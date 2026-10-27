@@ -121,7 +121,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 | Observability | OBS-01..02 | Not started | OBS-02 (OTel wiring) deferred to M8 |
 | SR | SR-01..02 | Done | `radicom::sr`: CodeItem (short/long/URN auto-dispatch), ContentItem with all 14 value types and 7 relationships, typed constructors, StructuredReport open/save with explicit-length sequences. 18 tests |
 | JSON/XML | JSON-01..02, XML-01 | Done | JSON-01 PS3.18 model (PN groups, byte-backed round-trips, tolerant reader); JSON-02 BulkDataURI via a `BulkDataUri` buffer, bidirectional; XML-01 one-way NativeDicomModel export verified well-formed by a quick-xml parse |
-| Media (DICOMDIR) | MEDIA-01..03 | In progress | MEDIA-01 read/write done: PATIENT/STUDY/SERIES/leaf tree, absolute byte offsets measured from the serialized file, dirty-offset tolerance. MEDIA-02 icon and MEDIA-03 scanner remain |
+| Media (DICOMDIR) | MEDIA-01..03 | In progress | MEDIA-01 read/write (records, absolute offsets, dirty tolerance); MEDIA-02 IconGenerator (≤128×128 8-bit MONOCHROME2 preview via add_file_with_icon). MEDIA-03 scanner remains |
 | Structured report | SR-01..02 | Not started | |
 | Printing | PRINT-01..02 | Deferred (P2) | |
 | Anonymizer | ANON-01 | Done | PS3.15 Basic Profile (655-row CSV from fo-dicom, dependency-free matcher): D/Z/X/K/C/U actions, recursive sequences, consistent UID mapping, file-meta SOP instance sync. 17 tests |
@@ -134,6 +134,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 
 | Date | Item | Milestone |
 |---|---|---|
+| 2026-10-27 | M7 continues: DICOMDIR icons (MEDIA-02). IconGenerator trait + BasicIconGenerator: pick a frame (RepresentativeFrameNumber else midpoint), box-downsample to ≤128×128, build an 8-bit MONOCHROME2 icon dataset, attach as (0088,0200); add_file_with_icon wires it in and it survives save/open. 8 icon tests, workspace 270, clippy clean | M7 |
 | 2026-10-27 | M7 continues: PS3.15 anonymizer (ANON-01). The 655-row Basic Profile CSV (extracted from fo-dicom's DicomAnonymizerGenerated.cs, MS-PL) drives a dependency-free tag-pattern matcher (literals, [classes], {n}); actions D/Z/X/K/C/U apply per element with recursive sequences, consistent UID remapping and file-meta SOP instance sync. Verified against fo-dicom's own anonymizer test expectations (PatientName/ID blank under the basic profile, StudyDate blanked Z, SeriesDate removed X). 17 tests, workspace 261, clippy clean | M7 |
 | 2026-10-27 | M7 continues: Structured Reports (SR-01/02). CodeItem auto-dispatches short/long/URN code forms; ContentItem models all 14 value types and 7 relationships with typed constructors (TEXT/CODE/PNAME/DATE/TIME/DATETIME/UIDREF/container) and container children; StructuredReport opens/saves with explicit-length sequences. 18 sr tests, workspace 244, clippy clean | M7 |
 | 2026-10-27 | M7 continues: DICOM XML export (XML-01). One-way NativeDicomModel export: tag/vr/keyword attributes, Value number=n, PN group elements, SQ Item nesting, InlineBinary base64, fragment sequences rendered as repeated InlineBinary. No reader (per spec). Tests parse the output with quick-xml as a dev-dependency to prove well-formedness; the runtime crate adds no XML dependency | M7 |

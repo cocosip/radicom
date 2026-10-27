@@ -1,0 +1,271 @@
+//! Icon generation for DICOMDIR records (MEDIA-02; docs/08-serialization-media.md §3.4).
+//!
+//! A DICOMDIR image record may carry an `IconImageSequence` (0088,0200) holding
+//! a small (≤128×128), 8-bit MONOCHROME2 preview of the image. This module
+//! defines the `IconGenerator` trait and a built-in builder that:
+//!
+//! 1. selects a frame — the `RepresentativeFrameNumber` (0028,6010) when in
+//!    range, else the midpoint frame;
+//! 2. downsamples that frame to at most 128×128 by box averaging;
+//! 3. builds the icon dataset (8-bit MONOCHROME2, one frame).
+//!
+//! Only uncompressed 8-/16-bit grayscale is handled; other pixel formats yield
+//! `None` rather than a wrong-looking icon (the caller then omits it).
+
+use crate::error::Error;
+use crate::model::dataset::Dataset;
+use crate::model::tag::Tag;
+use crate::model::vr::Vr;
+use crate::pixel::PixelData;
+
+/// The largest icon dimension DICOM allows (§3.4, PS3.3 C.7.6.1.1.6).
+pub const MAX_ICON_SIZE: u32 = 128;
+
+/// Builds an icon dataset for a source image, or `None` when unsupported.
+pub trait IconGenerator {
+    /// The `IconImageSequence` item for `dataset`, if one can be built.
+    fn generate(&self, dataset: &mut Dataset) -> Result<Option<Dataset>, Error>;
+}
+
+/// The built-in generator: ≤128×128, 8-bit MONOCHROME2 (§3.4).
+#[derive(Debug, Clone, Default)]
+pub struct BasicIconGenerator;
+
+impl IconGenerator for BasicIconGenerator {
+    fn generate(&self, dataset: &mut Dataset) -> Result<Option<Dataset>, Error> {
+        let Some(icon) = build_icon(dataset)? else {
+            return Ok(None);
+        };
+        Ok(Some(icon))
+    }
+}
+
+/// Extracts and downsamples one frame into a MONOCHROME2 icon dataset.
+fn build_icon(dataset: &mut Dataset) -> Result<Option<Dataset>, Error> {
+    let pixel = PixelData::from_dataset(dataset)?;
+
+    // only uncompressed single-sample grayscale is supported here
+    if pixel.transfer_syntax().is_encapsulated() || pixel.samples_per_pixel() != 1 {
+        return Ok(None);
+    }
+    let bits = pixel.bits_allocated()?;
+    if !matches!(bits, 8 | 16) {
+        return Ok(None);
+    }
+    let (width, height) = (pixel.width(), pixel.height());
+    if width == 0 || height == 0 {
+        return Ok(None);
+    }
+
+    let frames = pixel.number_of_frames().max(1);
+    let frame_index = representative_frame(pixel.dataset(), frames);
+    let frame = pixel.get_frame(frame_index)?;
+    let raw = frame.data();
+    let raw: &[u8] = raw.as_ref();
+
+    // decode samples to 16-bit values (still in the source range)
+    let samples: Vec<u16> = if bits == 8 {
+        raw.iter().map(|b| *b as u16).collect()
+    } else {
+        raw.chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect()
+    };
+    let expected = (width as usize) * (height as usize);
+    if samples.len() < expected {
+        return Ok(None);
+    }
+
+    let (icon_w, icon_h) = icon_dimensions(width, height);
+    let icon_pixels = downsample(&samples, width, height, icon_w, icon_h);
+
+    Ok(Some(icon_dataset(width, height, icon_w, icon_h, bits, &icon_pixels)))
+}
+
+/// The frame to preview: RepresentativeFrameNumber in range, else the midpoint.
+fn representative_frame(dataset: &Dataset, frame_count: u32) -> u32 {
+    // (0028,6010) RepresentativeFrameNumber is 1-based
+    if let Some(number) = dataset.try_get_str(Tag::new(0x0028, 0x6010)).and_then(|s| s.trim().parse::<u32>().ok()) {
+        if number >= 1 && number <= frame_count {
+            return number - 1;
+        }
+    }
+    (frame_count - 1) / 2
+}
+
+/// Scale preserving aspect ratio so the longer side is at most `MAX_ICON_SIZE`.
+fn icon_dimensions(width: u32, height: u32) -> (u32, u32) {
+    if width <= MAX_ICON_SIZE && height <= MAX_ICON_SIZE {
+        return (width, height);
+    }
+    let scale = MAX_ICON_SIZE as f64 / width.max(height) as f64;
+    let w = ((width as f64 * scale).round() as u32).max(1);
+    let h = ((height as f64 * scale).round() as u32).max(1);
+    (w, h)
+}
+
+/// Box-averages the source into the target size (§3.4, a simple downscale).
+fn downsample(samples: &[u16], width: u32, height: u32, target_w: u32, target_h: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity((target_w * target_h) as usize);
+    for ty in 0..target_h {
+        let y0 = (ty as u64 * height as u64 / target_h as u64) as u32;
+        let y1 = (((ty + 1) as u64 * height as u64 / target_h as u64) as u32).max(y0 + 1).min(height);
+        for tx in 0..target_w {
+            let x0 = (tx as u64 * width as u64 / target_w as u64) as u32;
+            let x1 = (((tx + 1) as u64 * width as u64 / target_w as u64) as u32).max(x0 + 1).min(width);
+            let mut sum = 0u64;
+            let mut count = 0u64;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    sum += samples[(y * width + x) as usize] as u64;
+                    count += 1;
+                }
+            }
+            let average = (sum / count.max(1)) as u32;
+            // the source range may exceed 8 bits; clamp into 0..=255 keeps the
+            // 8-bit icon valid without a window (a modest, documented limit)
+            out.push(average.min(255) as u8);
+        }
+    }
+    out
+}
+
+/// Assembles the icon dataset: 8-bit MONOCHROME2, one frame (§3.4).
+fn icon_dataset(
+    _src_w: u32,
+    _src_h: u32,
+    icon_w: u32,
+    icon_h: u32,
+    _src_bits: u16,
+    pixels: &[u8],
+) -> Dataset {
+    let mut icon = Dataset::new();
+    icon.insert_value(Tag::new(0x0028, 0x0002), 1u16); // SamplesPerPixel
+    icon.insert_str(Tag::new(0x0028, 0x0004), Vr::Cs, "MONOCHROME2"); // PhotometricInterpretation
+    icon.insert_value(Tag::new(0x0028, 0x0010), icon_h as u16); // Rows
+    icon.insert_value(Tag::new(0x0028, 0x0011), icon_w as u16); // Columns
+    icon.insert_value(Tag::new(0x0028, 0x0100), 8u16); // BitsAllocated
+    icon.insert_value(Tag::new(0x0028, 0x0101), 8u16); // BitsStored
+    icon.insert_value(Tag::new(0x0028, 0x0102), 7u16); // HighBit
+    icon.insert_value(Tag::new(0x0028, 0x0103), 0u16); // PixelRepresentation (unsigned)
+    icon.insert_str(Tag::new(0x0028, 0x0008), Vr::Cs, "1"); // NumberOfFrames
+    icon.insert_or_update(crate::model::item::DicomItem::Element(
+        crate::model::element::DicomElement::new_bytes(
+            Tag::new(0x7FE0, 0x0010),
+            Vr::Ob,
+            std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(pixels.to_vec())),
+        ),
+    ));
+    icon
+}
+
+/// Attaches an icon as `(0088,0200) IconImageSequence` on a directory record.
+pub fn attach_icon(record: &mut Dataset, icon: Dataset) {
+    record.insert_sequence(Tag::new(0x0088, 0x0200)).push(icon);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::tag::Tag;
+
+    fn source(width: u16, height: u16, frames: u16, bits: u16, fill: impl Fn(u32, u32) -> u16) -> Dataset {
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::new(0x0028, 0x0002), 1u16);
+        ds.insert_str(Tag::new(0x0028, 0x0004), Vr::Cs, "MONOCHROME2");
+        ds.insert_value(Tag::new(0x0028, 0x0010), height);
+        ds.insert_value(Tag::new(0x0028, 0x0011), width);
+        ds.insert_value(Tag::new(0x0028, 0x0100), bits);
+        ds.insert_value(Tag::new(0x0028, 0x0101), bits);
+        ds.insert_value(Tag::new(0x0028, 0x0102), bits - 1);
+        ds.insert_value(Tag::new(0x0028, 0x0103), 0u16);
+        ds.insert_str(Tag::new(0x0028, 0x0008), Vr::Cs, frames.to_string());
+        let mut bytes = Vec::new();
+        for f in 0..frames {
+            for y in 0..height as u32 {
+                for x in 0..width as u32 {
+                    let v = fill(x, y + f as u32 * height as u32);
+                    if bits == 8 {
+                        bytes.push(v as u8);
+                    } else {
+                        bytes.extend_from_slice(&v.to_le_bytes());
+                    }
+                }
+            }
+        }
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::new(0x7FE0, 0x0010),
+                Vr::Ob,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(bytes)),
+            ),
+        ));
+        ds
+    }
+
+    #[test]
+    fn a_small_image_becomes_an_eight_bit_icon() {
+        let mut ds = source(64, 32, 1, 8, |x, _| (x * 4) as u16);
+        let icon = BasicIconGenerator.generate(&mut ds).unwrap().unwrap();
+        assert_eq!(icon.try_get_str(Tag::new(0x0028, 0x0004)).as_deref(), Some("MONOCHROME2"));
+        assert_eq!(icon.try_get_str(Tag::new(0x0028, 0x0011)).as_deref(), Some("64"), "columns");
+        assert_eq!(icon.try_get_str(Tag::new(0x0028, 0x0010)).as_deref(), Some("32"), "rows");
+        assert_eq!(icon.try_get_str(Tag::new(0x0028, 0x0100)).as_deref(), Some("8"), "8-bit icon");
+    }
+
+    #[test]
+    fn a_large_image_is_scaled_to_at_most_128() {
+        let mut ds = source(300, 200, 1, 8, |_, _| 7);
+        let icon = BasicIconGenerator.generate(&mut ds).unwrap().unwrap();
+        let columns: u32 = icon.try_get_str(Tag::new(0x0028, 0x0011)).unwrap().parse().unwrap();
+        let rows: u32 = icon.try_get_str(Tag::new(0x0028, 0x0010)).unwrap().parse().unwrap();
+        assert!(columns <= 128 && rows <= 128, "icon is at most 128x128, got {columns}x{rows}");
+        assert_eq!(columns, 128, "the longer side hits the cap");
+        assert!(rows < 128, "the shorter side keeps aspect ratio");
+    }
+
+    #[test]
+    fn a_sixteen_bit_source_is_downconverted_to_eight_bit() {
+        let mut ds = source(16, 16, 1, 16, |_, _| 1000);
+        let icon = BasicIconGenerator.generate(&mut ds).unwrap().unwrap();
+        assert_eq!(icon.try_get_str(Tag::new(0x0028, 0x0100)).as_deref(), Some("8"));
+        // the pixel data length equals the icon size
+        let element = icon.get_element(Tag::new(0x7FE0, 0x0010)).unwrap();
+        assert_eq!(element.value().as_buffer().unwrap().size(), 16 * 16);
+    }
+
+    #[test]
+    fn representative_frame_number_selects_the_frame() {
+        // frame 0 all 10, frame 1 all 20; representative frame 2 (1-based) → 20
+        let mut ds = source(4, 4, 2, 8, |_, y| if y < 4 { 10 } else { 20 });
+        ds.insert_value(Tag::new(0x0028, 0x6010), 2u16);
+        let icon = BasicIconGenerator.generate(&mut ds).unwrap().unwrap();
+        let element = icon.get_element(Tag::new(0x7FE0, 0x0010)).unwrap();
+        let bytes = element.value().as_buffer().unwrap().data();
+        assert_eq!(bytes[0], 20, "the representative frame's value is used");
+    }
+
+    #[test]
+    fn a_colour_image_yields_no_icon() {
+        let mut ds = source(8, 8, 1, 8, |_, _| 1);
+        ds.insert_value(Tag::new(0x0028, 0x0002), 3u16); // RGB
+        assert!(BasicIconGenerator.generate(&mut ds).unwrap().is_none());
+    }
+
+    #[test]
+    fn an_icon_attaches_as_a_sequence() {
+        let mut record = Dataset::new();
+        let mut ds = source(8, 8, 1, 8, |_, _| 5);
+        let icon = BasicIconGenerator.generate(&mut ds).unwrap().unwrap();
+        attach_icon(&mut record, icon);
+        let sequence = record.try_get_sequence(Tag::new(0x0088, 0x0200)).unwrap();
+        assert_eq!(sequence.items().len(), 1);
+    }
+
+    #[test]
+    fn empty_geometry_yields_no_icon() {
+        let mut ds = source(8, 8, 1, 8, |_, _| 5);
+        ds.insert_value(Tag::new(0x0028, 0x0011), 0u16); // Columns = 0
+        assert!(BasicIconGenerator.generate(&mut ds).unwrap().is_none());
+    }
+}

@@ -19,6 +19,9 @@ use crate::model::transfer_syntax::syntaxes;
 use crate::model::vr::Vr;
 use std::path::{Path, PathBuf};
 
+pub mod icon;
+pub use icon::{attach_icon, BasicIconGenerator, IconGenerator};
+
 /// Tags of the media storage directory (§3.1, §3.2).
 pub mod tags {
     use crate::model::tag::Tag;
@@ -315,6 +318,26 @@ impl DicomDirectory {
         file: &DicomFile,
         referenced_file_id: impl AsRef<Path>,
     ) -> Result<&mut Self, Error> {
+        self.add_file_inner(file, referenced_file_id.as_ref(), None)
+    }
+
+    /// Like [`add_file`](Self::add_file) but also attaches an icon built by
+    /// `generator` as `(0088,0200) IconImageSequence` (§3.4, MEDIA-02).
+    pub fn add_file_with_icon(
+        &mut self,
+        file: &DicomFile,
+        referenced_file_id: impl AsRef<Path>,
+        generator: &dyn IconGenerator,
+    ) -> Result<&mut Self, Error> {
+        self.add_file_inner(file, referenced_file_id.as_ref(), Some(generator))
+    }
+
+    fn add_file_inner(
+        &mut self,
+        file: &DicomFile,
+        referenced_file_id: &Path,
+        generator: Option<&dyn IconGenerator>,
+    ) -> Result<&mut Self, Error> {
         let dataset = &file.dataset;
         let patient_id = dataset.try_get_str(tags::PATIENT_ID).unwrap_or_default();
         let study_uid = required(dataset, tags::STUDY_INSTANCE_UID, "Study Instance UID")?;
@@ -340,7 +363,15 @@ impl DicomDirectory {
         record.insert_str(tags::REFERENCED_SOP_CLASS, Vr::Ui, sop_class);
         record.insert_str(tags::REFERENCED_SOP_INSTANCE, Vr::Ui, sop_instance);
         record.insert_str(tags::REFERENCED_TRANSFER_SYNTAX, Vr::Ui, dataset.transfer_syntax().uid());
-        record.insert_str(tags::REFERENCED_FILE_ID, Vr::Cs, path_to_file_id(referenced_file_id.as_ref()));
+        record.insert_str(tags::REFERENCED_FILE_ID, Vr::Cs, path_to_file_id(referenced_file_id));
+
+        // optional preview (§3.4): built from a clone so the source is untouched
+        if let Some(generator) = generator {
+            let mut source = dataset.clone();
+            if let Some(icon) = generator.generate(&mut source)? {
+                attach_icon(&mut record, icon);
+            }
+        }
 
         self.records.push(DirectoryRecord { dataset: record, parent: Some(series) });
         Ok(self)
@@ -668,6 +699,34 @@ mod tests {
         std::env::temp_dir().join(format!("radicom-dicomdir-{}-{name}.dcm", std::process::id()))
     }
 
+    /// An 8x8 8-bit MONOCHROME2 image instance (enough for an icon).
+    fn image_instance(patient_id: &str, study: &str, series: &str, instance_uid: &str) -> DicomFile {
+        let mut dataset = Dataset::new();
+        dataset.insert_str(tags::PATIENT_ID, Vr::Lo, patient_id);
+        dataset.insert_str(tags::STUDY_INSTANCE_UID, Vr::Ui, study);
+        dataset.insert_str(tags::SERIES_INSTANCE_UID, Vr::Ui, series);
+        dataset.insert_str(tags::SOP_CLASS_UID, Vr::Ui, CT);
+        dataset.insert_str(tags::SOP_INSTANCE_UID, Vr::Ui, instance_uid);
+        dataset.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        dataset.insert_value(Tag::new(0x0028, 0x0002), 1u16);
+        dataset.insert_str(Tag::new(0x0028, 0x0004), Vr::Cs, "MONOCHROME2");
+        dataset.insert_value(Tag::new(0x0028, 0x0010), 8u16);
+        dataset.insert_value(Tag::new(0x0028, 0x0011), 8u16);
+        dataset.insert_value(Tag::new(0x0028, 0x0100), 8u16);
+        dataset.insert_value(Tag::new(0x0028, 0x0101), 8u16);
+        dataset.insert_value(Tag::new(0x0028, 0x0102), 7u16);
+        dataset.insert_value(Tag::new(0x0028, 0x0103), 0u16);
+        dataset.insert_str(Tag::new(0x0028, 0x0008), Vr::Cs, "1");
+        dataset.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::new(0x7FE0, 0x0010),
+                Vr::Ob,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![128u8; 64])),
+            ),
+        ));
+        DicomFile::from_dataset(dataset)
+    }
+
     #[test]
     fn a_new_directory_names_itself_and_is_empty() {
         let dir = DicomDirectory::new("MYFS");
@@ -816,6 +875,35 @@ mod tests {
         // and the root offsets name the first and last root items
         let first_root = reopened.file().dataset.get::<u32>(tags::OFFSET_FIRST_ROOT).unwrap();
         assert_eq!(first_root, item_positions[0], "the first root offset names the first item");
+    }
+
+    #[test]
+    fn add_file_with_icon_attaches_a_preview_that_survives_save() {
+        use crate::media::icon::BasicIconGenerator;
+
+        let path = temp_path("icon");
+        let mut dir = DicomDirectory::new("MYFS");
+        dir.add_file_with_icon(
+            &image_instance("P1", "1.2.3", "1.2.3.4", "1.2.3.4.5"),
+            "IMG0001",
+            &BasicIconGenerator,
+        )
+        .unwrap();
+
+        // the leaf record carries the icon sequence
+        let leaf = &dir.records()[3];
+        let icon_sequence = leaf.dataset.try_get_sequence(Tag::new(0x0088, 0x0200)).unwrap();
+        assert_eq!(icon_sequence.items().len(), 1);
+        let icon = &icon_sequence.items()[0];
+        assert_eq!(icon.try_get_str(Tag::new(0x0028, 0x0004)).as_deref(), Some("MONOCHROME2"));
+
+        // and the icon survives a save/open round-trip
+        dir.save(&path).unwrap();
+        let reopened = DicomDirectory::open(&path).unwrap();
+        let leaf = &reopened.records()[3];
+        let icon_sequence = leaf.dataset.try_get_sequence(Tag::new(0x0088, 0x0200)).unwrap();
+        assert_eq!(icon_sequence.items().len(), 1, "the icon round-trips");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
