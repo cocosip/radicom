@@ -193,6 +193,14 @@ impl FilmBox {
             .map(|sequence| sequence.items().len())
             .unwrap_or(0)
     }
+
+    /// The image boxes as owned [`ImageBox`] views (clones the item datasets).
+    pub fn image_boxes(&self) -> Vec<ImageBox> {
+        self.dataset
+            .try_get_sequence(tags::REFERENCED_IMAGE_BOX_SEQUENCE)
+            .map(|sequence| sequence.items().iter().cloned().map(ImageBox::from_dataset).collect())
+            .unwrap_or_default()
+    }
 }
 
 impl Default for FilmBox {
@@ -239,6 +247,14 @@ impl ImageBox {
             .try_get_sequence(Tag::new(0x2020, 0x0110))
             .map(|sequence| sequence.items().len())
             .unwrap_or(0)
+    }
+
+    /// The image datasets attached to this box (its ImageSequence items).
+    pub fn images(&self) -> &[Dataset] {
+        self.dataset
+            .try_get_sequence(Tag::new(0x2020, 0x0110))
+            .map(|sequence| sequence.items())
+            .unwrap_or(&[])
     }
 }
 
