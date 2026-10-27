@@ -1,6 +1,7 @@
 //! Data model: tags, VRs, elements, datasets, UIDs, transfer syntaxes and
 //! dictionaries (docs/04-data-model.md).
 
+pub mod buffer;
 pub mod dicom_datetime;
 pub mod dictionary;
 pub mod masked_tag;
