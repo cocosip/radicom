@@ -5,8 +5,13 @@
 //! handled by the protocol engine.
 
 use crate::error::{NetworkError, Result};
+use radicom::model::buffer::MemoryBuffer;
 use radicom::model::dataset::Dataset;
+use radicom::model::element::DicomElement;
+use radicom::model::item::DicomItem;
+use radicom::model::tag::Tag;
 use radicom::model::vr::Vr;
+use std::sync::Arc;
 
 /// Command set tags (§6.1).
 pub mod tag {
@@ -230,30 +235,30 @@ impl Command {
     pub fn to_dataset(&self) -> Dataset {
         let mut ds = Dataset::new();
         // required ordering: group length first, then ascending tags
-        ds.insert_value(tag::COMMAND_FIELD, self.field.code());
+        insert_us(&mut ds, tag::COMMAND_FIELD, self.field.code());
         if let Some(uid) = &self.affected_sop_class_uid {
             ds.insert_str(tag::AFFECTED_SOP_CLASS_UID, Vr::Ui, uid);
         }
         if let Some(uid) = &self.requested_sop_class_uid {
             ds.insert_str(tag::REQUESTED_SOP_CLASS_UID, Vr::Ui, uid);
         }
-        ds.insert_value(tag::MESSAGE_ID, self.message_id);
+        insert_us(&mut ds, tag::MESSAGE_ID, self.message_id);
         if let Some(id) = self.message_id_being_responded_to {
-            ds.insert_value(tag::MESSAGE_ID_BEING_RESPONDED_TO, id);
+            insert_us(&mut ds, tag::MESSAGE_ID_BEING_RESPONDED_TO, id);
         }
         if let Some(status) = self.status {
-            ds.insert_value(tag::STATUS, status);
+            insert_us(&mut ds, tag::STATUS, status);
         }
         if let Some(comment) = &self.error_comment {
             // LO is limited to 64 bytes
             ds.insert_str(tag::ERROR_COMMENT, Vr::Lo, truncate_lo(comment));
         }
-        ds.insert_value(tag::PRIORITY, self.priority.code());
+        insert_us(&mut ds, tag::PRIORITY, self.priority.code());
         if self.no_dataset {
-            ds.insert_value(tag::COMMAND_DATA_SET_TYPE, NO_DATA_SET);
+            insert_us(&mut ds, tag::COMMAND_DATA_SET_TYPE, NO_DATA_SET);
         } else {
             // 0x0001 = "dataset follows, not UID-addressed"
-            ds.insert_value(tag::COMMAND_DATA_SET_TYPE, 0x0001u16);
+            insert_us(&mut ds, tag::COMMAND_DATA_SET_TYPE, 0x0001u16);
         }
         if let Some(dest) = &self.move_destination {
             ds.insert_str(tag::MOVE_DESTINATION, Vr::Ae, dest);
@@ -265,38 +270,40 @@ impl Command {
             ds.insert_str(tag::REQUESTED_SOP_INSTANCE_UID, Vr::Ui, uid);
         }
         if let Some(id) = self.event_type_id {
-            ds.insert_value(tag::EVENT_TYPE_ID, id);
+            insert_us(&mut ds, tag::EVENT_TYPE_ID, id);
         }
         if let Some(id) = self.action_type_id {
-            ds.insert_value(tag::ACTION_TYPE_ID, id);
+            insert_us(&mut ds, tag::ACTION_TYPE_ID, id);
         }
         if let Some(ae) = &self.move_originator_ae_title {
             ds.insert_str(tag::MOVE_ORIGINATOR_APPLICATION_ENTITY_TITLE, Vr::Ae, ae);
         }
         if let Some(id) = self.move_originator_message_id {
-            ds.insert_value(tag::MOVE_ORIGINATOR_MESSAGE_ID, id);
+            insert_us(&mut ds, tag::MOVE_ORIGINATOR_MESSAGE_ID, id);
         }
         if let Some(n) = self.remaining_suboperations {
-            ds.insert_value(tag::NUMBER_OF_REMAINING_SUBOPERATIONS, n);
+            insert_us(&mut ds, tag::NUMBER_OF_REMAINING_SUBOPERATIONS, n);
         }
         if let Some(n) = self.completed_suboperations {
-            ds.insert_value(tag::NUMBER_OF_COMPLETED_SUBOPERATIONS, n);
+            insert_us(&mut ds, tag::NUMBER_OF_COMPLETED_SUBOPERATIONS, n);
         }
         if let Some(n) = self.failed_suboperations {
-            ds.insert_value(tag::NUMBER_OF_FAILED_SUBOPERATIONS, n);
+            insert_us(&mut ds, tag::NUMBER_OF_FAILED_SUBOPERATIONS, n);
         }
         if let Some(n) = self.warning_suboperations {
-            ds.insert_value(tag::NUMBER_OF_WARNING_SUBOPERATIONS, n);
+            insert_us(&mut ds, tag::NUMBER_OF_WARNING_SUBOPERATIONS, n);
         }
 
-        // (0000,0000) is the byte length of the rest of the command group
+        // (0000,0000) is recomputed by the writer when it encodes the command
+        // set with `keep_group_lengths`; the placeholder keeps tag order right
+        // and makes the dataset self-describing for tests.
         let mut with_len = ds.clone();
-        with_len.insert_value(tag::COMMAND_GROUP_LENGTH, 0u32);
+        insert_ul(&mut with_len, tag::COMMAND_GROUP_LENGTH, 0);
         let total = radicom::io::writer::DicomWriter::default()
             .dataset_length(&with_len, &radicom::model::transfer_syntax::syntaxes::IMPLICIT_VR_LITTLE_ENDIAN)
             .unwrap_or(0);
-        // the group length element itself is 4 tag + 4 length + 4 value = 12
-        ds.insert_value(tag::COMMAND_GROUP_LENGTH, (total.saturating_sub(12)) as u32);
+        // the group length element itself is 12 bytes (tag + length + value)
+        insert_ul(&mut ds, tag::COMMAND_GROUP_LENGTH, (total.saturating_sub(12)) as u32);
         ds
     }
 
@@ -355,6 +362,27 @@ pub fn response_field(request: CommandField) -> Option<CommandField> {
     })
 }
 
+/// Inserts a `u16` as a binary US value.
+///
+/// `Dataset::insert_value` maps integers through their string preference
+/// (`Vr::Is`), which is right for ordinary datasets but wrong for the command
+/// set, where PS3.5 §7.7 fixes every field's VR.
+fn insert_us(ds: &mut Dataset, tag: Tag, value: u16) -> &mut Dataset {
+    ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+        tag,
+        Vr::Us,
+        Arc::new(MemoryBuffer::from(value.to_le_bytes().to_vec())),
+    )))
+}
+
+/// Inserts a `u32` as a binary UL value.
+fn insert_ul(ds: &mut Dataset, tag: Tag, value: u32) -> &mut Dataset {
+    ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+        tag,
+        Vr::Ul,
+        Arc::new(MemoryBuffer::from(value.to_le_bytes().to_vec())),
+    )))
+}
 /// Truncates an error comment to the LO length limit of 64 bytes (§7.2).
 pub fn truncate_lo(comment: &str) -> String {
     const LIMIT: usize = 64;

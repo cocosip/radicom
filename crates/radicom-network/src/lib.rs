@@ -7,8 +7,12 @@
 pub mod assembler;
 pub mod association;
 pub mod dimse;
+pub mod engine;
 pub mod error;
 pub mod pdu;
+pub mod server;
+pub mod services;
+pub mod transport;
 
 pub use assembler::{MessageUnit, PduSplitter, PdvAssembler, Stream};
 pub use association::{
@@ -16,6 +20,7 @@ pub use association::{
     SyntaxPriority,
 };
 pub use dimse::{Command, CommandField, Priority, Status, StatusState};
+pub use engine::{CircuitBreaker, ConnectionLifecycle, ConnectionState, EngineOptions, PendingRequest, PendingTable};
 pub use error::{AbortSource, NetworkError, RejectResult, RejectSource, Result};
 pub use pdu::{
     Abort, Associate, AssociateRj, AsyncOperations, CommonExtended, ExtendedNegotiation, PData, Pdu, PduType, Pdv,
