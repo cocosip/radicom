@@ -13,6 +13,7 @@ pub mod cmove;
 pub mod dimse;
 pub mod engine;
 pub mod error;
+pub mod expert;
 pub mod extended;
 pub mod message;
 pub mod pdu;
@@ -34,6 +35,7 @@ pub use cmove::{store_to_destination, CMoveRequest, CMoveResponse, SubOperationS
 pub use dimse::{Command, CommandField, Priority, Status, StatusState};
 pub use engine::{CircuitBreaker, ConnectionLifecycle, ConnectionState, EngineOptions, PendingRequest, PendingTable};
 pub use error::{AbortSource, NetworkError, RejectResult, RejectSource, Result};
+pub use expert::{send as send_expert, Connection, ConnectionEvent, ExpertRequest, ExpertResponse, ResponseStream};
 pub use extended::{
     apply_answer, validate_common_extended, AppInfo, ExtendedNegotiationPolicy, FindAppInfo, RetrieveAppInfo,
     StorageAppInfo, StorageOption,
