@@ -88,7 +88,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 | M4 | Pixel & codec interfaces | Done | Codec boundary frozen for radicom-codecs; 208 tests green |
 | M5 | Network core | Complete | PDU codec, association, PDV assembly, message codec, engine state, C-ECHO/C-STORE over TCP and TLS; 150 tests at completion |
 | M6 | Network services | Complete except reference-peer interop | SRV-04..06, NET-04, CLI-01..02 (c3f75ab..a060c9c); 210 network tests, 218 with TLS. SRV-07/08 stay P2/M8 |
-| M7 | Serialization & media | In progress (JSON-01, XML-01, MEDIA-01, SR-01/02, ANON-01 done) | DICOM JSON, XML export, DICOMDIR, Structured Reports and the PS3.15 anonymizer landed; MEDIA-02 icon and JSON-02 BulkDataURI remain |
+| M7 | Serialization, media, SR, anonymization | Done (P1; MEDIA-03 scanner included) | All M7 features: DICOM JSON (01/02), XML export (01), DICOMDIR (01/02/03), Structured Reports (01/02), PS3.15 anonymizer (01). 277 core + 33 json + 210 network tests, clippy clean |
 | M8 | Rendering & enhancements | Deferred (P2) | |
 
 ### 3.2 Feature-group status (fine-grained)
@@ -121,7 +121,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 | Observability | OBS-01..02 | Not started | OBS-02 (OTel wiring) deferred to M8 |
 | SR | SR-01..02 | Done | `radicom::sr`: CodeItem (short/long/URN auto-dispatch), ContentItem with all 14 value types and 7 relationships, typed constructors, StructuredReport open/save with explicit-length sequences. 18 tests |
 | JSON/XML | JSON-01..02, XML-01 | Done | JSON-01 PS3.18 model (PN groups, byte-backed round-trips, tolerant reader); JSON-02 BulkDataURI via a `BulkDataUri` buffer, bidirectional; XML-01 one-way NativeDicomModel export verified well-formed by a quick-xml parse |
-| Media (DICOMDIR) | MEDIA-01..03 | In progress | MEDIA-01 read/write (records, absolute offsets, dirty tolerance); MEDIA-02 IconGenerator (≤128×128 8-bit MONOCHROME2 preview via add_file_with_icon). MEDIA-03 scanner remains |
+| Media (DICOMDIR) | MEDIA-01..03 | Done | MEDIA-01 read/write; MEDIA-02 IconGenerator (≤128×128 8-bit MONOCHROME2); MEDIA-03 DirectoryScanner (glob filter, depth/error policy, progress/file events) + DicomDirectoryBuilder. Scanner is synchronous (core has no runtime; callers offload to a blocking thread) |
 | Structured report | SR-01..02 | Not started | |
 | Printing | PRINT-01..02 | Deferred (P2) | |
 | Anonymizer | ANON-01 | Done | PS3.15 Basic Profile (655-row CSV from fo-dicom, dependency-free matcher): D/Z/X/K/C/U actions, recursive sequences, consistent UID mapping, file-meta SOP instance sync. 17 tests |
@@ -134,6 +134,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 
 | Date | Item | Milestone |
 |---|---|---|
+| 2026-10-27 | M7 complete: DICOMDIR directory scanner (MEDIA-03). Recursive walk with a dependency-free glob (`*`/`?` within a segment), configurable max_depth and Skip/Stop error policy, Progress/File events via a ScanVisitor, and a DicomDirectoryBuilder that turns matched files into a DICOMDIR. Synchronous by design (core has no async runtime; async callers offload to a blocking thread), documented in the module header. 7 scanner tests, workspace 277, clippy clean | M7 |
 | 2026-10-27 | M7 continues: DICOMDIR icons (MEDIA-02). IconGenerator trait + BasicIconGenerator: pick a frame (RepresentativeFrameNumber else midpoint), box-downsample to ≤128×128, build an 8-bit MONOCHROME2 icon dataset, attach as (0088,0200); add_file_with_icon wires it in and it survives save/open. 8 icon tests, workspace 270, clippy clean | M7 |
 | 2026-10-27 | M7 continues: PS3.15 anonymizer (ANON-01). The 655-row Basic Profile CSV (extracted from fo-dicom's DicomAnonymizerGenerated.cs, MS-PL) drives a dependency-free tag-pattern matcher (literals, [classes], {n}); actions D/Z/X/K/C/U apply per element with recursive sequences, consistent UID remapping and file-meta SOP instance sync. Verified against fo-dicom's own anonymizer test expectations (PatientName/ID blank under the basic profile, StudyDate blanked Z, SeriesDate removed X). 17 tests, workspace 261, clippy clean | M7 |
 | 2026-10-27 | M7 continues: Structured Reports (SR-01/02). CodeItem auto-dispatches short/long/URN code forms; ContentItem models all 14 value types and 7 relationships with typed constructors (TEXT/CODE/PNAME/DATE/TIME/DATETIME/UIDREF/container) and container children; StructuredReport opens/saves with explicit-length sequences. 18 sr tests, workspace 244, clippy clean | M7 |
