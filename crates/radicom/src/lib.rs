@@ -17,8 +17,12 @@ pub mod generated;
 pub mod model;
 
 pub use error::{DataError, Error, FileError, ReaderError, ValidationFailure};
+pub use model::dictionary::{
+    default_dictionary, load_xml, set_default_dictionary, Dictionary, DictionaryEntry, RuntimeEntry,
+};
 pub use model::endian::Endian;
 pub use model::tag::Tag;
 pub use model::transfer_syntax::{self as transfer_syntax_registry, TransferSyntax};
 pub use model::uid::{StorageCategory, Uid, UidGenerator, UidType};
+pub use model::vm::Vm;
 pub use model::vr::Vr;

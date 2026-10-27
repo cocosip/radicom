@@ -97,12 +97,38 @@ impl AsRef<str> for Uid {
 }
 
 // Runtime registry: interned known UIDs plus user registrations. The
-// generated static table from radicom-dict feeds `seed_known` (UID-02).
+// generated table from radicom-dict is force-seeded on first use (UID-02).
 static REGISTRY: Lazy<RwLock<HashMap<Arc<str>, Arc<Uid>>>> = Lazy::new(|| RwLock::new(HashMap::new()));
-static SEEDED: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
+static SEED: Lazy<()> = Lazy::new(|| {
+    let entries = radicom_dict::generated::uids::UIDS;
+    let mut reg = REGISTRY.write().expect("registry lock");
+    for raw in entries {
+        let uid_type = match raw.type_code {
+            0 => UidType::TransferSyntax,
+            1 => UidType::SopClass,
+            2 => UidType::MetaSopClass,
+            3 => UidType::ServiceClass,
+            4 => UidType::SopInstance,
+            5 => UidType::ApplicationContextName,
+            6 => UidType::ApplicationHostingModel,
+            7 => UidType::CodingScheme,
+            8 => UidType::FrameOfReference,
+            9 => UidType::Ldap,
+            10 => UidType::MappingResource,
+            11 => UidType::ContextGroupName,
+            _ => continue,
+        };
+        // Runtime registrations are never overwritten by the seed.
+        reg.entry(Arc::from(raw.uid)).or_insert_with(|| {
+            Arc::new(Uid { value: Arc::from(raw.uid), name: Some(raw.name), uid_type, retired: raw.retired })
+        });
+    }
+});
 
-/// One registry entry for seeding from generated tables.
-pub type KnownUid = (&'static str, &'static str, UidType, bool);
+/// Forces the generated UID table into the registry.
+pub fn ensure_seeded() {
+    Lazy::force(&SEED);
+}
 
 impl Uid {
     /// Builds an unregistered UID instance. Prefer [`Uid::parse`] which
@@ -129,27 +155,6 @@ impl Uid {
 
     // -- registry ---------------------------------------------------------
 
-    /// Loads the generated known-UID table into the registry (idempotent;
-    /// mismatched repeat calls error, mirroring fo-dicom's guard).
-    pub fn seed_known(entries: &'static [KnownUid]) -> Result<(), Error> {
-        let mut seeded = SEEDED.lock().expect("seed mutex");
-        if *seeded {
-            return Ok(()); // same-table re-seed tolerated, per idempotent guard
-        }
-        let mut reg = REGISTRY.write().expect("registry lock");
-        for (value, name, uid_type, retired) in entries {
-            let uid = Arc::new(Uid {
-                value: Arc::from(*value),
-                name: Some(name),
-                uid_type: *uid_type,
-                retired: *retired,
-            });
-            reg.insert(Arc::from(*value), uid);
-        }
-        *seeded = true;
-        Ok(())
-    }
-
     /// Registers a runtime-known UID (extension point). Replaces an
     /// existing entry with the same value.
     pub fn register(value: &'static str, name: &'static str, uid_type: UidType, retired: bool) -> Arc<Uid> {
@@ -167,6 +172,7 @@ impl Uid {
     /// return the known instance; misses construct a fresh `Unknown`-typed
     /// instance (registered behavior: misses are not inserted).
     pub fn parse(s: &str) -> Arc<Uid> {
+        ensure_seeded();
         let trimmed = s.trim_matches(|c| c == ' ' || c == '\0');
         if let Some(known) = REGISTRY.read().expect("registry lock").get(trimmed) {
             return known.clone();
@@ -176,12 +182,14 @@ impl Uid {
 
     /// Registry lookup without constructing (spec TS-style Query).
     pub fn query(s: &str) -> Option<Arc<Uid>> {
+        ensure_seeded();
         let trimmed = s.trim_matches(|c| c == ' ' || c == '\0');
         REGISTRY.read().expect("registry lock").get(trimmed).cloned()
     }
 
     /// All registered UIDs sorted by value.
     pub fn enumerate() -> Vec<Arc<Uid>> {
+        ensure_seeded();
         let reg = REGISTRY.read().expect("registry lock");
         let mut all: Vec<Arc<Uid>> = reg.values().cloned().collect();
         all.sort();

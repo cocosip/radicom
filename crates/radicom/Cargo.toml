@@ -13,6 +13,7 @@ once_cell.workspace = true
 chrono.workspace = true
 encoding_rs.workspace = true
 flate2.workspace = true
+quick-xml.workspace = true
 regex = { workspace = true, optional = true }
 uuid.workspace = true
 

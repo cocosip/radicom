@@ -423,6 +423,7 @@ dependencies = [
  "encoding_rs",
  "flate2",
  "once_cell",
+ "quick-xml",
  "radicom-dict",
  "rayon",
  "regex",
