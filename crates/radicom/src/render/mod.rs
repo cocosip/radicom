@@ -14,8 +14,10 @@ use crate::model::tag::Tag;
 use crate::pixel::overlay::OverlayData;
 use crate::pixel::PixelData;
 
+pub mod geometry;
 pub mod math;
 
+pub use geometry::{can_draw_localizer, FrameGeometry, FrameGeometryType, FrameOrientation};
 pub use math::{BitList, Histogram, Interval, Matrix, MovingAverage, Point2, Point3, Rect, Vector3};
 
 /// Default overlay colour: magenta `0xFF_FF00FF` (docs §1.2).
