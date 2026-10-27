@@ -14,6 +14,10 @@ use crate::model::tag::Tag;
 use crate::pixel::overlay::OverlayData;
 use crate::pixel::PixelData;
 
+pub mod math;
+
+pub use math::{BitList, Histogram, Interval, Matrix, MovingAverage, Point2, Point3, Rect, Vector3};
+
 /// Default overlay colour: magenta `0xFF_FF00FF` (docs §1.2).
 pub const DEFAULT_OVERLAY_COLOR: crate::pixel::Color32 = crate::pixel::Color32::new(0xFF, 0x00, 0xFF);
 
