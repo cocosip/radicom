@@ -16,6 +16,8 @@ pub mod error;
 pub mod model;
 
 pub use error::{DataError, Error, FileError, ReaderError, ValidationFailure};
+pub use model::endian::Endian;
 pub use model::tag::Tag;
+pub use model::transfer_syntax::{self as transfer_syntax_registry, TransferSyntax};
 pub use model::uid::{StorageCategory, Uid, UidGenerator, UidType};
 pub use model::vr::Vr;
