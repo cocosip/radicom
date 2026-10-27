@@ -4,10 +4,15 @@
 //! SCU/SCP services and the two-layer client. Implementation follows
 //! milestones M5–M6 per docs/07-network.md.
 
+pub mod association;
 pub mod dimse;
 pub mod error;
 pub mod pdu;
 
+pub use association::{
+    AcceptedContexts, ContextSetBuilder, ContextState, NegotiatedContext, NegotiationPolicy, ProposedContext,
+    SyntaxPriority,
+};
 pub use dimse::{Command, CommandField, Priority, Status, StatusState};
 pub use error::{AbortSource, NetworkError, RejectResult, RejectSource, Result};
 pub use pdu::{
