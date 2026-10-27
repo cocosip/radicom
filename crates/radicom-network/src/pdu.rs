@@ -275,8 +275,8 @@ pub fn decode(bytes: &[u8]) -> Result<Pdu> {
     let body = &body[..length as usize];
 
     Ok(match pdu_type {
-        PduType::AssociateRq => Pdu::AssociateRq(decode_associate(body)?),
-        PduType::AssociateAc => Pdu::AssociateAc(decode_associate(body)?),
+        PduType::AssociateRq => Pdu::AssociateRq(decode_associate(body, true)?),
+        PduType::AssociateAc => Pdu::AssociateAc(decode_associate(body, false)?),
         PduType::AssociateRj => Pdu::AssociateRj(decode_associate_rj(body)?),
         PduType::PDataTf => Pdu::PData(decode_pdata(body)?),
         PduType::ReleaseRq => Pdu::ReleaseRq,
@@ -316,7 +316,7 @@ fn encode_ae(value: &str) -> [u8; 16] {
     out
 }
 
-fn decode_associate(body: &[u8]) -> Result<Associate> {
+fn decode_associate(body: &[u8], is_rq: bool) -> Result<Associate> {
     if body.len() < 68 {
         return Err(NetworkError::protocol("A-ASSOCIATE body is truncated"));
     }
@@ -346,7 +346,7 @@ fn decode_associate(body: &[u8]) -> Result<Associate> {
                 presentation_contexts.push(decode_presentation_context(value)?);
             }
             item::USER_INFORMATION => {
-                user_information = decode_user_information(value)?;
+                user_information = decode_user_information(value, is_rq)?;
             }
             // unknown top-level items are skipped by length (§3.2)
             _ => {}
@@ -394,7 +394,11 @@ fn decode_presentation_context(value: &[u8]) -> Result<PresentationContext> {
     Ok(PresentationContext { id, abstract_syntax, transfer_syntaxes, result })
 }
 
-fn decode_user_information(value: &[u8]) -> Result<UserInformation> {
+/// Decodes the user-information sub-items.
+///
+/// Item 0x56 means "requested" in an RQ and "accepted" in an AC: the wire
+/// cannot say which, so the association direction decides (§4.3).
+fn decode_user_information(value: &[u8], is_rq: bool) -> Result<UserInformation> {
     let mut out = UserInformation::default();
     let mut offset = 0usize;
     while offset + 5 <= value.len() {
@@ -434,10 +438,18 @@ fn decode_user_information(value: &[u8]) -> Result<UserInformation> {
                 }
             }
             item::SOP_CLASS_EXTENDED_NEGOTIATION => {
-                out.extended_negotiations.push(decode_extended_negotiation(raw)?);
+                let mut ext = decode_extended_negotiation(raw)?;
+                if !is_rq {
+                    // the decoder fills `requested`; in an AC those bytes are the answer
+                    ext.accepted = std::mem::take(&mut ext.requested);
+                }
+                out.extended_negotiations.push(ext);
             }
             item::SOP_CLASS_COMMON_EXTENDED => {
-                out.common_extended = Some(decode_common_extended(raw)?);
+                // common extended negotiation is RQ-only (PS3.7)
+                if is_rq {
+                    out.common_extended = Some(decode_common_extended(raw)?);
+                }
             }
             item::USER_IDENTITY_RQ => {
                 if raw.len() >= 5 {
@@ -845,6 +857,37 @@ mod tests {
                 assert!(identity.positive_response_requested);
             }
             other => panic!("expected AssociateRq, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extended_negotiation_lands_on_the_side_matching_the_pdu() {
+        // item 0x56 carries "requested" in an RQ and "accepted" in an AC; the
+        // wire cannot say which, so the PDU type must decide (§4.3)
+        let mut assoc = Associate::new("SCP", "SCU");
+        assoc.user_information.extended_negotiations.push(ExtendedNegotiation {
+            sop_class: "1.2.840.10008.5.1.4.1.1.7".into(),
+            requested: vec![(1, vec![1])],
+            accepted: Vec::new(),
+        });
+        match round_trip(Pdu::AssociateRq(assoc.clone())) {
+            Pdu::AssociateRq(back) => {
+                let ext = &back.user_information.extended_negotiations[0];
+                assert_eq!(ext.requested, vec![(1, vec![1])], "an RQ keeps the request");
+                assert!(ext.accepted.is_empty());
+            }
+            other => panic!("expected AssociateRq, got {other:?}"),
+        }
+
+        assoc.user_information.extended_negotiations[0].requested = Vec::new();
+        assoc.user_information.extended_negotiations[0].accepted = vec![(1, vec![1]), (2, vec![])];
+        match round_trip(Pdu::AssociateAc(assoc)) {
+            Pdu::AssociateAc(back) => {
+                let ext = &back.user_information.extended_negotiations[0];
+                assert_eq!(ext.accepted, vec![(1, vec![1]), (2, vec![])], "an AC keeps the answer");
+                assert!(ext.requested.is_empty());
+            }
+            other => panic!("expected AssociateAc, got {other:?}"),
         }
     }
 

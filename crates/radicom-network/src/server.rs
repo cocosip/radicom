@@ -37,9 +37,43 @@ pub struct ServerOptions {
     pub association_timeout: Duration,
     /// Where incoming C-STORE instances are put before the provider sees them.
     pub store_sink: crate::store::StoreSink,
+    /// Answers SOP Class Extended Negotiation requests (§4.3).
+    pub extended_negotiation: crate::extended::ExtendedNegotiationPolicy,
+    /// User identity types this SCP accepts, and the response to echo (§4.3).
+    pub user_identity: UserIdentityPolicy,
     /// TLS material; `None` serves plain TCP (NET-01, `tls` feature).
     #[cfg(feature = "tls")]
     pub tls: Option<crate::tls::TlsOptions>,
+}
+
+/// How an SCP handles User Identity negotiation (§4.3).
+#[derive(Debug, Clone, Default)]
+pub enum UserIdentityPolicy {
+    /// Reject the association when a user identity is requested.
+    #[default]
+    Reject,
+    /// Accept any well-formed identity; the AC carries no response.
+    Accept,
+    /// Accept and echo this response byte string back (type 1–5 payload).
+    Answer(Vec<u8>),
+}
+
+impl UserIdentityPolicy {
+    /// The answer to `identity`, or `None` to reject the association.
+    fn answer(&self, identity: &crate::pdu::UserIdentity) -> Option<Option<Vec<u8>>> {
+        match self {
+            UserIdentityPolicy::Reject => None,
+            UserIdentityPolicy::Accept => Some(None),
+            UserIdentityPolicy::Answer(response) => {
+                // a response only means something when the peer asked for one
+                if identity.positive_response_requested {
+                    Some(Some(response.clone()))
+                } else {
+                    Some(None)
+                }
+            }
+        }
+    }
 }
 
 impl Default for ServerOptions {
@@ -49,6 +83,8 @@ impl Default for ServerOptions {
             max_pdu_length: 16384,
             association_timeout: Duration::from_secs(10),
             store_sink: crate::store::StoreSink::default(),
+            extended_negotiation: crate::extended::ExtendedNegotiationPolicy::decline_all(),
+            user_identity: UserIdentityPolicy::default(),
             #[cfg(feature = "tls")]
             tls: None,
         }
@@ -153,6 +189,24 @@ where
     let mut user = UserInformation::new(options.max_pdu_length);
     user.implementation_class_uid = Some(IMPLEMENTATION_CLASS_UID.to_string());
     user.implementation_version_name = Some(IMPLEMENTATION_VERSION_NAME.to_string());
+
+    // extended negotiation: the AC echoes one item per requested SOP class (§4.3)
+    user.extended_negotiations = options.extended_negotiation.answer(&request.user_information.extended_negotiations);
+
+    // user identity: refused identities reject the association (§4.3)
+    if let Some(identity) = &request.user_information.user_identity {
+        let Some(response) = options.user_identity.answer(identity) else {
+            let reject = AssociateRj {
+                result: RejectResult::Permanent,
+                source: RejectSource::User,
+                reason: 1, // no reason given
+            };
+            write_pdu(&mut stream, &Pdu::AssociateRj(reject)).await?;
+            return Ok(());
+        };
+        user.user_identity_response = response;
+    }
+
     accept.user_information = user;
     write_pdu(&mut stream, &Pdu::AssociateAc(accept)).await?;
 
@@ -772,11 +826,16 @@ where
     Ok(())
 }
 
-/// Client options (§9.1, reduced to what M5 needs).
+/// Client options (§9.1, reduced to what M5/M6 need).
 #[derive(Debug, Clone)]
 pub struct ClientOptions {
     pub max_pdu_length: u32,
     pub association_timeout: Duration,
+    /// User identity to offer; validated before the association is attempted
+    /// (§4.3).
+    pub user_identity: Option<crate::pdu::UserIdentity>,
+    /// SOP Class Extended Negotiation items to offer (§4.3).
+    pub extended_negotiations: Vec<crate::pdu::ExtendedNegotiation>,
     /// TLS material; `None` connects over plain TCP (NET-01, `tls` feature).
     #[cfg(feature = "tls")]
     pub tls: Option<crate::tls::TlsOptions>,
@@ -787,6 +846,8 @@ impl Default for ClientOptions {
         ClientOptions {
             max_pdu_length: 16384,
             association_timeout: Duration::from_secs(5),
+            user_identity: None,
+            extended_negotiations: Vec::new(),
             #[cfg(feature = "tls")]
             tls: None,
         }
@@ -862,6 +923,10 @@ pub struct Association {
     next_message_id: u16,
     /// Answers reverse C-STORE sub-operations; required for C-GET (§7.4).
     reverse_store: Option<ReverseStoreHandler>,
+    /// What the peer granted in SOP Class Extended Negotiation (§4.3).
+    peer_extended: Vec<crate::pdu::ExtendedNegotiation>,
+    /// The peer's user identity response (§4.3).
+    peer_identity_response: Option<Vec<u8>>,
 }
 
 /// The SCU-side answer to a reverse C-STORE (§7.4).
@@ -887,6 +952,12 @@ impl Association {
         presentation_contexts: Vec<PresentationContext>,
         options: ClientOptions,
     ) -> Result<Self> {
+        // validate before touching the network: a bad identity must not
+        // depend on whether the peer happens to be reachable (§4.3)
+        if let Some(identity) = &options.user_identity {
+            identity.validate()?;
+        }
+
         let tcp = TcpStream::connect(addr).await.map_err(NetworkError::Io)?;
         crate::transport::apply_options(&tcp, &TcpOptions::default())?;
 
@@ -904,6 +975,8 @@ impl Association {
         let mut user = UserInformation::new(options.max_pdu_length);
         user.implementation_class_uid = Some(IMPLEMENTATION_CLASS_UID.to_string());
         user.implementation_version_name = Some(IMPLEMENTATION_VERSION_NAME.to_string());
+        user.extended_negotiations = options.extended_negotiations.clone();
+        user.user_identity = options.user_identity.clone();
         request.user_information = user;
 
         write_pdu(&mut stream, &Pdu::AssociateRq(request)).await?;
@@ -911,6 +984,9 @@ impl Association {
         let response = tokio::time::timeout(options.association_timeout, read_pdu(&mut stream))
             .await
             .map_err(|_| NetworkError::AssociationRequestTimedOut { attempts: 1 })??;
+        // filled from the AC; both stay empty on a rejection
+        let peer_extended;
+        let peer_identity_response;
         let (accepted, peer_max_pdu) = match response {
             Some(Pdu::AssociateAc(accept)) => {
                 let negotiated = accept
@@ -928,6 +1004,8 @@ impl Association {
                 // 0 means "unlimited", so fall back to our own value
                 let peer = accept.user_information.max_pdu_length;
                 let cap = if peer == 0 { options.max_pdu_length } else { peer.min(options.max_pdu_length) };
+                peer_extended = accept.user_information.extended_negotiations;
+                peer_identity_response = accept.user_information.user_identity_response;
                 (AcceptedContexts::from_negotiated(negotiated), cap)
             }
             Some(Pdu::AssociateRj(reject)) => {
@@ -940,6 +1018,14 @@ impl Association {
             _ => return Err(NetworkError::protocol("expected A-ASSOCIATE-AC or A-ASSOCIATE-RJ")),
         };
 
+        // A positive identity response was required but the peer sent none:
+        // silently continuing would authenticate nobody (§9.1).
+        if let Some(identity) = &options.user_identity {
+            if identity.positive_response_requested && peer_identity_response.is_none() {
+                return Err(NetworkError::protocol("user identity response was required but not returned"));
+            }
+        }
+
         Ok(Association {
             stream,
             contexts: accepted,
@@ -947,7 +1033,35 @@ impl Association {
             assembler: PdvAssembler::new(),
             next_message_id: 1,
             reverse_store: None,
+            peer_extended,
+            peer_identity_response,
         })
+    }
+
+    /// The extended negotiation items the peer accepted (§4.3).
+    pub fn accepted_extended_negotiations(&self) -> &[crate::pdu::ExtendedNegotiation] {
+        &self.peer_extended
+    }
+
+    /// The peer's user identity response, when it sent one (§4.3).
+    pub fn user_identity_response(&self) -> Option<&[u8]> {
+        self.peer_identity_response.as_deref()
+    }
+
+    /// True when the peer granted `field` of `sop_class` (§4.3).
+    ///
+    /// A field the peer did not answer, or answered with length 0, is not
+    /// granted.
+    pub fn extended_field(&self, sop_class: &str, field: u8) -> Option<&[u8]> {
+        self.peer_extended
+            .iter()
+            .find(|ext| ext.sop_class == sop_class)
+            .and_then(|ext| {
+                ext.accepted
+                    .iter()
+                    .find(|(f, value)| *f == field && !value.is_empty())
+                    .map(|(_, value)| value.as_slice())
+            })
     }
 
     /// Registers the reverse C-STORE handler (§7.4).
@@ -2262,6 +2376,157 @@ mod tests {
 
         association.release().await.unwrap();
         handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn loopback_extended_negotiation_is_answered_per_sop_class() {
+        fn grant_level(sop_class: &str, requested: &crate::extended::AppInfo) -> Option<crate::extended::AppInfo> {
+            if sop_class != "1.2.840.10008.5.1.4.1.1.7" {
+                return None;
+            }
+            Some(crate::extended::AppInfo::answer(requested, |field, _| (field == 1).then(|| vec![1])))
+        }
+
+        let options = ServerOptions {
+            extended_negotiation: crate::extended::ExtendedNegotiationPolicy::new(grant_level),
+            ..Default::default()
+        };
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), options).await.unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let request = crate::pdu::ExtendedNegotiation {
+            sop_class: "1.2.840.10008.5.1.4.1.1.7".into(),
+            requested: crate::extended::StorageAppInfo {
+                level_of_support: 1,
+                digital_signature: 1,
+                element_coercion: 0,
+            }
+            .to_app_info()
+            .fields,
+            accepted: Vec::new(),
+        };
+        let client_options = ClientOptions {
+            extended_negotiations: vec![request],
+            ..Default::default()
+        };
+        let association =
+            Association::open(addr, "SCU", "SCP", vec![echo_context()], client_options).await.unwrap();
+
+        assert_eq!(
+            association.extended_field("1.2.840.10008.5.1.4.1.1.7", 1),
+            Some(&[1u8][..]),
+            "the SCP granted level 2"
+        );
+        assert_eq!(
+            association.extended_field("1.2.840.10008.5.1.4.1.1.7", 2),
+            None,
+            "a zero-length answer is not a grant"
+        );
+        assert_eq!(association.extended_field("9.9.9", 1), None, "unknown SOP class");
+
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn loopback_user_identity_is_echoed_when_requested() {
+        let options = ServerOptions {
+            user_identity: UserIdentityPolicy::Answer(b"OK".to_vec()),
+            ..Default::default()
+        };
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), options).await.unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let client_options = ClientOptions {
+            user_identity: Some(crate::pdu::UserIdentity {
+                identity_type: 2,
+                primary: b"user".to_vec(),
+                secondary: b"pass".to_vec(),
+                positive_response_requested: true,
+            }),
+            ..Default::default()
+        };
+        let association =
+            Association::open(addr, "SCU", "SCP", vec![echo_context()], client_options).await.unwrap();
+        assert_eq!(association.user_identity_response(), Some(&b"OK"[..]));
+
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn loopback_a_refused_identity_rejects_the_association() {
+        // the default policy refuses user identity
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let client_options = ClientOptions {
+            user_identity: Some(crate::pdu::UserIdentity {
+                identity_type: 1,
+                primary: b"user".to_vec(),
+                secondary: Vec::new(),
+                positive_response_requested: false,
+            }),
+            ..Default::default()
+        };
+        match Association::open(addr, "SCU", "SCP", vec![echo_context()], client_options).await {
+            Err(NetworkError::Reject { result, source_code, .. }) => {
+                assert_eq!(result, 1, "permanent");
+                assert_eq!(source_code, 1, "service user");
+            }
+            other => panic!("expected a rejection, got {other:?}"),
+        }
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_required_identity_response_that_is_missing_fails_the_association() {
+        // Accept without echoing: the peer asked for a positive response
+        let options = ServerOptions { user_identity: UserIdentityPolicy::Accept, ..Default::default() };
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), options).await.unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let client_options = ClientOptions {
+            user_identity: Some(crate::pdu::UserIdentity {
+                identity_type: 1,
+                primary: b"user".to_vec(),
+                secondary: Vec::new(),
+                positive_response_requested: true,
+            }),
+            ..Default::default()
+        };
+        match Association::open(addr, "SCU", "SCP", vec![echo_context()], client_options).await {
+            Err(NetworkError::Protocol(message)) => {
+                assert!(message.contains("user identity response"), "got {message}")
+            }
+            other => panic!("expected a protocol error, got {other:?}"),
+        }
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_invalid_identity_is_refused_before_connecting() {
+        let client_options = ClientOptions {
+            user_identity: Some(crate::pdu::UserIdentity {
+                identity_type: 1,
+                primary: b"user".to_vec(),
+                // a passcode without type 2 is invalid (§4.3)
+                secondary: b"pass".to_vec(),
+                positive_response_requested: false,
+            }),
+            ..Default::default()
+        };
+        let result = Association::open("127.0.0.1:1", "SCU", "SCP", vec![echo_context()], client_options).await;
+        match result {
+            Err(NetworkError::Protocol(message)) => assert!(message.contains("type 2"), "got {message}"),
+            other => panic!("expected a protocol error, got {other:?}"),
+        }
     }
 
     #[tokio::test]
