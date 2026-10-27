@@ -13,7 +13,7 @@ use crate::error::{AbortSource, NetworkError, RejectResult, RejectSource, Result
 use crate::pdu::{
     Abort, Associate, AssociateRj, Pdu, PresentationContext, UserInformation, APPLICATION_CONTEXT,
 };
-use crate::services::{CEchoRequest, CEchoResponse, ServiceProvider};
+use crate::services::{CEchoRequest, CEchoResponse, CStoreResponse, ServiceProvider};
 use crate::transport::{read_pdu, write_pdu, TcpOptions};
 use radicom::model::dataset::Dataset;
 use radicom::model::transfer_syntax::syntaxes;
@@ -34,11 +34,18 @@ pub struct ServerOptions {
     pub max_pdu_length: u32,
     /// How long to wait for the peer's A-ASSOCIATE-RQ.
     pub association_timeout: Duration,
+    /// Where incoming C-STORE instances are put before the provider sees them.
+    pub store_sink: crate::store::StoreSink,
 }
 
 impl Default for ServerOptions {
     fn default() -> Self {
-        ServerOptions { max_clients: 0, max_pdu_length: 16384, association_timeout: Duration::from_secs(10) }
+        ServerOptions {
+            max_clients: 0,
+            max_pdu_length: 16384,
+            association_timeout: Duration::from_secs(10),
+            store_sink: crate::store::StoreSink::default(),
+        }
     }
 }
 
@@ -129,7 +136,7 @@ async fn serve_connection<P: ServiceProvider>(
     accept.user_information = user;
     write_pdu(&mut stream, &Pdu::AssociateAc(accept)).await?;
 
-    let _accepted = AcceptedContexts::from_negotiated(negotiated);
+    let accepted = AcceptedContexts::from_negotiated(negotiated);
     let peer_max_pdu = if request.user_information.max_pdu_length == 0 {
         16384
     } else {
@@ -137,39 +144,55 @@ async fn serve_connection<P: ServiceProvider>(
     };
     let splitter = PduSplitter::new(peer_max_pdu, 16);
     let mut assembler = PdvAssembler::new();
+    // a command awaiting its dataset (§5.2)
+    let mut awaiting_dataset: Option<(u8, Command)> = None;
 
     // -- message loop ----------------------------------------------------
     loop {
         let Some(pdu) = read_pdu(&mut stream).await? else {
             return Ok(()); // peer closed
         };
-        match pdu {
-            Pdu::PData(pdata) => {
+        let mut serving = Serving { stream: &mut stream, splitter: &splitter, provider: &provider, options: &options };
+        match pdu {            Pdu::PData(pdata) => {
                 for unit in assembler.push_pdata(&pdata)? {
-                    if unit.stream != Stream::Command {
-                        continue;
-                    }
-                    let command = command_from_bytes(&unit.bytes)?;
-                    match command.field {
-                        CommandField::CEchoRq => {
-                            let request = CEchoRequest::from_command(&command)?;
-                            let response = provider.on_c_echo(&request).await?;
-                            send_command(&mut stream, &splitter, unit.context_id, &response.to_command()).await?;
+                    match unit.stream {
+                        Stream::Command => {
+                            let command = command_from_bytes(&unit.bytes)?;
+                            // Only C-STORE ever carries a dataset (§7.2). Any
+                            // other request is answered at once: trusting the
+                            // peer's (0000,0800) flag would hang the engine on
+                            // a peer that sets it wrongly.
+                            let expects_dataset =
+                                command.field == CommandField::CStoreRq && !command.no_dataset;
+                            if expects_dataset {
+                                // the dataset arrives in later PDVs
+                                awaiting_dataset = Some((unit.context_id, command));
+                            } else {
+                                handle_command(&mut serving, unit.context_id, command).await?;
+                            }
                         }
-                        CommandField::CCancelRq => {
-                            // nothing to cancel in this exchange
-                        }
-                        other => {
-                            // unsupported request: answer ProcessingFailure
-                            let mut response = Command::response(&command, crate::dimse::status::PROCESSING_FAILURE);
-                            response.error_comment = Some(format!("unsupported command {other:?}"));
-                            send_command(&mut stream, &splitter, unit.context_id, &response).await?;
+                        Stream::Data => {
+                            let Some((context_id, command)) = awaiting_dataset.take() else {
+                                return Err(NetworkError::protocol("dataset PDV without a command"));
+                            };
+                            let syntax = accepted
+                                .find_abstract(command.affected_sop_class_uid.as_deref().unwrap_or_default())
+                                .map(|c| transfer_syntax_of(&c.transfer_syntax))
+                                .unwrap_or_else(|| syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+                            handle_command_with_dataset(
+                                &mut serving,
+                                context_id,
+                                command,
+                                &unit.bytes,
+                                &syntax,
+                            )
+                            .await?;
                         }
                     }
                 }
             }
             Pdu::ReleaseRq => {
-                write_pdu(&mut stream, &Pdu::ReleaseRp).await?;
+                serving.send_pdu(&Pdu::ReleaseRp).await?;
                 return Ok(());
             }
             Pdu::Abort(_) => return Ok(()),
@@ -183,6 +206,91 @@ async fn serve_connection<P: ServiceProvider>(
                 }))
             }
         }
+    }
+}
+
+/// Resolves a UID string to a transfer syntax, defaulting to Explicit VR LE.
+fn transfer_syntax_of(uid: &str) -> Arc<radicom::model::transfer_syntax::TransferSyntax> {
+    radicom::model::transfer_syntax::parse(uid)
+        .unwrap_or_else(|_| syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone())
+}
+
+/// Dispatches a command that carries no dataset (§5.1).
+async fn handle_command<P: ServiceProvider>(
+    serving: &mut Serving<'_, P>,
+    context_id: u8,
+    command: Command,
+) -> Result<()> {
+    match command.field {
+        CommandField::CEchoRq => {
+            let request = CEchoRequest::from_command(&command)?;
+            let response = serving.provider.on_c_echo(&request).await?;
+            serving.send(context_id, &response.to_command()).await
+        }
+        CommandField::CCancelRq => Ok(()),
+        other => {
+            // unsupported request: answer ProcessingFailure, keep the connection
+            serving
+                .fail(context_id, &command, &format!("unsupported command {other:?}"))
+                .await
+        }
+    }
+}
+
+/// Dispatches a command together with its dataset — the C-STORE path (§7.2).
+async fn handle_command_with_dataset<P: ServiceProvider>(
+    serving: &mut Serving<'_, P>,
+    context_id: u8,
+    command: Command,
+    dataset_bytes: &[u8],
+    syntax: &Arc<radicom::model::transfer_syntax::TransferSyntax>,
+) -> Result<()> {
+    if command.field != CommandField::CStoreRq {
+        return serving.fail(context_id, &command, "dataset is only supported for C-STORE").await;
+    }
+
+    // parse failures become a failure status; the connection survives (§5.2)
+    let instance = match serving.options.store_sink.materialize(dataset_bytes, syntax) {
+        Ok(instance) => instance,
+        Err(error) => return serving.fail(context_id, &command, &error.to_string()).await,
+    };
+
+    let request = match crate::store::c_store_request_from_message(&command, instance) {
+        Ok(request) => request,
+        Err(error) => return serving.fail(context_id, &command, &error.to_string()).await,
+    };
+
+    let response = match serving.provider.on_c_store(&request).await {
+        Ok(response) => response,
+        Err(error) => crate::store::failure_response(&request, &error),
+    };
+    serving.send(context_id, &response.to_command()).await
+}
+
+/// The per-connection send side, so dispatch helpers stay small.
+struct Serving<'a, P: ServiceProvider> {
+    stream: &'a mut TcpStream,
+    splitter: &'a PduSplitter,
+    provider: &'a Arc<P>,
+    options: &'a ServerOptions,
+}
+
+impl<P: ServiceProvider> Serving<'_, P> {
+    /// Writes one PDU on the connection.
+    async fn send_pdu(&mut self, pdu: &Pdu) -> Result<()> {
+        write_pdu(self.stream, pdu).await
+    }
+
+    /// Sends one command-only message on `context_id`.
+    async fn send(&mut self, context_id: u8, command: &Command) -> Result<()> {
+        send_command(self.stream, self.splitter, context_id, command).await
+    }
+
+    /// Answers with ProcessingFailure and a truncated comment.
+    async fn fail(&mut self, context_id: u8, request: &Command, comment: &str) -> Result<()> {
+        let mut response = Command::response(request, crate::dimse::status::PROCESSING_FAILURE);
+        response.error_comment = Some(crate::dimse::truncate_lo(comment));
+        self.send(context_id, &response).await
     }
 }
 
@@ -333,7 +441,71 @@ impl Association {
             write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
         }
 
-        // wait for the matching response
+        let command = self.await_response(message_id, CommandField::CEchoRsp).await?;
+        CEchoResponse::from_command(&command)
+    }
+
+    /// Sends a C-STORE and waits for its response (§7.2).
+    ///
+    /// The dataset travels under the presentation context's accepted syntax;
+    /// when that differs from the file's own syntax the dataset is transcoded
+    /// through the global codec registry (§5.3).
+    pub async fn send_c_store(&mut self, file: &radicom::io::file::DicomFile) -> Result<CStoreResponse> {
+        let dataset = &file.dataset;
+        let sop_class = dataset
+            .try_get_str(radicom::model::tag::Tag::new(0x0008, 0x0016))
+            .map(|s| s.trim().to_string())
+            .ok_or(NetworkError::protocol("instance has no SOP class UID"))?;
+        let sop_instance = dataset
+            .try_get_str(radicom::model::tag::Tag::new(0x0008, 0x0018))
+            .map(|s| s.trim().to_string())
+            .ok_or(NetworkError::protocol("instance has no SOP instance UID"))?;
+
+        let context = self.contexts.pick(&sop_class, dataset.transfer_syntax().uid())?;
+        let context_id = context.id;
+        let target = transfer_syntax_of(&context.transfer_syntax);
+        let message_id = self.allocate_message_id();
+
+        let mut request = Command::request(CommandField::CStoreRq, message_id);
+        request.affected_sop_class_uid = Some(sop_class);
+        request.affected_sop_instance_uid = Some(sop_instance);
+        request.no_dataset = false;
+
+        // transcode when the accepted syntax differs from the instance's own
+        let source = dataset.transfer_syntax();
+        let payload = if source.uid() == target.uid() {
+            crate::message::encode_dataset(dataset, &target)?
+        } else {
+            let transcoder = radicom::pixel::transcoder::Transcoder::new(
+                source,
+                target.clone(),
+                None,
+                None,
+            );
+            let transcoded = transcoder
+                .transcode_dataset(dataset)
+                .map_err(|e| NetworkError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())))?;
+            crate::message::encode_dataset(&transcoded, &target)?
+        };
+
+        let command = crate::message::encode_command(&request.to_dataset())?;
+        for pdata in self.splitter.split_message(context_id, &command, Some(&payload))? {
+            write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
+        }
+
+        self.await_response(message_id, CommandField::CStoreRsp).await.map(|command| {
+            CStoreResponse::from_command(&command).unwrap_or_else(|_| CStoreResponse {
+                message_id_being_responded_to: message_id,
+                status: crate::dimse::status::PROCESSING_FAILURE,
+                affected_sop_class_uid: String::new(),
+                affected_sop_instance_uid: String::new(),
+                error_comment: Some("malformed C-STORE response".into()),
+            })
+        })
+    }
+
+    /// Reads PDUs until the response for `message_id` arrives (§5.2).
+    async fn await_response(&mut self, message_id: u16, expected: CommandField) -> Result<Command> {
         loop {
             let Some(pdu) = read_pdu(&mut self.stream).await? else {
                 return Err(NetworkError::ClosedPrematurely { source: None });
@@ -345,10 +517,10 @@ impl Association {
                             continue;
                         }
                         let command = command_from_bytes(&unit.bytes)?;
-                        if command.field == CommandField::CEchoRsp
+                        if command.field == expected
                             && command.message_id_being_responded_to == Some(message_id)
                         {
-                            return CEchoResponse::from_command(&command);
+                            return Ok(command);
                         }
                     }
                 }
@@ -356,7 +528,6 @@ impl Association {
                     return Err(NetworkError::Abort { source_code: abort.source.code(), reason: abort.reason })
                 }
                 Pdu::ReleaseRq => {
-                    // the peer wants to close; answer and report
                     write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
                     return Err(NetworkError::ClosedPrematurely { source: None });
                 }
@@ -391,7 +562,10 @@ impl Association {
 mod tests {
     use super::*;
     use crate::association::sop_class;
-    use crate::services::VerificationProvider;
+    use crate::services::{CStoreRequest, VerificationProvider};
+    use radicom::model::dataset::Dataset;
+    use radicom::model::tag::Tag;
+    use radicom::model::vr::Vr;
 
     fn echo_context() -> PresentationContext {
         PresentationContext::new(
@@ -555,6 +729,183 @@ mod tests {
         .await
         .unwrap();
         association.abort(0).await.unwrap();
+        handle.await.unwrap().unwrap();
+    }    /// A provider that records every stored instance.
+    struct RecordingProvider {
+        stored: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingProvider {
+        fn new() -> Self {
+            RecordingProvider { stored: std::sync::Mutex::new(Vec::new()) }
+        }
+
+        fn instance_uids(&self) -> Vec<String> {
+            self.stored.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ServiceProvider for RecordingProvider {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec![
+                sop_class::VERIFICATION.to_string(),
+                "1.2.840.10008.5.1.4.1.1.7".to_string(),
+            ]
+        }
+
+        async fn on_c_echo(&self, request: &CEchoRequest) -> Result<CEchoResponse> {
+            Ok(CEchoResponse::success(request))
+        }
+
+        async fn on_c_store(&self, request: &CStoreRequest) -> Result<CStoreResponse> {
+            self.stored.lock().unwrap().push(request.affected_sop_instance_uid.clone());
+            Ok(CStoreResponse::success(request))
+        }
+    }
+
+    fn store_context() -> PresentationContext {
+        PresentationContext::new(
+            1,
+            "1.2.840.10008.5.1.4.1.1.7",
+            vec!["1.2.840.10008.1.2".to_string(), "1.2.840.10008.1.2.1".to_string()],
+        )
+    }
+
+    fn instance_file() -> radicom::io::file::DicomFile {
+        let mut dataset = Dataset::new();
+        dataset.insert_str(Tag::new(0x0008, 0x0016), Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        dataset.insert_str(Tag::new(0x0008, 0x0018), Vr::Ui, "1.2.3.4.5.6");
+        dataset.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Doe^John");
+        dataset.insert_str(Tag::new(0x0010, 0x0020), Vr::Lo, "PID-1");
+        dataset.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        radicom::io::file::DicomFile::from_dataset(dataset)
+    }
+
+    #[tokio::test]
+    async fn loopback_c_store_delivers_the_instance() {
+        let provider = Arc::new(RecordingProvider::new());
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            provider.clone(),
+            ServerOptions { store_sink: crate::store::StoreSink::Memory, ..Default::default() },
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association = Association::open(
+            addr,
+            "SCU",
+            "SCP",
+            vec![store_context()],
+            ClientOptions::default(),
+        )
+        .await
+        .unwrap();
+        let response = association.send_c_store(&instance_file()).await.unwrap();
+        assert_eq!(response.status, crate::dimse::status::SUCCESS, "C-STORE accepted");
+        assert_eq!(response.state(), crate::dimse::StatusState::Success);
+        assert_eq!(provider.instance_uids(), vec!["1.2.3.4.5.6".to_string()]);
+
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn loopback_c_store_preserves_the_dataset() {
+        let provider = Arc::new(RecordingProvider::new());
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            provider.clone(),
+            ServerOptions { store_sink: crate::store::StoreSink::Memory, ..Default::default() },
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association = Association::open(addr, "SCU", "SCP", vec![store_context()], ClientOptions::default())
+            .await
+            .unwrap();
+        let file = instance_file();
+        association.send_c_store(&file).await.unwrap();
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+        assert_eq!(provider.instance_uids().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn loopback_c_store_then_echo_on_one_association() {
+        let provider = Arc::new(RecordingProvider::new());
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            provider.clone(),
+            ServerOptions { store_sink: crate::store::StoreSink::Memory, ..Default::default() },
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        // propose both contexts so one association serves both services
+        let contexts = vec![
+            PresentationContext::new(1, sop_class::VERIFICATION, vec!["1.2.840.10008.1.2".to_string()]),
+            store_context(),
+        ];
+        let mut association = Association::open(addr, "SCU", "SCP", contexts, ClientOptions::default())
+            .await
+            .unwrap();
+
+        let store = association.send_c_store(&instance_file()).await.unwrap();
+        assert_eq!(store.status, crate::dimse::status::SUCCESS);
+        let echo = association.send_c_echo(sop_class::VERIFICATION).await.unwrap();
+        assert_eq!(echo.status, crate::dimse::status::SUCCESS);
+
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn loopback_c_store_failure_keeps_the_connection() {
+        // the VerificationProvider does not implement C-STORE
+        struct EchoOnly;
+        #[async_trait::async_trait]
+        impl ServiceProvider for EchoOnly {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![sop_class::VERIFICATION.to_string(), "1.2.840.10008.5.1.4.1.1.7".to_string()]
+            }
+            async fn on_c_echo(&self, request: &CEchoRequest) -> Result<CEchoResponse> {
+                Ok(CEchoResponse::success(request))
+            }
+        }
+
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(EchoOnly),
+            ServerOptions { store_sink: crate::store::StoreSink::Memory, ..Default::default() },
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let contexts = vec![
+            PresentationContext::new(1, sop_class::VERIFICATION, vec!["1.2.840.10008.1.2".to_string()]),
+            store_context(),
+        ];
+        let mut association = Association::open(addr, "SCU", "SCP", contexts, ClientOptions::default())
+            .await
+            .unwrap();
+
+        let response = association.send_c_store(&instance_file()).await.unwrap();
+        assert_eq!(response.state(), crate::dimse::StatusState::Failure, "C-STORE rejected");
+        // the connection survives a rejected instance (§5.2)
+        let echo = association.send_c_echo(sop_class::VERIFICATION).await.unwrap();
+        assert_eq!(echo.status, crate::dimse::status::SUCCESS);
+
+        association.release().await.unwrap();
         handle.await.unwrap().unwrap();
     }
     #[tokio::test]

@@ -21,6 +21,8 @@ impl CEchoRequest {
     pub fn to_command(&self) -> Command {
         let mut command = Command::request(CommandField::CEchoRq, self.message_id);
         command.affected_sop_class_uid = Some(self.affected_sop_class_uid.clone());
+        // C-ECHO never carries a dataset, so (0000,0800) must say so
+        command.no_dataset = true;
         command
     }
 

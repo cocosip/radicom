@@ -9,9 +9,11 @@ pub mod association;
 pub mod dimse;
 pub mod engine;
 pub mod error;
+pub mod message;
 pub mod pdu;
 pub mod server;
 pub mod services;
+pub mod store;
 pub mod transport;
 
 pub use assembler::{MessageUnit, PduSplitter, PdvAssembler, Stream};
