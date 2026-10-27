@@ -17,6 +17,7 @@ pub mod error;
 pub mod generated;
 pub mod io;
 pub mod model;
+pub mod pixel;
 pub mod validation;
 
 pub use error::{DataError, Error, FileError, ReaderError, ValidationFailure};
