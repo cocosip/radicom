@@ -304,6 +304,21 @@ impl DicomClient {
         Ok(responses)
     }
 
+    /// Sends a C-CANCEL (0x0FFF) for an in-flight request (§7.6, SRV-08).
+    ///
+    /// `message_id` names the request to cancel. Returns `Ok(false)` when no
+    /// association is open (nothing to cancel). Prints the cancel on the first
+    /// negotiated presentation context. As with fo-dicom, cancel is only
+    /// meaningful while the request is still producing responses; here the SCP
+    /// buffers a query's matches, so a cancel suppresses *further* results.
+    pub async fn cancel(&mut self, message_id: u16) -> Result<bool> {
+        let Some(association) = self.association.as_mut() else {
+            return Ok(false);
+        };
+        association.send_c_cancel(1, message_id).await?;
+        Ok(true)
+    }
+
     /// Releases the association; the client can be reused afterwards.
     pub async fn release(&mut self) {
         self.close_association().await;
@@ -532,7 +547,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_rejection_is_not_retried() {        // the SCP serves nothing, so the association is rejected
+    async fn a_c_cancel_keeps_the_association_healthy() {
+        struct FindProvider;
+        #[async_trait::async_trait]
+        impl ServiceProvider for FindProvider {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![crate::association::sop_class::STUDY_ROOT_QR_FIND.to_string()]
+            }
+            fn on_c_find<'a>(
+                &'a self,
+                request: &'a CFindRequest,
+            ) -> futures::stream::BoxStream<'a, Result<CFindResponse>> {
+                Box::pin(futures::stream::once(async move {
+                    Ok(CFindResponse::success(request, 0))
+                }))
+            }
+        }
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(FindProvider), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string());
+        // open an association
+        client.send_c_find(&CFindRequest::study_query(1)).await.unwrap();
+        // cancel a request; the SCP consumes the 0x0FFF command without erroring
+        assert!(client.cancel(1).await.unwrap(), "cancel is sent on the open association");
+        // the association is still usable for the next request
+        let responses = client.send_c_find(&CFindRequest::study_query(2)).await.unwrap();
+        assert_eq!(responses.len(), 1, "the association stayed healthy after C-CANCEL");
+
+        client.release().await;
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancel_without_an_association_is_a_no_op() {
+        let mut client = DicomClient::new("SCU", "SCP", "127.0.0.1:1");
+        assert!(!client.cancel(1).await.unwrap(), "no association yet means nothing to cancel");
+    }
+
+    #[tokio::test]
+    async fn a_rejection_is_not_retried() {
+        // the SCP serves nothing, so the association is rejected
         let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), ServerOptions::default())
             .await
             .unwrap();

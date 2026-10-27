@@ -320,7 +320,16 @@ where
             let response = serving.provider.on_c_echo(&request).await?;
             serving.send(context_id, &response.to_command()).await
         }
-        CommandField::CCancelRq => Ok(()),
+        CommandField::CCancelRq => {
+            // §7.6 / SRV-08: acknowledge the cancel for the request named in
+            // (0000,0120). Providers here answer a query before the loop reads
+            // the next PDU (buffered per query), so there is no in-flight
+            // stream to interrupt; the loop simply consumes the command so the
+            // association stays healthy. Full mid-stream cancellation needs the
+            // streaming C-FIND path.
+            let _cancelled = command.message_id_being_responded_to;
+            Ok(())
+        }
         other => {
             // unsupported request: answer ProcessingFailure, keep the connection
             serving
@@ -1497,6 +1506,26 @@ impl Association {
     }
 
     /// Releases the association gracefully (§5.5).
+    /// Sends a C-CANCEL-RQ (0x0FFF) for an in-flight request (§7.6, SRV-08).
+    ///
+    /// The command carries the target `message_id` in
+    /// `(0000,0120) MessageIDBeingRespondedTo`, matching fo-dicom's
+    /// `CCancelRequest = 0x0FFF`. It is sent on `context_id` (a proposed
+    /// presentation context id). Note the SCP collects a query's matches before
+    /// answering (buffered per query), so a cancel prevents *further* results
+    /// rather than aborting one already computed; full mid-stream interruption
+    /// needs the streaming C-FIND path.
+    pub async fn send_c_cancel(&mut self, context_id: u8, message_id: u16) -> Result<()> {
+        let mut command = Command::request(CommandField::CCancelRq, message_id);
+        // a C-CANCEL identifies the cancelled request in (0000,0120)
+        command.message_id_being_responded_to = Some(message_id);
+        let bytes = command_bytes(&command)?;
+        for pdata in self.splitter.split_message(context_id, &bytes, None)? {
+            write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
+        }
+        Ok(())
+    }
+
     pub async fn release(mut self) -> Result<()> {
         write_pdu(&mut self.stream, &Pdu::ReleaseRq).await?;
         // wait for A-RELEASE-RP, tolerating a peer that just closes
