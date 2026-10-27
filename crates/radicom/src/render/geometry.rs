@@ -216,6 +216,38 @@ impl FrameGeometry {
         self.point_bottom_right
     }
 
+    /// Column spacing in mm (0028,0030 first value), 0 when absent.
+    pub fn spacing_between_columns(&self) -> f64 {
+        self.spacing_between_columns
+    }
+
+    /// Row spacing in mm (0028,0030 second value), 0 when absent.
+    pub fn spacing_between_rows(&self) -> f64 {
+        self.spacing_between_rows
+    }
+
+    /// The patient-space axis-aligned bounding box of this frame's four
+    /// corners, as `(min, max)` (fo-dicom `FrameGeometry.GetBoundingBox`).
+    pub fn bounding_box(&self) -> (Point3, Point3) {
+        let corners = [
+            self.point_top_left,
+            self.point_top_right,
+            self.point_bottom_left,
+            self.point_bottom_right,
+        ];
+        let min = Point3::new(
+            corners.iter().map(|p| p.x).fold(f64::INFINITY, f64::min),
+            corners.iter().map(|p| p.y).fold(f64::INFINITY, f64::min),
+            corners.iter().map(|p| p.z).fold(f64::INFINITY, f64::min),
+        );
+        let max = Point3::new(
+            corners.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max),
+            corners.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max),
+            corners.iter().map(|p| p.z).fold(f64::NEG_INFINITY, f64::max),
+        );
+        (min, max)
+    }
+
     /// Maps an image (column, row) point to patient space (fo-dicom
     /// `TransformImagePointToPatient`). Errors when there is no geometry.
     pub fn transform_image_to_patient(&self, image: Point2) -> Result<Point3, Error> {
