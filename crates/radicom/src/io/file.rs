@@ -2,16 +2,17 @@
 //! (FILE-01..06; docs/05-file-io.md §4, §5.3).
 
 use crate::error::{Error, FileError};
-use crate::io::byte_source::ByteSourceReader;
+use crate::io::byte_source::{ByteSourceReader, WindowSource};
 use crate::io::dataset_builder::{parse_dataset_bytes, DatasetBuilder};
-use crate::io::reader::DicomReader;
+use crate::io::reader::{DicomReader, LargeValuePolicy};
 use crate::io::writer::{DicomWriter, WriteOptions};
+use crate::model::buffer::{FileWindow, SharedBuffer};
 use crate::model::dataset::Dataset;
 use crate::model::tag::Tag;
 use crate::model::transfer_syntax::{syntaxes, TransferSyntax};
 use crate::model::uid::Uid;
 use crate::model::vr::Vr;
-use std::io::{Cursor, Read, Seek, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -82,6 +83,11 @@ pub struct DicomFile {
 }
 
 impl DicomFile {
+    /// The path this file was opened from, when it came from disk (FILE-01).
+    pub fn source(&self) -> Option<&Path> {
+        self.source.as_deref()
+    }
+
     /// Builds a file in memory from an existing dataset (no source path).
     pub fn from_dataset(dataset: Dataset) -> Self {
         DicomFile {
@@ -93,14 +99,96 @@ impl DicomFile {
         }
     }
 
-    /// Opens and parses a file from disk.
+    /// Opens and parses a file from disk (FILE-01, default read options).
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
-        let path = path.as_ref();
-        let bytes = std::fs::read(path).map_err(|e| file_err(path, "read", e))?;
-        let mut file = Self::from_bytes(&bytes, &ReadOptions::default()).map_err(|e| attach(e, path))?;
-        file.source = Some(path.to_path_buf());
-        Ok(file)
+        Self::open_with_options(path, &ReadOptions::default())
     }
+
+    /// Opens a file honoring the [`ReadOptions`] large-value policy (FILE-02).
+    ///
+    /// The header and meta group are read with a bounded scan; the dataset is
+    /// then parsed directly from the file so large values stay as lazy
+    /// [`FileWindow`]s instead of being copied into memory.
+    pub fn open_with_options(path: impl AsRef<Path>, options: &ReadOptions) -> Result<Self, Error> {
+        let path = path.as_ref();
+        let mut file = std::fs::File::open(path).map_err(|e| file_err(path, "open", e))?;
+        let file_len = file.metadata().map_err(|e| file_err(path, "stat", e))?.len();
+        if file_len < 8 {
+            return Err(Error::File(FileError::InvalidFormat("file is too short to be DICOM".into())));
+        }
+
+        // preamble / header
+        let head_len = file_len.min(132) as usize;
+        let mut head = vec![0u8; head_len];
+        file.read_exact(&mut head).map_err(|e| file_err(path, "read", e))?;
+        let (mut format, meta_start) = if head_len >= 132 && &head[128..132] == b"DICM" {
+            (FileFormat::Dicom3, 132u64)
+        } else {
+            (FileFormat::Dicom3NoFileMetaInfo, 0u64)
+        };
+
+        // leading group 0002 (bounded, growing read)
+        let (meta_block, meta_len) = read_meta_block(&mut file, meta_start, file_len)
+            .map_err(|e| Error::File(FileError::InvalidFormat(format!("meta group: {e}"))))?;
+        let file_meta = if meta_len > 0 {
+            parse_dataset_bytes(&meta_block, &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN)?
+        } else {
+            Dataset::new()
+        };
+        if meta_len > 0 && meta_start == 0 {
+            format = FileFormat::Dicom3NoPreamble;
+        }
+
+        let dataset_offset = meta_start + meta_len;
+        let syntax = file_meta
+            .try_get_str(Tag::new(0x0002, 0x0010))
+            .and_then(|uid| crate::model::transfer_syntax::parse(uid.trim()).ok())
+            .unwrap_or_else(|| {
+                let probe = read_probe(&mut file, dataset_offset, file_len);
+                dataset_syntax(format, &probe)
+            });
+
+        let mut dataset = if syntax.is_deflate() {
+            // a deflated body must be inflated before parsing; windows cannot
+            // address into the compressed stream
+            let mut comp = vec![0u8; (file_len - dataset_offset) as usize];
+            file.seek(SeekFrom::Start(dataset_offset)).map_err(|e| file_err(path, "seek", e))?;
+            file.read_exact(&mut comp).map_err(|e| file_err(path, "read", e))?;
+            parse_dataset_with(&comp, &syntax, options)?
+        } else {
+            file.seek(SeekFrom::Start(dataset_offset)).map_err(|e| file_err(path, "seek", e))?;
+            let mut source = ByteSourceReader::new(file, syntax.endian())
+                .with_window_source(Arc::new(PathWindow { path: path.to_path_buf() }));
+            let reader = DicomReader {
+                large_object_size: options.large_object_size,
+                large_policy: policy_of(options.read),
+                ..DicomReader::default()
+            };
+            let mut builder = DatasetBuilder::with_transfer_syntax(syntax.clone());
+            reader.read(&mut source, &syntax, &mut builder, None)?;
+            builder.into_dataset()
+        };
+        dataset.set_transfer_syntax(syntax.clone());
+
+        // the ACR-NEMA recognition code lives in the *dataset* (0008,0010)
+        let format = match dataset.try_get_str(Tag::new(0x0008, 0x0010)) {
+            Some(code) => match code.trim() {
+                "ACR-NEMA 1.0" => FileFormat::AcrNema1,
+                "ACR-NEMA 2.0" => FileFormat::AcrNema2,
+                _ => format,
+            },
+            None => format,
+        };
+
+        Ok(DicomFile {
+            file_meta,
+            dataset,
+            format,
+            is_partial: false,
+            source: Some(path.to_path_buf()),
+        })
+    }
+
 
     /// Parses from a byte slice.
     pub fn from_bytes(bytes: &[u8], options: &ReadOptions) -> Result<Self, Error> {
@@ -127,7 +215,7 @@ impl DicomFile {
             .and_then(|uid| crate::model::transfer_syntax::parse(uid.trim()).ok())
             .unwrap_or_else(|| dataset_syntax(format, dataset_bytes));
 
-        let mut dataset = parse_dataset_bytes(dataset_bytes, &syntax)?;
+        let mut dataset = parse_dataset_with(dataset_bytes, &syntax, options)?;
         dataset.set_transfer_syntax(syntax);
         // the ACR-NEMA recognition code lives in the *dataset* (0008,0010)
         let format = match dataset.try_get_str(Tag::new(0x0008, 0x0010)) {
@@ -138,10 +226,6 @@ impl DicomFile {
             },
             None => format,
         };
-        // ponytail: every value is materialized in memory, so `options.read`
-        // and `large_object_size` have no effect yet; they take effect once
-        // the File/Stream buffer windows land (FILE-02, BUF-02 P1).
-        let _ = options;
 
         Ok(DicomFile {
             file_meta,
@@ -257,6 +341,126 @@ impl DicomFile {
 type Split<'a> = (FileFormat, Option<&'a [u8]>, &'a [u8]);
 
 /// Splits a raw file into (format, meta bytes, dataset bytes) (FILE-03).
+/// Maps the file-level read policy to the parser's large-value policy.
+fn policy_of(read: FileReadOption) -> LargeValuePolicy {
+    match read {
+        FileReadOption::SkipLargeTags => LargeValuePolicy::Skip,
+        FileReadOption::ReadAll => LargeValuePolicy::Materialize,
+        FileReadOption::Default | FileReadOption::ReadLargeOnDemand => LargeValuePolicy::OnDemand,
+    }
+}
+
+/// Parses a dataset byte slice honoring the large-value policy (FILE-02).
+/// Deflated bodies are inflated first; there is no window source here, so
+/// `ReadLargeOnDemand` falls back to materializing.
+fn parse_dataset_with(bytes: &[u8], syntax: &TransferSyntax, options: &ReadOptions) -> Result<Dataset, Error> {
+    let owned;
+    let bytes = if syntax.is_deflate() {
+        owned = crate::io::reader::inflate(bytes)?;
+        &owned[..]
+    } else {
+        bytes
+    };
+    let mut source = ByteSourceReader::new(Cursor::new(bytes.to_vec()), syntax.endian());
+    let reader = DicomReader {
+        large_object_size: options.large_object_size,
+        large_policy: policy_of(options.read),
+        ..DicomReader::default()
+    };
+    let mut builder = DatasetBuilder::with_transfer_syntax(Arc::new(syntax.clone()));
+    reader.read(&mut source, syntax, &mut builder, None)?;
+    Ok(builder.into_dataset())
+}
+
+/// Builds lazy [`FileWindow`]s over a file for the parser (FILE-02).
+struct PathWindow {
+    path: PathBuf,
+}
+
+impl WindowSource for PathWindow {
+    fn window(&self, absolute_offset: u64, len: u64) -> std::io::Result<SharedBuffer> {
+        Ok(Arc::new(FileWindow::open(&self.path, absolute_offset, len)?))
+    }
+}
+
+/// Reads up to 4 KiB at `start` for transfer-syntax probing.
+fn read_probe(file: &mut std::fs::File, start: u64, file_len: u64) -> Vec<u8> {
+    let take = file_len.saturating_sub(start).min(4096) as usize;
+    let mut buf = vec![0u8; take];
+    if file.seek(SeekFrom::Start(start)).and_then(|_| file.read_exact(&mut buf)).is_err() {
+        return Vec::new();
+    }
+    buf
+}
+
+enum MetaScan {
+    /// A group-0002 run ended at `usize` bytes.
+    Run(usize),
+    /// The first group is not 0x0002 (no meta group).
+    None,
+    /// Ran out of buffered bytes while still inside group 0002.
+    More,
+}
+
+/// Reads the leading group 0002 element run, growing the buffer as needed so a
+/// large file is never read whole. Returns the meta bytes and their length.
+fn read_meta_block(file: &mut std::fs::File, start: u64, file_len: u64) -> std::io::Result<(Vec<u8>, u64)> {
+    let avail = file_len.saturating_sub(start);
+    let mut want = avail.min(4096);
+    loop {
+        let take = want.min(avail);
+        let mut buf = vec![0u8; take as usize];
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut buf)?;
+        match scan_meta(&buf) {
+            MetaScan::Run(len) => return Ok((buf[..len].to_vec(), len as u64)),
+            MetaScan::None => return Ok((Vec::new(), 0)),
+            MetaScan::More => {
+                if take == avail {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "meta group is truncated"));
+                }
+                want = (take.saturating_mul(2)).min(avail);
+            }
+        }
+    }
+}
+
+/// Walks group-0002 elements (always Explicit VR LE) over `buf`.
+fn scan_meta(buf: &[u8]) -> MetaScan {
+    if buf.len() < 8 {
+        return MetaScan::More;
+    }
+    if u16::from_le_bytes([buf[0], buf[1]]) != 0x0002 {
+        return MetaScan::None;
+    }
+    let mut pos = 0usize;
+    while pos + 8 <= buf.len() {
+        if u16::from_le_bytes([buf[pos], buf[pos + 1]]) != 0x0002 {
+            return MetaScan::Run(pos);
+        }
+        let vr = match Vr::try_parse(&[buf[pos + 4], buf[pos + 5]]) {
+            Some(v) => v,
+            None => return MetaScan::More,
+        };
+        let (len, header) = if vr.is_16bit_length() {
+            (u16::from_le_bytes([buf[pos + 6], buf[pos + 7]]) as usize, 8)
+        } else {
+            if pos + 12 > buf.len() {
+                return MetaScan::More;
+            }
+            (u32::from_le_bytes([buf[pos + 8], buf[pos + 9], buf[pos + 10], buf[pos + 11]]) as usize, 12)
+        };
+        let end = pos + header + len;
+        if end > buf.len() {
+            return MetaScan::More;
+        }
+        pos = end;
+    }
+    // all buffered bytes consumed and still inside group 0002 (or exactly at the
+    // end); ask for more unless the caller already read to EOF
+    MetaScan::More
+}
+
 fn detect(raw: &[u8]) -> Result<Split<'_>, Error> {
     if raw.len() < 8 {
         return Err(Error::File(FileError::InvalidFormat(
@@ -599,5 +803,83 @@ mod tests {
         fn get_str(&self, tag: Tag) -> String {
             self.dataset.get_str(tag).unwrap()
         }
+    }
+
+    fn temp_file(name: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "radicom-filetest-{}-{}-{name}.dcm",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    /// Writes a file whose (0009,1001) OB value is `big_len` bytes (>= any test
+    /// threshold) followed by a small (0010,0020). Returns (path, big bytes).
+    fn file_with_large_value(big_len: usize) -> (PathBuf, Vec<u8>) {
+        let big: Vec<u8> = (0..big_len).map(|i| (i % 251) as u8).collect();
+        let mut ds = Dataset::new();
+        ds.insert_or_update(crate::model::element::DicomElement::new_bytes(
+            Tag::new(0x0009, 0x1001),
+            Vr::Ob,
+            std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(big.clone())),
+        ));
+        ds.insert_str(Tag::new(0x0010, 0x0020), Vr::Lo, "PID-1");
+        let file = DicomFile::from_dataset(ds);
+        let path = temp_file("large");
+        file.save(&path).unwrap();
+        (path, big)
+    }
+
+    fn large_value_buffer(ds: &Dataset) -> &crate::model::buffer::SharedBuffer {
+        match ds.item(&Tag::new(0x0009, 0x1001)) {
+            Some(crate::model::item::DicomItem::Element(e)) => e.value().as_buffer().expect("value has a buffer"),
+            other => panic!("expected element, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_large_on_demand_yields_a_lazy_window() {
+        let (path, big) = file_with_large_value(5000);
+        {
+            let opts = ReadOptions { read: FileReadOption::ReadLargeOnDemand, large_object_size: 1000 };
+            let file = DicomFile::open_with_options(&path, &opts).unwrap();
+            let buffer = large_value_buffer(&file.dataset);
+            assert_eq!(buffer.size(), 5000);
+            assert!(!buffer.is_memory(), "large value must stay a file window, not in memory");
+            assert_eq!(&*buffer.data(), &big[..], "window reads the real bytes");
+            assert_eq!(file.dataset.get_str(Tag::new(0x0010, 0x0020)).unwrap(), "PID-1");
+        }
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn read_all_materializes_large_values() {
+        let (path, big) = file_with_large_value(5000);
+        {
+            let opts = ReadOptions { read: FileReadOption::ReadAll, large_object_size: 1000 };
+            let file = DicomFile::open_with_options(&path, &opts).unwrap();
+            let buffer = large_value_buffer(&file.dataset);
+            assert_eq!(buffer.size(), 5000);
+            assert!(buffer.is_memory(), "ReadAll keeps the value in memory");
+            assert_eq!(&*buffer.data(), &big[..]);
+        }
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn skip_large_tags_leaves_a_placeholder_and_advances() {
+        let (path, _big) = file_with_large_value(5000);
+        {
+            let opts = ReadOptions { read: FileReadOption::SkipLargeTags, large_object_size: 1000 };
+            let file = DicomFile::open_with_options(&path, &opts).unwrap();
+            let buffer = large_value_buffer(&file.dataset);
+            assert_eq!(buffer.size(), 0, "skipped value is an empty placeholder");
+            assert!(buffer.data().is_empty());
+            // the parser still advanced past the skipped value to the next element
+            assert_eq!(file.dataset.get_str(Tag::new(0x0010, 0x0020)).unwrap(), "PID-1");
+        }
+        std::fs::remove_file(&path).ok();
     }
 }

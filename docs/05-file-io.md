@@ -1,6 +1,6 @@
 # Module Spec: File and IO (Buffers, Parser, Writer, DicomFile)
 
-> Status: implemented (milestone M3; see [03-development-plan.md](03-development-plan.md) §3) — buffers, byte source/target, parser, writer + length calculator and DicomFile are done; the on-demand file/stream windows (FILE-02, BUF-02 P1) are the remaining gap
+> Status: implemented (milestone M3; see [03-development-plan.md](03-development-plan.md) §3) — buffers (including `FileWindow`/`TempFileSpill`/`StreamWindow`), byte source/target, parser, writer + length calculator and DicomFile are done, including the on-demand file/stream windows (FILE-02, BUF-02): `open_with_options` keeps large values as lazy file windows, skips them, or materializes them per `FileReadOption`.
 > Feature IDs covered: BUF-01..02, IO-01..03, RD-01..05, WR-01..03, FILE-01..06
 > Behavior baseline: fo-dicom `IO/` (Reader, Writer, Buffer), `DicomFile.cs`, `DicomFileReader.Preprocess`, tolerance behaviors accumulated in fo-dicom issue history
 

@@ -65,16 +65,30 @@ pub enum ReadOutcome {
     Stopped,
 }
 
+/// How values at or above `large_object_size` are handled (FILE-02).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LargeValuePolicy {
+    /// Read into memory. The only option when no window source is attached.
+    #[default]
+    Materialize,
+    /// Skip the bytes and report an empty placeholder.
+    Skip,
+    /// Leave the value as a lazy file/stream window when a window source exists,
+    /// otherwise fall back to materializing.
+    OnDemand,
+}
+
 /// Parser options (RD-01).
 #[derive(Debug, Clone)]
 pub struct DicomReader {
     pub large_object_size: u64,
     pub max_depth: u32,
+    pub large_policy: LargeValuePolicy,
 }
 
 impl Default for DicomReader {
     fn default() -> Self {
-        DicomReader { large_object_size: 64 * 1024, max_depth: 256 }
+        DicomReader { large_object_size: 64 * 1024, max_depth: 256, large_policy: LargeValuePolicy::Materialize }
     }
 }
 
@@ -232,7 +246,25 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         }
         // `require` reports the real offset and byte count on truncation.
         self.source.require(length).map_err(Error::Reader)?;
-        let raw = self.source.read_buffer(length).map_err(|e| io_err(e, at))?;
+        let large = length >= self.options.large_object_size;
+        let raw = if large {
+            match self.options.large_policy {
+                LargeValuePolicy::Skip => {
+                    self.source.skip(length).map_err(|e| io_err(e, at))?;
+                    return Ok(EmptyBuffer::shared());
+                }
+                LargeValuePolicy::OnDemand => match self.source.window_at_current(length).map_err(|e| io_err(e, at))? {
+                    Some(window) => {
+                        self.source.skip(length).map_err(|e| io_err(e, at))?;
+                        window
+                    }
+                    None => self.source.read_buffer(length).map_err(|e| io_err(e, at))?,
+                },
+                LargeValuePolicy::Materialize => self.source.read_buffer(length).map_err(|e| io_err(e, at))?,
+            }
+        } else {
+            self.source.read_buffer(length).map_err(|e| io_err(e, at))?
+        };
         let unit = vr.byte_swap_size();
         let needs_swap = unit > 1
             && ((self.big_endian && !cfg!(target_endian = "big"))
