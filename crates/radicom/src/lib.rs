@@ -20,6 +20,8 @@ pub mod media;
 pub mod model;
 pub mod pixel;
 pub mod print;
+#[cfg(feature = "render")]
+pub mod render;
 pub mod sr;
 pub mod validation;
 
