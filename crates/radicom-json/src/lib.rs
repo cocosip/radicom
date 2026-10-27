@@ -154,8 +154,13 @@ fn element_to_value(element: &DicomElement, options: &JsonOptions) -> Result<Val
     object.insert("vr".to_string(), Value::String(vr.code().to_string()));
 
     if is_binary(vr) {
-        // an empty binary value carries no carrier at all (§1.1)
         if let Some(buffer) = element.value().as_buffer() {
+            // a BulkDataUri buffer emits the URI, not its (absent) bytes (§1.1)
+            if let Some(uri) = buffer.bulk_uri() {
+                object.insert("BulkDataURI".to_string(), Value::String(uri.to_string()));
+                return Ok(Value::Object(object));
+            }
+            // an empty binary value carries no carrier at all (§1.1)
             if buffer.size() > 0 {
                 let encoded = base64::engine::general_purpose::STANDARD.encode(buffer.data().as_ref());
                 object.insert("InlineBinary".to_string(), Value::String(encoded));
@@ -387,10 +392,14 @@ fn attribute_to_item(tag: Tag, attribute: &Value) -> Result<Option<DicomItem>> {
     let vr = Vr::parse_str(vr_code)
         .map_err(|_| JsonError::UnknownVr { tag: tag.to_json_string(), vr: vr_code.to_string() })?;
 
-    if object.contains_key("BulkDataURI") {
-        // ponytail: fetching a bulk URI needs the store layer that owns it;
-        // until that exists the read path reports it instead of guessing (JSON-02).
-        return Err(JsonError::Unsupported("BulkDataURI retrieval is not implemented yet"));
+    if let Some(uri) = object.get("BulkDataURI").and_then(Value::as_str) {
+        // JSON-02: keep the reference as a BulkDataUri buffer; the resolver that
+        // owns fetching is out of scope, so the bytes stay unloaded until asked.
+        return Ok(Some(DicomItem::Element(DicomElement::new_bytes(
+            tag,
+            vr,
+            Arc::new(radicom::model::buffer::BulkDataUri::new(uri)),
+        ))));
     }
 
     if let Some(encoded) = object.get("InlineBinary").and_then(Value::as_str) {
@@ -805,12 +814,19 @@ mod tests {
     }
 
     #[test]
-    fn bulk_data_uri_reports_unsupported() {
+    fn bulk_data_uri_round_trips() {
+        // read: the URI becomes a BulkDataUri buffer, not an error (JSON-02)
         let json = r#"{"7FE00010":{"vr":"OB","BulkDataURI":"http://example/x"}}"#;
-        match json_to_dataset(json, &JsonOptions::default()) {
-            Err(JsonError::Unsupported(message)) => assert!(message.contains("BulkDataURI"), "got {message}"),
-            other => panic!("expected Unsupported, got {other:?}"),
-        }
+        let ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
+        let element = ds.get_element(Tag::new(0x7FE0, 0x0010)).unwrap();
+        let buffer = element.value().as_buffer().unwrap();
+        assert_eq!(buffer.bulk_uri(), Some("http://example/x"));
+
+        // write: the buffer emits the URI back, not an InlineBinary
+        let out = dataset_to_json(&ds, &JsonOptions::default()).unwrap();
+        let value: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(value["7FE00010"]["BulkDataURI"], "http://example/x");
+        assert!(value["7FE00010"].get("InlineBinary").is_none(), "no bytes were materialized");
     }
 
     #[test]

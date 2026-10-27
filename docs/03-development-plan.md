@@ -120,7 +120,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 | DIMSE model | DIMSE-01 | Done | All 22 command fields with request/response pairing, command group length recomputed, status classification with mask classes, LO-truncated error comments |
 | Observability | OBS-01..02 | Not started | OBS-02 (OTel wiring) deferred to M8 |
 | SR | SR-01..02 | Done | `radicom::sr`: CodeItem (short/long/URN auto-dispatch), ContentItem with all 14 value types and 7 relationships, typed constructors, StructuredReport open/save with explicit-length sequences. 18 tests |
-| JSON/XML | JSON-01..02, XML-01 | In progress | JSON-01 done (PS3.18 model, PN groups, byte-backed round-trips, tolerant reader). XML-01 done: one-way NativeDicomModel export, verified well-formed by a quick-xml parse in tests. JSON-02 (BulkDataURI) remains |
+| JSON/XML | JSON-01..02, XML-01 | Done | JSON-01 PS3.18 model (PN groups, byte-backed round-trips, tolerant reader); JSON-02 BulkDataURI via a `BulkDataUri` buffer, bidirectional; XML-01 one-way NativeDicomModel export verified well-formed by a quick-xml parse |
 | Media (DICOMDIR) | MEDIA-01..03 | In progress | MEDIA-01 read/write done: PATIENT/STUDY/SERIES/leaf tree, absolute byte offsets measured from the serialized file, dirty-offset tolerance. MEDIA-02 icon and MEDIA-03 scanner remain |
 | Structured report | SR-01..02 | Not started | |
 | Printing | PRINT-01..02 | Deferred (P2) | |

@@ -18,6 +18,12 @@ pub trait ByteBuffer: Send + Sync + std::fmt::Debug {
     /// Materializes the whole value (may trigger a lazy load).
     fn data(&self) -> std::borrow::Cow<'_, [u8]>;
 
+    /// The bulk-data URI this buffer stands for, when it is a [`BulkDataUri`]
+    /// (JSON `BulkDataURI` carrier, docs/08 §1.1). Defaults to `None`.
+    fn bulk_uri(&self) -> Option<&str> {
+        None
+    }
+
     /// Copies `buf.len()` bytes starting at `offset`; out-of-bounds is a
     /// caller bug and asserts in debug builds.
     fn get_byte_range(&self, offset: u64, buf: &mut [u8]) {
@@ -33,6 +39,53 @@ pub trait ByteBuffer: Send + Sync + std::fmt::Debug {
         let data = self.data();
         w.write_all(&data)?;
         Ok(data.len() as u64)
+    }
+}
+
+/// A reference to bytes that live outside the dataset, addressed by URI
+/// (fo-dicom `BulkDataUriByteBuffer`; JSON `BulkDataURI` carrier, docs/08 §1.1).
+///
+/// The data itself is not fetched here — the buffer only carries the URI and,
+/// when the caller supplied it, an already-materialized fallback so consumers
+/// that need bytes still work. `data()` returns the fallback (empty when the
+/// repository has not been asked to resolve it).
+#[derive(Debug, Clone)]
+pub struct BulkDataUri {
+    uri: String,
+    fallback: Option<Bytes>,
+}
+
+impl BulkDataUri {
+    /// A URI-only buffer (no local bytes).
+    pub fn new(uri: impl Into<String>) -> Self {
+        BulkDataUri { uri: uri.into(), fallback: None }
+    }
+
+    /// A URI buffer backed by already-loaded bytes (e.g. after a fetch).
+    pub fn with_data(uri: impl Into<String>, data: impl Into<Bytes>) -> Self {
+        BulkDataUri { uri: uri.into(), fallback: Some(data.into()) }
+    }
+
+    pub fn uri(&self) -> &str {
+        &self.uri
+    }
+}
+
+impl ByteBuffer for BulkDataUri {
+    fn size(&self) -> u64 {
+        self.fallback.as_ref().map_or(0, |b| b.len() as u64)
+    }
+    fn is_memory(&self) -> bool {
+        true
+    }
+    fn data(&self) -> std::borrow::Cow<'_, [u8]> {
+        match &self.fallback {
+            Some(bytes) => std::borrow::Cow::Borrowed(bytes),
+            None => std::borrow::Cow::Borrowed(&[]),
+        }
+    }
+    fn bulk_uri(&self) -> Option<&str> {
+        Some(&self.uri)
     }
 }
 
@@ -406,6 +459,24 @@ mod tests {
         assert_eq!(&*padded.data(), &[1, 2, 3, 0]);
         let even = shared(MemoryBuffer::from(vec![1, 2]));
         assert!(Arc::ptr_eq(&EvenLengthBuffer::wrap_if_needed(even.clone()), &even));
+    }
+
+    #[test]
+    fn bulk_data_uri_carries_the_uri_not_bytes() {
+        let uri = BulkDataUri::new("http://example/x");
+        assert_eq!(uri.uri(), "http://example/x");
+        assert_eq!(uri.bulk_uri(), Some("http://example/x"));
+        assert_eq!(uri.size(), 0, "no bytes loaded");
+        assert!(uri.data().is_empty());
+
+        // a resolved buffer reports the bytes but still exposes the URI
+        let resolved = BulkDataUri::with_data("http://example/y", vec![1, 2, 3]);
+        assert_eq!(resolved.bulk_uri(), Some("http://example/y"));
+        assert_eq!(resolved.size(), 3);
+        assert_eq!(&*resolved.data(), &[1, 2, 3]);
+
+        // an ordinary buffer has no bulk URI
+        assert_eq!(MemoryBuffer::from(vec![1]).bulk_uri(), None);
     }
 
     #[test]
