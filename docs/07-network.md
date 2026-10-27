@@ -1,6 +1,6 @@
 # Module Spec: Network (DIMSE) — radicom-network
 
-> Status: in progress (milestones M5–M6; see [03-development-plan.md](03-development-plan.md) §3) — PDU codec, DIMSE model, association negotiation, PDV assembly, engine state and a working TCP C-ECHO are implemented; the streaming send loop, C-STORE sink, C-FIND/C-GET/C-MOVE, TLS and the client layers remain
+> Status: M5 complete (milestone M6 next; see [03-development-plan.md](03-development-plan.md) §3) — PDU codec, DIMSE model, association negotiation, PDV assembly, message codec, engine state, C-ECHO and C-STORE over plain TCP and TLS are implemented and tested. C-FIND/C-GET/C-MOVE, the higher-level client layers and reference-peer interop remain.
 > Feature IDs covered: NET-01..08, SRV-01..08, CLI-01..02, DIMSE-01, OBS-01
 > Behavior baseline: fo-dicom `Network/` (DicomService, PDU.cs, DicomAssociation, DicomServer, DicomClient + Advanced layer, DicomMessage/service types)
 > Runtime: tokio; all APIs `async`.
