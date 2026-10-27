@@ -185,6 +185,10 @@ impl CStoreResponse {
 #[async_trait]
 pub trait ServiceProvider: Send + Sync {
     /// Abstract syntaxes this provider serves; drives PC negotiation (§7.1).
+    ///
+    /// A C-GET provider must also list the storage classes it will push back,
+    /// because those presentation contexts are what the reverse C-STORE
+    /// sub-operations travel on (§7.4).
     fn supported_sop_classes(&self) -> Vec<String>;
 
     /// Answers C-ECHO.
@@ -204,6 +208,31 @@ pub trait ServiceProvider: Send + Sync {
         let _ = request;
         Box::pin(futures::stream::once(async {
             Err(NetworkError::protocol("C-FIND is not supported by this provider"))
+        }))
+    }
+
+    /// Answers a C-MOVE with a stream of Pending progress and one terminal
+    /// response (§7.5).
+    ///
+    /// The provider resolves the destination AE title and pushes the instances
+    /// itself with [`crate::cmove::store_to_destination`]; the engine only
+    /// relays the responses.
+    fn on_c_move<'a>(&'a self, request: &'a crate::cmove::CMoveRequest) -> futures::stream::BoxStream<'a, Result<crate::cmove::CMoveResponse>> {
+        let _ = request;
+        Box::pin(futures::stream::once(async {
+            Err(NetworkError::protocol("C-MOVE is not supported by this provider"))
+        }))
+    }
+
+    /// Answers a C-GET (§7.4).
+    ///
+    /// The provider yields instances; the engine turns each into a reverse
+    /// C-STORE sub-operation on the same association, so a provider never
+    /// writes to the socket itself.
+    fn on_c_get<'a>(&'a self, request: &'a crate::cget::CGetRequest) -> futures::stream::BoxStream<'a, Result<crate::cget::CGetEvent>> {
+        let _ = request;
+        Box::pin(futures::stream::once(async {
+            Err(NetworkError::protocol("C-GET is not supported by this provider"))
         }))
     }
 }

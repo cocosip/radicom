@@ -7,6 +7,8 @@
 pub mod assembler;
 pub mod association;
 pub mod cfind;
+pub mod cget;
+pub mod cmove;
 pub mod dimse;
 pub mod engine;
 pub mod error;
@@ -23,6 +25,9 @@ pub use association::{
     AcceptedContexts, ContextSetBuilder, ContextState, NegotiatedContext, NegotiationPolicy, ProposedContext,
     SyntaxPriority,
 };
+pub use cfind::{CFindRequest, CFindResponse, QueryRetrieveLevel, QueryRoot, RetrieveService};
+pub use cget::{CGetEvent, CGetRequest, CGetResponse};
+pub use cmove::{store_to_destination, CMoveRequest, CMoveResponse, SubOperationSummary};
 pub use dimse::{Command, CommandField, Priority, Status, StatusState};
 pub use engine::{CircuitBreaker, ConnectionLifecycle, ConnectionState, EngineOptions, PendingRequest, PendingTable};
 pub use error::{AbortSource, NetworkError, RejectResult, RejectSource, Result};

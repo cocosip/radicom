@@ -503,6 +503,8 @@ pub mod status {
     pub const NO_SUCH_SOP_INSTANCE: u16 = 0xA701;
     pub const MOVE_DESTINATION_UNKNOWN: u16 = 0xA801;
     pub const SUBOPERATIONS_COMPLETED_WITH_WARNINGS: u16 = 0xB000;
+    /// No sub-operation succeeded (PS3.4 C-GET/C-MOVE terminal failure).
+    pub const UNABLE_TO_PERFORM_SUBOPERATIONS: u16 = 0xA702;
 }
 
 #[cfg(test)]

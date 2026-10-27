@@ -55,6 +55,33 @@ impl QueryRetrieveLevel {
             (QueryRoot::Study, _) => sc::STUDY_ROOT_QR_FIND,
         }
     }
+
+    /// The retrieve SOP class for this level (§7.4, §7.5).
+    ///
+    /// A worklist is query-only, so it has no retrieve model.
+    pub fn retrieve_sop_class(self, root: QueryRoot, service: RetrieveService) -> Option<&'static str> {
+        use crate::association::sop_class as sc;
+        if self == QueryRetrieveLevel::Worklist {
+            return None;
+        }
+        let pair = match (service, root) {
+            (RetrieveService::Get, QueryRoot::Patient) => sc::PATIENT_ROOT_QR_GET,
+            (RetrieveService::Get, QueryRoot::Study) => sc::STUDY_ROOT_QR_GET,
+            (RetrieveService::Move, QueryRoot::Patient) => sc::PATIENT_ROOT_QR_MOVE,
+            (RetrieveService::Move, QueryRoot::Study) => sc::STUDY_ROOT_QR_MOVE,
+        };
+        Some(pair)
+    }
+
+    /// The C-MOVE SOP class for this level (§7.5).
+    pub fn move_sop_class(self, root: QueryRoot) -> Option<&'static str> {
+        self.retrieve_sop_class(root, RetrieveService::Move)
+    }
+
+    /// The C-GET SOP class for this level (§7.4).
+    pub fn get_sop_class(self, root: QueryRoot) -> Option<&'static str> {
+        self.retrieve_sop_class(root, RetrieveService::Get)
+    }
 }
 
 /// Which Q/R information model the query uses (§7.3).
@@ -63,6 +90,15 @@ pub enum QueryRoot {
     Patient,
     #[default]
     Study,
+}
+
+/// The retrieve service a request belongs to (§7.4, §7.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetrieveService {
+    /// C-GET: instances come back on the *same* association.
+    Get,
+    /// C-MOVE: the SCP pushes instances to a third party.
+    Move,
 }
 
 /// Return keys that identify the entity at each level, in tag order.
