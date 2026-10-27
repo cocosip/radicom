@@ -17,3 +17,4 @@ pub mod model;
 
 pub use error::{DataError, Error, FileError, ReaderError, ValidationFailure};
 pub use model::tag::Tag;
+pub use model::vr::Vr;

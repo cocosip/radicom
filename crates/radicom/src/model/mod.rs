@@ -3,3 +3,4 @@
 
 pub mod private_creator;
 pub mod tag;
+pub mod vr;
