@@ -84,7 +84,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 | M0 | Scaffolding | Done | Workspace + 4 crates + xtask gen-dict committed (8e1be2a, fe25717, 8188021); build/tests/clippy green |
 | M1 | Identifier system | Done | TAG/VR/UID/TS/DICT/VM/MaskedTag/tag-index committed (343bd56..16847ac); 5347-tag + 1928-UID generated tables verified by tests; exit condition met |
 | M2 | Dataset & elements | Done | DA/DT/TM, buffers, element model, PersonName, dataset, charsets, validators, functional groups/equality/datetime (a792ecb..bfa3e6f); 110 tests green; exit condition met |
-| M3 | File & IO | In progress | Byte source/target (4cc33e9), parser + dataset builder (8fa5ae7) and writer (WR-01..03) landed; DicomFile (FILE-01..06) remains |
+| M3 | File & IO | Complete | Byte source/target (4cc33e9), parser (8fa5ae7), writer (a2c4317) and DicomFile all landed; 163 tests, clippy clean. FILE-02 on-demand windows remain P1 |
 | M4 | Pixel & codec interfaces | Not started | Boundary freeze gates radicom-codecs kickoff |
 | M5 | Network core | Not started | |
 | M6 | Network services | Not started | |
@@ -108,7 +108,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 | Byte source/target | IO-02..03 | Done | ByteSourceReader/ByteTargetWriter with endian-aware scalars, chunked buffer streaming (4cc33e9); IO-01 file/dir refs pending |
 | Reader | RD-01..05 | Done | Recursive-descent parser + DatasetBuilder observer; tolerance rows T1–T10 each have a test; depth cap verified at the default 2 MiB stack |
 | Writer | WR-01..03 | Done | DicomWriter + length calculator share one header/length path; WriteOptions, private-SQ explicit length, CP-1066 demotion, group-length recalc/removal, charset-aware value encoding, fragment offset table + delimiters |
-| DicomFile | FILE-01..06 | Not started | |
+| DicomFile | FILE-01..06 | Done | Format detection (preamble/no-preamble/no-meta/ACR-NEMA, explicit-vs-implicit and endianness probing), meta refresh on save, partial open via stop predicate, deflate on write, `has_valid_header`; FILE-02 large-object windows deferred with BUF-02 P1 |
 | PixelData | PIX-01..05 | Not started | |
 | Codec interface | CODEC-01..03, CODEC-05 | Not started | CODEC-04 dropped 2026-10-27 (no built-in codecs; all implementations incl. RLE in radicom-codecs) |
 | Transcoder | TR-01..03 | Not started | |
@@ -133,6 +133,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 
 | Date | Item | Milestone |
 |---|---|---|
+| 2026-10-27 | M3 DicomFile complete: format detection for all FILE-03 variants, meta-group refresh on save, partial open via stop predicate, deflate write path and `has_valid_header`; M3 exit condition reached except FILE-02 on-demand windows (P1, tracked with BUF-02); 163 tests, clippy clean | M3 |
 | 2026-10-27 | M3 writer: `DicomWriter` + length calculator (WR-01..03) sharing one header path; WriteOptions, private-SQ explicit length, CP-1066 UN demotion, group-length recalculation, charset-aware value encoding, fragment offset table; round-trips for explicit/implicit/big-endian/SQ/fragments; 149 tests, clippy clean | M3 |
 | 2026-10-27 | M3 parser: recursive-descent `DicomReader` + `DatasetBuilder` observer (RD-01..05); tolerance rows T1–T10 each covered by a test; SQ item events, fragment offset table, private creator binding and deflate (RD-04) implemented; 136 tests, clippy clean | M3 |
 | 2026-10-27 | M2 dataset and elements complete: DA/DT/TM parsers, buffer layer, element value model + conversions, PersonName, Dataset with private tags/walker, charsets, validators, functional groups/equality/datetime composition; 110 tests, clippy clean | M2 |
@@ -167,6 +168,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-10-27 | radicom team | M3 complete: DicomFile added (FILE-01..06); ACR-NEMA recognition code is read from the dataset, not the meta group, and `ReadOptions.read` is documented as inert until the on-demand buffer windows land |
 | 2026-10-27 | radicom team | M3 writer landed; `DicomFragmentSequence::push_fragment` now builds the offset table from item headers plus padded lengths, and the reader strips value padding (UI NUL, string space) so round-trips are idempotent |
 | 2026-10-27 | radicom team | M3 progress: parser + dataset builder landed; `ParseObserver::on_begin_fragment` now receives the decoded basic offset table; the parser frame was split (`step` vs `parse_level`) so the 256-level cap holds on a 2 MiB stack |
 | 2026-10-27 | radicom team | Parity re-audit: platform capabilities mapped to Rust equivalents (HOST-01/OBS-02/PRINT-02/INF-07/UID-05); rendering module spec added (10-rendering.md); absolute fo-dicom paths removed from all docs |

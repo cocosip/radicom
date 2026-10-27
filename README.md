@@ -24,7 +24,7 @@ radicom covers the DICOM data model, file I/O, network communication (DIMSE), se
 
 ## Status
 
-Milestones M0–M2 are complete (workspace, identifier system, dataset/elements); M3 (file IO) is in progress — buffers, byte source/target and the parser with its malformed-data tolerance rules are implemented and tested. See the progress tables in the development plan for the current state.
+Milestones M0–M3 are complete (workspace, identifier system, dataset/elements, file IO). Reading and writing round-trip across explicit/implicit VR, both endiannesses, sequences, encapsulated pixel data and deflate; the parser covers the malformed-data tolerance corpus (T1–T10). Pixel data and the codec interface (M4) are next. See the progress tables in the development plan.
 
 ## License
 
