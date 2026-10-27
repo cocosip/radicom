@@ -438,37 +438,40 @@ impl<'a> PixelData<'a> {
     }
 
     /// One LUT channel: descriptor-driven 8-bit expansion.
+    ///
+    /// The LUT Descriptor (PS3.3 C.7.6.3.1.5) is three US values:
+    /// `[0]` number of entries (0 ⇒ 65536), `[1]` first mapped pixel value,
+    /// `[2]` bits per entry. Each US is little-endian, so the byte layout is
+    /// entries@0..2, first@2..4, bits@4..6 — a 6-byte descriptor.
     fn read_lut(&self, descriptor_tag: Tag, data_tag: Tag) -> Option<Vec<u8>> {
         let descriptor = self.dataset.item(&descriptor_tag)?.as_element_buffer()?;
         let desc = descriptor.data();
-        if desc.len() < 8 {
+        if desc.len() < 6 {
             return None;
         }
-        let entries = u16::from_le_bytes([desc[2], desc[3]]);
+        let entries = u16::from_le_bytes([desc[0], desc[1]]);
         // a descriptor count of 0 means 65536 entries (PS3.3 C.7.6.3.1.5)
         let count = if entries == 0 { 65536usize } else { entries as usize };
-        let first_mapped = u16::from_le_bytes([desc[4], desc[5]]);
-        let bits = u16::from_le_bytes([desc[6], desc[7]]);
+        let _first_mapped = u16::from_le_bytes([desc[2], desc[3]]);
+        let bits = u16::from_le_bytes([desc[4], desc[5]]);
         let data = self.dataset.item(&data_tag)?.as_element_buffer()?;
         let raw = data.data();
 
         let mut out = Vec::with_capacity(count);
-        match bits {
-            8 => {
-                for i in 0..count {
-                    out.push(*raw.get(i).unwrap_or(&0));
-                }
+        if raw.len() == count {
+            // 8-bit entries (one byte per entry)
+            for i in 0..count {
+                out.push(*raw.get(i).unwrap_or(&0));
             }
-            16 => {
-                // 16-bit entries: keep the high byte (fo-dicom truncation rule)
-                for i in 0..count {
-                    let hi = *raw.get(i * 2 + 1).unwrap_or(&0);
-                    out.push(hi);
-                }
+        } else {
+            // data is two bytes per entry: fo-dicom takes one byte per entry,
+            // the high byte (offset 1) when 16-bit-allocated, else the low byte
+            let offset = if bits == 16 { 1 } else { 0 };
+            for i in 0..count {
+                let byte = *raw.get(i * 2 + offset).unwrap_or(&0);
+                out.push(byte);
             }
-            _ => return None,
         }
-        let _ = first_mapped;
         Some(out)
     }
 }
@@ -695,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn palette_lut_expands_8_and_16_bit_entries() {
+    fn palette_lut_expands_8_bit_entries() {
         let mut ds = mono_dataset(4, 1, 8, 1);
         ds.insert_str(PHOTOMETRIC_INTERPRETATION, Vr::Cs, "PALETTE COLOR");
         // descriptor: 3 entries, first mapped 0, 8 bits
@@ -707,7 +710,7 @@ mod tests {
             ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
                 desc_tag,
                 Vr::Us,
-                Arc::new(MemoryBuffer::from(vec![0u8, 0, 3, 0, 0, 0, 8, 0])),
+                Arc::new(MemoryBuffer::from(vec![3u8, 0, 0, 0, 8, 0])),
             )));
             ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
                 data_tag,
@@ -722,8 +725,39 @@ mod tests {
     }
 
     #[test]
-    fn palette_lut_is_none_for_other_interpretations() {
-        let mut ds = mono_dataset(4, 1, 8, 1);
+    fn a_16_bit_allocated_palette_keeps_the_high_byte() {
+        // 3 entries, 8 bits each, but stored as 16-bit words (little-endian):
+        // the high byte is the entry value (fo-dicom truncation rule).
+        let mut ds = mono_dataset(3, 1, 8, 1);
+        ds.insert_str(PHOTOMETRIC_INTERPRETATION, Vr::Cs, "PALETTE COLOR");
+        let us = |vals: &[u16]| {
+            let mut b = Vec::new();
+            for &v in vals {
+                b.extend_from_slice(&v.to_le_bytes());
+            }
+            Arc::new(MemoryBuffer::from(b)) as SharedBuffer
+        };
+        // 16-bit-allocated words whose high byte is the intended 8-bit value
+        let words = |vals: [u16; 3]| {
+            let mut b = Vec::new();
+            for &v in &vals {
+                // low byte = 0xEE filler, high byte = value
+                let word = ((v) << 8) | 0x00EE;
+                b.extend_from_slice(&word.to_le_bytes());
+            }
+            Arc::new(MemoryBuffer::from(b)) as SharedBuffer
+        };
+        for (d, t, v) in [(RED_DESCRIPTOR, RED_DATA, [50u16, 100, 150]), (GREEN_DESCRIPTOR, GREEN_DATA, [60u16, 110, 160]), (BLUE_DESCRIPTOR, BLUE_DATA, [70u16, 120, 170])] {
+            ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(d, Vr::Us, us(&[3, 0, 16]))));
+            ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(t, Vr::Ow, words(v))));
+        }
+        let palette = PixelData::from_dataset(&mut ds).unwrap().palette_color_lut().unwrap();
+        assert_eq!(palette.len(), 3);
+        assert_eq!((palette[1].r, palette[1].g, palette[1].b), (100, 110, 120), "high byte is the entry value");
+    }
+
+    #[test]
+    fn palette_lut_is_none_for_other_interpretations() {        let mut ds = mono_dataset(4, 1, 8, 1);
         assert!(PixelData::from_dataset(&mut ds).unwrap().palette_color_lut().is_none());
     }
 
@@ -732,5 +766,55 @@ mod tests {
         let mut ds = mono_dataset(2, 2, 12, 1);
         let pd = PixelData::from_dataset(&mut ds).unwrap();
         assert!(pd.bits_allocated().is_err());
+    }
+
+    #[test]
+    fn a_six_byte_palette_descriptor_is_read_correctly() {
+        // 3-US descriptor [count=3, first=0, bits=8] is exactly 6 bytes;
+        // the old code rejected it (needed >=8) and misread the fields.
+        let mut ds = mono_dataset(3, 1, 8, 1);
+        ds.insert_str(PHOTOMETRIC_INTERPRETATION, Vr::Cs, "PALETTE COLOR");
+        let us = |vals: &[u16]| {
+            let mut b = Vec::new();
+            for &v in vals {
+                b.extend_from_slice(&v.to_le_bytes());
+            }
+            std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(b)) as SharedBuffer
+        };
+        let ds8 = |vals: [u8; 3]| {
+            std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vals.to_vec())) as SharedBuffer
+        };
+        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(RED_DESCRIPTOR, Vr::Us, us(&[3, 0, 8]))));
+        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(GREEN_DESCRIPTOR, Vr::Us, us(&[3, 0, 8]))));
+        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(BLUE_DESCRIPTOR, Vr::Us, us(&[3, 0, 8]))));
+        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(RED_DATA, Vr::Ow, ds8([10, 20, 30]))));
+        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(GREEN_DATA, Vr::Ow, ds8([1, 2, 3]))));
+        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(BLUE_DATA, Vr::Ow, ds8([100, 110, 120]))));
+
+        let palette = PixelData::from_dataset(&mut ds).unwrap().palette_color_lut().unwrap();
+        assert_eq!(palette.len(), 3, "the 6-byte descriptor yields 3 entries");
+        assert_eq!((palette[2].r, palette[2].g, palette[2].b), (30, 3, 120), "last entry maps right");
+    }
+
+    #[test]
+    fn a_zero_entry_palette_descriptor_means_65536() {
+        // entries == 0 ⇒ 65536 (PS3.3), verified through the 8-bit path length
+        let mut ds = mono_dataset(1, 1, 8, 1);
+        ds.insert_str(PHOTOMETRIC_INTERPRETATION, Vr::Cs, "PALETTE COLOR");
+        let us = |vals: &[u16]| {
+            let mut b = Vec::new();
+            for &v in vals {
+                b.extend_from_slice(&v.to_le_bytes());
+            }
+            std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(b)) as SharedBuffer
+        };
+        // 65536 one-byte entries
+        let big = std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![0u8; 65536])) as SharedBuffer;
+        for (d, t) in [(RED_DESCRIPTOR, RED_DATA), (GREEN_DESCRIPTOR, GREEN_DATA), (BLUE_DESCRIPTOR, BLUE_DATA)] {
+            ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(d, Vr::Us, us(&[0, 0, 8]))));
+            ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(t, Vr::Ow, big.clone())));
+        }
+        let palette = PixelData::from_dataset(&mut ds).unwrap().palette_color_lut().unwrap();
+        assert_eq!(palette.len(), 65536, "zero entries expands to 65536");
     }
 }

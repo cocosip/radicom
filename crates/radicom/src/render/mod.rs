@@ -644,8 +644,8 @@ mod tests {
     #[test]
     fn a_palette_frame_maps_indices_through_the_colour_lut() {
         let mut ds = color_image("PALETTE COLOR", 1, 8, &[0, 1], 0);
-        // read_lut reads descriptors as >=8 raw bytes: [_, count@2, first@4, bits@6]
-        let desc = || us_bytes(&[0, 2, 0, 8]); // first=0, count=2, bits=8
+        // 6-byte descriptor: [count=2, first=0, bits=8]
+        let desc = || us_bytes(&[2, 0, 8]);
         ds.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(Tag::new(0x0028, 0x1101), Vr::Us, desc()),
         ));
