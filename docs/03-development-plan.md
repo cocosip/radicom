@@ -88,7 +88,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 | M4 | Pixel & codec interfaces | Done | Codec boundary frozen for radicom-codecs; 208 tests green |
 | M5 | Network core | Complete | PDU codec, association, PDV assembly, message codec, engine state, C-ECHO/C-STORE over TCP and TLS; 150 tests at completion |
 | M6 | Network services | Complete except reference-peer interop | SRV-04..06, NET-04, CLI-01..02 (c3f75ab..a060c9c); 210 network tests, 218 with TLS. SRV-07/08 stay P2/M8 |
-| M7 | Serialization & media | In progress (JSON-01 done) | DICOM JSON model committed c907f6f with 23 tests; XML, DICOMDIR, SR and the anonymizer remain |
+| M7 | Serialization & media | In progress (JSON-01, MEDIA-01 done) | DICOM JSON (c907f6f) and DICOMDIR read/write (MEDIA-01) landed; MEDIA-02 icon, XML-01, SR and the anonymizer remain |
 | M8 | Rendering & enhancements | Deferred (P2) | |
 
 ### 3.2 Feature-group status (fine-grained)
@@ -120,7 +120,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 | DIMSE model | DIMSE-01 | Done | All 22 command fields with request/response pairing, command group length recomputed, status classification with mask classes, LO-truncated error comments |
 | Observability | OBS-01..02 | Not started | OBS-02 (OTel wiring) deferred to M8 |
 | JSON/XML | JSON-01..02, XML-01 | In progress | JSON-01 done: PS3.18 model with PN groups, AT, sequences, number modes and a tolerant reader. JSON-02 (BulkDataURI) and XML-01 remain |
-| Media (DICOMDIR) | MEDIA-01..03 | Not started | |
+| Media (DICOMDIR) | MEDIA-01..03 | In progress | MEDIA-01 read/write done: PATIENT/STUDY/SERIES/leaf tree, absolute byte offsets measured from the serialized file, dirty-offset tolerance. MEDIA-02 icon and MEDIA-03 scanner remain |
 | Structured report | SR-01..02 | Not started | |
 | Printing | PRINT-01..02 | Deferred (P2) | |
 | Anonymizer | ANON-01 | Not started | |
@@ -133,6 +133,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 
 | Date | Item | Milestone |
 |---|---|---|
+| 2026-10-27 | M7 continues: DICOMDIR read/write (MEDIA-01). Tree built from PATIENT/STUDY/SERIES/leaf records keyed by PatientID/StudyUID/SeriesUID; storage records by SOP class. Offsets are absolute file positions, measured by serializing a placeholder layout then reading the real item positions back. Dirty offsets degrade to roots instead of failing. 19 media tests, workspace 226, clippy clean | M7 |
 | 2026-10-27 | M7 started: DICOM JSON (JSON-01). PS3.18 model with PN groups, byte-backed AT/US round-trips, three number modes, tolerant reading and fragment rejection. 23 radicom-json tests, clippy clean | M7 |
 | 2026-10-27 | M6 services (partial): C-GET (SRV-05), C-MOVE (SRV-06), extended negotiation + user identity (NET-04) and the high-level client (CLI-01). 203 network tests, 211 with TLS, clippy clean | M6 |
 | 2026-10-27 | M6 started: C-FIND (SRV-04) end-to-end. Level presets map to the standard SOP classes, the SCP streams matches from a provider stream, and a provider that ends early still gets one terminal response. 150 network tests, clippy clean | M6 |
@@ -175,6 +176,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-10-27 | radicom team | MEDIA-01 landed. Fixed while testing: the writer emits sequence items with undefined length and delimiters, so `dataset_length` alone undercounts by 16 bytes per record — offsets are now read back from a real serialization instead of predicted; and stitching must walk the sibling (`next`) chain from each parent's first child (`lower`), not treat `lower` as the whole child list |
 | 2026-10-27 | radicom team | M7 JSON landed (JSON-01). Fixed while testing: US/AT elements are byte-backed in the model, so the reader must build them with `new_bytes` (a `new_str` path panicked on a debug assert) and integer VRs must serialize as JSON integers, not `512.0`. `base64` became a workspace dependency for InlineBinary |
 | 2026-10-27 | radicom team | CLI-02 expert layer landed: `Connection` enforces one association at a time and `ResponseStream` is a real `Iterator`. M6 is now complete apart from reference-peer interop |
 | 2026-10-27 | radicom team | M6 services landed in three commits. Fixed while testing: the PDU decoder put item 0x56 into `requested` for both directions, so every negotiated answer was lost (the PDU type now decides); the C-GET path only proposed the retrieve model, leaving the SCP no storage context and failing every reverse sub-operation; user identity was validated after connecting, so a bad identity surfaced as a connection error. Still open in M6: CLI-02 expert layer, reference-peer interop |

@@ -16,6 +16,7 @@ pub mod encoding;
 pub mod error;
 pub mod generated;
 pub mod io;
+pub mod media;
 pub mod model;
 pub mod pixel;
 pub mod validation;
