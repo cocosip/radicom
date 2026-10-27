@@ -1,0 +1,1928 @@
+1.2.840.10008.1.1	Verification	Verification SOP Class	1	false
+1.2.840.10008.1.2	ImplicitVRLittleEndian	Implicit VR Little Endian: Default Transfer Syntax for DICOM	0	false
+1.2.840.10008.1.2.1	ExplicitVRLittleEndian	Explicit VR Little Endian	0	false
+1.2.840.10008.1.2.1.98	EncapsulatedUncompressedExplicitVRLittleEndian	Encapsulated Uncompressed Explicit VR Little Endian	0	false
+1.2.840.10008.1.2.1.99	DeflatedExplicitVRLittleEndian	Deflated Explicit VR Little Endian	0	false
+1.2.840.10008.1.2.2	ExplicitVRBigEndianRETIRED	Explicit VR Big Endian (Retired)	0	true
+1.2.840.10008.1.2.4.50	JPEGBaseline8Bit	JPEG Baseline (Process 1): Default Transfer Syntax for Lossy JPEG 8 Bit Image Compression	0	false
+1.2.840.10008.1.2.4.51	JPEGExtended12Bit	JPEG Extended (Process 2 & 4): Default Transfer Syntax for Lossy JPEG 12 Bit Image Compression (Process 4 only)	0	false
+1.2.840.10008.1.2.4.52	JPEGExtended35RETIRED	JPEG Extended (Process 3 & 5) (Retired)	0	true
+1.2.840.10008.1.2.4.53	JPEGSpectralSelectionNonHierarchical68RETIRED	JPEG Spectral Selection, Non-Hierarchical (Process 6 & 8) (Retired)	0	true
+1.2.840.10008.1.2.4.54	JPEGSpectralSelectionNonHierarchical79RETIRED	JPEG Spectral Selection, Non-Hierarchical (Process 7 & 9) (Retired)	0	true
+1.2.840.10008.1.2.4.55	JPEGFullProgressionNonHierarchical1012RETIRED	JPEG Full Progression, Non-Hierarchical (Process 10 & 12) (Retired)	0	true
+1.2.840.10008.1.2.4.56	JPEGFullProgressionNonHierarchical1113RETIRED	JPEG Full Progression, Non-Hierarchical (Process 11 & 13) (Retired)	0	true
+1.2.840.10008.1.2.4.57	JPEGLossless	JPEG Lossless, Non-Hierarchical (Process 14)	0	false
+1.2.840.10008.1.2.4.58	JPEGLosslessNonHierarchical15RETIRED	JPEG Lossless, Non-Hierarchical (Process 15) (Retired)	0	true
+1.2.840.10008.1.2.4.59	JPEGExtendedHierarchical1618RETIRED	JPEG Extended, Hierarchical (Process 16 & 18) (Retired)	0	true
+1.2.840.10008.1.2.4.60	JPEGExtendedHierarchical1719RETIRED	JPEG Extended, Hierarchical (Process 17 & 19) (Retired)	0	true
+1.2.840.10008.1.2.4.61	JPEGSpectralSelectionHierarchical2022RETIRED	JPEG Spectral Selection, Hierarchical (Process 20 & 22) (Retired)	0	true
+1.2.840.10008.1.2.4.62	JPEGSpectralSelectionHierarchical2123RETIRED	JPEG Spectral Selection, Hierarchical (Process 21 & 23) (Retired)	0	true
+1.2.840.10008.1.2.4.63	JPEGFullProgressionHierarchical2426RETIRED	JPEG Full Progression, Hierarchical (Process 24 & 26) (Retired)	0	true
+1.2.840.10008.1.2.4.64	JPEGFullProgressionHierarchical2527RETIRED	JPEG Full Progression, Hierarchical (Process 25 & 27) (Retired)	0	true
+1.2.840.10008.1.2.4.65	JPEGLosslessHierarchical28RETIRED	JPEG Lossless, Hierarchical (Process 28) (Retired)	0	true
+1.2.840.10008.1.2.4.66	JPEGLosslessHierarchical29RETIRED	JPEG Lossless, Hierarchical (Process 29) (Retired)	0	true
+1.2.840.10008.1.2.4.70	JPEGLosslessSV1	JPEG Lossless, Non-Hierarchical, First-Order Prediction (Process 14 [Selection Value 1]): Default Transfer Syntax for Lossless JPEG Image Compression	0	false
+1.2.840.10008.1.2.4.80	JPEGLSLossless	JPEG-LS Lossless Image Compression	0	false
+1.2.840.10008.1.2.4.81	JPEGLSNearLossless	JPEG-LS Lossy (Near-Lossless) Image Compression	0	false
+1.2.840.10008.1.2.4.90	JPEG2000Lossless	JPEG 2000 Image Compression (Lossless Only)	0	false
+1.2.840.10008.1.2.4.91	JPEG2000	JPEG 2000 Image Compression	0	false
+1.2.840.10008.1.2.4.92	JPEG2000MCLossless	JPEG 2000 Part 2 Multi-component Image Compression (Lossless Only)	0	false
+1.2.840.10008.1.2.4.93	JPEG2000MC	JPEG 2000 Part 2 Multi-component Image Compression	0	false
+1.2.840.10008.1.2.4.94	JPIPReferenced	JPIP Referenced	0	false
+1.2.840.10008.1.2.4.95	JPIPReferencedDeflate	JPIP Referenced Deflate	0	false
+1.2.840.10008.1.2.4.100	MPEG2MPML	MPEG2 Main Profile / Main Level	0	false
+1.2.840.10008.1.2.4.100.1	MPEG2MPMLF	Fragmentable MPEG2 Main Profile / Main Level	0	false
+1.2.840.10008.1.2.4.101	MPEG2MPHL	MPEG2 Main Profile / High Level	0	false
+1.2.840.10008.1.2.4.101.1	MPEG2MPHLF	Fragmentable MPEG2 Main Profile / High Level	0	false
+1.2.840.10008.1.2.4.102	MPEG4HP41	MPEG-4 AVC/H.264 High Profile / Level 4.1	0	false
+1.2.840.10008.1.2.4.102.1	MPEG4HP41F	Fragmentable MPEG-4 AVC/H.264 High Profile / Level 4.1	0	false
+1.2.840.10008.1.2.4.103	MPEG4HP41BD	MPEG-4 AVC/H.264 BD-compatible High Profile / Level 4.1	0	false
+1.2.840.10008.1.2.4.103.1	MPEG4HP41BDF	Fragmentable MPEG-4 AVC/H.264 BD-compatible High Profile / Level 4.1	0	false
+1.2.840.10008.1.2.4.104	MPEG4HP422D	MPEG-4 AVC/H.264 High Profile / Level 4.2 For 2D Video	0	false
+1.2.840.10008.1.2.4.104.1	MPEG4HP422DF	Fragmentable MPEG-4 AVC/H.264 High Profile / Level 4.2 For 2D Video	0	false
+1.2.840.10008.1.2.4.105	MPEG4HP423D	MPEG-4 AVC/H.264 High Profile / Level 4.2 For 3D Video	0	false
+1.2.840.10008.1.2.4.105.1	MPEG4HP423DF	Fragmentable MPEG-4 AVC/H.264 High Profile / Level 4.2 For 3D Video	0	false
+1.2.840.10008.1.2.4.106	MPEG4HP42STEREO	MPEG-4 AVC/H.264 Stereo High Profile / Level 4.2	0	false
+1.2.840.10008.1.2.4.106.1	MPEG4HP42STEREOF	Fragmentable MPEG-4 AVC/H.264 Stereo High Profile / Level 4.2	0	false
+1.2.840.10008.1.2.4.107	HEVCMP51	HEVC/H.265 Main Profile / Level 5.1	0	false
+1.2.840.10008.1.2.4.108	HEVCM10P51	HEVC/H.265 Main 10 Profile / Level 5.1	0	false
+1.2.840.10008.1.2.4.110	JPEGXLLossless	JPEG XL Lossless	0	false
+1.2.840.10008.1.2.4.111	JPEGXLJPEGRecompression	JPEG XL JPEG Recompression	0	false
+1.2.840.10008.1.2.4.112	JPEGXL	JPEG XL	0	false
+1.2.840.10008.1.2.4.201	HTJ2KLossless	High-Throughput JPEG 2000 Image Compression (Lossless Only)	0	false
+1.2.840.10008.1.2.4.202	HTJ2KLosslessRPCL	High-Throughput JPEG 2000 with RPCL Options Image Compression (Lossless Only)	0	false
+1.2.840.10008.1.2.4.203	HTJ2K	High-Throughput JPEG 2000 Image Compression	0	false
+1.2.840.10008.1.2.4.204	JPIPHTJ2KReferenced	JPIP HTJ2K Referenced	0	false
+1.2.840.10008.1.2.4.205	JPIPHTJ2KReferencedDeflate	JPIP HTJ2K Referenced Deflate	0	false
+1.2.840.10008.1.2.5	RLELossless	RLE Lossless	0	false
+1.2.840.10008.1.2.6.1	RFC2557MIMEEncapsulationRETIRED	RFC 2557 MIME encapsulation (Retired)	0	true
+1.2.840.10008.1.2.6.2	XMLEncodingRETIRED	XML Encoding (Retired)	0	true
+1.2.840.10008.1.2.7.1	SMPTEST211020UncompressedProgressiveActiveVideo	SMPTE ST 2110-20 Uncompressed Progressive Active Video	0	false
+1.2.840.10008.1.2.7.2	SMPTEST211020UncompressedInterlacedActiveVideo	SMPTE ST 2110-20 Uncompressed Interlaced Active Video	0	false
+1.2.840.10008.1.2.7.3	SMPTEST211030PCMDigitalAudio	SMPTE ST 2110-30 PCM Digital Audio	0	false
+1.2.840.10008.1.2.8.1	DeflatedImageFrameCompression	Deflated Image Frame Compression	0	false
+1.2.840.10008.1.3.10	MediaStorageDirectoryStorage	Media Storage Directory Storage	1	false
+1.2.840.10008.1.5.1	HotIronPalette	Hot Iron Color Palette SOP Instance	4	false
+1.2.840.10008.1.5.2	PETPalette	PET Color Palette SOP Instance	4	false
+1.2.840.10008.1.5.3	HotMetalBluePalette	Hot Metal Blue Color Palette SOP Instance	4	false
+1.2.840.10008.1.5.4	PET20StepPalette	PET 20 Step Color Palette SOP Instance	4	false
+1.2.840.10008.1.5.5	SpringPalette	Spring Color Palette SOP Instance	4	false
+1.2.840.10008.1.5.6	SummerPalette	Summer Color Palette SOP Instance	4	false
+1.2.840.10008.1.5.7	FallPalette	Fall Color Palette SOP Instance	4	false
+1.2.840.10008.1.5.8	WinterPalette	Winter Color Palette SOP Instance	4	false
+1.2.840.10008.1.9	BasicStudyContentNotificationRETIRED	Basic Study Content Notification SOP Class (Retired)	1	true
+1.2.840.10008.1.20	Papyrus3ImplicitVRLittleEndianRETIRED	Papyrus 3 Implicit VR Little Endian (Retired)	0	true
+1.2.840.10008.1.20.1	StorageCommitmentPushModel	Storage Commitment Push Model SOP Class	1	false
+1.2.840.10008.1.20.1.1	StorageCommitmentPushModelInstance	Storage Commitment Push Model SOP Instance	4	false
+1.2.840.10008.1.20.2	StorageCommitmentPullModelRETIRED	Storage Commitment Pull Model SOP Class (Retired)	1	true
+1.2.840.10008.1.20.2.1	StorageCommitmentPullModelInstanceRETIRED	Storage Commitment Pull Model SOP Instance (Retired)	4	true
+1.2.840.10008.1.40	ProceduralEventLogging	Procedural Event Logging SOP Class	1	false
+1.2.840.10008.1.40.1	ProceduralEventLoggingInstance	Procedural Event Logging SOP Instance	4	false
+1.2.840.10008.1.42	SubstanceAdministrationLogging	Substance Administration Logging SOP Class	1	false
+1.2.840.10008.1.42.1	SubstanceAdministrationLoggingInstance	Substance Administration Logging SOP Instance	4	false
+1.2.840.10008.2.6.1	DCMUID	DICOM UID Registry	7	false
+1.2.840.10008.2.16.4	DCM	DICOM Controlled Terminology	7	false
+1.2.840.10008.2.16.5	MA	Adult Mouse Anatomy Ontology	7	false
+1.2.840.10008.2.16.6	UBERON	Uberon Ontology	7	false
+1.2.840.10008.2.16.7	ITIS_TSN	Integrated Taxonomic Information System (ITIS) Taxonomic Serial Number (TSN)	7	false
+1.2.840.10008.2.16.8	MGI	Mouse Genome Initiative (MGI)	7	false
+1.2.840.10008.2.16.9	PUBCHEM_CID	PubChem Compound CID	7	false
+1.2.840.10008.2.16.10	DC	Dublin Core	7	false
+1.2.840.10008.2.16.11	NYUMCCG	New York University Melanoma Clinical Cooperative Group	7	false
+1.2.840.10008.2.16.12	MAYONRISBSASRG	Mayo Clinic Non-radiological Images Specific Body Structure Anatomical Surface Region Guide	7	false
+1.2.840.10008.2.16.13	IBSI	Image Biomarker Standardisation Initiative	7	false
+1.2.840.10008.2.16.14	RO	Radiomics Ontology	7	false
+1.2.840.10008.2.16.15	RADELEMENT	RadElement	7	false
+1.2.840.10008.2.16.16	I11	ICD-11	7	false
+1.2.840.10008.2.16.17	UNS	Unified numbering system (UNS) for metals and alloys	7	false
+1.2.840.10008.2.16.18	RRID	Research Resource Identification	7	false
+1.2.840.10008.3.1.1.1	DICOMApplicationContext	DICOM Application Context Name	5	false
+1.2.840.10008.3.1.2.1.1	DetachedPatientManagementRETIRED	Detached Patient Management SOP Class (Retired)	1	true
+1.2.840.10008.3.1.2.1.4	DetachedPatientManagementMetaRETIRED	Detached Patient Management Meta SOP Class (Retired)	2	true
+1.2.840.10008.3.1.2.2.1	DetachedVisitManagementRETIRED	Detached Visit Management SOP Class (Retired)	1	true
+1.2.840.10008.3.1.2.3.1	DetachedStudyManagementRETIRED	Detached Study Management SOP Class (Retired)	1	true
+1.2.840.10008.3.1.2.3.2	StudyComponentManagementRETIRED	Study Component Management SOP Class (Retired)	1	true
+1.2.840.10008.3.1.2.3.3	ModalityPerformedProcedureStep	Modality Performed Procedure Step SOP Class	1	false
+1.2.840.10008.3.1.2.3.4	ModalityPerformedProcedureStepRetrieve	Modality Performed Procedure Step Retrieve SOP Class	1	false
+1.2.840.10008.3.1.2.3.5	ModalityPerformedProcedureStepNotification	Modality Performed Procedure Step Notification SOP Class	1	false
+1.2.840.10008.3.1.2.5.1	DetachedResultsManagementRETIRED	Detached Results Management SOP Class (Retired)	1	true
+1.2.840.10008.3.1.2.5.4	DetachedResultsManagementMetaRETIRED	Detached Results Management Meta SOP Class (Retired)	2	true
+1.2.840.10008.3.1.2.5.5	DetachedStudyManagementMetaRETIRED	Detached Study Management Meta SOP Class (Retired)	2	true
+1.2.840.10008.3.1.2.6.1	DetachedInterpretationManagementRETIRED	Detached Interpretation Management SOP Class (Retired)	1	true
+1.2.840.10008.4.2	Storage	Storage Service Class	3	false
+1.2.840.10008.5.1.1.1	BasicFilmSession	Basic Film Session SOP Class	1	false
+1.2.840.10008.5.1.1.2	BasicFilmBox	Basic Film Box SOP Class	1	false
+1.2.840.10008.5.1.1.4	BasicGrayscaleImageBox	Basic Grayscale Image Box SOP Class	1	false
+1.2.840.10008.5.1.1.4.1	BasicColorImageBox	Basic Color Image Box SOP Class	1	false
+1.2.840.10008.5.1.1.4.2	ReferencedImageBoxRETIRED	Referenced Image Box SOP Class (Retired)	1	true
+1.2.840.10008.5.1.1.9	BasicGrayscalePrintManagementMeta	Basic Grayscale Print Management Meta SOP Class	2	false
+1.2.840.10008.5.1.1.9.1	ReferencedGrayscalePrintManagementMetaRETIRED	Referenced Grayscale Print Management Meta SOP Class (Retired)	2	true
+1.2.840.10008.5.1.1.14	PrintJob	Print Job SOP Class	1	false
+1.2.840.10008.5.1.1.15	BasicAnnotationBox	Basic Annotation Box SOP Class	1	false
+1.2.840.10008.5.1.1.16	Printer	Printer SOP Class	1	false
+1.2.840.10008.5.1.1.16.376	PrinterConfigurationRetrieval	Printer Configuration Retrieval SOP Class	1	false
+1.2.840.10008.5.1.1.17	PrinterInstance	Printer SOP Instance	4	false
+1.2.840.10008.5.1.1.17.376	PrinterConfigurationRetrievalInstance	Printer Configuration Retrieval SOP Instance	4	false
+1.2.840.10008.5.1.1.18	BasicColorPrintManagementMeta	Basic Color Print Management Meta SOP Class	2	false
+1.2.840.10008.5.1.1.18.1	ReferencedColorPrintManagementMetaRETIRED	Referenced Color Print Management Meta SOP Class (Retired)	2	true
+1.2.840.10008.5.1.1.22	VOILUTBox	VOI LUT Box SOP Class	1	false
+1.2.840.10008.5.1.1.23	PresentationLUT	Presentation LUT SOP Class	1	false
+1.2.840.10008.5.1.1.24	ImageOverlayBoxRETIRED	Image Overlay Box SOP Class (Retired)	1	true
+1.2.840.10008.5.1.1.24.1	BasicPrintImageOverlayBoxRETIRED	Basic Print Image Overlay Box SOP Class (Retired)	1	true
+1.2.840.10008.5.1.1.25	PrintQueueInstanceRETIRED	Print Queue SOP Instance (Retired)	4	true
+1.2.840.10008.5.1.1.26	PrintQueueManagementRETIRED	Print Queue Management SOP Class (Retired)	1	true
+1.2.840.10008.5.1.1.27	StoredPrintStorageRETIRED	Stored Print Storage SOP Class (Retired)	1	true
+1.2.840.10008.5.1.1.29	HardcopyGrayscaleImageStorageRETIRED	Hardcopy Grayscale Image Storage SOP Class (Retired)	1	true
+1.2.840.10008.5.1.1.30	HardcopyColorImageStorageRETIRED	Hardcopy Color Image Storage SOP Class (Retired)	1	true
+1.2.840.10008.5.1.1.31	PullPrintRequestRETIRED	Pull Print Request SOP Class (Retired)	1	true
+1.2.840.10008.5.1.1.32	PullStoredPrintManagementMetaRETIRED	Pull Stored Print Management Meta SOP Class (Retired)	2	true
+1.2.840.10008.5.1.1.33	MediaCreationManagement	Media Creation Management SOP Class UID	1	false
+1.2.840.10008.5.1.1.40	DisplaySystem	Display System SOP Class	1	false
+1.2.840.10008.5.1.1.40.1	DisplaySystemInstance	Display System SOP Instance	4	false
+1.2.840.10008.5.1.4.1.1.1	ComputedRadiographyImageStorage	Computed Radiography Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.1.1	DigitalXRayImageStorageForPresentation	Digital X-Ray Image Storage - For Presentation	1	false
+1.2.840.10008.5.1.4.1.1.1.1.1	DigitalXRayImageStorageForProcessing	Digital X-Ray Image Storage - For Processing	1	false
+1.2.840.10008.5.1.4.1.1.1.2	DigitalMammographyXRayImageStorageForPresentation	Digital Mammography X-Ray Image Storage - For Presentation	1	false
+1.2.840.10008.5.1.4.1.1.1.2.1	DigitalMammographyXRayImageStorageForProcessing	Digital Mammography X-Ray Image Storage - For Processing	1	false
+1.2.840.10008.5.1.4.1.1.1.3	DigitalIntraOralXRayImageStorageForPresentation	Digital Intra-Oral X-Ray Image Storage - For Presentation	1	false
+1.2.840.10008.5.1.4.1.1.1.3.1	DigitalIntraOralXRayImageStorageForProcessing	Digital Intra-Oral X-Ray Image Storage - For Processing	1	false
+1.2.840.10008.5.1.4.1.1.2	CTImageStorage	CT Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.2.1	EnhancedCTImageStorage	Enhanced CT Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.2.2	LegacyConvertedEnhancedCTImageStorage	Legacy Converted Enhanced CT Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.3	UltrasoundMultiFrameImageStorageRetiredRETIRED	Ultrasound Multi-frame Image Storage (Retired)	1	true
+1.2.840.10008.5.1.4.1.1.3.1	UltrasoundMultiFrameImageStorage	Ultrasound Multi-frame Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.4	MRImageStorage	MR Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.4.1	EnhancedMRImageStorage	Enhanced MR Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.4.2	MRSpectroscopyStorage	MR Spectroscopy Storage	1	false
+1.2.840.10008.5.1.4.1.1.4.3	EnhancedMRColorImageStorage	Enhanced MR Color Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.4.4	LegacyConvertedEnhancedMRImageStorage	Legacy Converted Enhanced MR Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.5	NuclearMedicineImageStorageRetiredRETIRED	Nuclear Medicine Image Storage (Retired)	1	true
+1.2.840.10008.5.1.4.1.1.6	UltrasoundImageStorageRetiredRETIRED	Ultrasound Image Storage (Retired)	1	true
+1.2.840.10008.5.1.4.1.1.6.1	UltrasoundImageStorage	Ultrasound Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.6.2	EnhancedUSVolumeStorage	Enhanced US Volume Storage	1	false
+1.2.840.10008.5.1.4.1.1.6.3	PhotoacousticImageStorage	Photoacoustic Image Storage 	1	false
+1.2.840.10008.5.1.4.1.1.7	SecondaryCaptureImageStorage	Secondary Capture Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.7.1	MultiFrameSingleBitSecondaryCaptureImageStorage	Multi-frame Single Bit Secondary Capture Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.7.2	MultiFrameGrayscaleByteSecondaryCaptureImageStorage	Multi-frame Grayscale Byte Secondary Capture Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.7.3	MultiFrameGrayscaleWordSecondaryCaptureImageStorage	Multi-frame Grayscale Word Secondary Capture Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.7.4	MultiFrameTrueColorSecondaryCaptureImageStorage	Multi-frame True Color Secondary Capture Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.8	StandaloneOverlayStorageRETIRED	Standalone Overlay Storage (Retired)	1	true
+1.2.840.10008.5.1.4.1.1.9	StandaloneCurveStorageRETIRED	Standalone Curve Storage (Retired)	1	true
+1.2.840.10008.5.1.4.1.1.9.1	WaveformStorageTrialRETIRED	Waveform Storage - Trial (Retired)	1	true
+1.2.840.10008.5.1.4.1.1.9.1.1	TwelveLeadECGWaveformStorage	12-lead ECG Waveform Storage	1	false
+1.2.840.10008.5.1.4.1.1.9.1.2	GeneralECGWaveformStorage	General ECG Waveform Storage	1	false
+1.2.840.10008.5.1.4.1.1.9.1.3	AmbulatoryECGWaveformStorage	Ambulatory ECG Waveform Storage	1	false
+1.2.840.10008.5.1.4.1.1.9.1.4	General32bitECGWaveformStorage	General 32-bit ECG Waveform Storage	1	false
+1.2.840.10008.5.1.4.1.1.9.2.1	HemodynamicWaveformStorage	Hemodynamic Waveform Storage	1	false
+1.2.840.10008.5.1.4.1.1.9.3.1	CardiacElectrophysiologyWaveformStorage	Cardiac Electrophysiology Waveform Storage	1	false
+1.2.840.10008.5.1.4.1.1.9.4.1	BasicVoiceAudioWaveformStorage	Basic Voice Audio Waveform Storage	1	false
+1.2.840.10008.5.1.4.1.1.9.4.2	GeneralAudioWaveformStorage	General Audio Waveform Storage	1	false
+1.2.840.10008.5.1.4.1.1.9.5.1	ArterialPulseWaveformStorage	Arterial Pulse Waveform Storage	1	false
+1.2.840.10008.5.1.4.1.1.9.6.1	RespiratoryWaveformStorage	Respiratory Waveform Storage	1	false
+1.2.840.10008.5.1.4.1.1.9.6.2	MultichannelRespiratoryWaveformStorage	Multi-channel Respiratory Waveform Storage	1	false
+1.2.840.10008.5.1.4.1.1.9.7.1	RoutineScalpElectroencephalogramWaveformStorage	Routine Scalp Electroencephalogram Waveform Storage	1	false
+1.2.840.10008.5.1.4.1.1.9.7.2	ElectromyogramWaveformStorage	Electromyogram Waveform Storage	1	false
+1.2.840.10008.5.1.4.1.1.9.7.3	ElectrooculogramWaveformStorage	Electrooculogram Waveform Storage	1	false
+1.2.840.10008.5.1.4.1.1.9.7.4	SleepElectroencephalogramWaveformStorage	Sleep Electroencephalogram Waveform Storage	1	false
+1.2.840.10008.5.1.4.1.1.9.8.1	BodyPositionWaveformStorage	Body Position Waveform Storage	1	false
+1.2.840.10008.5.1.4.1.1.9.100.1	WaveformPresentationStateStorage	Waveform Presentation State Storage	1	false
+1.2.840.10008.5.1.4.1.1.9.100.2	WaveformAcquisitionPresentationStateStorage	Waveform Acquisition Presentation State Storage	1	false
+1.2.840.10008.5.1.4.1.1.10	StandaloneModalityLUTStorageRETIRED	Standalone Modality LUT Storage (Retired)	1	true
+1.2.840.10008.5.1.4.1.1.11	StandaloneVOILUTStorageRETIRED	Standalone VOI LUT Storage (Retired)	1	true
+1.2.840.10008.5.1.4.1.1.11.1	GrayscaleSoftcopyPresentationStateStorage	Grayscale Softcopy Presentation State Storage	1	false
+1.2.840.10008.5.1.4.1.1.11.2	ColorSoftcopyPresentationStateStorage	Color Softcopy Presentation State Storage	1	false
+1.2.840.10008.5.1.4.1.1.11.3	PseudoColorSoftcopyPresentationStateStorage	Pseudo-Color Softcopy Presentation State Storage	1	false
+1.2.840.10008.5.1.4.1.1.11.4	BlendingSoftcopyPresentationStateStorage	Blending Softcopy Presentation State Storage	1	false
+1.2.840.10008.5.1.4.1.1.11.5	XAXRFGrayscaleSoftcopyPresentationStateStorage	XA/XRF Grayscale Softcopy Presentation State Storage	1	false
+1.2.840.10008.5.1.4.1.1.11.6	GrayscalePlanarMPRVolumetricPresentationStateStorage	Grayscale Planar MPR Volumetric Presentation State Storage	1	false
+1.2.840.10008.5.1.4.1.1.11.7	CompositingPlanarMPRVolumetricPresentationStateStorage	Compositing Planar MPR Volumetric Presentation State Storage	1	false
+1.2.840.10008.5.1.4.1.1.11.8	AdvancedBlendingPresentationStateStorage	Advanced Blending Presentation State Storage	1	false
+1.2.840.10008.5.1.4.1.1.11.9	VolumeRenderingVolumetricPresentationStateStorage	Volume Rendering Volumetric Presentation State Storage	1	false
+1.2.840.10008.5.1.4.1.1.11.10	SegmentedVolumeRenderingVolumetricPresentationStateStorage	Segmented Volume Rendering Volumetric Presentation State Storage	1	false
+1.2.840.10008.5.1.4.1.1.11.11	MultipleVolumeRenderingVolumetricPresentationStateStorage	Multiple Volume Rendering Volumetric Presentation State Storage	1	false
+1.2.840.10008.5.1.4.1.1.11.12	VariableModalityLUTSoftcopyPresentationStateStorage	Variable Modality LUT Softcopy Presentation State Storage	1	false
+1.2.840.10008.5.1.4.1.1.12.1	XRayAngiographicImageStorage	X-Ray Angiographic Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.12.1.1	EnhancedXAImageStorage	Enhanced XA Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.12.2	XRayRadiofluoroscopicImageStorage	X-Ray Radiofluoroscopic Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.12.2.1	EnhancedXRFImageStorage	Enhanced XRF Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.12.3	XRayAngiographicBiPlaneImageStorageRETIRED	X-Ray Angiographic Bi-Plane Image Storage (Retired)	1	true
+1.2.840.10008.5.1.4.1.1.13.1.1	XRay3DAngiographicImageStorage	X-Ray 3D Angiographic Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.13.1.2	XRay3DCraniofacialImageStorage	X-Ray 3D Craniofacial Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.13.1.3	BreastTomosynthesisImageStorage	Breast Tomosynthesis Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.13.1.4	BreastProjectionXRayImageStorageForPresentation	Breast Projection X-Ray Image Storage - For Presentation	1	false
+1.2.840.10008.5.1.4.1.1.13.1.5	BreastProjectionXRayImageStorageForProcessing	Breast Projection X-Ray Image Storage - For Processing	1	false
+1.2.840.10008.5.1.4.1.1.14.1	IntravascularOpticalCoherenceTomographyImageStorageForPresentation	Intravascular Optical Coherence Tomography Image Storage - For Presentation	1	false
+1.2.840.10008.5.1.4.1.1.14.2	IntravascularOpticalCoherenceTomographyImageStorageForProcessing	Intravascular Optical Coherence Tomography Image Storage - For Processing	1	false
+1.2.840.10008.5.1.4.1.1.20	NuclearMedicineImageStorage	Nuclear Medicine Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.30	ParametricMapStorage	Parametric Map Storage	1	false
+1.2.840.10008.5.1.4.1.1.66	RawDataStorage	Raw Data Storage	1	false
+1.2.840.10008.5.1.4.1.1.66.1	SpatialRegistrationStorage	Spatial Registration Storage	1	false
+1.2.840.10008.5.1.4.1.1.66.2	SpatialFiducialsStorage	Spatial Fiducials Storage	1	false
+1.2.840.10008.5.1.4.1.1.66.3	DeformableSpatialRegistrationStorage	Deformable Spatial Registration Storage	1	false
+1.2.840.10008.5.1.4.1.1.66.4	SegmentationStorage	Segmentation Storage	1	false
+1.2.840.10008.5.1.4.1.1.66.5	SurfaceSegmentationStorage	Surface Segmentation Storage	1	false
+1.2.840.10008.5.1.4.1.1.66.6	TractographyResultsStorage	Tractography Results Storage	1	false
+1.2.840.10008.5.1.4.1.1.66.7	LabelMapSegmentationStorage	Label Map Segmentation Storage	1	false
+1.2.840.10008.5.1.4.1.1.66.8	HeightMapSegmentationStorage	Height Map Segmentation Storage	1	false
+1.2.840.10008.5.1.4.1.1.67	RealWorldValueMappingStorage	Real World Value Mapping Storage	1	false
+1.2.840.10008.5.1.4.1.1.68.1	SurfaceScanMeshStorage	Surface Scan Mesh Storage	1	false
+1.2.840.10008.5.1.4.1.1.68.2	SurfaceScanPointCloudStorage	Surface Scan Point Cloud Storage	1	false
+1.2.840.10008.5.1.4.1.1.77.1	VLImageStorageTrialRETIRED	VL Image Storage - Trial (Retired)	1	true
+1.2.840.10008.5.1.4.1.1.77.2	VLMultiFrameImageStorageTrialRETIRED	VL Multi-frame Image Storage - Trial (Retired)	1	true
+1.2.840.10008.5.1.4.1.1.77.1.1	VLEndoscopicImageStorage	VL Endoscopic Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.77.1.1.1	VideoEndoscopicImageStorage	Video Endoscopic Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.77.1.2	VLMicroscopicImageStorage	VL Microscopic Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.77.1.2.1	VideoMicroscopicImageStorage	Video Microscopic Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.77.1.3	VLSlideCoordinatesMicroscopicImageStorage	VL Slide-Coordinates Microscopic Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.77.1.4	VLPhotographicImageStorage	VL Photographic Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.77.1.4.1	VideoPhotographicImageStorage	Video Photographic Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.77.1.5.1	OphthalmicPhotography8BitImageStorage	Ophthalmic Photography 8 Bit Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.77.1.5.2	OphthalmicPhotography16BitImageStorage	Ophthalmic Photography 16 Bit Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.77.1.5.3	StereometricRelationshipStorage	Stereometric Relationship Storage	1	false
+1.2.840.10008.5.1.4.1.1.77.1.5.4	OphthalmicTomographyImageStorage	Ophthalmic Tomography Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.77.1.5.5	WideFieldOphthalmicPhotographyStereographicProjectionImageStorage	Wide Field Ophthalmic Photography Stereographic Projection Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.77.1.5.6	WideFieldOphthalmicPhotography3DCoordinatesImageStorage	Wide Field Ophthalmic Photography 3D Coordinates Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.77.1.5.7	OphthalmicOpticalCoherenceTomographyEnFaceImageStorage	Ophthalmic Optical Coherence Tomography En Face Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.77.1.5.8	OphthalmicOpticalCoherenceTomographyBscanVolumeAnalysisStorage	Ophthalmic Optical Coherence Tomography B-scan Volume Analysis Storage	1	false
+1.2.840.10008.5.1.4.1.1.77.1.6	VLWholeSlideMicroscopyImageStorage	VL Whole Slide Microscopy Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.77.1.7	DermoscopicPhotographyImageStorage	Dermoscopic Photography Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.77.1.8	ConfocalMicroscopyImageStorage	Confocal Microscopy Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.77.1.9	ConfocalMicroscopyTiledPyramidalImageStorage	Confocal Microscopy Tiled Pyramidal Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.78.1	LensometryMeasurementsStorage	Lensometry Measurements Storage	1	false
+1.2.840.10008.5.1.4.1.1.78.2	AutorefractionMeasurementsStorage	Autorefraction Measurements Storage	1	false
+1.2.840.10008.5.1.4.1.1.78.3	KeratometryMeasurementsStorage	Keratometry Measurements Storage	1	false
+1.2.840.10008.5.1.4.1.1.78.4	SubjectiveRefractionMeasurementsStorage	Subjective Refraction Measurements Storage	1	false
+1.2.840.10008.5.1.4.1.1.78.5	VisualAcuityMeasurementsStorage	Visual Acuity Measurements Storage	1	false
+1.2.840.10008.5.1.4.1.1.78.6	SpectaclePrescriptionReportStorage	Spectacle Prescription Report Storage	1	false
+1.2.840.10008.5.1.4.1.1.78.7	OphthalmicAxialMeasurementsStorage	Ophthalmic Axial Measurements Storage	1	false
+1.2.840.10008.5.1.4.1.1.78.8	IntraocularLensCalculationsStorage	Intraocular Lens Calculations Storage	1	false
+1.2.840.10008.5.1.4.1.1.79.1	MacularGridThicknessAndVolumeReportStorage	Macular Grid Thickness and Volume Report Storage	1	false
+1.2.840.10008.5.1.4.1.1.80.1	OphthalmicVisualFieldStaticPerimetryMeasurementsStorage	Ophthalmic Visual Field Static Perimetry Measurements Storage	1	false
+1.2.840.10008.5.1.4.1.1.81.1	OphthalmicThicknessMapStorage	Ophthalmic Thickness Map Storage	1	false
+1.2.840.10008.5.1.4.1.1.82.1	CornealTopographyMapStorage	Corneal Topography Map Storage	1	false
+1.2.840.10008.5.1.4.1.1.88.1	TextSRStorageTrialRETIRED	Text SR Storage - Trial (Retired)	1	true
+1.2.840.10008.5.1.4.1.1.88.2	AudioSRStorageTrialRETIRED	Audio SR Storage - Trial (Retired)	1	true
+1.2.840.10008.5.1.4.1.1.88.3	DetailSRStorageTrialRETIRED	Detail SR Storage - Trial (Retired)	1	true
+1.2.840.10008.5.1.4.1.1.88.4	ComprehensiveSRStorageTrialRETIRED	Comprehensive SR Storage - Trial (Retired)	1	true
+1.2.840.10008.5.1.4.1.1.88.11	BasicTextSRStorage	Basic Text SR Storage	1	false
+1.2.840.10008.5.1.4.1.1.88.22	EnhancedSRStorage	Enhanced SR Storage	1	false
+1.2.840.10008.5.1.4.1.1.88.33	ComprehensiveSRStorage	Comprehensive SR Storage	1	false
+1.2.840.10008.5.1.4.1.1.88.34	Comprehensive3DSRStorage	Comprehensive 3D SR Storage	1	false
+1.2.840.10008.5.1.4.1.1.88.35	ExtensibleSRStorage	Extensible SR Storage	1	false
+1.2.840.10008.5.1.4.1.1.88.40	ProcedureLogStorage	Procedure Log Storage	1	false
+1.2.840.10008.5.1.4.1.1.88.50	MammographyCADSRStorage	Mammography CAD SR Storage	1	false
+1.2.840.10008.5.1.4.1.1.88.59	KeyObjectSelectionDocumentStorage	Key Object Selection Document Storage	1	false
+1.2.840.10008.5.1.4.1.1.88.65	ChestCADSRStorage	Chest CAD SR Storage	1	false
+1.2.840.10008.5.1.4.1.1.88.67	XRayRadiationDoseSRStorage	X-Ray Radiation Dose SR Storage	1	false
+1.2.840.10008.5.1.4.1.1.88.68	RadiopharmaceuticalRadiationDoseSRStorage	Radiopharmaceutical Radiation Dose SR Storage	1	false
+1.2.840.10008.5.1.4.1.1.88.69	ColonCADSRStorage	Colon CAD SR Storage	1	false
+1.2.840.10008.5.1.4.1.1.88.70	ImplantationPlanSRStorage	Implantation Plan SR Storage	1	false
+1.2.840.10008.5.1.4.1.1.88.71	AcquisitionContextSRStorage	Acquisition Context SR Storage	1	false
+1.2.840.10008.5.1.4.1.1.88.72	SimplifiedAdultEchoSRStorage	Simplified Adult Echo SR Storage	1	false
+1.2.840.10008.5.1.4.1.1.88.73	PatientRadiationDoseSRStorage	Patient Radiation Dose SR Storage	1	false
+1.2.840.10008.5.1.4.1.1.88.74	PlannedImagingAgentAdministrationSRStorage	Planned Imaging Agent Administration SR Storage	1	false
+1.2.840.10008.5.1.4.1.1.88.75	PerformedImagingAgentAdministrationSRStorage	Performed Imaging Agent Administration SR Storage	1	false
+1.2.840.10008.5.1.4.1.1.88.76	EnhancedXRayRadiationDoseSRStorage	Enhanced X-Ray Radiation Dose SR Storage	1	false
+1.2.840.10008.5.1.4.1.1.88.77	WaveformAnnotationSRStorage	Waveform Annotation SR Storage	1	false
+1.2.840.10008.5.1.4.1.1.90.1	ContentAssessmentResultsStorage	Content Assessment Results Storage	1	false
+1.2.840.10008.5.1.4.1.1.91.1	MicroscopyBulkSimpleAnnotationsStorage	Microscopy Bulk Simple Annotations Storage	1	false
+1.2.840.10008.5.1.4.1.1.104.1	EncapsulatedPDFStorage	Encapsulated PDF Storage	1	false
+1.2.840.10008.5.1.4.1.1.104.2	EncapsulatedCDAStorage	Encapsulated CDA Storage	1	false
+1.2.840.10008.5.1.4.1.1.104.3	EncapsulatedSTLStorage	Encapsulated STL Storage	1	false
+1.2.840.10008.5.1.4.1.1.104.4	EncapsulatedOBJStorage	Encapsulated OBJ Storage	1	false
+1.2.840.10008.5.1.4.1.1.104.5	EncapsulatedMTLStorage	Encapsulated MTL Storage	1	false
+1.2.840.10008.5.1.4.1.1.128	PositronEmissionTomographyImageStorage	Positron Emission Tomography Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.128.1	LegacyConvertedEnhancedPETImageStorage	Legacy Converted Enhanced PET Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.129	StandalonePETCurveStorageRETIRED	Standalone PET Curve Storage (Retired)	1	true
+1.2.840.10008.5.1.4.1.1.130	EnhancedPETImageStorage	Enhanced PET Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.131	BasicStructuredDisplayStorage	Basic Structured Display Storage	1	false
+1.2.840.10008.5.1.4.1.1.200.1	CTDefinedProcedureProtocolStorage	CT Defined Procedure Protocol Storage	1	false
+1.2.840.10008.5.1.4.1.1.200.2	CTPerformedProcedureProtocolStorage	CT Performed Procedure Protocol Storage	1	false
+1.2.840.10008.5.1.4.1.1.200.3	ProtocolApprovalStorage	Protocol Approval Storage	1	false
+1.2.840.10008.5.1.4.1.1.200.4	ProtocolApprovalInformationModelFind	Protocol Approval Information Model - FIND	1	false
+1.2.840.10008.5.1.4.1.1.200.5	ProtocolApprovalInformationModelMove	Protocol Approval Information Model - MOVE	1	false
+1.2.840.10008.5.1.4.1.1.200.6	ProtocolApprovalInformationModelGet	Protocol Approval Information Model - GET	1	false
+1.2.840.10008.5.1.4.1.1.200.7	XADefinedProcedureProtocolStorage	XA Defined Procedure Protocol Storage	1	false
+1.2.840.10008.5.1.4.1.1.200.8	XAPerformedProcedureProtocolStorage	XA Performed Procedure Protocol Storage	1	false
+1.2.840.10008.5.1.4.1.1.201.1	InventoryStorage	Inventory Storage	1	false
+1.2.840.10008.5.1.4.1.1.201.2	InventoryFind	Inventory - FIND	1	false
+1.2.840.10008.5.1.4.1.1.201.3	InventoryMove	Inventory - MOVE	1	false
+1.2.840.10008.5.1.4.1.1.201.4	InventoryGet	Inventory - GET	1	false
+1.2.840.10008.5.1.4.1.1.201.5	InventoryCreation	Inventory Creation	1	false
+1.2.840.10008.5.1.4.1.1.201.6	RepositoryQuery	Repository Query	1	false
+1.2.840.10008.5.1.4.1.1.201.1.1	StorageManagementInstance	Storage Management SOP Instance	4	false
+1.2.840.10008.5.1.4.1.1.481.1	RTImageStorage	RT Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.2	RTDoseStorage	RT Dose Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.3	RTStructureSetStorage	RT Structure Set Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.4	RTBeamsTreatmentRecordStorage	RT Beams Treatment Record Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.5	RTPlanStorage	RT Plan Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.6	RTBrachyTreatmentRecordStorage	RT Brachy Treatment Record Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.7	RTTreatmentSummaryRecordStorage	RT Treatment Summary Record Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.8	RTIonPlanStorage	RT Ion Plan Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.9	RTIonBeamsTreatmentRecordStorage	RT Ion Beams Treatment Record Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.10	RTPhysicianIntentStorage	RT Physician Intent Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.11	RTSegmentAnnotationStorage	RT Segment Annotation Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.12	RTRadiationSetStorage	RT Radiation Set Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.13	CArmPhotonElectronRadiationStorage	C-Arm Photon-Electron Radiation Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.14	TomotherapeuticRadiationStorage	Tomotherapeutic Radiation Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.15	RoboticArmRadiationStorage	Robotic-Arm Radiation Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.16	RTRadiationRecordSetStorage	RT Radiation Record Set Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.17	RTRadiationSalvageRecordStorage	RT Radiation Salvage Record Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.18	TomotherapeuticRadiationRecordStorage	Tomotherapeutic Radiation Record Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.19	CArmPhotonElectronRadiationRecordStorage	C-Arm Photon-Electron Radiation Record Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.20	RoboticRadiationRecordStorage	Robotic Radiation Record Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.21	RTRadiationSetDeliveryInstructionStorage	RT Radiation Set Delivery Instruction Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.22	RTTreatmentPreparationStorage	RT Treatment Preparation Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.23	EnhancedRTImageStorage	Enhanced RT Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.24	EnhancedContinuousRTImageStorage	Enhanced Continuous RT Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.481.25	RTPatientPositionAcquisitionInstructionStorage	RT Patient Position Acquisition Instruction Storage	1	false
+1.2.840.10008.5.1.4.1.1.501.1	DICOSCTImageStorage	DICOS CT Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.501.2.1	DICOSDigitalXRayImageStorageForPresentation	DICOS Digital X-Ray Image Storage - For Presentation	1	false
+1.2.840.10008.5.1.4.1.1.501.2.2	DICOSDigitalXRayImageStorageForProcessing	DICOS Digital X-Ray Image Storage - For Processing	1	false
+1.2.840.10008.5.1.4.1.1.501.3	DICOSThreatDetectionReportStorage	DICOS Threat Detection Report Storage	1	false
+1.2.840.10008.5.1.4.1.1.501.4	DICOS2DAITStorage	DICOS 2D AIT Storage	1	false
+1.2.840.10008.5.1.4.1.1.501.5	DICOS3DAITStorage	DICOS 3D AIT Storage	1	false
+1.2.840.10008.5.1.4.1.1.501.6	DICOSQuadrupoleResonanceStorage	DICOS Quadrupole Resonance (QR) Storage	1	false
+1.2.840.10008.5.1.4.1.1.601.1	EddyCurrentImageStorage	Eddy Current Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.601.2	EddyCurrentMultiFrameImageStorage	Eddy Current Multi-frame Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.601.3	ThermographyImageStorage	Thermography Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.601.4	ThermographyMultiFrameImageStorage	Thermography Multi-frame Image Storage	1	false
+1.2.840.10008.5.1.4.1.1.601.5	UltrasoundWaveformStorage	Ultrasound Waveform Storage	1	false
+1.2.840.10008.5.1.4.1.2.1.1	PatientRootQueryRetrieveInformationModelFind	Patient Root Query/Retrieve Information Model - FIND	1	false
+1.2.840.10008.5.1.4.1.2.1.2	PatientRootQueryRetrieveInformationModelMove	Patient Root Query/Retrieve Information Model - MOVE	1	false
+1.2.840.10008.5.1.4.1.2.1.3	PatientRootQueryRetrieveInformationModelGet	Patient Root Query/Retrieve Information Model - GET	1	false
+1.2.840.10008.5.1.4.1.2.2.1	StudyRootQueryRetrieveInformationModelFind	Study Root Query/Retrieve Information Model - FIND	1	false
+1.2.840.10008.5.1.4.1.2.2.2	StudyRootQueryRetrieveInformationModelMove	Study Root Query/Retrieve Information Model - MOVE	1	false
+1.2.840.10008.5.1.4.1.2.2.3	StudyRootQueryRetrieveInformationModelGet	Study Root Query/Retrieve Information Model - GET	1	false
+1.2.840.10008.5.1.4.1.2.3.1	PatientStudyOnlyQueryRetrieveInformationModelFindRETIRED	Patient/Study Only Query/Retrieve Information Model - FIND (Retired)	1	true
+1.2.840.10008.5.1.4.1.2.3.2	PatientStudyOnlyQueryRetrieveInformationModelMoveRETIRED	Patient/Study Only Query/Retrieve Information Model - MOVE (Retired)	1	true
+1.2.840.10008.5.1.4.1.2.3.3	PatientStudyOnlyQueryRetrieveInformationModelGetRETIRED	Patient/Study Only Query/Retrieve Information Model - GET (Retired)	1	true
+1.2.840.10008.5.1.4.1.2.4.2	CompositeInstanceRootRetrieveMove	Composite Instance Root Retrieve - MOVE	1	false
+1.2.840.10008.5.1.4.1.2.4.3	CompositeInstanceRootRetrieveGet	Composite Instance Root Retrieve - GET	1	false
+1.2.840.10008.5.1.4.1.2.5.3	CompositeInstanceRetrieveWithoutBulkDataGet	Composite Instance Retrieve Without Bulk Data - GET	1	false
+1.2.840.10008.5.1.4.20.1	DefinedProcedureProtocolInformationModelFind	Defined Procedure Protocol Information Model - FIND	1	false
+1.2.840.10008.5.1.4.20.2	DefinedProcedureProtocolInformationModelMove	Defined Procedure Protocol Information Model - MOVE	1	false
+1.2.840.10008.5.1.4.20.3	DefinedProcedureProtocolInformationModelGet	Defined Procedure Protocol Information Model - GET	1	false
+1.2.840.10008.5.1.4.31	ModalityWorklistInformationModelFind	Modality Worklist Information Model - FIND	1	false
+1.2.840.10008.5.1.4.32	GeneralPurposeWorklistManagementMetaRETIRED	General Purpose Worklist Management Meta SOP Class (Retired)	2	true
+1.2.840.10008.5.1.4.32.1	GeneralPurposeWorklistInformationModelFindRETIRED	General Purpose Worklist Information Model - FIND (Retired)	1	true
+1.2.840.10008.5.1.4.32.2	GeneralPurposeScheduledProcedureStepRETIRED	General Purpose Scheduled Procedure Step SOP Class (Retired)	1	true
+1.2.840.10008.5.1.4.32.3	GeneralPurposePerformedProcedureStepRETIRED	General Purpose Performed Procedure Step SOP Class (Retired)	1	true
+1.2.840.10008.5.1.4.33	InstanceAvailabilityNotification	Instance Availability Notification SOP Class	1	false
+1.2.840.10008.5.1.4.34.1	RTBeamsDeliveryInstructionStorageTrialRETIRED	RT Beams Delivery Instruction Storage - Trial (Retired)	1	true
+1.2.840.10008.5.1.4.34.2	RTConventionalMachineVerificationTrialRETIRED	RT Conventional Machine Verification - Trial (Retired)	1	true
+1.2.840.10008.5.1.4.34.3	RTIonMachineVerificationTrialRETIRED	RT Ion Machine Verification - Trial (Retired)	1	true
+1.2.840.10008.5.1.4.34.4	UnifiedWorklistAndProcedureStepTrialRETIRED	Unified Worklist and Procedure Step Service Class - Trial (Retired)	3	true
+1.2.840.10008.5.1.4.34.4.1	UnifiedProcedureStepPushTrialRETIRED	Unified Procedure Step - Push SOP Class - Trial (Retired)	1	true
+1.2.840.10008.5.1.4.34.4.2	UnifiedProcedureStepWatchTrialRETIRED	Unified Procedure Step - Watch SOP Class - Trial (Retired)	1	true
+1.2.840.10008.5.1.4.34.4.3	UnifiedProcedureStepPullTrialRETIRED	Unified Procedure Step - Pull SOP Class - Trial (Retired)	1	true
+1.2.840.10008.5.1.4.34.4.4	UnifiedProcedureStepEventTrialRETIRED	Unified Procedure Step - Event SOP Class - Trial (Retired)	1	true
+1.2.840.10008.5.1.4.34.5	UPSGlobalSubscriptionInstance	UPS Global Subscription SOP Instance	4	false
+1.2.840.10008.5.1.4.34.5.1	UPSFilteredGlobalSubscriptionInstance	UPS Filtered Global Subscription SOP Instance	4	false
+1.2.840.10008.5.1.4.34.6	UnifiedWorklistAndProcedureStep	Unified Worklist and Procedure Step Service Class	3	false
+1.2.840.10008.5.1.4.34.6.1	UnifiedProcedureStepPush	Unified Procedure Step - Push SOP Class	1	false
+1.2.840.10008.5.1.4.34.6.2	UnifiedProcedureStepWatch	Unified Procedure Step - Watch SOP Class	1	false
+1.2.840.10008.5.1.4.34.6.3	UnifiedProcedureStepPull	Unified Procedure Step - Pull SOP Class	1	false
+1.2.840.10008.5.1.4.34.6.4	UnifiedProcedureStepEvent	Unified Procedure Step - Event SOP Class	1	false
+1.2.840.10008.5.1.4.34.6.5	UnifiedProcedureStepQuery	Unified Procedure Step - Query SOP Class	1	false
+1.2.840.10008.5.1.4.34.7	RTBeamsDeliveryInstructionStorage	RT Beams Delivery Instruction Storage	1	false
+1.2.840.10008.5.1.4.34.8	RTConventionalMachineVerification	RT Conventional Machine Verification	1	false
+1.2.840.10008.5.1.4.34.9	RTIonMachineVerification	RT Ion Machine Verification	1	false
+1.2.840.10008.5.1.4.34.10	RTBrachyApplicationSetupDeliveryInstructionStorage	RT Brachy Application Setup Delivery Instruction Storage	1	false
+1.2.840.10008.5.1.4.37.1	GeneralRelevantPatientInformationQuery	General Relevant Patient Information Query	1	false
+1.2.840.10008.5.1.4.37.2	BreastImagingRelevantPatientInformationQuery	Breast Imaging Relevant Patient Information Query	1	false
+1.2.840.10008.5.1.4.37.3	CardiacRelevantPatientInformationQuery	Cardiac Relevant Patient Information Query	1	false
+1.2.840.10008.5.1.4.38.1	HangingProtocolStorage	Hanging Protocol Storage	1	false
+1.2.840.10008.5.1.4.38.2	HangingProtocolInformationModelFind	Hanging Protocol Information Model - FIND	1	false
+1.2.840.10008.5.1.4.38.3	HangingProtocolInformationModelMove	Hanging Protocol Information Model - MOVE	1	false
+1.2.840.10008.5.1.4.38.4	HangingProtocolInformationModelGet	Hanging Protocol Information Model - GET	1	false
+1.2.840.10008.5.1.4.39.1	ColorPaletteStorage	Color Palette Storage	1	false
+1.2.840.10008.5.1.4.39.2	ColorPaletteQueryRetrieveInformationModelFind	Color Palette Query/Retrieve Information Model - FIND	1	false
+1.2.840.10008.5.1.4.39.3	ColorPaletteQueryRetrieveInformationModelMove	Color Palette Query/Retrieve Information Model - MOVE	1	false
+1.2.840.10008.5.1.4.39.4	ColorPaletteQueryRetrieveInformationModelGet	Color Palette Query/Retrieve Information Model - GET	1	false
+1.2.840.10008.5.1.4.41	ProductCharacteristicsQuery	Product Characteristics Query SOP Class	1	false
+1.2.840.10008.5.1.4.42	SubstanceApprovalQuery	Substance Approval Query SOP Class	1	false
+1.2.840.10008.5.1.4.43.1	GenericImplantTemplateStorage	Generic Implant Template Storage	1	false
+1.2.840.10008.5.1.4.43.2	GenericImplantTemplateInformationModelFind	Generic Implant Template Information Model - FIND	1	false
+1.2.840.10008.5.1.4.43.3	GenericImplantTemplateInformationModelMove	Generic Implant Template Information Model - MOVE	1	false
+1.2.840.10008.5.1.4.43.4	GenericImplantTemplateInformationModelGet	Generic Implant Template Information Model - GET	1	false
+1.2.840.10008.5.1.4.44.1	ImplantAssemblyTemplateStorage	Implant Assembly Template Storage	1	false
+1.2.840.10008.5.1.4.44.2	ImplantAssemblyTemplateInformationModelFind	Implant Assembly Template Information Model - FIND	1	false
+1.2.840.10008.5.1.4.44.3	ImplantAssemblyTemplateInformationModelMove	Implant Assembly Template Information Model - MOVE	1	false
+1.2.840.10008.5.1.4.44.4	ImplantAssemblyTemplateInformationModelGet	Implant Assembly Template Information Model - GET	1	false
+1.2.840.10008.5.1.4.45.1	ImplantTemplateGroupStorage	Implant Template Group Storage	1	false
+1.2.840.10008.5.1.4.45.2	ImplantTemplateGroupInformationModelFind	Implant Template Group Information Model - FIND	1	false
+1.2.840.10008.5.1.4.45.3	ImplantTemplateGroupInformationModelMove	Implant Template Group Information Model - MOVE	1	false
+1.2.840.10008.5.1.4.45.4	ImplantTemplateGroupInformationModelGet	Implant Template Group Information Model - GET	1	false
+1.2.840.10008.7.1.1	NativeDICOMModel	Native DICOM Model	6	false
+1.2.840.10008.7.1.2	AbstractMultiDimensionalImageModel	Abstract Multi-Dimensional Image Model	6	false
+1.2.840.10008.8.1.1	DICOMContentMappingResource	DICOM Content Mapping Resource	10	false
+1.2.840.10008.10.1	VideoEndoscopicImageRealTimeCommunication	Video Endoscopic Image Real-Time Communication	1	false
+1.2.840.10008.10.2	VideoPhotographicImageRealTimeCommunication	Video Photographic Image Real-Time Communication	1	false
+1.2.840.10008.10.3	AudioWaveformRealTimeCommunication	Audio Waveform Real-Time Communication	1	false
+1.2.840.10008.10.4	RenditionSelectionDocumentRealTimeCommunication	Rendition Selection Document Real-Time Communication	1	false
+1.2.840.10008.15.0.3.1	dicomDeviceName	dicomDeviceName	9	false
+1.2.840.10008.15.0.3.2	dicomDescription	dicomDescription	9	false
+1.2.840.10008.15.0.3.3	dicomManufacturer	dicomManufacturer	9	false
+1.2.840.10008.15.0.3.4	dicomManufacturerModelName	dicomManufacturerModelName	9	false
+1.2.840.10008.15.0.3.5	dicomSoftwareVersion	dicomSoftwareVersion	9	false
+1.2.840.10008.15.0.3.6	dicomVendorData	dicomVendorData	9	false
+1.2.840.10008.15.0.3.7	dicomAETitle	dicomAETitle	9	false
+1.2.840.10008.15.0.3.8	dicomNetworkConnectionReference	dicomNetworkConnectionReference	9	false
+1.2.840.10008.15.0.3.9	dicomApplicationCluster	dicomApplicationCluster	9	false
+1.2.840.10008.15.0.3.10	dicomAssociationInitiator	dicomAssociationInitiator	9	false
+1.2.840.10008.15.0.3.11	dicomAssociationAcceptor	dicomAssociationAcceptor	9	false
+1.2.840.10008.15.0.3.12	dicomHostname	dicomHostname	9	false
+1.2.840.10008.15.0.3.13	dicomPort	dicomPort	9	false
+1.2.840.10008.15.0.3.14	dicomSOPClass	dicomSOPClass	9	false
+1.2.840.10008.15.0.3.15	dicomTransferRole	dicomTransferRole	9	false
+1.2.840.10008.15.0.3.16	dicomTransferSyntax	dicomTransferSyntax	9	false
+1.2.840.10008.15.0.3.17	dicomPrimaryDeviceType	dicomPrimaryDeviceType	9	false
+1.2.840.10008.15.0.3.18	dicomRelatedDeviceReference	dicomRelatedDeviceReference	9	false
+1.2.840.10008.15.0.3.19	dicomPreferredCalledAETitle	dicomPreferredCalledAETitle	9	false
+1.2.840.10008.15.0.3.20	dicomTLSCyphersuite	dicomTLSCyphersuite	9	false
+1.2.840.10008.15.0.3.21	dicomAuthorizedNodeCertificateReference	dicomAuthorizedNodeCertificateReference	9	false
+1.2.840.10008.15.0.3.22	dicomThisNodeCertificateReference	dicomThisNodeCertificateReference	9	false
+1.2.840.10008.15.0.3.23	dicomInstalled	dicomInstalled	9	false
+1.2.840.10008.15.0.3.24	dicomStationName	dicomStationName	9	false
+1.2.840.10008.15.0.3.25	dicomDeviceSerialNumber	dicomDeviceSerialNumber	9	false
+1.2.840.10008.15.0.3.26	dicomInstitutionName	dicomInstitutionName	9	false
+1.2.840.10008.15.0.3.27	dicomInstitutionAddress	dicomInstitutionAddress	9	false
+1.2.840.10008.15.0.3.28	dicomInstitutionDepartmentName	dicomInstitutionDepartmentName	9	false
+1.2.840.10008.15.0.3.29	dicomIssuerOfPatientID	dicomIssuerOfPatientID	9	false
+1.2.840.10008.15.0.3.30	dicomPreferredCallingAETitle	dicomPreferredCallingAETitle	9	false
+1.2.840.10008.15.0.3.31	dicomSupportedCharacterSet	dicomSupportedCharacterSet	9	false
+1.2.840.10008.15.0.4.1	dicomConfigurationRoot	dicomConfigurationRoot	9	false
+1.2.840.10008.15.0.4.2	dicomDevicesRoot	dicomDevicesRoot	9	false
+1.2.840.10008.15.0.4.3	dicomUniqueAETitlesRegistryRoot	dicomUniqueAETitlesRegistryRoot	9	false
+1.2.840.10008.15.0.4.4	dicomDevice	dicomDevice	9	false
+1.2.840.10008.15.0.4.5	dicomNetworkAE	dicomNetworkAE	9	false
+1.2.840.10008.15.0.4.6	dicomNetworkConnection	dicomNetworkConnection	9	false
+1.2.840.10008.15.0.4.7	dicomUniqueAETitle	dicomUniqueAETitle	9	false
+1.2.840.10008.15.0.4.8	dicomTransferCapability	dicomTransferCapability	9	false
+1.2.840.10008.15.1.1	UTC	Universal Coordinated Time	8	false
+1.2.840.10008.6.1.1	AnatomicModifier2	Anatomic Modifier (2)	11	false
+1.2.840.10008.6.1.2	AnatomicRegion4	Anatomic Region (4)	11	false
+1.2.840.10008.6.1.3	TransducerApproach5	Transducer Approach (5)	11	false
+1.2.840.10008.6.1.4	TransducerOrientation6	Transducer Orientation (6)	11	false
+1.2.840.10008.6.1.5	UltrasoundBeamPath7	Ultrasound Beam Path (7)	11	false
+1.2.840.10008.6.1.6	AngiographicInterventionalDevice8	Angiographic Interventional Device (8)	11	false
+1.2.840.10008.6.1.7	ImageGuidedTherapeuticProcedure9	Image Guided Therapeutic Procedure (9)	11	false
+1.2.840.10008.6.1.8	InterventionalDrug10	Interventional Drug (10)	11	false
+1.2.840.10008.6.1.9	AdministrationRoute11	Administration Route (11)	11	false
+1.2.840.10008.6.1.10	ImagingContrastAgent12	Imaging Contrast Agent (12)	11	false
+1.2.840.10008.6.1.11	ImagingContrastAgentIngredient13	Imaging Contrast Agent Ingredient (13)	11	false
+1.2.840.10008.6.1.12	RadiopharmaceuticalIsotope18	Radiopharmaceutical Isotope (18)	11	false
+1.2.840.10008.6.1.13	PatientOrientation19	Patient Orientation (19)	11	false
+1.2.840.10008.6.1.14	PatientOrientationModifier20	Patient Orientation Modifier (20)	11	false
+1.2.840.10008.6.1.15	PatientEquipmentRelationship21	Patient Equipment Relationship (21)	11	false
+1.2.840.10008.6.1.16	CranioCaudadAngulation23	Cranio-Caudad Angulation (23)	11	false
+1.2.840.10008.6.1.17	Radiopharmaceutical25	Radiopharmaceutical (25)	11	false
+1.2.840.10008.6.1.18	NuclearMedicineProjection26	Nuclear Medicine Projection (26)	11	false
+1.2.840.10008.6.1.19	AcquisitionModality29	Acquisition Modality (29)	11	false
+1.2.840.10008.6.1.20	DICOMDevice30	DICOM Device (30)	11	false
+1.2.840.10008.6.1.21	AbstractPrior31	Abstract Prior (31)	11	false
+1.2.840.10008.6.1.22	NumericValueQualifier42	Numeric Value Qualifier (42)	11	false
+1.2.840.10008.6.1.23	MeasurementUnit82	Measurement Unit (82)	11	false
+1.2.840.10008.6.1.24	RealWorldValueMappingUnit83	Real World Value Mapping Unit (83)	11	false
+1.2.840.10008.6.1.25	SignificanceLevel220	Significance Level (220)	11	false
+1.2.840.10008.6.1.26	MeasurementRangeConcept221	Measurement Range Concept (221)	11	false
+1.2.840.10008.6.1.27	Normality222	Normality (222)	11	false
+1.2.840.10008.6.1.28	NormalRangeValue223	Normal Range Value (223)	11	false
+1.2.840.10008.6.1.29	SelectionMethod224	Selection Method (224)	11	false
+1.2.840.10008.6.1.30	MeasurementUncertaintyConcept225	Measurement Uncertainty Concept (225)	11	false
+1.2.840.10008.6.1.31	PopulationStatisticalDescriptor226	Population Statistical Descriptor (226)	11	false
+1.2.840.10008.6.1.32	SampleStatisticalDescriptor227	Sample Statistical Descriptor (227)	11	false
+1.2.840.10008.6.1.33	EquationOrTable228	Equation or Table (228)	11	false
+1.2.840.10008.6.1.34	YesNo230	Yes-No (230)	11	false
+1.2.840.10008.6.1.35	PresentAbsent240	Present-Absent (240)	11	false
+1.2.840.10008.6.1.36	NormalAbnormal242	Normal-Abnormal (242)	11	false
+1.2.840.10008.6.1.37	Laterality244	Laterality (244)	11	false
+1.2.840.10008.6.1.38	PositiveNegative250	Positive-Negative (250)	11	false
+1.2.840.10008.6.1.39	ComplicationSeverity251	Complication Severity (251)	11	false
+1.2.840.10008.6.1.40	ObserverType270	Observer Type (270)	11	false
+1.2.840.10008.6.1.41	ObservationSubjectClass271	Observation Subject Class (271)	11	false
+1.2.840.10008.6.1.42	AudioChannelSource3000	Audio Channel Source (3000)	11	false
+1.2.840.10008.6.1.43	ECGLead3001	ECG Lead (3001)	11	false
+1.2.840.10008.6.1.44	HemodynamicWaveformSource3003	Hemodynamic Waveform Source (3003)	11	false
+1.2.840.10008.6.1.45	CardiovascularAnatomicStructure3010	Cardiovascular Anatomic Structure (3010)	11	false
+1.2.840.10008.6.1.46	ElectrophysiologyAnatomicLocation3011	Electrophysiology Anatomic Location (3011)	11	false
+1.2.840.10008.6.1.47	CoronaryArterySegment3014	Coronary Artery Segment (3014)	11	false
+1.2.840.10008.6.1.48	CoronaryArtery3015	Coronary Artery (3015)	11	false
+1.2.840.10008.6.1.49	CardiovascularAnatomicStructureModifier3019	Cardiovascular Anatomic Structure Modifier (3019)	11	false
+1.2.840.10008.6.1.50	CardiologyMeasurementUnit3082RETIRED	Cardiology Measurement Unit (Retired) (3082)	11	true
+1.2.840.10008.6.1.51	TimeSynchronizationChannelType3090	Time Synchronization Channel Type (3090)	11	false
+1.2.840.10008.6.1.52	CardiacProceduralStateValue3101	Cardiac Procedural State Value (3101)	11	false
+1.2.840.10008.6.1.53	ElectrophysiologyMeasurementFunctionTechnique3240	Electrophysiology Measurement Function/Technique (3240)	11	false
+1.2.840.10008.6.1.54	HemodynamicMeasurementTechnique3241	Hemodynamic Measurement Technique (3241)	11	false
+1.2.840.10008.6.1.55	CatheterizationProcedurePhase3250	Catheterization Procedure Phase (3250)	11	false
+1.2.840.10008.6.1.56	ElectrophysiologyProcedurePhase3254	Electrophysiology Procedure Phase (3254)	11	false
+1.2.840.10008.6.1.57	StressProtocol3261	Stress Protocol (3261)	11	false
+1.2.840.10008.6.1.58	ECGPatientStateValue3262	ECG Patient State Value (3262)	11	false
+1.2.840.10008.6.1.59	ElectrodePlacementValue3263	Electrode Placement Value (3263)	11	false
+1.2.840.10008.6.1.60	XYZElectrodePlacementValues3264RETIRED	XYZ Electrode Placement Values (Retired) (3264)	11	true
+1.2.840.10008.6.1.61	HemodynamicPhysiologicalChallenge3271	Hemodynamic Physiological Challenge (3271)	11	false
+1.2.840.10008.6.1.62	ECGAnnotation3335	ECG Annotation (3335)	11	false
+1.2.840.10008.6.1.63	HemodynamicAnnotation3337	Hemodynamic Annotation (3337)	11	false
+1.2.840.10008.6.1.64	ElectrophysiologyAnnotation3339	Electrophysiology Annotation (3339)	11	false
+1.2.840.10008.6.1.65	ProcedureLogTitle3400	Procedure Log Title (3400)	11	false
+1.2.840.10008.6.1.66	LogNoteType3401	Log Note Type (3401)	11	false
+1.2.840.10008.6.1.67	PatientStatusAndEvent3402	Patient Status and Event (3402)	11	false
+1.2.840.10008.6.1.68	PercutaneousEntry3403	Percutaneous Entry (3403)	11	false
+1.2.840.10008.6.1.69	StaffAction3404	Staff Action (3404)	11	false
+1.2.840.10008.6.1.70	ProcedureActionValue3405	Procedure Action Value (3405)	11	false
+1.2.840.10008.6.1.71	NonCoronaryTranscatheterIntervention3406	Non-coronary Transcatheter Intervention (3406)	11	false
+1.2.840.10008.6.1.72	ObjectReferencePurpose3407	Object Reference Purpose (3407)	11	false
+1.2.840.10008.6.1.73	ConsumableAction3408	Consumable Action (3408)	11	false
+1.2.840.10008.6.1.74	DrugContrastAdministration3409	Drug/Contrast Administration (3409)	11	false
+1.2.840.10008.6.1.75	DrugContrastNumericParameter3410	Drug/Contrast Numeric Parameter (3410)	11	false
+1.2.840.10008.6.1.76	IntracoronaryDevice3411	Intracoronary Device (3411)	11	false
+1.2.840.10008.6.1.77	InterventionActionStatus3412	Intervention Action/Status (3412)	11	false
+1.2.840.10008.6.1.78	AdverseOutcome3413	Adverse Outcome (3413)	11	false
+1.2.840.10008.6.1.79	ProcedureUrgency3414	Procedure Urgency (3414)	11	false
+1.2.840.10008.6.1.80	CardiacRhythm3415	Cardiac Rhythm (3415)	11	false
+1.2.840.10008.6.1.81	RespirationRhythm3416	Respiration Rhythm (3416)	11	false
+1.2.840.10008.6.1.82	LesionRisk3418	Lesion Risk (3418)	11	false
+1.2.840.10008.6.1.83	FindingTitle3419	Finding Title (3419)	11	false
+1.2.840.10008.6.1.84	ProcedureAction3421	Procedure Action (3421)	11	false
+1.2.840.10008.6.1.85	DeviceUseAction3422	Device Use Action (3422)	11	false
+1.2.840.10008.6.1.86	NumericDeviceCharacteristic3423	Numeric Device Characteristic (3423)	11	false
+1.2.840.10008.6.1.87	InterventionParameter3425	Intervention Parameter (3425)	11	false
+1.2.840.10008.6.1.88	ConsumablesParameter3426	Consumables Parameter (3426)	11	false
+1.2.840.10008.6.1.89	EquipmentEvent3427	Equipment Event (3427)	11	false
+1.2.840.10008.6.1.90	CardiovascularImagingProcedure3428	Cardiovascular Imaging Procedure (3428)	11	false
+1.2.840.10008.6.1.91	CatheterizationDevice3429	Catheterization Device (3429)	11	false
+1.2.840.10008.6.1.92	DateTimeQualifier3430	DateTime Qualifier (3430)	11	false
+1.2.840.10008.6.1.93	PeripheralPulseLocation3440	Peripheral Pulse Location (3440)	11	false
+1.2.840.10008.6.1.94	PatientAssessment3441	Patient Assessment (3441)	11	false
+1.2.840.10008.6.1.95	PeripheralPulseMethod3442	Peripheral Pulse Method (3442)	11	false
+1.2.840.10008.6.1.96	SkinCondition3446	Skin Condition (3446)	11	false
+1.2.840.10008.6.1.97	AirwayAssessment3448	Airway Assessment (3448)	11	false
+1.2.840.10008.6.1.98	CalibrationObject3451	Calibration Object (3451)	11	false
+1.2.840.10008.6.1.99	CalibrationMethod3452	Calibration Method (3452)	11	false
+1.2.840.10008.6.1.100	CardiacVolumeMethod3453	Cardiac Volume Method (3453)	11	false
+1.2.840.10008.6.1.101	IndexMethod3455	Index Method (3455)	11	false
+1.2.840.10008.6.1.102	SubSegmentMethod3456	Sub-segment Method (3456)	11	false
+1.2.840.10008.6.1.103	ContourRealignment3458	Contour Realignment (3458)	11	false
+1.2.840.10008.6.1.104	CircumferentialExtent3460	Circumferential Extent (3460)	11	false
+1.2.840.10008.6.1.105	RegionalExtent3461	Regional Extent (3461)	11	false
+1.2.840.10008.6.1.106	ChamberIdentification3462	Chamber Identification (3462)	11	false
+1.2.840.10008.6.1.107	QAReferenceMethod3465	QA Reference Method (3465)	11	false
+1.2.840.10008.6.1.108	PlaneIdentification3466	Plane Identification (3466)	11	false
+1.2.840.10008.6.1.109	EjectionFraction3467	Ejection Fraction (3467)	11	false
+1.2.840.10008.6.1.110	EDVolume3468	ED Volume (3468)	11	false
+1.2.840.10008.6.1.111	ESVolume3469	ES Volume (3469)	11	false
+1.2.840.10008.6.1.112	VesselLumenCrossSectionalAreaCalculationMethod3470	Vessel Lumen Cross-sectional Area Calculation Method (3470)	11	false
+1.2.840.10008.6.1.113	EstimatedVolume3471	Estimated Volume (3471)	11	false
+1.2.840.10008.6.1.114	CardiacContractionPhase3472	Cardiac Contraction Phase (3472)	11	false
+1.2.840.10008.6.1.115	IVUSProcedurePhase3480	IVUS Procedure Phase (3480)	11	false
+1.2.840.10008.6.1.116	IVUSDistanceMeasurement3481	IVUS Distance Measurement (3481)	11	false
+1.2.840.10008.6.1.117	IVUSAreaMeasurement3482	IVUS Area Measurement (3482)	11	false
+1.2.840.10008.6.1.118	IVUSLongitudinalMeasurement3483	IVUS Longitudinal Measurement (3483)	11	false
+1.2.840.10008.6.1.119	IVUSIndexRatio3484	IVUS Index/Ratio (3484)	11	false
+1.2.840.10008.6.1.120	IVUSVolumeMeasurement3485	IVUS Volume Measurement (3485)	11	false
+1.2.840.10008.6.1.121	VascularMeasurementSite3486	Vascular Measurement Site (3486)	11	false
+1.2.840.10008.6.1.122	IntravascularVolumetricRegion3487	Intravascular Volumetric Region (3487)	11	false
+1.2.840.10008.6.1.123	MinMaxMean3488	Min/Max/Mean (3488)	11	false
+1.2.840.10008.6.1.124	CalciumDistribution3489	Calcium Distribution (3489)	11	false
+1.2.840.10008.6.1.125	IVUSLesionMorphology3491	IVUS Lesion Morphology (3491)	11	false
+1.2.840.10008.6.1.126	VascularDissectionClassification3492	Vascular Dissection Classification (3492)	11	false
+1.2.840.10008.6.1.127	IVUSRelativeStenosisSeverity3493	IVUS Relative Stenosis Severity (3493)	11	false
+1.2.840.10008.6.1.128	IVUSNonMorphologicalFinding3494	IVUS Non Morphological Finding (3494)	11	false
+1.2.840.10008.6.1.129	IVUSPlaqueComposition3495	IVUS Plaque Composition (3495)	11	false
+1.2.840.10008.6.1.130	IVUSFiducialPoint3496	IVUS Fiducial Point (3496)	11	false
+1.2.840.10008.6.1.131	IVUSArterialMorphology3497	IVUS Arterial Morphology (3497)	11	false
+1.2.840.10008.6.1.132	PressureUnit3500	Pressure Unit (3500)	11	false
+1.2.840.10008.6.1.133	HemodynamicResistanceUnit3502	Hemodynamic Resistance Unit (3502)	11	false
+1.2.840.10008.6.1.134	IndexedHemodynamicResistanceUnit3503	Indexed Hemodynamic Resistance Unit (3503)	11	false
+1.2.840.10008.6.1.135	CatheterSizeUnit3510	Catheter Size Unit (3510)	11	false
+1.2.840.10008.6.1.136	SpecimenCollection3515	Specimen Collection (3515)	11	false
+1.2.840.10008.6.1.137	BloodSourceType3520	Blood Source Type (3520)	11	false
+1.2.840.10008.6.1.138	BloodGasPressure3524	Blood Gas Pressure (3524)	11	false
+1.2.840.10008.6.1.139	BloodGasContent3525	Blood Gas Content (3525)	11	false
+1.2.840.10008.6.1.140	BloodGasSaturation3526	Blood Gas Saturation (3526)	11	false
+1.2.840.10008.6.1.141	BloodBaseExcess3527	Blood Base Excess (3527)	11	false
+1.2.840.10008.6.1.142	BloodPH3528	Blood pH (3528)	11	false
+1.2.840.10008.6.1.143	ArterialVenousContent3529	Arterial / Venous Content (3529)	11	false
+1.2.840.10008.6.1.144	OxygenAdministrationAction3530	Oxygen Administration Action (3530)	11	false
+1.2.840.10008.6.1.145	OxygenAdministration3531	Oxygen Administration (3531)	11	false
+1.2.840.10008.6.1.146	CirculatorySupportAction3550	Circulatory Support Action (3550)	11	false
+1.2.840.10008.6.1.147	VentilationAction3551	Ventilation Action (3551)	11	false
+1.2.840.10008.6.1.148	PacingAction3552	Pacing Action (3552)	11	false
+1.2.840.10008.6.1.149	CirculatorySupport3553	Circulatory Support (3553)	11	false
+1.2.840.10008.6.1.150	Ventilation3554	Ventilation (3554)	11	false
+1.2.840.10008.6.1.151	Pacing3555	Pacing (3555)	11	false
+1.2.840.10008.6.1.152	BloodPressureMethod3560	Blood Pressure Method (3560)	11	false
+1.2.840.10008.6.1.153	RelativeTime3600	Relative Time (3600)	11	false
+1.2.840.10008.6.1.154	HemodynamicPatientState3602	Hemodynamic Patient State (3602)	11	false
+1.2.840.10008.6.1.155	ArterialLesionLocation3604	Arterial Lesion Location (3604)	11	false
+1.2.840.10008.6.1.156	ArterialSourceLocation3606	Arterial Source Location (3606)	11	false
+1.2.840.10008.6.1.157	VenousSourceLocation3607	Venous Source Location (3607)	11	false
+1.2.840.10008.6.1.158	AtrialSourceLocation3608	Atrial Source Location (3608)	11	false
+1.2.840.10008.6.1.159	VentricularSourceLocation3609	Ventricular Source Location (3609)	11	false
+1.2.840.10008.6.1.160	GradientSourceLocation3610	Gradient Source Location (3610)	11	false
+1.2.840.10008.6.1.161	PressureMeasurement3611	Pressure Measurement (3611)	11	false
+1.2.840.10008.6.1.162	BloodVelocityMeasurement3612	Blood Velocity Measurement (3612)	11	false
+1.2.840.10008.6.1.163	HemodynamicTimeMeasurement3613	Hemodynamic Time Measurement (3613)	11	false
+1.2.840.10008.6.1.164	NonMitralValveArea3614	Non-mitral Valve Area (3614)	11	false
+1.2.840.10008.6.1.165	ValveArea3615	Valve Area (3615)	11	false
+1.2.840.10008.6.1.166	HemodynamicPeriodMeasurement3616	Hemodynamic Period Measurement (3616)	11	false
+1.2.840.10008.6.1.167	ValveFlow3617	Valve Flow (3617)	11	false
+1.2.840.10008.6.1.168	HemodynamicFlow3618	Hemodynamic Flow (3618)	11	false
+1.2.840.10008.6.1.169	HemodynamicResistanceMeasurement3619	Hemodynamic Resistance Measurement (3619)	11	false
+1.2.840.10008.6.1.170	HemodynamicRatio3620	Hemodynamic Ratio (3620)	11	false
+1.2.840.10008.6.1.171	FractionalFlowReserve3621	Fractional Flow Reserve (3621)	11	false
+1.2.840.10008.6.1.172	MeasurementType3627	Measurement Type (3627)	11	false
+1.2.840.10008.6.1.173	CardiacOutputMethod3628	Cardiac Output Method (3628)	11	false
+1.2.840.10008.6.1.174	ProcedureIntent3629	Procedure Intent (3629)	11	false
+1.2.840.10008.6.1.175	CardiovascularAnatomicLocation3630	Cardiovascular Anatomic Location (3630)	11	false
+1.2.840.10008.6.1.176	Hypertension3640	Hypertension (3640)	11	false
+1.2.840.10008.6.1.177	HemodynamicAssessment3641	Hemodynamic Assessment (3641)	11	false
+1.2.840.10008.6.1.178	DegreeFinding3642	Degree Finding (3642)	11	false
+1.2.840.10008.6.1.179	HemodynamicMeasurementPhase3651	Hemodynamic Measurement Phase (3651)	11	false
+1.2.840.10008.6.1.180	BodySurfaceAreaEquation3663	Body Surface Area Equation (3663)	11	false
+1.2.840.10008.6.1.181	OxygenConsumptionEquationTable3664	Oxygen Consumption Equation/Table (3664)	11	false
+1.2.840.10008.6.1.182	P50Equation3666	P50 Equation (3666)	11	false
+1.2.840.10008.6.1.183	FraminghamScore3667	Framingham Score (3667)	11	false
+1.2.840.10008.6.1.184	FraminghamTable3668	Framingham Table (3668)	11	false
+1.2.840.10008.6.1.185	ECGProcedureType3670	ECG Procedure Type (3670)	11	false
+1.2.840.10008.6.1.186	ReasonForECGStudy3671	Reason for ECG Study (3671)	11	false
+1.2.840.10008.6.1.187	Pacemaker3672	Pacemaker (3672)	11	false
+1.2.840.10008.6.1.188	Diagnosis3673RETIRED	Diagnosis (Retired) (3673)	11	true
+1.2.840.10008.6.1.189	OtherFilters3675RETIRED	Other Filters (Retired) (3675)	11	true
+1.2.840.10008.6.1.190	LeadMeasurementTechnique3676	Lead Measurement Technique (3676)	11	false
+1.2.840.10008.6.1.191	SummaryCodesECG3677	Summary Codes ECG (3677)	11	false
+1.2.840.10008.6.1.192	QTCorrectionAlgorithm3678	QT Correction Algorithm (3678)	11	false
+1.2.840.10008.6.1.193	ECGMorphologyDescription3679RETIRED	ECG Morphology Description (Retired) (3679)	11	true
+1.2.840.10008.6.1.194	ECGLeadNoiseDescription3680	ECG Lead Noise Description (3680)	11	false
+1.2.840.10008.6.1.195	ECGLeadNoiseModifier3681RETIRED	ECG Lead Noise Modifier (Retired) (3681)	11	true
+1.2.840.10008.6.1.196	Probability3682RETIRED	Probability (Retired) (3682)	11	true
+1.2.840.10008.6.1.197	Modifier3683RETIRED	Modifier (Retired) (3683)	11	true
+1.2.840.10008.6.1.198	Trend3684RETIRED	Trend (Retired) (3684)	11	true
+1.2.840.10008.6.1.199	ConjunctiveTerm3685RETIRED	Conjunctive Term (Retired) (3685)	11	true
+1.2.840.10008.6.1.200	ECGInterpretiveStatement3686RETIRED	ECG Interpretive Statement (Retired) (3686)	11	true
+1.2.840.10008.6.1.201	ElectrophysiologyWaveformDuration3687	Electrophysiology Waveform Duration (3687)	11	false
+1.2.840.10008.6.1.202	ElectrophysiologyWaveformVoltage3688	Electrophysiology Waveform Voltage (3688)	11	false
+1.2.840.10008.6.1.203	CathDiagnosis3700	Cath Diagnosis (3700)	11	false
+1.2.840.10008.6.1.204	CardiacValveTract3701	Cardiac Valve/Tract (3701)	11	false
+1.2.840.10008.6.1.205	WallMotion3703	Wall Motion (3703)	11	false
+1.2.840.10008.6.1.206	MyocardiumWallMorphologyFinding3704	Myocardium Wall Morphology Finding (3704)	11	false
+1.2.840.10008.6.1.207	ChamberSize3705	Chamber Size (3705)	11	false
+1.2.840.10008.6.1.208	OverallContractility3706	Overall Contractility (3706)	11	false
+1.2.840.10008.6.1.209	VSDDescription3707	VSD Description (3707)	11	false
+1.2.840.10008.6.1.210	AorticRootDescription3709	Aortic Root Description (3709)	11	false
+1.2.840.10008.6.1.211	CoronaryDominance3710	Coronary Dominance (3710)	11	false
+1.2.840.10008.6.1.212	ValvularAbnormality3711	Valvular Abnormality (3711)	11	false
+1.2.840.10008.6.1.213	VesselDescriptor3712	Vessel Descriptor (3712)	11	false
+1.2.840.10008.6.1.214	TIMIFlowCharacteristic3713	TIMI Flow Characteristic (3713)	11	false
+1.2.840.10008.6.1.215	Thrombus3714	Thrombus (3714)	11	false
+1.2.840.10008.6.1.216	LesionMargin3715	Lesion Margin (3715)	11	false
+1.2.840.10008.6.1.217	Severity3716	Severity (3716)	11	false
+1.2.840.10008.6.1.218	LeftVentricleMyocardialWall17SegmentModel3717	Left Ventricle Myocardial Wall 17 Segment Model (3717)	11	false
+1.2.840.10008.6.1.219	MyocardialWallSegmentsInProjection3718	Myocardial Wall Segments in Projection (3718)	11	false
+1.2.840.10008.6.1.220	CanadianClinicalClassification3719	Canadian Clinical Classification (3719)	11	false
+1.2.840.10008.6.1.221	CardiacHistoryDate3720RETIRED	Cardiac History Date (Retired) (3720)	11	true
+1.2.840.10008.6.1.222	CardiovascularSurgery3721	Cardiovascular Surgery (3721)	11	false
+1.2.840.10008.6.1.223	DiabeticTherapy3722	Diabetic Therapy (3722)	11	false
+1.2.840.10008.6.1.224	MIType3723	MI Type (3723)	11	false
+1.2.840.10008.6.1.225	SmokingHistory3724	Smoking History (3724)	11	false
+1.2.840.10008.6.1.226	CoronaryInterventionIndication3726	Coronary Intervention Indication (3726)	11	false
+1.2.840.10008.6.1.227	CatheterizationIndication3727	Catheterization Indication (3727)	11	false
+1.2.840.10008.6.1.228	CathFinding3728	Cath Finding (3728)	11	false
+1.2.840.10008.6.1.229	AdmissionStatus3729	Admission Status (3729)	11	false
+1.2.840.10008.6.1.230	InsurancePayor3730	Insurance Payor (3730)	11	false
+1.2.840.10008.6.1.231	PrimaryCauseOfDeath3733	Primary Cause of Death (3733)	11	false
+1.2.840.10008.6.1.232	AcuteCoronarySyndromeTimePeriod3735	Acute Coronary Syndrome Time Period (3735)	11	false
+1.2.840.10008.6.1.233	NYHAClassification3736	NYHA Classification (3736)	11	false
+1.2.840.10008.6.1.234	IschemiaNonInvasiveTest3737	Ischemia Non-invasive Test (3737)	11	false
+1.2.840.10008.6.1.235	PreCathAnginaType3738	Pre-Cath Angina Type (3738)	11	false
+1.2.840.10008.6.1.236	CathProcedureType3739	Cath Procedure Type (3739)	11	false
+1.2.840.10008.6.1.237	ThrombolyticAdministration3740	Thrombolytic Administration (3740)	11	false
+1.2.840.10008.6.1.238	LabVisitMedicationAdministration3741	Lab Visit Medication Administration (3741)	11	false
+1.2.840.10008.6.1.239	PCIMedicationAdministration3742	PCI Medication Administration (3742)	11	false
+1.2.840.10008.6.1.240	ClopidogrelTiclopidineAdministration3743	Clopidogrel/Ticlopidine Administration (3743)	11	false
+1.2.840.10008.6.1.241	EFTestingMethod3744	EF Testing Method (3744)	11	false
+1.2.840.10008.6.1.242	CalculationMethod3745	Calculation Method (3745)	11	false
+1.2.840.10008.6.1.243	PercutaneousEntrySite3746	Percutaneous Entry Site (3746)	11	false
+1.2.840.10008.6.1.244	PercutaneousClosure3747	Percutaneous Closure (3747)	11	false
+1.2.840.10008.6.1.245	AngiographicEFTestingMethod3748	Angiographic EF Testing Method (3748)	11	false
+1.2.840.10008.6.1.246	PCIProcedureResult3749	PCI Procedure Result (3749)	11	false
+1.2.840.10008.6.1.247	PreviouslyDilatedLesion3750	Previously Dilated Lesion (3750)	11	false
+1.2.840.10008.6.1.248	GuidewireCrossing3752	Guidewire Crossing (3752)	11	false
+1.2.840.10008.6.1.249	VascularComplication3754	Vascular Complication (3754)	11	false
+1.2.840.10008.6.1.250	CathComplication3755	Cath Complication (3755)	11	false
+1.2.840.10008.6.1.251	CardiacPatientRiskFactor3756	Cardiac Patient Risk Factor (3756)	11	false
+1.2.840.10008.6.1.252	CardiacDiagnosticProcedure3757	Cardiac Diagnostic Procedure (3757)	11	false
+1.2.840.10008.6.1.253	CardiovascularFamilyHistory3758	Cardiovascular Family History (3758)	11	false
+1.2.840.10008.6.1.254	HypertensionTherapy3760	Hypertension Therapy (3760)	11	false
+1.2.840.10008.6.1.255	AntilipemicAgent3761	Antilipemic Agent (3761)	11	false
+1.2.840.10008.6.1.256	AntiarrhythmicAgent3762	Antiarrhythmic Agent (3762)	11	false
+1.2.840.10008.6.1.257	MyocardialInfarctionTherapy3764	Myocardial Infarction Therapy (3764)	11	false
+1.2.840.10008.6.1.258	ConcernType3769	Concern Type (3769)	11	false
+1.2.840.10008.6.1.259	ProblemStatus3770	Problem Status (3770)	11	false
+1.2.840.10008.6.1.260	HealthStatus3772	Health Status (3772)	11	false
+1.2.840.10008.6.1.261	UseStatus3773	Use Status (3773)	11	false
+1.2.840.10008.6.1.262	SocialHistory3774	Social History (3774)	11	false
+1.2.840.10008.6.1.263	CardiovascularImplant3777	Cardiovascular Implant (3777)	11	false
+1.2.840.10008.6.1.264	PlaqueStructure3802	Plaque Structure (3802)	11	false
+1.2.840.10008.6.1.265	StenosisMeasurementMethod3804	Stenosis Measurement Method (3804)	11	false
+1.2.840.10008.6.1.266	StenosisType3805	Stenosis Type (3805)	11	false
+1.2.840.10008.6.1.267	StenosisShape3806	Stenosis Shape (3806)	11	false
+1.2.840.10008.6.1.268	VolumeMeasurementMethod3807	Volume Measurement Method (3807)	11	false
+1.2.840.10008.6.1.269	AneurysmType3808	Aneurysm Type (3808)	11	false
+1.2.840.10008.6.1.270	AssociatedCondition3809	Associated Condition (3809)	11	false
+1.2.840.10008.6.1.271	VascularMorphology3810	Vascular Morphology (3810)	11	false
+1.2.840.10008.6.1.272	StentFinding3813	Stent Finding (3813)	11	false
+1.2.840.10008.6.1.273	StentComposition3814	Stent Composition (3814)	11	false
+1.2.840.10008.6.1.274	SourceOfVascularFinding3815	Source of Vascular Finding (3815)	11	false
+1.2.840.10008.6.1.275	VascularSclerosisType3817	Vascular Sclerosis Type (3817)	11	false
+1.2.840.10008.6.1.276	NonInvasiveVascularProcedure3820	Non-invasive Vascular Procedure (3820)	11	false
+1.2.840.10008.6.1.277	PapillaryMuscleIncludedExcluded3821	Papillary Muscle Included/Excluded (3821)	11	false
+1.2.840.10008.6.1.278	RespiratoryStatus3823	Respiratory Status (3823)	11	false
+1.2.840.10008.6.1.279	HeartRhythm3826	Heart Rhythm (3826)	11	false
+1.2.840.10008.6.1.280	VesselSegment3827	Vessel Segment (3827)	11	false
+1.2.840.10008.6.1.281	PulmonaryArtery3829	Pulmonary Artery (3829)	11	false
+1.2.840.10008.6.1.282	StenosisLength3831	Stenosis Length (3831)	11	false
+1.2.840.10008.6.1.283	StenosisGrade3832	Stenosis Grade (3832)	11	false
+1.2.840.10008.6.1.284	CardiacEjectionFraction3833	Cardiac Ejection Fraction (3833)	11	false
+1.2.840.10008.6.1.285	CardiacVolumeMeasurement3835	Cardiac Volume Measurement (3835)	11	false
+1.2.840.10008.6.1.286	TimeBasedPerfusionMeasurement3836	Time-based Perfusion Measurement (3836)	11	false
+1.2.840.10008.6.1.287	FiducialFeature3837	Fiducial Feature (3837)	11	false
+1.2.840.10008.6.1.288	DiameterDerivation3838	Diameter Derivation (3838)	11	false
+1.2.840.10008.6.1.289	CoronaryVein3839	Coronary Vein (3839)	11	false
+1.2.840.10008.6.1.290	PulmonaryVein3840	Pulmonary Vein (3840)	11	false
+1.2.840.10008.6.1.291	MyocardialSubsegment3843	Myocardial Subsegment (3843)	11	false
+1.2.840.10008.6.1.292	PartialViewSectionForMammography4005	Partial View Section for Mammography (4005)	11	false
+1.2.840.10008.6.1.293	DXAnatomyImaged4009	DX Anatomy Imaged (4009)	11	false
+1.2.840.10008.6.1.294	DXView4010	DX View (4010)	11	false
+1.2.840.10008.6.1.295	DXViewModifier4011	DX View Modifier (4011)	11	false
+1.2.840.10008.6.1.296	ProjectionEponymousName4012	Projection Eponymous Name (4012)	11	false
+1.2.840.10008.6.1.297	AnatomicRegionForMammography4013	Anatomic Region for Mammography (4013)	11	false
+1.2.840.10008.6.1.298	ViewForMammography4014	View for Mammography (4014)	11	false
+1.2.840.10008.6.1.299	ViewModifierForMammography4015	View Modifier for Mammography (4015)	11	false
+1.2.840.10008.6.1.300	AnatomicRegionForIntraOralRadiography4016	Anatomic Region for Intra-oral Radiography (4016)	11	false
+1.2.840.10008.6.1.301	AnatomicRegionModifierForIntraOralRadiography4017	Anatomic Region Modifier for Intra-oral Radiography (4017)	11	false
+1.2.840.10008.6.1.302	PrimaryAnatomicStructureForIntraOralRadiographyPermanentDentitionDesignationOfTeeth4018	Primary Anatomic Structure for Intra-oral Radiography (Permanent Dentition - Designation of Teeth) (4018)	11	false
+1.2.840.10008.6.1.303	PrimaryAnatomicStructureForIntraOralRadiographyDeciduousDentitionDesignationOfTeeth4019	Primary Anatomic Structure for Intra-oral Radiography (Deciduous Dentition - Designation of Teeth) (4019)	11	false
+1.2.840.10008.6.1.304	PETRadionuclide4020	PET Radionuclide (4020)	11	false
+1.2.840.10008.6.1.305	PETRadiopharmaceutical4021	PET Radiopharmaceutical (4021)	11	false
+1.2.840.10008.6.1.306	CraniofacialAnatomicRegion4028	Craniofacial Anatomic Region (4028)	11	false
+1.2.840.10008.6.1.307	CTMRAndPETAnatomyImaged4030	CT, MR and PET Anatomy Imaged (4030)	11	false
+1.2.840.10008.6.1.308	CommonAnatomicRegion4031	Common Anatomic Region (4031)	11	false
+1.2.840.10008.6.1.309	MRSpectroscopyMetabolite4032	MR Spectroscopy Metabolite (4032)	11	false
+1.2.840.10008.6.1.310	MRProtonSpectroscopyMetabolite4033	MR Proton Spectroscopy Metabolite (4033)	11	false
+1.2.840.10008.6.1.311	EndoscopyAnatomicRegion4040	Endoscopy Anatomic Region (4040)	11	false
+1.2.840.10008.6.1.312	XAXRFAnatomyImaged4042	XA/XRF Anatomy Imaged (4042)	11	false
+1.2.840.10008.6.1.313	DrugOrContrastAgentCharacteristic4050	Drug or Contrast Agent Characteristic (4050)	11	false
+1.2.840.10008.6.1.314	GeneralDevice4051	General Device (4051)	11	false
+1.2.840.10008.6.1.315	PhantomDevice4052	Phantom Device (4052)	11	false
+1.2.840.10008.6.1.316	OphthalmicImagingAgent4200	Ophthalmic Imaging Agent (4200)	11	false
+1.2.840.10008.6.1.317	PatientEyeMovementCommand4201	Patient Eye Movement Command (4201)	11	false
+1.2.840.10008.6.1.318	OphthalmicPhotographyAcquisitionDevice4202	Ophthalmic Photography Acquisition Device (4202)	11	false
+1.2.840.10008.6.1.319	OphthalmicPhotographyIllumination4203	Ophthalmic Photography Illumination (4203)	11	false
+1.2.840.10008.6.1.320	OphthalmicFilter4204	Ophthalmic Filter (4204)	11	false
+1.2.840.10008.6.1.321	OphthalmicLens4205	Ophthalmic Lens (4205)	11	false
+1.2.840.10008.6.1.322	OphthalmicChannelDescription4206	Ophthalmic Channel Description (4206)	11	false
+1.2.840.10008.6.1.323	OphthalmicImagePosition4207	Ophthalmic Image Position (4207)	11	false
+1.2.840.10008.6.1.324	MydriaticAgent4208	Mydriatic Agent (4208)	11	false
+1.2.840.10008.6.1.325	OphthalmicAnatomicStructureImaged4209	Ophthalmic Anatomic Structure Imaged (4209)	11	false
+1.2.840.10008.6.1.326	OphthalmicTomographyAcquisitionDevice4210	Ophthalmic Tomography Acquisition Device (4210)	11	false
+1.2.840.10008.6.1.327	OphthalmicOCTAnatomicStructureImaged4211	Ophthalmic OCT Anatomic Structure Imaged (4211)	11	false
+1.2.840.10008.6.1.328	Language5000	Language (5000)	11	false
+1.2.840.10008.6.1.329	Country5001	Country (5001)	11	false
+1.2.840.10008.6.1.330	OverallBreastComposition6000	Overall Breast Composition (6000)	11	false
+1.2.840.10008.6.1.331	OverallBreastCompositionFromBIRADS6001	Overall Breast Composition from BI-RADS® (6001)	11	false
+1.2.840.10008.6.1.332	ChangeSinceLastMammogramOrPriorSurgery6002	Change Since Last Mammogram or Prior Surgery (6002)	11	false
+1.2.840.10008.6.1.333	ChangeSinceLastMammogramOrPriorSurgeryFromBIRADS6003	Change Since Last Mammogram or Prior Surgery from BI-RADS® (6003)	11	false
+1.2.840.10008.6.1.334	MammographyShapeCharacteristic6004	Mammography Shape Characteristic (6004)	11	false
+1.2.840.10008.6.1.335	ShapeCharacteristicFromBIRADS6005	Shape Characteristic from BI-RADS® (6005)	11	false
+1.2.840.10008.6.1.336	MammographyMarginCharacteristic6006	Mammography Margin Characteristic (6006)	11	false
+1.2.840.10008.6.1.337	MarginCharacteristicFromBIRADS6007	Margin Characteristic from BI-RADS® (6007)	11	false
+1.2.840.10008.6.1.338	DensityModifier6008	Density Modifier (6008)	11	false
+1.2.840.10008.6.1.339	DensityModifierFromBIRADS6009	Density Modifier from BI-RADS® (6009)	11	false
+1.2.840.10008.6.1.340	MammographyCalcificationType6010	Mammography Calcification Type (6010)	11	false
+1.2.840.10008.6.1.341	CalcificationTypeFromBIRADS6011	Calcification Type from BI-RADS® (6011)	11	false
+1.2.840.10008.6.1.342	CalcificationDistributionModifier6012	Calcification Distribution Modifier (6012)	11	false
+1.2.840.10008.6.1.343	CalcificationDistributionModifierFromBIRADS6013	Calcification Distribution Modifier from BI-RADS® (6013)	11	false
+1.2.840.10008.6.1.344	MammographySingleImageFinding6014	Mammography Single Image Finding (6014)	11	false
+1.2.840.10008.6.1.345	SingleImageFindingFromBIRADS6015	Single Image Finding from BI-RADS® (6015)	11	false
+1.2.840.10008.6.1.346	MammographyCompositeFeature6016	Mammography Composite Feature (6016)	11	false
+1.2.840.10008.6.1.347	CompositeFeatureFromBIRADS6017	Composite Feature from BI-RADS® (6017)	11	false
+1.2.840.10008.6.1.348	ClockfaceLocationOrRegion6018	Clockface Location or Region (6018)	11	false
+1.2.840.10008.6.1.349	ClockfaceLocationOrRegionFromBIRADS6019	Clockface Location or Region from BI-RADS® (6019)	11	false
+1.2.840.10008.6.1.350	QuadrantLocation6020	Quadrant Location (6020)	11	false
+1.2.840.10008.6.1.351	QuadrantLocationFromBIRADS6021	Quadrant Location from BI-RADS® (6021)	11	false
+1.2.840.10008.6.1.352	Side6022	Side (6022)	11	false
+1.2.840.10008.6.1.353	SideFromBIRADS6023	Side from BI-RADS® (6023)	11	false
+1.2.840.10008.6.1.354	Depth6024	Depth (6024)	11	false
+1.2.840.10008.6.1.355	DepthFromBIRADS6025	Depth from BI-RADS® (6025)	11	false
+1.2.840.10008.6.1.356	MammographyAssessment6026	Mammography Assessment (6026)	11	false
+1.2.840.10008.6.1.357	AssessmentFromBIRADS6027	Assessment from BI-RADS® (6027)	11	false
+1.2.840.10008.6.1.358	MammographyRecommendedFollowUp6028	Mammography Recommended Follow-up (6028)	11	false
+1.2.840.10008.6.1.359	RecommendedFollowUpFromBIRADS6029	Recommended Follow-up from BI-RADS® (6029)	11	false
+1.2.840.10008.6.1.360	MammographyPathologyCode6030	Mammography Pathology Code (6030)	11	false
+1.2.840.10008.6.1.361	BenignPathologyCodeFromBIRADS6031	Benign Pathology Code from BI-RADS® (6031)	11	false
+1.2.840.10008.6.1.362	HighRiskLesionPathologyCodeFromBIRADS6032	High Risk Lesion Pathology Code from BI-RADS® (6032)	11	false
+1.2.840.10008.6.1.363	MalignantPathologyCodeFromBIRADS6033	Malignant Pathology Code from BI-RADS® (6033)	11	false
+1.2.840.10008.6.1.364	CADOutputIntendedUse6034	CAD Output Intended Use (6034)	11	false
+1.2.840.10008.6.1.365	CompositeFeatureRelation6035	Composite Feature Relation (6035)	11	false
+1.2.840.10008.6.1.366	FeatureScope6036	Feature Scope (6036)	11	false
+1.2.840.10008.6.1.367	MammographyQuantitativeTemporalDifferenceType6037	Mammography Quantitative Temporal Difference Type (6037)	11	false
+1.2.840.10008.6.1.368	MammographyQualitativeTemporalDifferenceType6038	Mammography Qualitative Temporal Difference Type (6038)	11	false
+1.2.840.10008.6.1.369	NippleCharacteristic6039	Nipple Characteristic (6039)	11	false
+1.2.840.10008.6.1.370	NonLesionObjectType6040	Non-lesion Object Type (6040)	11	false
+1.2.840.10008.6.1.371	MammographyImageQualityFinding6041	Mammography Image Quality Finding (6041)	11	false
+1.2.840.10008.6.1.372	ResultStatus6042	Result Status (6042)	11	false
+1.2.840.10008.6.1.373	MammographyCADAnalysisType6043	Mammography CAD Analysis Type (6043)	11	false
+1.2.840.10008.6.1.374	ImageQualityAssessmentType6044	Image Quality Assessment Type (6044)	11	false
+1.2.840.10008.6.1.375	MammographyQualityControlStandardType6045	Mammography Quality Control Standard Type (6045)	11	false
+1.2.840.10008.6.1.376	FollowUpIntervalUnit6046	Follow-up Interval Unit (6046)	11	false
+1.2.840.10008.6.1.377	CADProcessingAndFindingSummary6047	CAD Processing and Finding Summary (6047)	11	false
+1.2.840.10008.6.1.378	CADOperatingPointAxisLabel6048	CAD Operating Point Axis Label (6048)	11	false
+1.2.840.10008.6.1.379	BreastProcedureReported6050	Breast Procedure Reported (6050)	11	false
+1.2.840.10008.6.1.380	BreastProcedureReason6051	Breast Procedure Reason (6051)	11	false
+1.2.840.10008.6.1.381	BreastImagingReportSectionTitle6052	Breast Imaging Report Section Title (6052)	11	false
+1.2.840.10008.6.1.382	BreastImagingReportElement6053	Breast Imaging Report Element (6053)	11	false
+1.2.840.10008.6.1.383	BreastImagingFinding6054	Breast Imaging Finding (6054)	11	false
+1.2.840.10008.6.1.384	BreastClinicalFindingOrIndicatedProblem6055	Breast Clinical Finding or Indicated Problem (6055)	11	false
+1.2.840.10008.6.1.385	AssociatedFindingForBreast6056	Associated Finding for Breast (6056)	11	false
+1.2.840.10008.6.1.386	DuctographyFindingForBreast6057	Ductography Finding for Breast (6057)	11	false
+1.2.840.10008.6.1.387	ProcedureModifiersForBreast6058	Procedure Modifiers for Breast (6058)	11	false
+1.2.840.10008.6.1.388	BreastImplantType6059	Breast Implant Type (6059)	11	false
+1.2.840.10008.6.1.389	BreastBiopsyTechnique6060	Breast Biopsy Technique (6060)	11	false
+1.2.840.10008.6.1.390	BreastImagingProcedureModifier6061	Breast Imaging Procedure Modifier (6061)	11	false
+1.2.840.10008.6.1.391	InterventionalProcedureComplication6062	Interventional Procedure Complication (6062)	11	false
+1.2.840.10008.6.1.392	InterventionalProcedureResult6063	Interventional Procedure Result (6063)	11	false
+1.2.840.10008.6.1.393	UltrasoundFindingForBreast6064	Ultrasound Finding for Breast (6064)	11	false
+1.2.840.10008.6.1.394	InstrumentApproach6065	Instrument Approach (6065)	11	false
+1.2.840.10008.6.1.395	TargetConfirmation6066	Target Confirmation (6066)	11	false
+1.2.840.10008.6.1.396	FluidColor6067	Fluid Color (6067)	11	false
+1.2.840.10008.6.1.397	TumorStagesFromAJCC6068	Tumor Stages From AJCC (6068)	11	false
+1.2.840.10008.6.1.398	NottinghamCombinedHistologicGrade6069	Nottingham Combined Histologic Grade (6069)	11	false
+1.2.840.10008.6.1.399	BloomRichardsonHistologicGrade6070	Bloom-Richardson Histologic Grade (6070)	11	false
+1.2.840.10008.6.1.400	HistologicGradingMethod6071	Histologic Grading Method (6071)	11	false
+1.2.840.10008.6.1.401	BreastImplantFinding6072	Breast Implant Finding (6072)	11	false
+1.2.840.10008.6.1.402	GynecologicalHormone6080	Gynecological Hormone (6080)	11	false
+1.2.840.10008.6.1.403	BreastCancerRiskFactor6081	Breast Cancer Risk Factor (6081)	11	false
+1.2.840.10008.6.1.404	GynecologicalProcedure6082	Gynecological Procedure (6082)	11	false
+1.2.840.10008.6.1.405	ProceduresForBreast6083	Procedures for Breast (6083)	11	false
+1.2.840.10008.6.1.406	MammoplastyProcedure6084	Mammoplasty Procedure (6084)	11	false
+1.2.840.10008.6.1.407	TherapiesForBreast6085	Therapies for Breast (6085)	11	false
+1.2.840.10008.6.1.408	MenopausalPhase6086	Menopausal Phase (6086)	11	false
+1.2.840.10008.6.1.409	GeneralRiskFactor6087	General Risk Factor (6087)	11	false
+1.2.840.10008.6.1.410	OBGYNMaternalRiskFactor6088	OB-GYN Maternal Risk Factor (6088)	11	false
+1.2.840.10008.6.1.411	Substance6089	Substance (6089)	11	false
+1.2.840.10008.6.1.412	RelativeUsageExposureAmount6090	Relative Usage/Exposure Amount (6090)	11	false
+1.2.840.10008.6.1.413	RelativeFrequencyOfEventValue6091	Relative Frequency of Event Value (6091)	11	false
+1.2.840.10008.6.1.414	UsageExposureQualitativeConcept6092	Usage/Exposure Qualitative Concept (6092)	11	false
+1.2.840.10008.6.1.415	UsageExposureAmountQualitativeConcept6093	Usage/Exposure/Amount Qualitative Concept (6093)	11	false
+1.2.840.10008.6.1.416	UsageExposureFrequencyQualitativeConcept6094	Usage/Exposure/Frequency Qualitative Concept (6094)	11	false
+1.2.840.10008.6.1.417	ProcedureNumericProperty6095	Procedure Numeric Property (6095)	11	false
+1.2.840.10008.6.1.418	PregnancyStatus6096	Pregnancy Status (6096)	11	false
+1.2.840.10008.6.1.419	SideOfFamily6097	Side of Family (6097)	11	false
+1.2.840.10008.6.1.420	ChestComponentCategory6100	Chest Component Category (6100)	11	false
+1.2.840.10008.6.1.421	ChestFindingOrFeature6101	Chest Finding or Feature (6101)	11	false
+1.2.840.10008.6.1.422	ChestFindingOrFeatureModifier6102	Chest Finding or Feature Modifier (6102)	11	false
+1.2.840.10008.6.1.423	AbnormalLinesFindingOrFeature6103	Abnormal Lines Finding or Feature (6103)	11	false
+1.2.840.10008.6.1.424	AbnormalOpacityFindingOrFeature6104	Abnormal Opacity Finding or Feature (6104)	11	false
+1.2.840.10008.6.1.425	AbnormalLucencyFindingOrFeature6105	Abnormal Lucency Finding or Feature (6105)	11	false
+1.2.840.10008.6.1.426	AbnormalTextureFindingOrFeature6106	Abnormal Texture Finding or Feature (6106)	11	false
+1.2.840.10008.6.1.427	WidthDescriptor6107	Width Descriptor (6107)	11	false
+1.2.840.10008.6.1.428	ChestAnatomicStructureAbnormalDistribution6108	Chest Anatomic Structure Abnormal Distribution (6108)	11	false
+1.2.840.10008.6.1.429	RadiographicAnatomyFindingOrFeature6109	Radiographic Anatomy Finding or Feature (6109)	11	false
+1.2.840.10008.6.1.430	LungAnatomyFindingOrFeature6110	Lung Anatomy Finding or Feature (6110)	11	false
+1.2.840.10008.6.1.431	BronchovascularAnatomyFindingOrFeature6111	Bronchovascular Anatomy Finding or Feature (6111)	11	false
+1.2.840.10008.6.1.432	PleuraAnatomyFindingOrFeature6112	Pleura Anatomy Finding or Feature (6112)	11	false
+1.2.840.10008.6.1.433	MediastinumAnatomyFindingOrFeature6113	Mediastinum Anatomy Finding or Feature (6113)	11	false
+1.2.840.10008.6.1.434	OsseousAnatomyFindingOrFeature6114	Osseous Anatomy Finding or Feature (6114)	11	false
+1.2.840.10008.6.1.435	OsseousAnatomyModifier6115	Osseous Anatomy Modifier (6115)	11	false
+1.2.840.10008.6.1.436	MuscularAnatomy6116	Muscular Anatomy (6116)	11	false
+1.2.840.10008.6.1.437	VascularAnatomy6117	Vascular Anatomy (6117)	11	false
+1.2.840.10008.6.1.438	SizeDescriptor6118	Size Descriptor (6118)	11	false
+1.2.840.10008.6.1.439	ChestBorderShape6119	Chest Border Shape (6119)	11	false
+1.2.840.10008.6.1.440	ChestBorderDefinition6120	Chest Border Definition (6120)	11	false
+1.2.840.10008.6.1.441	ChestOrientationDescriptor6121	Chest Orientation Descriptor (6121)	11	false
+1.2.840.10008.6.1.442	ChestContentDescriptor6122	Chest Content Descriptor (6122)	11	false
+1.2.840.10008.6.1.443	ChestOpacityDescriptor6123	Chest Opacity Descriptor (6123)	11	false
+1.2.840.10008.6.1.444	LocationInChest6124	Location in Chest (6124)	11	false
+1.2.840.10008.6.1.445	GeneralChestLocation6125	General Chest Location (6125)	11	false
+1.2.840.10008.6.1.446	LocationInLung6126	Location in Lung (6126)	11	false
+1.2.840.10008.6.1.447	SegmentLocationInLung6127	Segment Location in Lung (6127)	11	false
+1.2.840.10008.6.1.448	ChestDistributionDescriptor6128	Chest Distribution Descriptor (6128)	11	false
+1.2.840.10008.6.1.449	ChestSiteInvolvement6129	Chest Site Involvement (6129)	11	false
+1.2.840.10008.6.1.450	SeverityDescriptor6130	Severity Descriptor (6130)	11	false
+1.2.840.10008.6.1.451	ChestTextureDescriptor6131	Chest Texture Descriptor (6131)	11	false
+1.2.840.10008.6.1.452	ChestCalcificationDescriptor6132	Chest Calcification Descriptor (6132)	11	false
+1.2.840.10008.6.1.453	ChestQuantitativeTemporalDifferenceType6133	Chest Quantitative Temporal Difference Type (6133)	11	false
+1.2.840.10008.6.1.454	ChestQualitativeTemporalDifferenceType6134	Chest Qualitative Temporal Difference Type (6134)	11	false
+1.2.840.10008.6.1.455	ImageQualityFinding6135	Image Quality Finding (6135)	11	false
+1.2.840.10008.6.1.456	ChestTypesOfQualityControlStandard6136	Chest Types of Quality Control Standard (6136)	11	false
+1.2.840.10008.6.1.457	CADAnalysisType6137	CAD Analysis Type (6137)	11	false
+1.2.840.10008.6.1.458	ChestNonLesionObjectType6138	Chest Non-lesion Object Type (6138)	11	false
+1.2.840.10008.6.1.459	NonLesionModifier6139	Non-lesion Modifier (6139)	11	false
+1.2.840.10008.6.1.460	CalculationMethod6140	Calculation Method (6140)	11	false
+1.2.840.10008.6.1.461	AttenuationCoefficientMeasurement6141	Attenuation Coefficient Measurement (6141)	11	false
+1.2.840.10008.6.1.462	CalculatedValue6142	Calculated Value (6142)	11	false
+1.2.840.10008.6.1.463	LesionResponse6143	Lesion Response (6143)	11	false
+1.2.840.10008.6.1.464	RECISTDefinedLesionResponse6144	RECIST Defined Lesion Response (6144)	11	false
+1.2.840.10008.6.1.465	BaselineCategory6145	Baseline Category (6145)	11	false
+1.2.840.10008.6.1.466	BackgroundEchotexture6151	Background Echotexture (6151)	11	false
+1.2.840.10008.6.1.467	Orientation6152	Orientation (6152)	11	false
+1.2.840.10008.6.1.468	LesionBoundary6153	Lesion Boundary (6153)	11	false
+1.2.840.10008.6.1.469	EchoPattern6154	Echo Pattern (6154)	11	false
+1.2.840.10008.6.1.470	PosteriorAcousticFeature6155	Posterior Acoustic Feature (6155)	11	false
+1.2.840.10008.6.1.471	Vascularity6157	Vascularity (6157)	11	false
+1.2.840.10008.6.1.472	CorrelationToOtherFinding6158	Correlation to Other Finding (6158)	11	false
+1.2.840.10008.6.1.473	MalignancyType6159	Malignancy Type (6159)	11	false
+1.2.840.10008.6.1.474	BreastPrimaryTumorAssessmentFromAJCC6160	Breast Primary Tumor Assessment From AJCC (6160)	11	false
+1.2.840.10008.6.1.475	PathologicalRegionalLymphNodeAssessmentForBreast6161	Pathological Regional Lymph Node Assessment for Breast (6161)	11	false
+1.2.840.10008.6.1.476	AssessmentOfMetastasisForBreast6162	Assessment of Metastasis for Breast (6162)	11	false
+1.2.840.10008.6.1.477	MenstrualCyclePhase6163	Menstrual Cycle Phase (6163)	11	false
+1.2.840.10008.6.1.478	TimeInterval6164	Time Interval (6164)	11	false
+1.2.840.10008.6.1.479	BreastLinearMeasurement6165	Breast Linear Measurement (6165)	11	false
+1.2.840.10008.6.1.480	CADGeometrySecondaryGraphicalRepresentation6166	CAD Geometry Secondary Graphical Representation (6166)	11	false
+1.2.840.10008.6.1.481	DiagnosticImagingReportDocumentTitle7000	Diagnostic Imaging Report Document Title (7000)	11	false
+1.2.840.10008.6.1.482	DiagnosticImagingReportHeading7001	Diagnostic Imaging Report Heading (7001)	11	false
+1.2.840.10008.6.1.483	DiagnosticImagingReportElement7002	Diagnostic Imaging Report Element (7002)	11	false
+1.2.840.10008.6.1.484	DiagnosticImagingReportPurposeOfReference7003	Diagnostic Imaging Report Purpose of Reference (7003)	11	false
+1.2.840.10008.6.1.485	WaveformPurposeOfReference7004	Waveform Purpose of Reference (7004)	11	false
+1.2.840.10008.6.1.486	ContributingEquipmentPurposeOfReference7005	Contributing Equipment Purpose of Reference (7005)	11	false
+1.2.840.10008.6.1.487	SRDocumentPurposeOfReference7006	SR Document Purpose of Reference (7006)	11	false
+1.2.840.10008.6.1.488	SignaturePurpose7007	Signature Purpose (7007)	11	false
+1.2.840.10008.6.1.489	MediaImport7008	Media Import (7008)	11	false
+1.2.840.10008.6.1.490	KeyObjectSelectionDocumentTitle7010	Key Object Selection Document Title (7010)	11	false
+1.2.840.10008.6.1.491	RejectedForQualityReason7011	Rejected for Quality Reason (7011)	11	false
+1.2.840.10008.6.1.492	BestInSet7012	Best in Set (7012)	11	false
+1.2.840.10008.6.1.493	DocumentTitle7020	Document Title (7020)	11	false
+1.2.840.10008.6.1.494	RCSRegistrationMethodType7100	RCS Registration Method Type (7100)	11	false
+1.2.840.10008.6.1.495	BrainAtlasFiducial7101	Brain Atlas Fiducial (7101)	11	false
+1.2.840.10008.6.1.496	SegmentationPropertyCategory7150	Segmentation Property Category (7150)	11	false
+1.2.840.10008.6.1.497	SegmentationPropertyType7151	Segmentation Property Type (7151)	11	false
+1.2.840.10008.6.1.498	CardiacStructureSegmentationType7152	Cardiac Structure Segmentation Type (7152)	11	false
+1.2.840.10008.6.1.499	CNSSegmentationType7153	CNS Segmentation Type (7153)	11	false
+1.2.840.10008.6.1.500	AbdominalSegmentationType7154	Abdominal Segmentation Type (7154)	11	false
+1.2.840.10008.6.1.501	ThoracicSegmentationType7155	Thoracic Segmentation Type (7155)	11	false
+1.2.840.10008.6.1.502	VascularSegmentationType7156	Vascular Segmentation Type (7156)	11	false
+1.2.840.10008.6.1.503	DeviceSegmentationType7157	Device Segmentation Type (7157)	11	false
+1.2.840.10008.6.1.504	ArtifactSegmentationType7158	Artifact Segmentation Type (7158)	11	false
+1.2.840.10008.6.1.505	LesionSegmentationType7159	Lesion Segmentation Type (7159)	11	false
+1.2.840.10008.6.1.506	PelvicOrganSegmentationType7160	Pelvic Organ Segmentation Type (7160)	11	false
+1.2.840.10008.6.1.507	PhysiologySegmentationType7161	Physiology Segmentation Type (7161)	11	false
+1.2.840.10008.6.1.508	ReferencedImagePurposeOfReference7201	Referenced Image Purpose of Reference (7201)	11	false
+1.2.840.10008.6.1.509	SourceImagePurposeOfReference7202	Source Image Purpose of Reference (7202)	11	false
+1.2.840.10008.6.1.510	ImageDerivation7203	Image Derivation (7203)	11	false
+1.2.840.10008.6.1.511	PurposeOfReferenceToAlternateRepresentation7205	Purpose of Reference to Alternate Representation (7205)	11	false
+1.2.840.10008.6.1.512	RelatedSeriesPurposeOfReference7210	Related Series Purpose of Reference (7210)	11	false
+1.2.840.10008.6.1.513	MultiFrameSubsetType7250	Multi-Frame Subset Type (7250)	11	false
+1.2.840.10008.6.1.514	PersonRole7450	Person Role (7450)	11	false
+1.2.840.10008.6.1.515	FamilyMember7451	Family Member (7451)	11	false
+1.2.840.10008.6.1.516	OrganizationalRole7452	Organizational Role (7452)	11	false
+1.2.840.10008.6.1.517	PerformingRole7453	Performing Role (7453)	11	false
+1.2.840.10008.6.1.518	AnimalTaxonomicRankValue7454	Animal Taxonomic Rank Value (7454)	11	false
+1.2.840.10008.6.1.519	Sex7455	Sex (7455)	11	false
+1.2.840.10008.6.1.520	AgeUnit7456	Age Unit (7456)	11	false
+1.2.840.10008.6.1.521	LinearMeasurementUnit7460	Linear Measurement Unit (7460)	11	false
+1.2.840.10008.6.1.522	AreaMeasurementUnit7461	Area Measurement Unit (7461)	11	false
+1.2.840.10008.6.1.523	VolumeMeasurementUnit7462	Volume Measurement Unit (7462)	11	false
+1.2.840.10008.6.1.524	LinearMeasurement7470	Linear Measurement (7470)	11	false
+1.2.840.10008.6.1.525	AreaMeasurement7471	Area Measurement (7471)	11	false
+1.2.840.10008.6.1.526	VolumeMeasurement7472	Volume Measurement (7472)	11	false
+1.2.840.10008.6.1.527	GeneralAreaCalculationMethod7473	General Area Calculation Method (7473)	11	false
+1.2.840.10008.6.1.528	GeneralVolumeCalculationMethod7474	General Volume Calculation Method (7474)	11	false
+1.2.840.10008.6.1.529	Breed7480	Breed (7480)	11	false
+1.2.840.10008.6.1.530	BreedRegistry7481	Breed Registry (7481)	11	false
+1.2.840.10008.6.1.531	WorkitemDefinition9231	Workitem Definition (9231)	11	false
+1.2.840.10008.6.1.532	NonDICOMOutputTypes9232RETIRED	Non-DICOM Output Types (Retired) (9232)	11	true
+1.2.840.10008.6.1.533	ProcedureDiscontinuationReason9300	Procedure Discontinuation Reason (9300)	11	false
+1.2.840.10008.6.1.534	ScopeOfAccumulation10000	Scope of Accumulation (10000)	11	false
+1.2.840.10008.6.1.535	UIDType10001	UID Type (10001)	11	false
+1.2.840.10008.6.1.536	IrradiationEventType10002	Irradiation Event Type (10002)	11	false
+1.2.840.10008.6.1.537	EquipmentPlaneIdentification10003	Equipment Plane Identification (10003)	11	false
+1.2.840.10008.6.1.538	FluoroMode10004	Fluoro Mode (10004)	11	false
+1.2.840.10008.6.1.539	XRayFilterMaterial10006	X-Ray Filter Material (10006)	11	false
+1.2.840.10008.6.1.540	XRayFilterType10007	X-Ray Filter Type (10007)	11	false
+1.2.840.10008.6.1.541	DoseRelatedDistanceMeasurement10008	Dose Related Distance Measurement (10008)	11	false
+1.2.840.10008.6.1.542	MeasuredCalculated10009	Measured/Calculated (10009)	11	false
+1.2.840.10008.6.1.543	DoseMeasurementDevice10010	Dose Measurement Device (10010)	11	false
+1.2.840.10008.6.1.544	EffectiveDoseEvaluationMethod10011	Effective Dose Evaluation Method (10011)	11	false
+1.2.840.10008.6.1.545	CTAcquisitionType10013	CT Acquisition Type (10013)	11	false
+1.2.840.10008.6.1.546	CTIVContrastImagingTechnique10014	CT IV Contrast Imaging Technique (10014)	11	false
+1.2.840.10008.6.1.547	CTDoseReferenceAuthority10015	CT Dose Reference Authority (10015)	11	false
+1.2.840.10008.6.1.548	AnodeTargetMaterial10016	Anode Target Material (10016)	11	false
+1.2.840.10008.6.1.549	XRayGrid10017	X-Ray Grid (10017)	11	false
+1.2.840.10008.6.1.550	UltrasoundProtocolType12001	Ultrasound Protocol Type (12001)	11	false
+1.2.840.10008.6.1.551	UltrasoundProtocolStageType12002	Ultrasound Protocol Stage Type (12002)	11	false
+1.2.840.10008.6.1.552	OBGYNDate12003	OB-GYN Date (12003)	11	false
+1.2.840.10008.6.1.553	FetalBiometryRatio12004	Fetal Biometry Ratio (12004)	11	false
+1.2.840.10008.6.1.554	FetalBiometryMeasurement12005	Fetal Biometry Measurement (12005)	11	false
+1.2.840.10008.6.1.555	FetalLongBonesBiometryMeasurement12006	Fetal Long Bones Biometry Measurement (12006)	11	false
+1.2.840.10008.6.1.556	FetalCraniumMeasurement12007	Fetal Cranium Measurement (12007)	11	false
+1.2.840.10008.6.1.557	OBGYNAmnioticSacMeasurement12008	OB-GYN Amniotic Sac Measurement (12008)	11	false
+1.2.840.10008.6.1.558	EarlyGestationBiometryMeasurement12009	Early Gestation Biometry Measurement (12009)	11	false
+1.2.840.10008.6.1.559	UltrasoundPelvisAndUterusMeasurement12011	Ultrasound Pelvis and Uterus Measurement (12011)	11	false
+1.2.840.10008.6.1.560	OBEquationTable12012	OB Equation/Table (12012)	11	false
+1.2.840.10008.6.1.561	GestationalAgeEquationTable12013	Gestational Age Equation/Table (12013)	11	false
+1.2.840.10008.6.1.562	OBFetalBodyWeightEquationTable12014	OB Fetal Body Weight Equation/Table (12014)	11	false
+1.2.840.10008.6.1.563	FetalGrowthEquationTable12015	Fetal Growth Equation/Table (12015)	11	false
+1.2.840.10008.6.1.564	EstimatedFetalWeightPercentileEquationTable12016	Estimated Fetal Weight Percentile Equation/Table (12016)	11	false
+1.2.840.10008.6.1.565	GrowthDistributionRank12017	Growth Distribution Rank (12017)	11	false
+1.2.840.10008.6.1.566	OBGYNSummary12018	OB-GYN Summary (12018)	11	false
+1.2.840.10008.6.1.567	OBGYNFetusSummary12019	OB-GYN Fetus Summary (12019)	11	false
+1.2.840.10008.6.1.568	VascularSummary12101	Vascular Summary (12101)	11	false
+1.2.840.10008.6.1.569	TemporalPeriodRelatingToProcedureOrTherapy12102	Temporal Period Relating to Procedure or Therapy (12102)	11	false
+1.2.840.10008.6.1.570	VascularUltrasoundAnatomicLocation12103	Vascular Ultrasound Anatomic Location (12103)	11	false
+1.2.840.10008.6.1.571	ExtracranialArtery12104	Extracranial Artery (12104)	11	false
+1.2.840.10008.6.1.572	IntracranialCerebralVessel12105	Intracranial Cerebral Vessel (12105)	11	false
+1.2.840.10008.6.1.573	IntracranialCerebralVesselUnilateral12106	Intracranial Cerebral Vessel (Unilateral) (12106)	11	false
+1.2.840.10008.6.1.574	UpperExtremityArtery12107	Upper Extremity Artery (12107)	11	false
+1.2.840.10008.6.1.575	UpperExtremityVein12108	Upper Extremity Vein (12108)	11	false
+1.2.840.10008.6.1.576	LowerExtremityArtery12109	Lower Extremity Artery (12109)	11	false
+1.2.840.10008.6.1.577	LowerExtremityVein12110	Lower Extremity Vein (12110)	11	false
+1.2.840.10008.6.1.578	AbdominopelvicArteryPaired12111	Abdominopelvic Artery (Paired) (12111)	11	false
+1.2.840.10008.6.1.579	AbdominopelvicArteryUnpaired12112	Abdominopelvic Artery (Unpaired) (12112)	11	false
+1.2.840.10008.6.1.580	AbdominopelvicVeinPaired12113	Abdominopelvic Vein (Paired) (12113)	11	false
+1.2.840.10008.6.1.581	AbdominopelvicVeinUnpaired12114	Abdominopelvic Vein (Unpaired) (12114)	11	false
+1.2.840.10008.6.1.582	RenalVessel12115	Renal Vessel (12115)	11	false
+1.2.840.10008.6.1.583	VesselSegmentModifier12116	Vessel Segment Modifier (12116)	11	false
+1.2.840.10008.6.1.584	VesselBranchModifier12117	Vessel Branch Modifier (12117)	11	false
+1.2.840.10008.6.1.585	VascularUltrasoundProperty12119	Vascular Ultrasound Property (12119)	11	false
+1.2.840.10008.6.1.586	UltrasoundBloodVelocityMeasurement12120	Ultrasound Blood Velocity Measurement (12120)	11	false
+1.2.840.10008.6.1.587	VascularIndexRatio12121	Vascular Index/Ratio (12121)	11	false
+1.2.840.10008.6.1.588	OtherVascularProperty12122	Other Vascular Property (12122)	11	false
+1.2.840.10008.6.1.589	CarotidRatio12123	Carotid Ratio (12123)	11	false
+1.2.840.10008.6.1.590	RenalRatio12124	Renal Ratio (12124)	11	false
+1.2.840.10008.6.1.591	PelvicVasculatureAnatomicalLocation12140	Pelvic Vasculature Anatomical Location (12140)	11	false
+1.2.840.10008.6.1.592	FetalVasculatureAnatomicalLocation12141	Fetal Vasculature Anatomical Location (12141)	11	false
+1.2.840.10008.6.1.593	EchocardiographyLeftVentricleMeasurement12200	Echocardiography Left Ventricle Measurement (12200)	11	false
+1.2.840.10008.6.1.594	LeftVentricleLinearMeasurement12201	Left Ventricle Linear Measurement (12201)	11	false
+1.2.840.10008.6.1.595	LeftVentricleVolumeMeasurement12202	Left Ventricle Volume Measurement (12202)	11	false
+1.2.840.10008.6.1.596	LeftVentricleOtherMeasurement12203	Left Ventricle Other Measurement (12203)	11	false
+1.2.840.10008.6.1.597	EchocardiographyRightVentricleMeasurement12204	Echocardiography Right Ventricle Measurement (12204)	11	false
+1.2.840.10008.6.1.598	EchocardiographyLeftAtriumMeasurement12205	Echocardiography Left Atrium Measurement (12205)	11	false
+1.2.840.10008.6.1.599	EchocardiographyRightAtriumMeasurement12206	Echocardiography Right Atrium Measurement (12206)	11	false
+1.2.840.10008.6.1.600	EchocardiographyMitralValveMeasurement12207	Echocardiography Mitral Valve Measurement (12207)	11	false
+1.2.840.10008.6.1.601	EchocardiographyTricuspidValveMeasurement12208	Echocardiography Tricuspid Valve Measurement (12208)	11	false
+1.2.840.10008.6.1.602	EchocardiographyPulmonicValveMeasurement12209	Echocardiography Pulmonic Valve Measurement (12209)	11	false
+1.2.840.10008.6.1.603	EchocardiographyPulmonaryArteryMeasurement12210	Echocardiography Pulmonary Artery Measurement (12210)	11	false
+1.2.840.10008.6.1.604	EchocardiographyAorticValveMeasurement12211	Echocardiography Aortic Valve Measurement (12211)	11	false
+1.2.840.10008.6.1.605	EchocardiographyAortaMeasurement12212	Echocardiography Aorta Measurement (12212)	11	false
+1.2.840.10008.6.1.606	EchocardiographyPulmonaryVeinMeasurement12214	Echocardiography Pulmonary Vein Measurement (12214)	11	false
+1.2.840.10008.6.1.607	EchocardiographyVenaCavaMeasurement12215	Echocardiography Vena Cava Measurement (12215)	11	false
+1.2.840.10008.6.1.608	EchocardiographyHepaticVeinMeasurement12216	Echocardiography Hepatic Vein Measurement (12216)	11	false
+1.2.840.10008.6.1.609	EchocardiographyCardiacShuntMeasurement12217	Echocardiography Cardiac Shunt Measurement (12217)	11	false
+1.2.840.10008.6.1.610	EchocardiographyCongenitalAnomalyMeasurement12218	Echocardiography Congenital Anomaly Measurement (12218)	11	false
+1.2.840.10008.6.1.611	PulmonaryVeinModifier12219	Pulmonary Vein Modifier (12219)	11	false
+1.2.840.10008.6.1.612	EchocardiographyCommonMeasurement12220	Echocardiography Common Measurement (12220)	11	false
+1.2.840.10008.6.1.613	FlowDirection12221	Flow Direction (12221)	11	false
+1.2.840.10008.6.1.614	OrificeFlowProperty12222	Orifice Flow Property (12222)	11	false
+1.2.840.10008.6.1.615	EchocardiographyStrokeVolumeOrigin12223	Echocardiography Stroke Volume Origin (12223)	11	false
+1.2.840.10008.6.1.616	UltrasoundImageMode12224	Ultrasound Image Mode (12224)	11	false
+1.2.840.10008.6.1.617	EchocardiographyImageView12226	Echocardiography Image View (12226)	11	false
+1.2.840.10008.6.1.618	EchocardiographyMeasurementMethod12227	Echocardiography Measurement Method (12227)	11	false
+1.2.840.10008.6.1.619	EchocardiographyVolumeMethod12228	Echocardiography Volume Method (12228)	11	false
+1.2.840.10008.6.1.620	EchocardiographyAreaMethod12229	Echocardiography Area Method (12229)	11	false
+1.2.840.10008.6.1.621	GradientMethod12230	Gradient Method (12230)	11	false
+1.2.840.10008.6.1.622	VolumeFlowMethod12231	Volume Flow Method (12231)	11	false
+1.2.840.10008.6.1.623	MyocardiumMassMethod12232	Myocardium Mass Method (12232)	11	false
+1.2.840.10008.6.1.624	CardiacPhase12233	Cardiac Phase (12233)	11	false
+1.2.840.10008.6.1.625	RespirationState12234	Respiration State (12234)	11	false
+1.2.840.10008.6.1.626	MitralValveAnatomicSite12235	Mitral Valve Anatomic Site (12235)	11	false
+1.2.840.10008.6.1.627	EchocardiographyAnatomicSite12236	Echocardiography Anatomic Site (12236)	11	false
+1.2.840.10008.6.1.628	EchocardiographyAnatomicSiteModifier12237	Echocardiography Anatomic Site Modifier (12237)	11	false
+1.2.840.10008.6.1.629	WallMotionScoringScheme12238	Wall Motion Scoring Scheme (12238)	11	false
+1.2.840.10008.6.1.630	CardiacOutputProperty12239	Cardiac Output Property (12239)	11	false
+1.2.840.10008.6.1.631	LeftVentricleAreaMeasurement12240	Left Ventricle Area Measurement (12240)	11	false
+1.2.840.10008.6.1.632	TricuspidValveFindingSite12241	Tricuspid Valve Finding Site (12241)	11	false
+1.2.840.10008.6.1.633	AorticValveFindingSite12242	Aortic Valve Finding Site (12242)	11	false
+1.2.840.10008.6.1.634	LeftVentricleFindingSite12243	Left Ventricle Finding Site (12243)	11	false
+1.2.840.10008.6.1.635	CongenitalFindingSite12244	Congenital Finding Site (12244)	11	false
+1.2.840.10008.6.1.636	SurfaceProcessingAlgorithmFamily7162	Surface Processing Algorithm Family (7162)	11	false
+1.2.840.10008.6.1.637	StressTestProcedurePhase3207	Stress Test Procedure Phase (3207)	11	false
+1.2.840.10008.6.1.638	Stage3778	Stage (3778)	11	false
+1.2.840.10008.6.1.735	SMLSizeDescriptor252	S-M-L Size Descriptor (252)	11	false
+1.2.840.10008.6.1.736	MajorCoronaryArtery3016	Major Coronary Artery (3016)	11	false
+1.2.840.10008.6.1.737	RadioactivityUnit3083	Radioactivity Unit (3083)	11	false
+1.2.840.10008.6.1.738	RestStressState3102	Rest/Stress State (3102)	11	false
+1.2.840.10008.6.1.739	PETCardiologyProtocol3106	PET Cardiology Protocol (3106)	11	false
+1.2.840.10008.6.1.740	PETCardiologyRadiopharmaceutical3107	PET Cardiology Radiopharmaceutical (3107)	11	false
+1.2.840.10008.6.1.741	NMPETProcedure3108	NM/PET Procedure (3108)	11	false
+1.2.840.10008.6.1.742	NuclearCardiologyProtocol3110	Nuclear Cardiology Protocol (3110)	11	false
+1.2.840.10008.6.1.743	NuclearCardiologyRadiopharmaceutical3111	Nuclear Cardiology Radiopharmaceutical (3111)	11	false
+1.2.840.10008.6.1.744	AttenuationCorrection3112	Attenuation Correction (3112)	11	false
+1.2.840.10008.6.1.745	PerfusionDefectType3113	Perfusion Defect Type (3113)	11	false
+1.2.840.10008.6.1.746	StudyQuality3114	Study Quality (3114)	11	false
+1.2.840.10008.6.1.747	StressImagingQualityIssue3115	Stress Imaging Quality Issue (3115)	11	false
+1.2.840.10008.6.1.748	NMExtracardiacFinding3116	NM Extracardiac Finding (3116)	11	false
+1.2.840.10008.6.1.749	AttenuationCorrectionMethod3117	Attenuation Correction Method (3117)	11	false
+1.2.840.10008.6.1.750	LevelOfRisk3118	Level of Risk (3118)	11	false
+1.2.840.10008.6.1.751	LVFunction3119	LV Function (3119)	11	false
+1.2.840.10008.6.1.752	PerfusionFinding3120	Perfusion Finding (3120)	11	false
+1.2.840.10008.6.1.753	PerfusionMorphology3121	Perfusion Morphology (3121)	11	false
+1.2.840.10008.6.1.754	VentricularEnlargement3122	Ventricular Enlargement (3122)	11	false
+1.2.840.10008.6.1.755	StressTestProcedure3200	Stress Test Procedure (3200)	11	false
+1.2.840.10008.6.1.756	IndicationsForStressTest3201	Indications for Stress Test (3201)	11	false
+1.2.840.10008.6.1.757	ChestPain3202	Chest Pain (3202)	11	false
+1.2.840.10008.6.1.758	ExerciserDevice3203	Exerciser Device (3203)	11	false
+1.2.840.10008.6.1.759	StressAgent3204	Stress Agent (3204)	11	false
+1.2.840.10008.6.1.760	IndicationsForPharmacologicalStressTest3205	Indications for Pharmacological Stress Test (3205)	11	false
+1.2.840.10008.6.1.761	NonInvasiveCardiacImagingProcedure3206	Non-invasive Cardiac Imaging Procedure (3206)	11	false
+1.2.840.10008.6.1.763	ExerciseECGSummaryCode3208	Exercise ECG Summary Code (3208)	11	false
+1.2.840.10008.6.1.764	StressImagingSummaryCode3209	Stress Imaging Summary Code (3209)	11	false
+1.2.840.10008.6.1.765	SpeedOfResponse3210	Speed of Response (3210)	11	false
+1.2.840.10008.6.1.766	BPResponse3211	BP Response (3211)	11	false
+1.2.840.10008.6.1.767	TreadmillSpeed3212	Treadmill Speed (3212)	11	false
+1.2.840.10008.6.1.768	StressHemodynamicFinding3213	Stress Hemodynamic Finding (3213)	11	false
+1.2.840.10008.6.1.769	PerfusionFindingMethod3215	Perfusion Finding Method (3215)	11	false
+1.2.840.10008.6.1.770	ComparisonFinding3217	Comparison Finding (3217)	11	false
+1.2.840.10008.6.1.771	StressSymptom3220	Stress Symptom (3220)	11	false
+1.2.840.10008.6.1.772	StressTestTerminationReason3221	Stress Test Termination Reason (3221)	11	false
+1.2.840.10008.6.1.773	QTcMeasurement3227	QTc Measurement (3227)	11	false
+1.2.840.10008.6.1.774	ECGTimingMeasurement3228	ECG Timing Measurement (3228)	11	false
+1.2.840.10008.6.1.775	ECGAxisMeasurement3229	ECG Axis Measurement (3229)	11	false
+1.2.840.10008.6.1.776	ECGFinding3230	ECG Finding (3230)	11	false
+1.2.840.10008.6.1.777	STSegmentFinding3231	ST Segment Finding (3231)	11	false
+1.2.840.10008.6.1.778	STSegmentLocation3232	ST Segment Location (3232)	11	false
+1.2.840.10008.6.1.779	STSegmentMorphology3233	ST Segment Morphology (3233)	11	false
+1.2.840.10008.6.1.780	EctopicBeatMorphology3234	Ectopic Beat Morphology (3234)	11	false
+1.2.840.10008.6.1.781	PerfusionComparisonFinding3235	Perfusion Comparison Finding (3235)	11	false
+1.2.840.10008.6.1.782	ToleranceComparisonFinding3236	Tolerance Comparison Finding (3236)	11	false
+1.2.840.10008.6.1.783	WallMotionComparisonFinding3237	Wall Motion Comparison Finding (3237)	11	false
+1.2.840.10008.6.1.784	StressScoringScale3238	Stress Scoring Scale (3238)	11	false
+1.2.840.10008.6.1.785	PerceivedExertionScale3239	Perceived Exertion Scale (3239)	11	false
+1.2.840.10008.6.1.786	VentricleIdentification3463	Ventricle Identification (3463)	11	false
+1.2.840.10008.6.1.787	ColonOverallAssessment6200	Colon Overall Assessment (6200)	11	false
+1.2.840.10008.6.1.788	ColonFindingOrFeature6201	Colon Finding or Feature (6201)	11	false
+1.2.840.10008.6.1.789	ColonFindingOrFeatureModifier6202	Colon Finding or Feature Modifier (6202)	11	false
+1.2.840.10008.6.1.790	ColonNonLesionObjectType6203	Colon Non-lesion Object Type (6203)	11	false
+1.2.840.10008.6.1.791	AnatomicNonColonFinding6204	Anatomic Non-colon Finding (6204)	11	false
+1.2.840.10008.6.1.792	ClockfaceLocationForColon6205	Clockface Location for Colon (6205)	11	false
+1.2.840.10008.6.1.793	RecumbentPatientOrientationForColon6206	Recumbent Patient Orientation for Colon (6206)	11	false
+1.2.840.10008.6.1.794	ColonQuantitativeTemporalDifferenceType6207	Colon Quantitative Temporal Difference Type (6207)	11	false
+1.2.840.10008.6.1.795	ColonTypesOfQualityControlStandard6208	Colon Types of Quality Control Standard (6208)	11	false
+1.2.840.10008.6.1.796	ColonMorphologyDescriptor6209	Colon Morphology Descriptor (6209)	11	false
+1.2.840.10008.6.1.797	LocationInIntestinalTract6210	Location in Intestinal Tract (6210)	11	false
+1.2.840.10008.6.1.798	ColonCADMaterialDescription6211	Colon CAD Material Description (6211)	11	false
+1.2.840.10008.6.1.799	CalculatedValueForColonFinding6212	Calculated Value for Colon Finding (6212)	11	false
+1.2.840.10008.6.1.800	OphthalmicHorizontalDirection4214	Ophthalmic Horizontal Direction (4214)	11	false
+1.2.840.10008.6.1.801	OphthalmicVerticalDirection4215	Ophthalmic Vertical Direction (4215)	11	false
+1.2.840.10008.6.1.802	OphthalmicVisualAcuityType4216	Ophthalmic Visual Acuity Type (4216)	11	false
+1.2.840.10008.6.1.803	ArterialPulseWaveform3004	Arterial Pulse Waveform (3004)	11	false
+1.2.840.10008.6.1.804	RespirationWaveform3005	Respiration Waveform (3005)	11	false
+1.2.840.10008.6.1.805	UltrasoundContrastBolusAgent12030	Ultrasound Contrast/Bolus Agent (12030)	11	false
+1.2.840.10008.6.1.806	ProtocolIntervalEvent12031	Protocol Interval Event (12031)	11	false
+1.2.840.10008.6.1.807	TransducerScanPattern12032	Transducer Scan Pattern (12032)	11	false
+1.2.840.10008.6.1.808	UltrasoundTransducerGeometry12033	Ultrasound Transducer Geometry (12033)	11	false
+1.2.840.10008.6.1.809	UltrasoundTransducerBeamSteering12034	Ultrasound Transducer Beam Steering (12034)	11	false
+1.2.840.10008.6.1.810	UltrasoundTransducerApplication12035	Ultrasound Transducer Application (12035)	11	false
+1.2.840.10008.6.1.811	InstanceAvailabilityStatus50	Instance Availability Status (50)	11	false
+1.2.840.10008.6.1.812	ModalityPPSDiscontinuationReason9301	Modality PPS Discontinuation Reason (9301)	11	false
+1.2.840.10008.6.1.813	MediaImportPPSDiscontinuationReason9302	Media Import PPS Discontinuation Reason (9302)	11	false
+1.2.840.10008.6.1.814	DXAnatomyImagedForAnimal7482	DX Anatomy Imaged for Animal (7482)	11	false
+1.2.840.10008.6.1.815	CommonAnatomicRegionsForAnimal7483	Common Anatomic Regions for Animal (7483)	11	false
+1.2.840.10008.6.1.816	DXViewForAnimal7484	DX View for Animal (7484)	11	false
+1.2.840.10008.6.1.817	InstitutionalDepartmentUnitService7030	Institutional Department/Unit/Service (7030)	11	false
+1.2.840.10008.6.1.818	PurposeOfReferenceToPredecessorReport7009	Purpose of Reference to Predecessor Report (7009)	11	false
+1.2.840.10008.6.1.819	VisualFixationQualityDuringAcquisition4220	Visual Fixation Quality During Acquisition (4220)	11	false
+1.2.840.10008.6.1.820	VisualFixationQualityProblem4221	Visual Fixation Quality Problem (4221)	11	false
+1.2.840.10008.6.1.821	OphthalmicMacularGridProblem4222	Ophthalmic Macular Grid Problem (4222)	11	false
+1.2.840.10008.6.1.822	Organization5002	Organization (5002)	11	false
+1.2.840.10008.6.1.823	MixedBreed7486	Mixed Breed (7486)	11	false
+1.2.840.10008.6.1.824	BroselowLutenPediatricSizeCategory7040	Broselow-Luten Pediatric Size Category (7040)	11	false
+1.2.840.10008.6.1.825	CMDCTECCCalciumScoringPatientSizeCategory7042	CMDCTECC Calcium Scoring Patient Size Category (7042)	11	false
+1.2.840.10008.6.1.826	CardiacUltrasoundReportTitle12245	Cardiac Ultrasound Report Title (12245)	11	false
+1.2.840.10008.6.1.827	CardiacUltrasoundIndicationForStudy12246	Cardiac Ultrasound Indication for Study (12246)	11	false
+1.2.840.10008.6.1.828	PediatricFetalAndCongenitalCardiacSurgicalIntervention12247	Pediatric, Fetal and Congenital Cardiac Surgical Intervention (12247)	11	false
+1.2.840.10008.6.1.829	CardiacUltrasoundSummaryCode12248	Cardiac Ultrasound Summary Code (12248)	11	false
+1.2.840.10008.6.1.830	CardiacUltrasoundFetalSummaryCode12249	Cardiac Ultrasound Fetal Summary Code (12249)	11	false
+1.2.840.10008.6.1.831	CardiacUltrasoundCommonLinearMeasurement12250	Cardiac Ultrasound Common Linear Measurement (12250)	11	false
+1.2.840.10008.6.1.832	CardiacUltrasoundLinearValveMeasurement12251	Cardiac Ultrasound Linear Valve Measurement (12251)	11	false
+1.2.840.10008.6.1.833	CardiacUltrasoundCardiacFunction12252	Cardiac Ultrasound Cardiac Function (12252)	11	false
+1.2.840.10008.6.1.834	CardiacUltrasoundAreaMeasurement12253	Cardiac Ultrasound Area Measurement (12253)	11	false
+1.2.840.10008.6.1.835	CardiacUltrasoundHemodynamicMeasurement12254	Cardiac Ultrasound Hemodynamic Measurement (12254)	11	false
+1.2.840.10008.6.1.836	CardiacUltrasoundMyocardiumMeasurement12255	Cardiac Ultrasound Myocardium Measurement (12255)	11	false
+1.2.840.10008.6.1.838	CardiacUltrasoundLeftVentricleMeasurement12257	Cardiac Ultrasound Left Ventricle Measurement (12257)	11	false
+1.2.840.10008.6.1.839	CardiacUltrasoundRightVentricleMeasurement12258	Cardiac Ultrasound Right Ventricle Measurement (12258)	11	false
+1.2.840.10008.6.1.840	CardiacUltrasoundVentriclesMeasurement12259	Cardiac Ultrasound Ventricles Measurement (12259)	11	false
+1.2.840.10008.6.1.841	CardiacUltrasoundPulmonaryArteryMeasurement12260	Cardiac Ultrasound Pulmonary Artery Measurement (12260)	11	false
+1.2.840.10008.6.1.842	CardiacUltrasoundPulmonaryVein12261	Cardiac Ultrasound Pulmonary Vein (12261)	11	false
+1.2.840.10008.6.1.843	CardiacUltrasoundPulmonaryValveMeasurement12262	Cardiac Ultrasound Pulmonary Valve Measurement (12262)	11	false
+1.2.840.10008.6.1.844	CardiacUltrasoundVenousReturnPulmonaryMeasurement12263	Cardiac Ultrasound Venous Return Pulmonary Measurement (12263)	11	false
+1.2.840.10008.6.1.845	CardiacUltrasoundVenousReturnSystemicMeasurement12264	Cardiac Ultrasound Venous Return Systemic Measurement (12264)	11	false
+1.2.840.10008.6.1.846	CardiacUltrasoundAtriaAndAtrialSeptumMeasurement12265	Cardiac Ultrasound Atria and Atrial Septum Measurement (12265)	11	false
+1.2.840.10008.6.1.847	CardiacUltrasoundMitralValveMeasurement12266	Cardiac Ultrasound Mitral Valve Measurement (12266)	11	false
+1.2.840.10008.6.1.848	CardiacUltrasoundTricuspidValveMeasurement12267	Cardiac Ultrasound Tricuspid Valve Measurement (12267)	11	false
+1.2.840.10008.6.1.849	CardiacUltrasoundAtrioventricularValveMeasurement12268	Cardiac Ultrasound Atrioventricular Valve Measurement (12268)	11	false
+1.2.840.10008.6.1.850	CardiacUltrasoundInterventricularSeptumMeasurement12269	Cardiac Ultrasound Interventricular Septum Measurement (12269)	11	false
+1.2.840.10008.6.1.851	CardiacUltrasoundAorticValveMeasurement12270	Cardiac Ultrasound Aortic Valve Measurement (12270)	11	false
+1.2.840.10008.6.1.852	CardiacUltrasoundOutflowTractMeasurement12271	Cardiac Ultrasound Outflow Tract Measurement (12271)	11	false
+1.2.840.10008.6.1.853	CardiacUltrasoundSemilunarValveAnnulateAndSinusMeasurement12272	Cardiac Ultrasound Semilunar Valve, Annulate and Sinus Measurement (12272)	11	false
+1.2.840.10008.6.1.854	CardiacUltrasoundAorticSinotubularJunctionMeasurement12273	Cardiac Ultrasound Aortic Sinotubular Junction Measurement (12273)	11	false
+1.2.840.10008.6.1.855	CardiacUltrasoundAortaMeasurement12274	Cardiac Ultrasound Aorta Measurement (12274)	11	false
+1.2.840.10008.6.1.856	CardiacUltrasoundCoronaryArteryMeasurement12275	Cardiac Ultrasound Coronary Artery Measurement (12275)	11	false
+1.2.840.10008.6.1.857	CardiacUltrasoundAortoPulmonaryConnectionMeasurement12276	Cardiac Ultrasound Aorto Pulmonary Connection Measurement (12276)	11	false
+1.2.840.10008.6.1.858	CardiacUltrasoundPericardiumAndPleuraMeasurement12277	Cardiac Ultrasound Pericardium and Pleura Measurement (12277)	11	false
+1.2.840.10008.6.1.859	CardiacUltrasoundFetalGeneralMeasurement12279	Cardiac Ultrasound Fetal General Measurement (12279)	11	false
+1.2.840.10008.6.1.860	CardiacUltrasoundTargetSite12280	Cardiac Ultrasound Target Site (12280)	11	false
+1.2.840.10008.6.1.861	CardiacUltrasoundTargetSiteModifier12281	Cardiac Ultrasound Target Site Modifier (12281)	11	false
+1.2.840.10008.6.1.862	CardiacUltrasoundVenousReturnSystemicFindingSite12282	Cardiac Ultrasound Venous Return Systemic Finding Site (12282)	11	false
+1.2.840.10008.6.1.863	CardiacUltrasoundVenousReturnPulmonaryFindingSite12283	Cardiac Ultrasound Venous Return Pulmonary Finding Site (12283)	11	false
+1.2.840.10008.6.1.864	CardiacUltrasoundAtriaAndAtrialSeptumFindingSite12284	Cardiac Ultrasound Atria and Atrial Septum Finding Site (12284)	11	false
+1.2.840.10008.6.1.865	CardiacUltrasoundAtrioventricularValveFindingSite12285	Cardiac Ultrasound Atrioventricular Valve Finding Site (12285)	11	false
+1.2.840.10008.6.1.866	CardiacUltrasoundInterventricularSeptumFindingSite12286	Cardiac Ultrasound Interventricular Septum Finding Site (12286)	11	false
+1.2.840.10008.6.1.867	CardiacUltrasoundVentricleFindingSite12287	Cardiac Ultrasound Ventricle Finding Site (12287)	11	false
+1.2.840.10008.6.1.868	CardiacUltrasoundOutflowTractFindingSite12288	Cardiac Ultrasound Outflow Tract Finding Site (12288)	11	false
+1.2.840.10008.6.1.869	CardiacUltrasoundSemilunarValveAnnulusAndSinusFindingSite12289	Cardiac Ultrasound Semilunar Valve, Annulus and Sinus Finding Site (12289)	11	false
+1.2.840.10008.6.1.870	CardiacUltrasoundPulmonaryArteryFindingSite12290	Cardiac Ultrasound Pulmonary Artery Finding Site (12290)	11	false
+1.2.840.10008.6.1.871	CardiacUltrasoundAortaFindingSite12291	Cardiac Ultrasound Aorta Finding Site (12291)	11	false
+1.2.840.10008.6.1.872	CardiacUltrasoundCoronaryArteryFindingSite12292	Cardiac Ultrasound Coronary Artery Finding Site (12292)	11	false
+1.2.840.10008.6.1.873	CardiacUltrasoundAortopulmonaryConnectionFindingSite12293	Cardiac Ultrasound Aortopulmonary Connection Finding Site (12293)	11	false
+1.2.840.10008.6.1.874	CardiacUltrasoundPericardiumAndPleuraFindingSite12294	Cardiac Ultrasound Pericardium and Pleura Finding Site (12294)	11	false
+1.2.840.10008.6.1.876	OphthalmicUltrasoundAxialMeasurementsType4230	Ophthalmic Ultrasound Axial Measurements Type (4230)	11	false
+1.2.840.10008.6.1.877	LensStatus4231	Lens Status (4231)	11	false
+1.2.840.10008.6.1.878	VitreousStatus4232	Vitreous Status (4232)	11	false
+1.2.840.10008.6.1.879	OphthalmicAxialLengthMeasurementsSegmentName4233	Ophthalmic Axial Length Measurements Segment Name (4233)	11	false
+1.2.840.10008.6.1.880	RefractiveSurgeryType4234	Refractive Surgery Type (4234)	11	false
+1.2.840.10008.6.1.881	KeratometryDescriptor4235	Keratometry Descriptor (4235)	11	false
+1.2.840.10008.6.1.882	IOLCalculationFormula4236	IOL Calculation Formula (4236)	11	false
+1.2.840.10008.6.1.883	LensConstantType4237	Lens Constant Type (4237)	11	false
+1.2.840.10008.6.1.884	RefractiveErrorType4238	Refractive Error Type (4238)	11	false
+1.2.840.10008.6.1.885	AnteriorChamberDepthDefinition4239	Anterior Chamber Depth Definition (4239)	11	false
+1.2.840.10008.6.1.886	OphthalmicMeasurementOrCalculationDataSource4240	Ophthalmic Measurement or Calculation Data Source (4240)	11	false
+1.2.840.10008.6.1.887	OphthalmicAxialLengthSelectionMethod4241	Ophthalmic Axial Length Selection Method (4241)	11	false
+1.2.840.10008.6.1.889	OphthalmicQualityMetricType4243	Ophthalmic Quality Metric Type (4243)	11	false
+1.2.840.10008.6.1.890	OphthalmicAgentConcentrationUnit4244	Ophthalmic Agent Concentration Unit (4244)	11	false
+1.2.840.10008.6.1.891	FunctionalConditionPresentDuringAcquisition91	Functional Condition Present During Acquisition (91)	11	false
+1.2.840.10008.6.1.892	JointPositionDuringAcquisition92	Joint Position During Acquisition (92)	11	false
+1.2.840.10008.6.1.893	JointPositioningMethod93	Joint Positioning Method (93)	11	false
+1.2.840.10008.6.1.894	PhysicalForceAppliedDuringAcquisition94	Physical Force Applied During Acquisition (94)	11	false
+1.2.840.10008.6.1.895	ECGControlNumericVariable3690	ECG Control Numeric Variable (3690)	11	false
+1.2.840.10008.6.1.896	ECGControlTextVariable3691	ECG Control Text Variable (3691)	11	false
+1.2.840.10008.6.1.897	WholeSlideMicroscopyImageReferencedImagePurposeOfReference8120	Whole Slide Microscopy Image Referenced Image Purpose of Reference (8120)	11	false
+1.2.840.10008.6.1.898	MicroscopyLensType8121	Microscopy Lens Type (8121)	11	false
+1.2.840.10008.6.1.899	MicroscopyIlluminatorAndSensorColor8122	Microscopy Illuminator and Sensor Color (8122)	11	false
+1.2.840.10008.6.1.900	MicroscopyIlluminationMethod8123	Microscopy Illumination Method (8123)	11	false
+1.2.840.10008.6.1.901	MicroscopyFilter8124	Microscopy Filter (8124)	11	false
+1.2.840.10008.6.1.902	MicroscopyIlluminatorType8125	Microscopy Illuminator Type (8125)	11	false
+1.2.840.10008.6.1.903	AuditEventID400	Audit Event ID (400)	11	false
+1.2.840.10008.6.1.904	AuditEventTypeCode401	Audit Event Type Code (401)	11	false
+1.2.840.10008.6.1.905	AuditActiveParticipantRoleIDCode402	Audit Active Participant Role ID Code (402)	11	false
+1.2.840.10008.6.1.906	SecurityAlertTypeCode403	Security Alert Type Code (403)	11	false
+1.2.840.10008.6.1.907	AuditParticipantObjectIDTypeCode404	Audit Participant Object ID Type Code (404)	11	false
+1.2.840.10008.6.1.908	MediaTypeCode405	Media Type Code (405)	11	false
+1.2.840.10008.6.1.909	VisualFieldStaticPerimetryTestPattern4250	Visual Field Static Perimetry Test Pattern (4250)	11	false
+1.2.840.10008.6.1.910	VisualFieldStaticPerimetryTestStrategy4251	Visual Field Static Perimetry Test Strategy (4251)	11	false
+1.2.840.10008.6.1.911	VisualFieldStaticPerimetryScreeningTestMode4252	Visual Field Static Perimetry Screening Test Mode (4252)	11	false
+1.2.840.10008.6.1.912	VisualFieldStaticPerimetryFixationStrategy4253	Visual Field Static Perimetry Fixation Strategy (4253)	11	false
+1.2.840.10008.6.1.913	VisualFieldStaticPerimetryTestAnalysisResult4254	Visual Field Static Perimetry Test Analysis Result (4254)	11	false
+1.2.840.10008.6.1.914	VisualFieldIlluminationColor4255	Visual Field Illumination Color (4255)	11	false
+1.2.840.10008.6.1.915	VisualFieldProcedureModifier4256	Visual Field Procedure Modifier (4256)	11	false
+1.2.840.10008.6.1.916	VisualFieldGlobalIndexName4257	Visual Field Global Index Name (4257)	11	false
+1.2.840.10008.6.1.917	AbstractMultiDimensionalImageModelComponentSemantic7180	Abstract Multi-dimensional Image Model Component Semantic (7180)	11	false
+1.2.840.10008.6.1.918	AbstractMultiDimensionalImageModelComponentUnit7181	Abstract Multi-dimensional Image Model Component Unit (7181)	11	false
+1.2.840.10008.6.1.919	AbstractMultiDimensionalImageModelDimensionSemantic7182	Abstract Multi-dimensional Image Model Dimension Semantic (7182)	11	false
+1.2.840.10008.6.1.920	AbstractMultiDimensionalImageModelDimensionUnit7183	Abstract Multi-dimensional Image Model Dimension Unit (7183)	11	false
+1.2.840.10008.6.1.921	AbstractMultiDimensionalImageModelAxisDirection7184	Abstract Multi-dimensional Image Model Axis Direction (7184)	11	false
+1.2.840.10008.6.1.922	AbstractMultiDimensionalImageModelAxisOrientation7185	Abstract Multi-dimensional Image Model Axis Orientation (7185)	11	false
+1.2.840.10008.6.1.923	AbstractMultiDimensionalImageModelQualitativeDimensionSampleSemantic7186	Abstract Multi-dimensional Image Model Qualitative Dimension Sample Semantic (7186)	11	false
+1.2.840.10008.6.1.924	PlanningMethod7320	Planning Method (7320)	11	false
+1.2.840.10008.6.1.925	DeIdentificationMethod7050	De-identification Method (7050)	11	false
+1.2.840.10008.6.1.926	MeasurementOrientation12118	Measurement Orientation (12118)	11	false
+1.2.840.10008.6.1.927	ECGGlobalWaveformDuration3689	ECG Global Waveform Duration (3689)	11	false
+1.2.840.10008.6.1.930	ICD3692	ICD (3692)	11	false
+1.2.840.10008.6.1.931	RadiotherapyGeneralWorkitemDefinition9241	Radiotherapy General Workitem Definition (9241)	11	false
+1.2.840.10008.6.1.932	RadiotherapyAcquisitionWorkitemDefinition9242	Radiotherapy Acquisition Workitem Definition (9242)	11	false
+1.2.840.10008.6.1.933	RadiotherapyRegistrationWorkitemDefinition9243	Radiotherapy Registration Workitem Definition (9243)	11	false
+1.2.840.10008.6.1.934	ContrastBolusSubstance3850	Contrast Bolus Substance (3850)	11	false
+1.2.840.10008.6.1.935	LabelType10022	Label Type (10022)	11	false
+1.2.840.10008.6.1.936	OphthalmicMappingUnitForRealWorldValueMapping4260	Ophthalmic Mapping Unit for Real World Value Mapping (4260)	11	false
+1.2.840.10008.6.1.937	OphthalmicMappingAcquisitionMethod4261	Ophthalmic Mapping Acquisition Method (4261)	11	false
+1.2.840.10008.6.1.938	RetinalThicknessDefinition4262	Retinal Thickness Definition (4262)	11	false
+1.2.840.10008.6.1.939	OphthalmicThicknessMapValueType4263	Ophthalmic Thickness Map Value Type (4263)	11	false
+1.2.840.10008.6.1.940	OphthalmicMapPurposeOfReference4264	Ophthalmic Map Purpose of Reference (4264)	11	false
+1.2.840.10008.6.1.941	OphthalmicThicknessDeviationCategory4265	Ophthalmic Thickness Deviation Category (4265)	11	false
+1.2.840.10008.6.1.942	OphthalmicAnatomicStructureReferencePoint4266	Ophthalmic Anatomic Structure Reference Point (4266)	11	false
+1.2.840.10008.6.1.943	CardiacSynchronizationTechnique3104	Cardiac Synchronization Technique (3104)	11	false
+1.2.840.10008.6.1.944	StainingProtocol8130	Staining Protocol (8130)	11	false
+1.2.840.10008.6.1.947	SizeSpecificDoseEstimationMethodForCT10023	Size Specific Dose Estimation Method for CT (10023)	11	false
+1.2.840.10008.6.1.948	PathologyImagingProtocol8131	Pathology Imaging Protocol (8131)	11	false
+1.2.840.10008.6.1.949	MagnificationSelection8132	Magnification Selection (8132)	11	false
+1.2.840.10008.6.1.950	TissueSelection8133	Tissue Selection (8133)	11	false
+1.2.840.10008.6.1.951	GeneralRegionOfInterestMeasurementModifier7464	General Region of Interest Measurement Modifier (7464)	11	false
+1.2.840.10008.6.1.952	MeasurementDerivedFromMultipleROIMeasurements7465	Measurement Derived From Multiple ROI Measurements (7465)	11	false
+1.2.840.10008.6.1.953	SurfaceScanAcquisitionType8201	Surface Scan Acquisition Type (8201)	11	false
+1.2.840.10008.6.1.954	SurfaceScanModeType8202	Surface Scan Mode Type (8202)	11	false
+1.2.840.10008.6.1.956	SurfaceScanRegistrationMethodType8203	Surface Scan Registration Method Type (8203)	11	false
+1.2.840.10008.6.1.957	BasicCardiacView27	Basic Cardiac View (27)	11	false
+1.2.840.10008.6.1.958	CTReconstructionAlgorithm10033	CT Reconstruction Algorithm (10033)	11	false
+1.2.840.10008.6.1.959	DetectorType10030	Detector Type (10030)	11	false
+1.2.840.10008.6.1.960	CRDRMechanicalConfiguration10031	CR/DR Mechanical Configuration (10031)	11	false
+1.2.840.10008.6.1.961	ProjectionXRayAcquisitionDeviceType10032	Projection X-Ray Acquisition Device Type (10032)	11	false
+1.2.840.10008.6.1.962	AbstractSegmentationType7165	Abstract Segmentation Type (7165)	11	false
+1.2.840.10008.6.1.963	CommonTissueSegmentationType7166	Common Tissue Segmentation Type (7166)	11	false
+1.2.840.10008.6.1.964	PeripheralNervousSystemSegmentationType7167	Peripheral Nervous System Segmentation Type (7167)	11	false
+1.2.840.10008.6.1.965	CornealTopographyMappingUnitForRealWorldValueMapping4267	Corneal Topography Mapping Unit for Real World Value Mapping (4267)	11	false
+1.2.840.10008.6.1.966	CornealTopographyMapValueType4268	Corneal Topography Map Value Type (4268)	11	false
+1.2.840.10008.6.1.967	BrainStructureForVolumetricMeasurement7140	Brain Structure for Volumetric Measurement (7140)	11	false
+1.2.840.10008.6.1.968	RTDoseDerivation7220	RT Dose Derivation (7220)	11	false
+1.2.840.10008.6.1.969	RTDosePurposeOfReference7221	RT Dose Purpose of Reference (7221)	11	false
+1.2.840.10008.6.1.970	SpectroscopyPurposeOfReference7215	Spectroscopy Purpose of Reference (7215)	11	false
+1.2.840.10008.6.1.971	ScheduledProcessingParameterConceptCodesForRTTreatment9250	Scheduled Processing Parameter Concept Codes for RT Treatment (9250)	11	false
+1.2.840.10008.6.1.972	RadiopharmaceuticalOrganDoseReferenceAuthority10040	Radiopharmaceutical Organ Dose Reference Authority (10040)	11	false
+1.2.840.10008.6.1.973	SourceOfRadioisotopeActivityInformation10041	Source of Radioisotope Activity Information (10041)	11	false
+1.2.840.10008.6.1.975	IntravenousExtravasationSymptom10043	Intravenous Extravasation Symptom (10043)	11	false
+1.2.840.10008.6.1.976	RadiosensitiveOrgan10044	Radiosensitive Organ (10044)	11	false
+1.2.840.10008.6.1.977	RadiopharmaceuticalPatientState10045	Radiopharmaceutical Patient State (10045)	11	false
+1.2.840.10008.6.1.978	GFRMeasurement10046	GFR Measurement (10046)	11	false
+1.2.840.10008.6.1.979	GFRMeasurementMethod10047	GFR Measurement Method (10047)	11	false
+1.2.840.10008.6.1.980	VisualEvaluationMethod8300	Visual Evaluation Method (8300)	11	false
+1.2.840.10008.6.1.981	TestPatternCode8301	Test Pattern Code (8301)	11	false
+1.2.840.10008.6.1.982	MeasurementPatternCode8302	Measurement Pattern Code (8302)	11	false
+1.2.840.10008.6.1.983	DisplayDeviceType8303	Display Device Type (8303)	11	false
+1.2.840.10008.6.1.984	SUVUnit85	SUV Unit (85)	11	false
+1.2.840.10008.6.1.985	T1MeasurementMethod4100	T1 Measurement Method (4100)	11	false
+1.2.840.10008.6.1.986	TracerKineticModel4101	Tracer Kinetic Model (4101)	11	false
+1.2.840.10008.6.1.987	PerfusionMeasurementMethod4102	Perfusion Measurement Method (4102)	11	false
+1.2.840.10008.6.1.988	ArterialInputFunctionMeasurementMethod4103	Arterial Input Function Measurement Method (4103)	11	false
+1.2.840.10008.6.1.989	BolusArrivalTimeDerivationMethod4104	Bolus Arrival Time Derivation Method (4104)	11	false
+1.2.840.10008.6.1.990	PerfusionAnalysisMethod4105	Perfusion Analysis Method (4105)	11	false
+1.2.840.10008.6.1.991	QuantitativeMethodUsedForPerfusionAndTracerKineticModel4106	Quantitative Method Used for Perfusion and Tracer Kinetic Model (4106)	11	false
+1.2.840.10008.6.1.992	TracerKineticModelParameter4107	Tracer Kinetic Model Parameter (4107)	11	false
+1.2.840.10008.6.1.993	PerfusionModelParameter4108	Perfusion Model Parameter (4108)	11	false
+1.2.840.10008.6.1.994	ModelIndependentDynamicContrastAnalysisParameter4109	Model-Independent Dynamic Contrast Analysis Parameter (4109)	11	false
+1.2.840.10008.6.1.995	TracerKineticModelingCovariate4110	Tracer Kinetic Modeling Covariate (4110)	11	false
+1.2.840.10008.6.1.996	ContrastCharacteristic4111	Contrast Characteristic (4111)	11	false
+1.2.840.10008.6.1.997	MeasurementReportDocumentTitle7021	Measurement Report Document Title (7021)	11	false
+1.2.840.10008.6.1.998	QuantitativeDiagnosticImagingProcedure100	Quantitative Diagnostic Imaging Procedure (100)	11	false
+1.2.840.10008.6.1.999	PETRegionOfInterestMeasurement7466	PET Region of Interest Measurement (7466)	11	false
+1.2.840.10008.6.1.1000	GrayLevelCoOccurrenceMatrixMeasurement7467	Gray Level Co-occurrence Matrix Measurement (7467)	11	false
+1.2.840.10008.6.1.1001	TextureMeasurement7468	Texture Measurement (7468)	11	false
+1.2.840.10008.6.1.1002	TimePointType6146	Time Point Type (6146)	11	false
+1.2.840.10008.6.1.1003	GenericIntensityAndSizeMeasurement7469	Generic Intensity and Size Measurement (7469)	11	false
+1.2.840.10008.6.1.1004	ResponseCriteria6147	Response Criteria (6147)	11	false
+1.2.840.10008.6.1.1005	FetalBiometryAnatomicSite12020	Fetal Biometry Anatomic Site (12020)	11	false
+1.2.840.10008.6.1.1006	FetalLongBoneAnatomicSite12021	Fetal Long Bone Anatomic Site (12021)	11	false
+1.2.840.10008.6.1.1007	FetalCraniumAnatomicSite12022	Fetal Cranium Anatomic Site (12022)	11	false
+1.2.840.10008.6.1.1008	PelvisAndUterusAnatomicSite12023	Pelvis and Uterus Anatomic Site (12023)	11	false
+1.2.840.10008.6.1.1009	ParametricMapDerivationImagePurposeOfReference7222	Parametric Map Derivation Image Purpose of Reference (7222)	11	false
+1.2.840.10008.6.1.1010	PhysicalQuantityDescriptor9000	Physical Quantity Descriptor (9000)	11	false
+1.2.840.10008.6.1.1011	LymphNodeAnatomicSite7600	Lymph Node Anatomic Site (7600)	11	false
+1.2.840.10008.6.1.1012	HeadAndNeckCancerAnatomicSite7601	Head and Neck Cancer Anatomic Site (7601)	11	false
+1.2.840.10008.6.1.1013	FiberTractInBrainstem7701	Fiber Tract In Brainstem (7701)	11	false
+1.2.840.10008.6.1.1014	ProjectionAndThalamicFiber7702	Projection and Thalamic Fiber (7702)	11	false
+1.2.840.10008.6.1.1015	AssociationFiber7703	Association Fiber (7703)	11	false
+1.2.840.10008.6.1.1016	LimbicSystemTract7704	Limbic System Tract (7704)	11	false
+1.2.840.10008.6.1.1017	CommissuralFiber7705	Commissural Fiber (7705)	11	false
+1.2.840.10008.6.1.1018	CranialNerve7706	Cranial Nerve (7706)	11	false
+1.2.840.10008.6.1.1019	SpinalCordFiber7707	Spinal Cord Fiber (7707)	11	false
+1.2.840.10008.6.1.1020	TractographyAnatomicSite7710	Tractography Anatomic Site (7710)	11	false
+1.2.840.10008.6.1.1021	PrimaryAnatomicStructureForIntraOralRadiographySupernumeraryDentitionDesignationOfTeeth4025	Primary Anatomic Structure for Intra-oral Radiography (Supernumerary Dentition - Designation of Teeth) (4025)	11	false
+1.2.840.10008.6.1.1022	PrimaryAnatomicStructureForIntraOralAndCraniofacialRadiographyTeeth4026	Primary Anatomic Structure for Intra-oral and Craniofacial Radiography - Teeth (4026)	11	false
+1.2.840.10008.6.1.1023	IEC61217DevicePositionParameter9401	IEC61217 Device Position Parameter (9401)	11	false
+1.2.840.10008.6.1.1024	IEC61217GantryPositionParameter9402	IEC61217 Gantry Position Parameter (9402)	11	false
+1.2.840.10008.6.1.1025	IEC61217PatientSupportPositionParameter9403	IEC61217 Patient Support Position Parameter (9403)	11	false
+1.2.840.10008.6.1.1026	ActionableFindingClassification7035	Actionable Finding Classification (7035)	11	false
+1.2.840.10008.6.1.1027	ImageQualityAssessment7036	Image Quality Assessment (7036)	11	false
+1.2.840.10008.6.1.1028	SummaryRadiationExposureQuantity10050	Summary Radiation Exposure Quantity (10050)	11	false
+1.2.840.10008.6.1.1029	WideFieldOphthalmicPhotographyTransformationMethod4245	Wide Field Ophthalmic Photography Transformation Method (4245)	11	false
+1.2.840.10008.6.1.1030	PETUnit84	PET Unit (84)	11	false
+1.2.840.10008.6.1.1031	ImplantMaterial7300	Implant Material (7300)	11	false
+1.2.840.10008.6.1.1032	InterventionType7301	Intervention Type (7301)	11	false
+1.2.840.10008.6.1.1033	ImplantTemplateViewOrientation7302	Implant Template View Orientation (7302)	11	false
+1.2.840.10008.6.1.1034	ImplantTemplateModifiedViewOrientation7303	Implant Template Modified View Orientation (7303)	11	false
+1.2.840.10008.6.1.1035	ImplantTargetAnatomy7304	Implant Target Anatomy (7304)	11	false
+1.2.840.10008.6.1.1036	ImplantPlanningLandmark7305	Implant Planning Landmark (7305)	11	false
+1.2.840.10008.6.1.1037	HumanHipImplantPlanningLandmark7306	Human Hip Implant Planning Landmark (7306)	11	false
+1.2.840.10008.6.1.1038	ImplantComponentType7307	Implant Component Type (7307)	11	false
+1.2.840.10008.6.1.1039	HumanHipImplantComponentType7308	Human Hip Implant Component Type (7308)	11	false
+1.2.840.10008.6.1.1040	HumanTraumaImplantComponentType7309	Human Trauma Implant Component Type (7309)	11	false
+1.2.840.10008.6.1.1041	ImplantFixationMethod7310	Implant Fixation Method (7310)	11	false
+1.2.840.10008.6.1.1042	DeviceParticipatingRole7445	Device Participating Role (7445)	11	false
+1.2.840.10008.6.1.1043	ContainerType8101	Container Type (8101)	11	false
+1.2.840.10008.6.1.1044	ContainerComponentType8102	Container Component Type (8102)	11	false
+1.2.840.10008.6.1.1045	AnatomicPathologySpecimenType8103	Anatomic Pathology Specimen Type (8103)	11	false
+1.2.840.10008.6.1.1046	BreastTissueSpecimenType8104	Breast Tissue Specimen Type (8104)	11	false
+1.2.840.10008.6.1.1047	SpecimenCollectionProcedure8109	Specimen Collection Procedure (8109)	11	false
+1.2.840.10008.6.1.1048	SpecimenSamplingProcedure8110	Specimen Sampling Procedure (8110)	11	false
+1.2.840.10008.6.1.1049	SpecimenPreparationProcedure8111	Specimen Preparation Procedure (8111)	11	false
+1.2.840.10008.6.1.1050	SpecimenStain8112	Specimen Stain (8112)	11	false
+1.2.840.10008.6.1.1051	SpecimenPreparationStep8113	Specimen Preparation Step (8113)	11	false
+1.2.840.10008.6.1.1052	SpecimenFixative8114	Specimen Fixative (8114)	11	false
+1.2.840.10008.6.1.1053	SpecimenEmbeddingMedia8115	Specimen Embedding Media (8115)	11	false
+1.2.840.10008.6.1.1054	SourceOfProjectionXRayDoseInformation10020	Source of Projection X-Ray Dose Information (10020)	11	false
+1.2.840.10008.6.1.1055	SourceOfCTDoseInformation10021	Source of CT Dose Information (10021)	11	false
+1.2.840.10008.6.1.1056	RadiationDoseReferencePoint10025	Radiation Dose Reference Point (10025)	11	false
+1.2.840.10008.6.1.1057	VolumetricViewDescription501	Volumetric View Description (501)	11	false
+1.2.840.10008.6.1.1058	VolumetricViewModifier502	Volumetric View Modifier (502)	11	false
+1.2.840.10008.6.1.1059	DiffusionAcquisitionValueType7260	Diffusion Acquisition Value Type (7260)	11	false
+1.2.840.10008.6.1.1060	DiffusionModelValueType7261	Diffusion Model Value Type (7261)	11	false
+1.2.840.10008.6.1.1061	DiffusionTractographyAlgorithmFamily7262	Diffusion Tractography Algorithm Family (7262)	11	false
+1.2.840.10008.6.1.1062	DiffusionTractographyMeasurementType7263	Diffusion Tractography Measurement Type (7263)	11	false
+1.2.840.10008.6.1.1063	ResearchAnimalSourceRegistry7490	Research Animal Source Registry (7490)	11	false
+1.2.840.10008.6.1.1064	YesNoOnly231	Yes-No Only (231)	11	false
+1.2.840.10008.6.1.1065	BiosafetyLevel601	Biosafety Level (601)	11	false
+1.2.840.10008.6.1.1066	BiosafetyControlReason602	Biosafety Control Reason (602)	11	false
+1.2.840.10008.6.1.1067	SexMaleFemaleOrBoth7457	Sex - Male Female or Both (7457)	11	false
+1.2.840.10008.6.1.1068	AnimalRoomType603	Animal Room Type (603)	11	false
+1.2.840.10008.6.1.1069	DeviceReuse604	Device Reuse (604)	11	false
+1.2.840.10008.6.1.1070	AnimalBeddingMaterial605	Animal Bedding Material (605)	11	false
+1.2.840.10008.6.1.1071	AnimalShelterType606	Animal Shelter Type (606)	11	false
+1.2.840.10008.6.1.1072	AnimalFeedType607	Animal Feed Type (607)	11	false
+1.2.840.10008.6.1.1073	AnimalFeedSource608	Animal Feed Source (608)	11	false
+1.2.840.10008.6.1.1074	AnimalFeedingMethod609	Animal Feeding Method (609)	11	false
+1.2.840.10008.6.1.1075	WaterType610	Water Type (610)	11	false
+1.2.840.10008.6.1.1076	AnesthesiaCategoryCodeTypeForSmallAnimalAnesthesia611	Anesthesia Category Code Type for Small Animal Anesthesia (611)	11	false
+1.2.840.10008.6.1.1077	AnesthesiaCategoryCodeTypeFromAnesthesiaQualityInitiative612	Anesthesia Category Code Type from Anesthesia Quality Initiative (612)	11	false
+1.2.840.10008.6.1.1078	AnesthesiaInductionCodeTypeForSmallAnimalAnesthesia613	Anesthesia Induction Code Type for Small Animal Anesthesia (613)	11	false
+1.2.840.10008.6.1.1079	AnesthesiaInductionCodeTypeFromAnesthesiaQualityInitiative614	Anesthesia Induction Code Type from Anesthesia Quality Initiative (614)	11	false
+1.2.840.10008.6.1.1080	AnesthesiaMaintenanceCodeTypeForSmallAnimalAnesthesia615	Anesthesia Maintenance Code Type for Small Animal Anesthesia (615)	11	false
+1.2.840.10008.6.1.1081	AnesthesiaMaintenanceCodeTypeFromAnesthesiaQualityInitiative616	Anesthesia Maintenance Code Type from Anesthesia Quality Initiative (616)	11	false
+1.2.840.10008.6.1.1082	AirwayManagementMethodCodeTypeForSmallAnimalAnesthesia617	Airway Management Method Code Type for Small Animal Anesthesia (617)	11	false
+1.2.840.10008.6.1.1083	AirwayManagementMethodCodeTypeFromAnesthesiaQualityInitiative618	Airway Management Method Code Type from Anesthesia Quality Initiative (618)	11	false
+1.2.840.10008.6.1.1084	AirwayManagementSubMethodCodeTypeForSmallAnimalAnesthesia619	Airway Management Sub-Method Code Type for Small Animal Anesthesia (619)	11	false
+1.2.840.10008.6.1.1085	AirwayManagementSubMethodCodeTypeFromAnesthesiaQualityInitiative620	Airway Management Sub-Method Code Type from Anesthesia Quality Initiative (620)	11	false
+1.2.840.10008.6.1.1086	MedicationTypeForSmallAnimalAnesthesia621	Medication Type for Small Animal Anesthesia (621)	11	false
+1.2.840.10008.6.1.1087	MedicationTypeCodeTypeFromAnesthesiaQualityInitiative622	Medication Type Code Type from Anesthesia Quality Initiative (622)	11	false
+1.2.840.10008.6.1.1088	MedicationForSmallAnimalAnesthesia623	Medication for Small Animal Anesthesia (623)	11	false
+1.2.840.10008.6.1.1089	InhalationalAnesthesiaAgentForSmallAnimalAnesthesia624	Inhalational Anesthesia Agent for Small Animal Anesthesia (624)	11	false
+1.2.840.10008.6.1.1090	InjectableAnesthesiaAgentForSmallAnimalAnesthesia625	Injectable Anesthesia Agent for Small Animal Anesthesia (625)	11	false
+1.2.840.10008.6.1.1091	PremedicationAgentForSmallAnimalAnesthesia626	Premedication Agent for Small Animal Anesthesia (626)	11	false
+1.2.840.10008.6.1.1092	NeuromuscularBlockingAgentForSmallAnimalAnesthesia627	Neuromuscular Blocking Agent for Small Animal Anesthesia (627)	11	false
+1.2.840.10008.6.1.1093	AncillaryMedicationsForSmallAnimalAnesthesia628	Ancillary Medications for Small Animal Anesthesia (628)	11	false
+1.2.840.10008.6.1.1094	CarrierGasesForSmallAnimalAnesthesia629	Carrier Gases for Small Animal Anesthesia (629)	11	false
+1.2.840.10008.6.1.1095	LocalAnestheticsForSmallAnimalAnesthesia630	Local Anesthetics for Small Animal Anesthesia (630)	11	false
+1.2.840.10008.6.1.1096	ProcedurePhaseRequiringAnesthesia631	Procedure Phase Requiring Anesthesia (631)	11	false
+1.2.840.10008.6.1.1097	SurgicalProcedurePhaseRequiringAnesthesia632	Surgical Procedure Phase Requiring Anesthesia (632)	11	false
+1.2.840.10008.6.1.1098	PhaseOfImagingProcedureRequiringAnesthesia633RETIRED	Phase of Imaging Procedure Requiring Anesthesia (Retired) (633)	11	true
+1.2.840.10008.6.1.1099	AnimalHandlingPhase634	Animal Handling Phase (634)	11	false
+1.2.840.10008.6.1.1100	HeatingMethod635	Heating Method (635)	11	false
+1.2.840.10008.6.1.1101	TemperatureSensorDeviceComponentTypeForSmallAnimalProcedure636	Temperature Sensor Device Component Type for Small Animal Procedure (636)	11	false
+1.2.840.10008.6.1.1102	ExogenousSubstanceType637	Exogenous Substance Type (637)	11	false
+1.2.840.10008.6.1.1103	ExogenousSubstance638	Exogenous Substance (638)	11	false
+1.2.840.10008.6.1.1104	TumorGraftHistologicType639	Tumor Graft Histologic Type (639)	11	false
+1.2.840.10008.6.1.1105	Fibril640	Fibril (640)	11	false
+1.2.840.10008.6.1.1106	Virus641	Virus (641)	11	false
+1.2.840.10008.6.1.1107	Cytokine642	Cytokine (642)	11	false
+1.2.840.10008.6.1.1108	Toxin643	Toxin (643)	11	false
+1.2.840.10008.6.1.1109	ExogenousSubstanceAdministrationSite644	Exogenous Substance Administration Site (644)	11	false
+1.2.840.10008.6.1.1110	ExogenousSubstanceOriginTissue645	Exogenous Substance Origin Tissue (645)	11	false
+1.2.840.10008.6.1.1111	PreclinicalSmallAnimalImagingProcedure646	Preclinical Small Animal Imaging Procedure (646)	11	false
+1.2.840.10008.6.1.1112	PositionReferenceIndicatorForFrameOfReference647	Position Reference Indicator for Frame of Reference (647)	11	false
+1.2.840.10008.6.1.1113	PresentAbsentOnly241	Present-Absent Only (241)	11	false
+1.2.840.10008.6.1.1114	WaterEquivalentDiameterMethod10024	Water Equivalent Diameter Method (10024)	11	false
+1.2.840.10008.6.1.1115	RadiotherapyPurposeOfReference7022	Radiotherapy Purpose of Reference (7022)	11	false
+1.2.840.10008.6.1.1116	ContentAssessmentType701	Content Assessment Type (701)	11	false
+1.2.840.10008.6.1.1117	RTContentAssessmentType702	RT Content Assessment Type (702)	11	false
+1.2.840.10008.6.1.1118	AssessmentBasis703	Assessment Basis (703)	11	false
+1.2.840.10008.6.1.1119	ReaderSpecialty7449	Reader Specialty (7449)	11	false
+1.2.840.10008.6.1.1120	RequestedReportType9233	Requested Report Type (9233)	11	false
+1.2.840.10008.6.1.1121	CTTransversePlaneReferenceBasis1000	CT Transverse Plane Reference Basis (1000)	11	false
+1.2.840.10008.6.1.1122	AnatomicalReferenceBasis1001	Anatomical Reference Basis (1001)	11	false
+1.2.840.10008.6.1.1123	AnatomicalReferenceBasisHead1002	Anatomical Reference Basis - Head (1002)	11	false
+1.2.840.10008.6.1.1124	AnatomicalReferenceBasisSpine1003	Anatomical Reference Basis - Spine (1003)	11	false
+1.2.840.10008.6.1.1125	AnatomicalReferenceBasisChest1004	Anatomical Reference Basis - Chest (1004)	11	false
+1.2.840.10008.6.1.1126	AnatomicalReferenceBasisAbdomenPelvis1005	Anatomical Reference Basis - Abdomen/Pelvis (1005)	11	false
+1.2.840.10008.6.1.1127	AnatomicalReferenceBasisExtremity1006	Anatomical Reference Basis - Extremity (1006)	11	false
+1.2.840.10008.6.1.1128	ReferenceGeometryPlane1010	Reference Geometry - Plane (1010)	11	false
+1.2.840.10008.6.1.1129	ReferenceGeometryPoint1011	Reference Geometry - Point (1011)	11	false
+1.2.840.10008.6.1.1130	PatientAlignmentMethod1015	Patient Alignment Method (1015)	11	false
+1.2.840.10008.6.1.1131	ContraindicationsForCTImaging1200	Contraindications For CT Imaging (1200)	11	false
+1.2.840.10008.6.1.1132	FiducialCategory7110	Fiducial Category (7110)	11	false
+1.2.840.10008.6.1.1133	Fiducial7111	Fiducial (7111)	11	false
+1.2.840.10008.6.1.1134	NonImageSourceInstancePurposeOfReference7013	Non-Image Source Instance Purpose of Reference (7013)	11	false
+1.2.840.10008.6.1.1135	RTProcessOutput7023	RT Process Output (7023)	11	false
+1.2.840.10008.6.1.1136	RTProcessInput7024	RT Process Input (7024)	11	false
+1.2.840.10008.6.1.1137	RTProcessInputUsed7025	RT Process Input Used (7025)	11	false
+1.2.840.10008.6.1.1138	ProstateAnatomy6300	Prostate Anatomy (6300)	11	false
+1.2.840.10008.6.1.1139	ProstateSectorAnatomyFromPIRADSV26301	Prostate Sector Anatomy from PI-RADS v2 (6301)	11	false
+1.2.840.10008.6.1.1140	ProstateSectorAnatomyFromEuropeanConcensus16SectorMinimalModel6302	Prostate Sector Anatomy from European Concensus 16 Sector (Minimal) Model (6302)	11	false
+1.2.840.10008.6.1.1141	ProstateSectorAnatomyFromEuropeanConcensus27SectorOptimalModel6303	Prostate Sector Anatomy from European Concensus 27 Sector (Optimal) Model (6303)	11	false
+1.2.840.10008.6.1.1142	MeasurementSelectionReason12301	Measurement Selection Reason (12301)	11	false
+1.2.840.10008.6.1.1143	EchoFindingObservationType12302	Echo Finding Observation Type (12302)	11	false
+1.2.840.10008.6.1.1144	EchoMeasurementType12303	Echo Measurement Type (12303)	11	false
+1.2.840.10008.6.1.1145	CardiovascularMeasuredProperty12304	Cardiovascular Measured Property (12304)	11	false
+1.2.840.10008.6.1.1146	BasicEchoAnatomicSite12305	Basic Echo Anatomic Site (12305)	11	false
+1.2.840.10008.6.1.1147	EchoFlowDirection12306	Echo Flow Direction (12306)	11	false
+1.2.840.10008.6.1.1148	CardiacPhaseAndTimePoint12307	Cardiac Phase and Time Point (12307)	11	false
+1.2.840.10008.6.1.1149	CoreEchoMeasurement12300	Core Echo Measurement (12300)	11	false
+1.2.840.10008.6.1.1150	OCTAProcessingAlgorithmFamily4270	OCT-A Processing Algorithm Family (4270)	11	false
+1.2.840.10008.6.1.1151	EnFaceImageType4271	En Face Image Type (4271)	11	false
+1.2.840.10008.6.1.1152	OPTScanPatternType4272	OPT Scan Pattern Type (4272)	11	false
+1.2.840.10008.6.1.1153	RetinalSegmentationSurface4273	Retinal Segmentation Surface (4273)	11	false
+1.2.840.10008.6.1.1154	OrganForRadiationDoseEstimate10060	Organ for Radiation Dose Estimate (10060)	11	false
+1.2.840.10008.6.1.1155	AbsorbedRadiationDoseType10061	Absorbed Radiation Dose Type (10061)	11	false
+1.2.840.10008.6.1.1156	EquivalentRadiationDoseType10062	Equivalent Radiation Dose Type (10062)	11	false
+1.2.840.10008.6.1.1157	RadiationDoseEstimateDistributionRepresentation10063	Radiation Dose Estimate Distribution Representation (10063)	11	false
+1.2.840.10008.6.1.1158	PatientModelType10064	Patient Model Type (10064)	11	false
+1.2.840.10008.6.1.1159	RadiationTransportModelType10065	Radiation Transport Model Type (10065)	11	false
+1.2.840.10008.6.1.1160	AttenuatorCategory10066	Attenuator Category (10066)	11	false
+1.2.840.10008.6.1.1161	RadiationAttenuatorMaterial10067	Radiation Attenuator Material (10067)	11	false
+1.2.840.10008.6.1.1162	EstimateMethodType10068	Estimate Method Type (10068)	11	false
+1.2.840.10008.6.1.1163	RadiationDoseEstimateParameter10069	Radiation Dose Estimate Parameter (10069)	11	false
+1.2.840.10008.6.1.1164	RadiationDoseType10070	Radiation Dose Type (10070)	11	false
+1.2.840.10008.6.1.1165	MRDiffusionComponentSemantic7270	MR Diffusion Component Semantic (7270)	11	false
+1.2.840.10008.6.1.1166	MRDiffusionAnisotropyIndex7271	MR Diffusion Anisotropy Index (7271)	11	false
+1.2.840.10008.6.1.1167	MRDiffusionModelParameter7272	MR Diffusion Model Parameter (7272)	11	false
+1.2.840.10008.6.1.1168	MRDiffusionModel7273	MR Diffusion Model (7273)	11	false
+1.2.840.10008.6.1.1169	MRDiffusionModelFittingMethod7274	MR Diffusion Model Fitting Method (7274)	11	false
+1.2.840.10008.6.1.1170	MRDiffusionModelSpecificMethod7275	MR Diffusion Model Specific Method (7275)	11	false
+1.2.840.10008.6.1.1171	MRDiffusionModelInput7276	MR Diffusion Model Input (7276)	11	false
+1.2.840.10008.6.1.1172	DiffusionRateAreaOverTimeUnit7277	Diffusion Rate Area Over Time Unit (7277)	11	false
+1.2.840.10008.6.1.1173	PediatricSizeCategory7039	Pediatric Size Category (7039)	11	false
+1.2.840.10008.6.1.1174	CalciumScoringPatientSizeCategory7041	Calcium Scoring Patient Size Category (7041)	11	false
+1.2.840.10008.6.1.1175	ReasonForRepeatingAcquisition10034	Reason for Repeating Acquisition (10034)	11	false
+1.2.840.10008.6.1.1176	ProtocolAssertion800	Protocol Assertion (800)	11	false
+1.2.840.10008.6.1.1177	RadiotherapeuticDoseMeasurementDevice7026	Radiotherapeutic Dose Measurement Device (7026)	11	false
+1.2.840.10008.6.1.1178	ExportAdditionalInformationDocumentTitle7014	Export Additional Information Document Title (7014)	11	false
+1.2.840.10008.6.1.1179	ExportDelayReason7015	Export Delay Reason (7015)	11	false
+1.2.840.10008.6.1.1180	LevelOfDifficulty7016	Level of Difficulty (7016)	11	false
+1.2.840.10008.6.1.1181	CategoryOfTeachingMaterialImaging7017	Category of Teaching Material - Imaging (7017)	11	false
+1.2.840.10008.6.1.1182	MiscellaneousDocumentTitle7018	Miscellaneous Document Title (7018)	11	false
+1.2.840.10008.6.1.1183	SegmentationNonImageSourcePurposeOfReference7019	Segmentation Non-Image Source Purpose of Reference (7019)	11	false
+1.2.840.10008.6.1.1184	LongitudinalTemporalEventType280	Longitudinal Temporal Event Type (280)	11	false
+1.2.840.10008.6.1.1185	NonLesionObjectTypePhysicalObject6401	Non-lesion Object Type - Physical Object (6401)	11	false
+1.2.840.10008.6.1.1186	NonLesionObjectTypeSubstance6402	Non-lesion Object Type - Substance (6402)	11	false
+1.2.840.10008.6.1.1187	NonLesionObjectTypeTissue6403	Non-lesion Object Type - Tissue (6403)	11	false
+1.2.840.10008.6.1.1188	ChestNonLesionObjectTypePhysicalObject6404	Chest Non-lesion Object Type - Physical Object (6404)	11	false
+1.2.840.10008.6.1.1189	ChestNonLesionObjectTypeTissue6405	Chest Non-lesion Object Type - Tissue (6405)	11	false
+1.2.840.10008.6.1.1190	TissueSegmentationPropertyType7191	Tissue Segmentation Property Type (7191)	11	false
+1.2.840.10008.6.1.1191	AnatomicalStructureSegmentationPropertyType7192	Anatomical Structure Segmentation Property Type (7192)	11	false
+1.2.840.10008.6.1.1192	PhysicalObjectSegmentationPropertyType7193	Physical Object Segmentation Property Type (7193)	11	false
+1.2.840.10008.6.1.1193	MorphologicallyAbnormalStructureSegmentationPropertyType7194	Morphologically Abnormal Structure Segmentation Property Type (7194)	11	false
+1.2.840.10008.6.1.1194	FunctionSegmentationPropertyType7195	Function Segmentation Property Type (7195)	11	false
+1.2.840.10008.6.1.1195	SpatialAndRelationalConceptSegmentationPropertyType7196	Spatial and Relational Concept Segmentation Property Type (7196)	11	false
+1.2.840.10008.6.1.1196	BodySubstanceSegmentationPropertyType7197	Body Substance Segmentation Property Type (7197)	11	false
+1.2.840.10008.6.1.1197	SubstanceSegmentationPropertyType7198	Substance Segmentation Property Type (7198)	11	false
+1.2.840.10008.6.1.1198	InterpretationRequestDiscontinuationReason9303	Interpretation Request Discontinuation Reason (9303)	11	false
+1.2.840.10008.6.1.1199	GrayLevelRunLengthBasedFeature7475	Gray Level Run Length Based Feature (7475)	11	false
+1.2.840.10008.6.1.1200	GrayLevelSizeZoneBasedFeature7476	Gray Level Size Zone Based Feature (7476)	11	false
+1.2.840.10008.6.1.1201	EncapsulatedDocumentSourcePurposeOfReference7060	Encapsulated Document Source Purpose of Reference (7060)	11	false
+1.2.840.10008.6.1.1202	ModelDocumentTitle7061	Model Document Title (7061)	11	false
+1.2.840.10008.6.1.1203	PurposeOfReferenceToPredecessor3DModel7062	Purpose of Reference to Predecessor 3D Model (7062)	11	false
+1.2.840.10008.6.1.1204	ModelScaleUnit7063	Model Scale Unit (7063)	11	false
+1.2.840.10008.6.1.1205	ModelUsage7064	Model Usage (7064)	11	false
+1.2.840.10008.6.1.1206	RadiationDoseUnit10071	Radiation Dose Unit (10071)	11	false
+1.2.840.10008.6.1.1207	RadiotherapyFiducial7112	Radiotherapy Fiducial (7112)	11	false
+1.2.840.10008.6.1.1208	MultiEnergyRelevantMaterial300	Multi-energy Relevant Material (300)	11	false
+1.2.840.10008.6.1.1209	MultiEnergyMaterialUnit301	Multi-energy Material Unit (301)	11	false
+1.2.840.10008.6.1.1210	DosimetricObjectiveType9500	Dosimetric Objective Type (9500)	11	false
+1.2.840.10008.6.1.1211	PrescriptionAnatomyCategory9501	Prescription Anatomy Category (9501)	11	false
+1.2.840.10008.6.1.1212	RTSegmentAnnotationCategory9502	RT Segment Annotation Category (9502)	11	false
+1.2.840.10008.6.1.1213	RadiotherapyTherapeuticRoleCategory9503	Radiotherapy Therapeutic Role Category (9503)	11	false
+1.2.840.10008.6.1.1214	RTGeometricInformation9504	RT Geometric Information (9504)	11	false
+1.2.840.10008.6.1.1215	FixationOrPositioningDevice9505	Fixation or Positioning Device (9505)	11	false
+1.2.840.10008.6.1.1216	BrachytherapyDevice9506	Brachytherapy Device (9506)	11	false
+1.2.840.10008.6.1.1217	ExternalBodyModel9507	External Body Model (9507)	11	false
+1.2.840.10008.6.1.1218	NonSpecificVolume9508	Non-specific Volume (9508)	11	false
+1.2.840.10008.6.1.1219	PurposeOfReferenceForRTPhysicianIntentInput9509	Purpose of Reference For RT Physician Intent Input (9509)	11	false
+1.2.840.10008.6.1.1220	PurposeOfReferenceForRTTreatmentPlanningInput9510	Purpose of Reference For RT Treatment Planning Input (9510)	11	false
+1.2.840.10008.6.1.1221	GeneralExternalRadiotherapyProcedureTechnique9511	General External Radiotherapy Procedure Technique (9511)	11	false
+1.2.840.10008.6.1.1222	TomotherapeuticRadiotherapyProcedureTechnique9512	Tomotherapeutic Radiotherapy Procedure Technique (9512)	11	false
+1.2.840.10008.6.1.1223	FixationDevice9513	Fixation Device (9513)	11	false
+1.2.840.10008.6.1.1224	AnatomicalStructureForRadiotherapy9514	Anatomical Structure For Radiotherapy (9514)	11	false
+1.2.840.10008.6.1.1225	RTPatientSupportDevice9515	RT Patient Support Device (9515)	11	false
+1.2.840.10008.6.1.1226	RadiotherapyBolusDeviceType9516	Radiotherapy Bolus Device Type (9516)	11	false
+1.2.840.10008.6.1.1227	RadiotherapyBlockDeviceType9517	Radiotherapy Block Device Type (9517)	11	false
+1.2.840.10008.6.1.1228	RadiotherapyAccessoryNoSlotHolderDeviceType9518	Radiotherapy Accessory No-slot Holder Device Type (9518)	11	false
+1.2.840.10008.6.1.1229	RadiotherapyAccessorySlotHolderDeviceType9519	Radiotherapy Accessory Slot Holder Device Type (9519)	11	false
+1.2.840.10008.6.1.1230	SegmentedRTAccessoryDevice9520	Segmented RT Accessory Device (9520)	11	false
+1.2.840.10008.6.1.1231	RadiotherapyTreatmentEnergyUnit9521	Radiotherapy Treatment Energy Unit (9521)	11	false
+1.2.840.10008.6.1.1232	MultiSourceRadiotherapyProcedureTechnique9522	Multi-source Radiotherapy Procedure Technique (9522)	11	false
+1.2.840.10008.6.1.1233	RoboticRadiotherapyProcedureTechnique9523	Robotic Radiotherapy Procedure Technique (9523)	11	false
+1.2.840.10008.6.1.1234	RadiotherapyProcedureTechnique9524	Radiotherapy Procedure Technique (9524)	11	false
+1.2.840.10008.6.1.1235	RadiationTherapyParticle9525	Radiation Therapy Particle (9525)	11	false
+1.2.840.10008.6.1.1236	IonTherapyParticle9526	Ion Therapy Particle (9526)	11	false
+1.2.840.10008.6.1.1237	TeletherapyIsotope9527	Teletherapy Isotope (9527)	11	false
+1.2.840.10008.6.1.1238	BrachytherapyIsotope9528	Brachytherapy Isotope (9528)	11	false
+1.2.840.10008.6.1.1239	SingleDoseDosimetricObjective9529	Single Dose Dosimetric Objective (9529)	11	false
+1.2.840.10008.6.1.1240	PercentageAndDoseDosimetricObjective9530	Percentage and Dose Dosimetric Objective (9530)	11	false
+1.2.840.10008.6.1.1241	VolumeAndDoseDosimetricObjective9531	Volume and Dose Dosimetric Objective (9531)	11	false
+1.2.840.10008.6.1.1242	NoParameterDosimetricObjective9532	No-Parameter Dosimetric Objective (9532)	11	false
+1.2.840.10008.6.1.1243	DeliveryTimeStructure9533	Delivery Time Structure (9533)	11	false
+1.2.840.10008.6.1.1244	RadiotherapyTarget9534	Radiotherapy Target (9534)	11	false
+1.2.840.10008.6.1.1245	RadiotherapyDoseCalculationRole9535	Radiotherapy Dose Calculation Role (9535)	11	false
+1.2.840.10008.6.1.1246	RadiotherapyPrescribingAndSegmentingPersonRole9536	Radiotherapy Prescribing and Segmenting Person Role (9536)	11	false
+1.2.840.10008.6.1.1247	EffectiveDoseCalculationMethodCategory9537	Effective Dose Calculation Method Category (9537)	11	false
+1.2.840.10008.6.1.1248	RadiationTransportBasedEffectiveDoseMethodModifier9538	Radiation Transport-based Effective Dose Method Modifier (9538)	11	false
+1.2.840.10008.6.1.1249	FractionationBasedEffectiveDoseMethodModifier9539	Fractionation-based Effective Dose Method Modifier (9539)	11	false
+1.2.840.10008.6.1.1250	ImagingAgentAdministrationAdverseEvent60	Imaging Agent Administration Adverse Event (60)	11	false
+1.2.840.10008.6.1.1251	TimeRelativeToProcedure61RETIRED	Time Relative to Procedure (Retired) (61)	11	true
+1.2.840.10008.6.1.1252	ImagingAgentAdministrationPhaseType62	Imaging Agent Administration Phase Type (62)	11	false
+1.2.840.10008.6.1.1253	ImagingAgentAdministrationMode63	Imaging Agent Administration Mode (63)	11	false
+1.2.840.10008.6.1.1254	ImagingAgentAdministrationPatientState64	Imaging Agent Administration Patient State (64)	11	false
+1.2.840.10008.6.1.1255	ImagingAgentAdministrationPremedication65	Imaging Agent Administration Premedication (65)	11	false
+1.2.840.10008.6.1.1256	ImagingAgentAdministrationMedication66	Imaging Agent Administration Medication (66)	11	false
+1.2.840.10008.6.1.1257	ImagingAgentAdministrationCompletionStatus67	Imaging Agent Administration Completion Status (67)	11	false
+1.2.840.10008.6.1.1258	ImagingAgentAdministrationPharmaceuticalPresentationUnit68	Imaging Agent Administration Pharmaceutical Presentation Unit (68)	11	false
+1.2.840.10008.6.1.1259	ImagingAgentAdministrationConsumable69	Imaging Agent Administration Consumable (69)	11	false
+1.2.840.10008.6.1.1260	Flush70	Flush (70)	11	false
+1.2.840.10008.6.1.1261	ImagingAgentAdministrationInjectorEventType71	Imaging Agent Administration Injector Event Type (71)	11	false
+1.2.840.10008.6.1.1262	ImagingAgentAdministrationStepType72	Imaging Agent Administration Step Type (72)	11	false
+1.2.840.10008.6.1.1263	BolusShapingCurve73	Bolus Shaping Curve (73)	11	false
+1.2.840.10008.6.1.1264	ImagingAgentAdministrationConsumableCatheterType74	Imaging Agent Administration Consumable Catheter Type (74)	11	false
+1.2.840.10008.6.1.1265	LowHighOrEqual75	Low High or Equal (75)	11	false
+1.2.840.10008.6.1.1266	PremedicationType76	Premedication Type (76)	11	false
+1.2.840.10008.6.1.1267	LateralityWithMedian245	Laterality with Median (245)	11	false
+1.2.840.10008.6.1.1268	DermatologyAnatomicSite4029	Dermatology Anatomic Site (4029)	11	false
+1.2.840.10008.6.1.1269	QuantitativeImageFeature218	Quantitative Image Feature (218)	11	false
+1.2.840.10008.6.1.1270	GlobalShapeDescriptor7477	Global Shape Descriptor (7477)	11	false
+1.2.840.10008.6.1.1271	IntensityHistogramFeature7478	Intensity Histogram Feature (7478)	11	false
+1.2.840.10008.6.1.1272	GreyLevelDistanceZoneBasedFeature7479	Grey Level Distance Zone Based Feature (7479)	11	false
+1.2.840.10008.6.1.1273	NeighbourhoodGreyToneDifferenceBasedFeature7500	Neighbourhood Grey Tone Difference Based Feature (7500)	11	false
+1.2.840.10008.6.1.1274	NeighbouringGreyLevelDependenceBasedFeature7501	Neighbouring Grey Level Dependence Based Feature (7501)	11	false
+1.2.840.10008.6.1.1275	CorneaMeasurementMethodDescriptor4242	Cornea Measurement Method Descriptor (4242)	11	false
+1.2.840.10008.6.1.1276	SegmentedRadiotherapeuticDoseMeasurementDevice7027	Segmented Radiotherapeutic Dose Measurement Device (7027)	11	false
+1.2.840.10008.6.1.1277	ClinicalCourseOfDisease6098	Clinical Course of Disease (6098)	11	false
+1.2.840.10008.6.1.1278	RacialGroup6099	Racial Group (6099)	11	false
+1.2.840.10008.6.1.1279	RelativeLaterality246	Relative Laterality (246)	11	false
+1.2.840.10008.6.1.1280	BrainLesionSegmentationTypeWithNecrosis7168	Brain Lesion Segmentation Type With Necrosis (7168)	11	false
+1.2.840.10008.6.1.1281	BrainLesionSegmentationTypeWithoutNecrosis7169	Brain Lesion Segmentation Type Without Necrosis (7169)	11	false
+1.2.840.10008.6.1.1282	NonAcquisitionModality32	Non-Acquisition Modality (32)	11	false
+1.2.840.10008.6.1.1283	Modality33	Modality (33)	11	false
+1.2.840.10008.6.1.1284	LateralityLeftRightOnly247	Laterality Left-Right Only (247)	11	false
+1.2.840.10008.6.1.1285	QualitativeEvaluationModifierType210	Qualitative Evaluation Modifier Type (210)	11	false
+1.2.840.10008.6.1.1286	QualitativeEvaluationModifierValue211	Qualitative Evaluation Modifier Value (211)	11	false
+1.2.840.10008.6.1.1287	GenericAnatomicLocationModifier212	Generic Anatomic Location Modifier (212)	11	false
+1.2.840.10008.6.1.1288	BeamLimitingDeviceType9541	Beam Limiting Device Type (9541)	11	false
+1.2.840.10008.6.1.1289	CompensatorDeviceType9542	Compensator Device Type (9542)	11	false
+1.2.840.10008.6.1.1290	RadiotherapyTreatmentMachineMode9543	Radiotherapy Treatment Machine Mode (9543)	11	false
+1.2.840.10008.6.1.1291	RadiotherapyDistanceReferenceLocation9544	Radiotherapy Distance Reference Location (9544)	11	false
+1.2.840.10008.6.1.1292	FixedBeamLimitingDeviceType9545	Fixed Beam Limiting Device Type (9545)	11	false
+1.2.840.10008.6.1.1293	RadiotherapyWedgeType9546	Radiotherapy Wedge Type (9546)	11	false
+1.2.840.10008.6.1.1294	RTBeamLimitingDeviceOrientationLabel9547	RT Beam Limiting Device Orientation Label (9547)	11	false
+1.2.840.10008.6.1.1295	GeneralAccessoryDeviceType9548	General Accessory Device Type (9548)	11	false
+1.2.840.10008.6.1.1296	RadiationGenerationModeType9549	Radiation Generation Mode Type (9549)	11	false
+1.2.840.10008.6.1.1297	CArmPhotonElectronDeliveryRateUnit9550	C-Arm Photon-Electron Delivery Rate Unit (9550)	11	false
+1.2.840.10008.6.1.1298	TreatmentDeliveryDeviceType9551	Treatment Delivery Device Type (9551)	11	false
+1.2.840.10008.6.1.1299	CArmPhotonElectronDosimeterUnit9552	C-Arm Photon-Electron Dosimeter Unit (9552)	11	false
+1.2.840.10008.6.1.1300	TreatmentPoint9553	Treatment Point (9553)	11	false
+1.2.840.10008.6.1.1301	EquipmentReferencePoint9554	Equipment Reference Point (9554)	11	false
+1.2.840.10008.6.1.1302	RadiotherapyTreatmentPlanningPersonRole9555	Radiotherapy Treatment Planning Person Role (9555)	11	false
+1.2.840.10008.6.1.1303	RealTimeVideoRenditionTitle7070	Real Time Video Rendition Title (7070)	11	false
+1.2.840.10008.6.1.1304	GeometryGraphicalRepresentation219	Geometry Graphical Representation (219)	11	false
+1.2.840.10008.6.1.1305	VisualExplanation217	Visual Explanation (217)	11	false
+1.2.840.10008.6.1.1306	ProstateSectorAnatomyFromPIRADSV216304	Prostate Sector Anatomy from PI-RADS v2.1 (6304)	11	false
+1.2.840.10008.6.1.1307	RadiotherapyRoboticNodeSet9556	Radiotherapy Robotic Node Set (9556)	11	false
+1.2.840.10008.6.1.1308	TomotherapeuticDosimeterUnit9557	Tomotherapeutic Dosimeter Unit (9557)	11	false
+1.2.840.10008.6.1.1309	TomotherapeuticDoseRateUnit9558	Tomotherapeutic Dose Rate Unit (9558)	11	false
+1.2.840.10008.6.1.1310	RoboticDeliveryDeviceDosimeterUnit9559	Robotic Delivery Device Dosimeter Unit (9559)	11	false
+1.2.840.10008.6.1.1311	RoboticDeliveryDeviceDoseRateUnit9560	Robotic Delivery Device Dose Rate Unit (9560)	11	false
+1.2.840.10008.6.1.1312	AnatomicStructure8134	Anatomic Structure (8134)	11	false
+1.2.840.10008.6.1.1313	MediastinumFindingOrFeature6148	Mediastinum Finding or Feature (6148)	11	false
+1.2.840.10008.6.1.1314	MediastinumAnatomy6149	Mediastinum Anatomy (6149)	11	false
+1.2.840.10008.6.1.1315	VascularUltrasoundReportDocumentTitle12100	Vascular Ultrasound Report Document Title (12100)	11	false
+1.2.840.10008.6.1.1316	OrganPartNonLateralized12130	Organ Part (Non-Lateralized) (12130)	11	false
+1.2.840.10008.6.1.1317	OrganPartLateralized12131	Organ Part (Lateralized) (12131)	11	false
+1.2.840.10008.6.1.1318	TreatmentTerminationReason9561	Treatment Termination Reason (9561)	11	false
+1.2.840.10008.6.1.1319	RadiotherapyTreatmentDeliveryPersonRole9562	Radiotherapy Treatment Delivery Person Role (9562)	11	false
+1.2.840.10008.6.1.1320	RadiotherapyInterlockResolution9563	Radiotherapy Interlock Resolution (9563)	11	false
+1.2.840.10008.6.1.1321	TreatmentSessionConfirmationAssertion9564	Treatment Session Confirmation Assertion (9564)	11	false
+1.2.840.10008.6.1.1322	TreatmentToleranceViolationCause9565	Treatment Tolerance Violation Cause (9565)	11	false
+1.2.840.10008.6.1.1323	ClinicalToleranceViolationType9566	Clinical Tolerance Violation Type (9566)	11	false
+1.2.840.10008.6.1.1324	MachineToleranceViolationType9567	Machine Tolerance Violation Type (9567)	11	false
+1.2.840.10008.6.1.1325	RadiotherapyTreatmentInterlock9568	Radiotherapy Treatment Interlock (9568)	11	false
+1.2.840.10008.6.1.1326	IsocentricPatientSupportPositionParameter9569	Isocentric Patient Support Position Parameter (9569)	11	false
+1.2.840.10008.6.1.1327	RTOverriddenTreatmentParameter9570	RT Overridden Treatment Parameter (9570)	11	false
+1.2.840.10008.6.1.1328	EEGLead3030	EEG Lead (3030)	11	false
+1.2.840.10008.6.1.1329	LeadLocationNearOrInMuscle3031	Lead Location Near or in Muscle (3031)	11	false
+1.2.840.10008.6.1.1330	LeadLocationNearPeripheralNerve3032	Lead Location Near Peripheral Nerve (3032)	11	false
+1.2.840.10008.6.1.1331	EOGLead3033	EOG Lead (3033)	11	false
+1.2.840.10008.6.1.1332	BodyPositionChannel3034	Body Position Channel (3034)	11	false
+1.2.840.10008.6.1.1333	EEGAnnotationNeurophysiologicEnumeration3035	EEG Annotation – Neurophysiologic Enumeration (3035)	11	false
+1.2.840.10008.6.1.1334	EMGAnnotationNeurophysiologicalEnumeration3036	EMG Annotation – Neurophysiological Enumeration (3036)	11	false
+1.2.840.10008.6.1.1335	EOGAnnotationNeurophysiologicalEnumeration3037	EOG Annotation – Neurophysiological Enumeration (3037)	11	false
+1.2.840.10008.6.1.1336	PatternEvent3038	Pattern Event (3038)	11	false
+1.2.840.10008.6.1.1337	DeviceRelatedAndEnvironmentRelatedEvent3039	Device-related and Environment-related Event (3039)	11	false
+1.2.840.10008.6.1.1338	EEGAnnotationNeurologicalMonitoringMeasurement3040	EEG Annotation - Neurological Monitoring Measurement (3040)	11	false
+1.2.840.10008.6.1.1339	OBGYNUltrasoundReportDocumentTitle12024	OB-GYN Ultrasound Report Document Title (12024)	11	false
+1.2.840.10008.6.1.1340	AutomationOfMeasurement7230	Automation of Measurement (7230)	11	false
+1.2.840.10008.6.1.1341	OBGYNUltrasoundBeamPath12025	OB-GYN Ultrasound Beam Path (12025)	11	false
+1.2.840.10008.6.1.1342	AngleMeasurement7550	Angle Measurement (7550)	11	false
+1.2.840.10008.6.1.1343	GenericPurposeOfReferenceToImagesAndCoordinatesInMeasurement7551	Generic Purpose of Reference to Images and Coordinates in Measurement (7551)	11	false
+1.2.840.10008.6.1.1344	GenericPurposeOfReferenceToImagesInMeasurement7552	Generic Purpose of Reference to Images in Measurement (7552)	11	false
+1.2.840.10008.6.1.1345	GenericPurposeOfReferenceToCoordinatesInMeasurement7553	Generic Purpose of Reference to Coordinates in Measurement (7553)	11	false
+1.2.840.10008.6.1.1346	FitzpatrickSkinType4401	Fitzpatrick Skin Type (4401)	11	false
+1.2.840.10008.6.1.1347	HistoryOfMalignantMelanoma4402	History of Malignant Melanoma (4402)	11	false
+1.2.840.10008.6.1.1348	HistoryOfMelanomaInSitu4403	History of Melanoma in Situ (4403)	11	false
+1.2.840.10008.6.1.1349	HistoryOfNonMelanomaSkinCancer4404	History of Non-Melanoma Skin Cancer (4404)	11	false
+1.2.840.10008.6.1.1350	SkinDisorder4405	Skin Disorder (4405)	11	false
+1.2.840.10008.6.1.1351	PatientReportedLesionCharacteristic4406	Patient Reported Lesion Characteristic (4406)	11	false
+1.2.840.10008.6.1.1352	LesionPalpationFinding4407	Lesion Palpation Finding (4407)	11	false
+1.2.840.10008.6.1.1353	LesionVisualFinding4408	Lesion Visual Finding (4408)	11	false
+1.2.840.10008.6.1.1354	SkinProcedure4409	Skin Procedure (4409)	11	false
+1.2.840.10008.6.1.1355	AbdominopelvicVessel12125	Abdominopelvic Vessel (12125)	11	false
+1.2.840.10008.6.1.1356	NumericValueFailureQualifier43	Numeric Value Failure Qualifier (43)	11	false
+1.2.840.10008.6.1.1357	NumericValueUnknownQualifier44	Numeric Value Unknown Qualifier (44)	11	false
+1.2.840.10008.6.1.1358	CouinaudLiverSegment7170	Couinaud Liver Segment (7170)	11	false
+1.2.840.10008.6.1.1359	LiverSegmentationType7171	Liver Segmentation Type (7171)	11	false
+1.2.840.10008.6.1.1360	ContraindicationsForXAImaging1201	Contraindications For XA Imaging (1201)	11	false
+1.2.840.10008.6.1.1361	NeurophysiologicStimulationMode3041	Neurophysiologic Stimulation Mode (3041)	11	false
+1.2.840.10008.6.1.1362	ReportedValueType10072	Reported Value Type (10072)	11	false
+1.2.840.10008.6.1.1363	ValueTiming10073	Value Timing (10073)	11	false
+1.2.840.10008.6.1.1364	RDSRFrameOfReferenceOrigin10074	RDSR Frame of Reference Origin (10074)	11	false
+1.2.840.10008.6.1.1365	MicroscopyAnnotationPropertyType8135	Microscopy Annotation Property Type (8135)	11	false
+1.2.840.10008.6.1.1366	MicroscopyMeasurementType8136	Microscopy Measurement Type (8136)	11	false
+1.2.840.10008.6.1.1367	ProstateReportingSystem6310	Prostate Reporting System (6310)	11	false
+1.2.840.10008.6.1.1368	MRSignalIntensity6311	MR Signal Intensity (6311)	11	false
+1.2.840.10008.6.1.1369	CrossSectionalScanPlaneOrientation6312	Cross-sectional Scan Plane Orientation (6312)	11	false
+1.2.840.10008.6.1.1370	HistoryOfProstateDisease6313	History of Prostate Disease (6313)	11	false
+1.2.840.10008.6.1.1371	ProstateMRIStudyQualityFinding6314	Prostate MRI Study Quality Finding (6314)	11	false
+1.2.840.10008.6.1.1372	ProstateMRISeriesQualityFinding6315	Prostate MRI Series Quality Finding (6315)	11	false
+1.2.840.10008.6.1.1373	MRImagingArtifact6316	MR Imaging Artifact (6316)	11	false
+1.2.840.10008.6.1.1374	ProstateDCEMRIQualityFinding6317	Prostate DCE MRI Quality Finding (6317)	11	false
+1.2.840.10008.6.1.1375	ProstateDWIMRIQualityFinding6318	Prostate DWI MRI Quality Finding (6318)	11	false
+1.2.840.10008.6.1.1376	AbdominalInterventionType6319	Abdominal Intervention Type (6319)	11	false
+1.2.840.10008.6.1.1377	AbdominopelvicIntervention6320	Abdominopelvic Intervention (6320)	11	false
+1.2.840.10008.6.1.1378	ProstateCancerDiagnosticProcedure6321	Prostate Cancer Diagnostic Procedure (6321)	11	false
+1.2.840.10008.6.1.1379	ProstateCancerFamilyHistory6322	Prostate Cancer Family History (6322)	11	false
+1.2.840.10008.6.1.1380	ProstateCancerTherapy6323	Prostate Cancer Therapy (6323)	11	false
+1.2.840.10008.6.1.1381	ProstateMRIAssessment6324	Prostate MRI Assessment (6324)	11	false
+1.2.840.10008.6.1.1382	OverallAssessmentFromPIRADS6325	Overall Assessment from PI-RADS® (6325)	11	false
+1.2.840.10008.6.1.1383	ImageQualityControlStandard6326	Image Quality Control Standard (6326)	11	false
+1.2.840.10008.6.1.1384	ProstateImagingIndication6327	Prostate Imaging Indication (6327)	11	false
+1.2.840.10008.6.1.1385	PIRADSV2LesionAssessmentCategory6328	PI-RADS® v2 Lesion Assessment Category (6328)	11	false
+1.2.840.10008.6.1.1386	PIRADSV2T2WIPZLesionAssessmentCategory6329	PI-RADS® v2 T2WI PZ Lesion Assessment Category (6329)	11	false
+1.2.840.10008.6.1.1387	PIRADSV2T2WITZLesionAssessmentCategory6330	PI-RADS® v2 T2WI TZ Lesion Assessment Category (6330)	11	false
+1.2.840.10008.6.1.1388	PIRADSV2DWILesionAssessmentCategory6331	PI-RADS® v2 DWI Lesion Assessment Category (6331)	11	false
+1.2.840.10008.6.1.1389	PIRADSV2DCELesionAssessmentCategory6332	PI-RADS® v2 DCE Lesion Assessment Category (6332)	11	false
+1.2.840.10008.6.1.1390	mpMRIAssessmentType6333	mpMRI Assessment Type (6333)	11	false
+1.2.840.10008.6.1.1391	mpMRIAssessmentTypeFromPIRADS6334	mpMRI Assessment Type from PI-RADS® (6334)	11	false
+1.2.840.10008.6.1.1392	mpMRIAssessmentValue6335	mpMRI Assessment Value (6335)	11	false
+1.2.840.10008.6.1.1393	MRIAbnormality6336	MRI Abnormality (6336)	11	false
+1.2.840.10008.6.1.1394	mpMRIProstateAbnormalityFromPIRADS6337	mpMRI Prostate Abnormality from PI-RADS® (6337)	11	false
+1.2.840.10008.6.1.1395	mpMRIBenignProstateAbnormalityFromPIRADS6338	mpMRI Benign Prostate Abnormality from PI-RADS® (6338)	11	false
+1.2.840.10008.6.1.1396	MRIShapeCharacteristic6339	MRI Shape Characteristic (6339)	11	false
+1.2.840.10008.6.1.1397	ProstateMRIShapeCharacteristicFromPIRADS6340	Prostate MRI Shape Characteristic from PI-RADS® (6340)	11	false
+1.2.840.10008.6.1.1398	MRIMarginCharacteristic6341	MRI Margin Characteristic (6341)	11	false
+1.2.840.10008.6.1.1399	ProstateMRIMarginCharacteristicFromPIRADS6342	Prostate MRI Margin Characteristic from PI-RADS® (6342)	11	false
+1.2.840.10008.6.1.1400	MRISignalCharacteristic6343	MRI Signal Characteristic (6343)	11	false
+1.2.840.10008.6.1.1401	ProstateMRISignalCharacteristicFromPIRADS6344	Prostate MRI Signal Characteristic from PI-RADS® (6344)	11	false
+1.2.840.10008.6.1.1402	MRIEnhancementPattern6345	MRI Enhancement Pattern (6345)	11	false
+1.2.840.10008.6.1.1403	ProstateMRIEnhancementPatternFromPIRADS6346	Prostate MRI Enhancement Pattern from PI-RADS® (6346)	11	false
+1.2.840.10008.6.1.1404	ProstateMRIExtraProstaticFinding6347	Prostate MRI Extra-prostatic Finding (6347)	11	false
+1.2.840.10008.6.1.1405	ProstateMRIAssessmentOfExtraProstaticAnatomicSite6348	Prostate MRI Assessment of Extra-prostatic Anatomic Site (6348)	11	false
+1.2.840.10008.6.1.1406	MRCoilType6349	MR Coil Type (6349)	11	false
+1.2.840.10008.6.1.1407	EndorectalCoilFillSubstance6350	Endorectal Coil Fill Substance (6350)	11	false
+1.2.840.10008.6.1.1408	ProstateRelationalMeasurement6351	Prostate Relational Measurement (6351)	11	false
+1.2.840.10008.6.1.1409	ProstateCancerDiagnosticBloodLabMeasurement6352	Prostate Cancer Diagnostic Blood Lab Measurement (6352)	11	false
+1.2.840.10008.6.1.1410	ProstateImagingTypesOfQualityControlStandard6353	Prostate Imaging Types of Quality Control Standard (6353)	11	false
+1.2.840.10008.6.1.1411	UltrasoundShearWaveMeasurement12308	Ultrasound Shear Wave Measurement (12308)	11	false
+1.2.840.10008.6.1.1412	LeftVentricleMyocardialWall16SegmentModel3780RETIRED	Left Ventricle Myocardial Wall 16 Segment Model (Retired) (3780)	11	true
+1.2.840.10008.6.1.1413	LeftVentricleMyocardialWall18SegmentModel3781	Left Ventricle Myocardial Wall 18 Segment Model (3781)	11	false
+1.2.840.10008.6.1.1414	LeftVentricleBasalWall6Segments3782	Left Ventricle Basal Wall 6 Segments (3782)	11	false
+1.2.840.10008.6.1.1415	LeftVentricleMidlevelWall6Segments3783	Left Ventricle Midlevel Wall 6 Segments (3783)	11	false
+1.2.840.10008.6.1.1416	LeftVentricleApicalWall4Segments3784	Left Ventricle Apical Wall 4 Segments (3784)	11	false
+1.2.840.10008.6.1.1417	LeftVentricleApicalWall6Segments3785	Left Ventricle Apical Wall 6 Segments (3785)	11	false
+1.2.840.10008.6.1.1418	PatientTreatmentPreparationMethod9571	Patient Treatment Preparation Method (9571)	11	false
+1.2.840.10008.6.1.1419	PatientShieldingDevice9572	Patient Shielding Device (9572)	11	false
+1.2.840.10008.6.1.1420	PatientTreatmentPreparationDevice9573	Patient Treatment Preparation Device (9573)	11	false
+1.2.840.10008.6.1.1421	PatientPositionDisplacementReferencePoint9574	Patient Position Displacement Reference Point (9574)	11	false
+1.2.840.10008.6.1.1422	PatientAlignmentDevice9575	Patient Alignment Device (9575)	11	false
+1.2.840.10008.6.1.1423	ReasonsForRTRadiationTreatmentOmission9576	Reasons for RT Radiation Treatment Omission (9576)	11	false
+1.2.840.10008.6.1.1424	PatientTreatmentPreparationProcedure9577	Patient Treatment Preparation Procedure (9577)	11	false
+1.2.840.10008.6.1.1425	MotionManagementSetupDevice9578	Motion Management Setup Device (9578)	11	false
+1.2.840.10008.6.1.1426	CoreEchoStrainMeasurement12309	Core Echo Strain Measurement (12309)	11	false
+1.2.840.10008.6.1.1427	MyocardialStrainMethod12310	Myocardial Strain Method (12310)	11	false
+1.2.840.10008.6.1.1428	EchoMeasuredStrainProperty12311	Echo Measured Strain Property (12311)	11	false
+1.2.840.10008.6.1.1429	AssessmentFromCADRADS3020	Assessment from CAD-RADS™ (3020)	11	false
+1.2.840.10008.6.1.1430	CADRADSStenosisAssessmentModifier3021	CAD-RADS™ Stenosis Assessment Modifier (3021)	11	false
+1.2.840.10008.6.1.1431	CADRADSAssessmentModifier3022	CAD-RADS™ Assessment Modifier (3022)	11	false
+1.2.840.10008.6.1.1432	RTSegmentMaterial9579	RT Segment Material (9579)	11	false
+1.2.840.10008.6.1.1433	VertebralAnatomicStructure7602	Vertebral Anatomic Structure (7602)	11	false
+1.2.840.10008.6.1.1434	Vertebra7603	Vertebra (7603)	11	false
+1.2.840.10008.6.1.1435	IntervertebralDisc7604	Intervertebral Disc (7604)	11	false
+1.2.840.10008.6.1.1436	ImagingProcedure101	Imaging Procedure (101)	11	false
+1.2.840.10008.6.1.1437	NICIPShortCodeImagingProcedure103	NICIP Short Code Imaging Procedure (103)	11	false
+1.2.840.10008.6.1.1438	NICIPSNOMEDImagingProcedure104	NICIP SNOMED Imaging Procedure (104)	11	false
+1.2.840.10008.6.1.1439	ICD10PCSImagingProcedure105	ICD-10-PCS Imaging Procedure (105)	11	false
+1.2.840.10008.6.1.1440	ICD10PCSNuclearMedicineProcedure106	ICD-10-PCS Nuclear Medicine Procedure (106)	11	false
+1.2.840.10008.6.1.1441	ICD10PCSRadiationTherapyProcedure107	ICD-10-PCS Radiation Therapy Procedure (107)	11	false
+1.2.840.10008.6.1.1442	RTSegmentationPropertyCategory9580	RT Segmentation Property Category (9580)	11	false
+1.2.840.10008.6.1.1443	RadiotherapyRegistrationMark9581	Radiotherapy Registration Mark (9581)	11	false
+1.2.840.10008.6.1.1444	RadiotherapyDoseRegion9582	Radiotherapy Dose Region (9582)	11	false
+1.2.840.10008.6.1.1445	AnatomicallyLocalizedLesionSegmentationType7199	Anatomically Localized Lesion Segmentation Type (7199)	11	false
+1.2.840.10008.6.1.1446	ReasonForRemovalFromOperationalUse7031	Reason for Removal from Operational Use (7031)	11	false
+1.2.840.10008.6.1.1447	GeneralUltrasoundReportDocumentTitle12320	General Ultrasound Report Document Title (12320)	11	false
+1.2.840.10008.6.1.1448	ElastographySite12321	Elastography Site (12321)	11	false
+1.2.840.10008.6.1.1449	ElastographyMeasurementSite12322	Elastography Measurement Site (12322)	11	false
+1.2.840.10008.6.1.1450	UltrasoundRelevantPatientCondition12323	Ultrasound Relevant Patient Condition (12323)	11	false
+1.2.840.10008.6.1.1451	ShearWaveDetectionMethod12324	Shear Wave Detection Method (12324)	11	false
+1.2.840.10008.6.1.1452	LiverUltrasoundStudyIndication12325	Liver Ultrasound Study Indication (12325)	11	false
+1.2.840.10008.6.1.1453	AnalogWaveformFilter3042	Analog Waveform Filter (3042)	11	false
+1.2.840.10008.6.1.1454	DigitalWaveformFilter3043	Digital Waveform Filter (3043)	11	false
+1.2.840.10008.6.1.1455	WaveformFilterLookupTableInputFrequencyUnit3044	Waveform Filter Lookup Table Input Frequency Unit (3044)	11	false
+1.2.840.10008.6.1.1456	WaveformFilterLookupTableOutputMagnitudeUnit3045	Waveform Filter Lookup Table Output Magnitude Unit (3045)	11	false
+1.2.840.10008.6.1.1457	SpecificObservationSubjectClass272	Specific Observation Subject Class (272)	11	false
+1.2.840.10008.6.1.1458	MovableBeamLimitingDeviceType9540	Movable Beam Limiting Device Type (9540)	11	false
+1.2.840.10008.6.1.1459	RadiotherapyAcquisitionWorkItemSubtasks9260	Radiotherapy Acquisition WorkItem Subtasks (9260)	11	false
+1.2.840.10008.6.1.1460	PatientPositionAcquisitionRadiationSourceLocations9261	Patient Position Acquisition Radiation Source Locations (9261)	11	false
+1.2.840.10008.6.1.1461	EnergyDerivationTypes9262	Energy Derivation Types (9262)	11	false
+1.2.840.10008.6.1.1462	KVImagingAcquisitionTechniques9263	KV Imaging Acquisition Techniques (9263)	11	false
+1.2.840.10008.6.1.1463	MVImagingAcquisitionTechniques9264	MV Imaging Acquisition Techniques (9264)	11	false
+1.2.840.10008.6.1.1464	PatientPositionAcquisitionProjectionTechniques9265	Patient Position Acquisition - Projection Techniques (9265)	11	false
+1.2.840.10008.6.1.1465	PatientPositionAcquisitionCTTechniques9266	Patient Position Acquisition – CT Techniques (9266)	11	false
+1.2.840.10008.6.1.1466	PatientPositioningRelatedObjectPurposes9267	Patient Positioning Related Object Purposes (9267)	11	false
+1.2.840.10008.6.1.1467	PatientPositionAcquisitionDevices9268	Patient Position Acquisition Devices (9268)	11	false
+1.2.840.10008.6.1.1468	RTRadiationMetersetUnits9269	RT Radiation Meterset Units (9269)	11	false
+1.2.840.10008.6.1.1469	AcquisitionInitiationTypes9270	Acquisition Initiation Types (9270)	11	false
+1.2.840.10008.6.1.1470	RTImagePatientPositionAcquisitionDevices9271	RT Image Patient Position Acquisition Devices (9271)	11	false
+1.2.840.10008.6.1.1471	PhotoacousticIlluminationMethod11001	Photoacoustic Illumination Method (11001)	11	false
+1.2.840.10008.6.1.1472	AcousticCouplingMedium11002	Acoustic Coupling Medium (11002)	11	false
+1.2.840.10008.6.1.1473	UltrasoundTransducerTechnology11003	Ultrasound Transducer Technology (11003)	11	false
+1.2.840.10008.6.1.1474	SpeedOfSoundCorrectionMechanisms11004	Speed of Sound Correction Mechanisms (11004)	11	false
+1.2.840.10008.6.1.1475	PhotoacousticReconstructionAlgorithmFamily11005	Photoacoustic Reconstruction Algorithm Family (11005)	11	false
+1.2.840.10008.6.1.1476	PhotoacousticImagedProperty11006	Photoacoustic Imaged Property (11006)	11	false
+1.2.840.10008.6.1.1477	XRayRadiationDoseProcedureTypeReported10005	X-Ray Radiation Dose Procedure Type Reported (10005)	11	false
+1.2.840.10008.6.1.1478	TopicalTreatment4410	Topical Treatment (4410)	11	false
+1.2.840.10008.6.1.1479	LesionColor4411	Lesion Color (4411)	11	false
+1.2.840.10008.6.1.1480	SpecimenStainForConfocalMicroscopy4412	Specimen Stain for Confocal Microscopy (4412)	11	false
+1.2.840.10008.6.1.1481	RTROIImageAcquisitionContext9272	RT ROI Image Acquisition Context (9272)	11	false
+1.2.840.10008.6.1.1482	LobeOfLung6170	Lobe of Lung (6170)	11	false
+1.2.840.10008.6.1.1483	ZoneOfLung6171	Zone of Lung (6171)	11	false
+1.2.840.10008.6.1.1484	SleepStage3046	Sleep Stage (3046)	11	false
+1.2.840.10008.6.1.1485	PatientPositionAcquisitionMRTechniques9273	Patient Position Acquisition – MR Techniques (9273)	11	false
+1.2.840.10008.6.1.1486	RTPlanRadiotherapyProcedureTechnique9583	RT Plan Radiotherapy Procedure Technique (9583)	11	false
+1.2.840.10008.6.1.1487	WaveformAnnotationClassification3047	Waveform Annotation Classification (3047)	11	false
+1.2.840.10008.6.1.1488	WaveformAnnotationsDocumentTitle3048	Waveform Annotations Document Title  (3048)	11	false
+1.2.840.10008.6.1.1489	EEGProcedure3049	EEG Procedure  (3049)	11	false
+1.2.840.10008.6.1.1490	PatientConsciousness3050	Patient Consciousness  (3050)	11	false
+1.2.840.10008.6.1.1491	FollicleType12010	Follicle Type (12010)	11	false
+1.2.840.10008.6.1.1492	BreastTissueSegmentationType7163	Breast Tissue Segmentation Type (7163)	11	false
+1.2.840.10008.6.1.1493	ImplantedDevice3779	Implanted Device (3779)	11	false
+1.2.840.10008.6.1.1494	SimilarityMeasure281	Similarity Measure (281)	11	false
+1.2.840.10008.6.1.1495	WaveformAcquisitionModality34	Waveform Acquisition Modality (34)	11	false
+1.2.840.10008.6.1.1496	EnFaceProcessingAlgorithmFamily4274	En Face Processing Algorithm Family (4274)	11	false
+1.2.840.10008.6.1.1497	AnteriorEyeSegmentationSurface4275	Anterior Eye Segmentation Surface (4275)	11	false
+1.2.840.10008.6.1.1498	FetalEchocardiographyImageView12312	Fetal Echocardiography Image View (12312)	11	false
+1.2.840.10008.6.1.1499	CardiacUltrasoundFetalArrhythmiaMeasurements12313	Cardiac Ultrasound Fetal Arrhythmia Measurements (12313)	11	false
+1.2.840.10008.6.1.1500	CommonFetalEchocardiographyMeasurements12314	Common Fetal Echocardiography Measurements (12314)	11	false
+1.2.840.10008.6.1.1501	HeadAndNeckPrimaryAnatomicStructure4061	Head and Neck Primary Anatomic Structure (4061)	11	false
+1.2.840.10008.6.1.1502	VLView4062	VL View (4062)	11	false
+1.2.840.10008.6.1.1503	VLDentalView4063	VL Dental View (4063)	11	false
+1.2.840.10008.6.1.1504	VLViewModifier4064	VL View Modifier (4064)	11	false
+1.2.840.10008.6.1.1505	VLDentalViewModifier4065	VL Dental View Modifier (4065)	11	false
+1.2.840.10008.6.1.1506	OrthognathicFunctionalCondition4066	Orthognathic Functional Condition (4066)	11	false
+1.2.840.10008.6.1.1507	OrthodonticFindingByInspection4067	Orthodontic Finding by Inspection (4067)	11	false
+1.2.840.10008.6.1.1508	OrthodonticObservableEntity4068	Orthodontic Observable Entity (4068)	11	false
+1.2.840.10008.6.1.1509	DentalOcclusion4069	Dental Occlusion (4069)	11	false
+1.2.840.10008.6.1.1510	OrthodonticTreatmentProgress4070	Orthodontic Treatment Progress (4070)	11	false
+1.2.840.10008.6.1.1511	GeneralPhotographyDevice4071	General Photography Device (4071)	11	false
+1.2.840.10008.6.1.1512	DevicesForThePurposeOfDentalPhotography4072	Devices for the Purpose of Dental Photography (4072)	11	false
+1.2.840.10008.6.1.1513	CTDIPhantomDevice4053	CTDI Phantom Device (4053)	11	false
+1.2.840.10008.6.1.1514	DiagnosticImagingProcedureWithoutIVContrast108	Diagnostic Imaging Procedure without IV Contrast (108)	11	false
+1.2.840.10008.6.1.1515	DiagnosticImagingProcedureWithIVContrast109	Diagnostic Imaging Procedure with IV Contrast (109)	11	false
+1.2.840.10008.6.1.1516	StructuralHeartProcedure12331	Structural Heart Procedure (12331)	11	false
+1.2.840.10008.6.1.1517	StructuralHeartDevice12332	Structural Heart Device (12332)	11	false
+1.2.840.10008.6.1.1518	StructuralHeartMeasurement12333	Structural Heart Measurement (12333)	11	false
+1.2.840.10008.6.1.1519	AorticValveStructuralMeasurement12334	Aortic Valve Structural Measurement (12334)	11	false
+1.2.840.10008.6.1.1520	MitralValveStructuralMeasurement12335	Mitral Valve Structural Measurement (12335)	11	false
+1.2.840.10008.6.1.1521	TricuspidValveStructuralMeasurement12336	Tricuspid Valve Structural Measurement (12336)	11	false
+1.2.840.10008.6.1.1522	StructuralHeartEchoMeasurement12337	Structural Heart Echo Measurement (12337)	11	false
+1.2.840.10008.6.1.1523	LeftAtrialAppendageClosureMeasurement12338	Left Atrial Appendage Closure Measurement (12338)	11	false
+1.2.840.10008.6.1.1524	StructuralHeartProcedureAnatomicSite12339	Structural Heart Procedure Anatomic Site (12339)	11	false
+1.2.840.10008.6.1.1525	IndicationForStructuralHeartProcedure12341	Indication for Structural Heart Procedure (12341)	11	false
+1.2.840.10008.6.1.1526	BradycardiacAgent12342	Bradycardiac Agent (12342)	11	false
+1.2.840.10008.6.1.1527	TransesophagealEchocardiographyScanPlane12343	Transesophageal Echocardiography Scan Plane (12343)	11	false
+1.2.840.10008.6.1.1528	StructuralHeartMeasurementReportDocumentTitle12344	Structural Heart Measurement Report Document Title (12344)	11	false
+1.2.840.10008.6.1.1529	PersonGenderIdentity7458	Person Gender Identity (7458)	11	false
+1.2.840.10008.6.1.1530	CategoryOfSexParametersForClinicalUse7459	Category of Sex Parameters for Clinical Use (7459)	11	false
+1.2.840.10008.6.1.1531	ThirdPersonPronounSet7448	Third Person Pronoun Set (7448)	11	false
+1.2.840.10008.6.1.1532	CardiacStructureCalcificationQualitativeEvaluation12345	Cardiac Structure Calcification Qualitative Evaluation (12345)	11	false
+1.2.840.10008.6.1.1533	VisualFieldMeasurements4280	Visual Field Measurements (4280)	11	false
+1.2.840.10008.6.1.1534	OpticDiscKeyMeasurements4281	Optic Disc Key Measurements (4281)	11	false
+1.2.840.10008.6.1.1535	RetinalSectorMethods4282	Retinal Sector Methods (4282)	11	false
+1.2.840.10008.6.1.1536	RNFLSectorMeasurements4283	RNFL Sector Measurements (4283)	11	false
+1.2.840.10008.6.1.1537	RNFLClockfaceMeasurements4284	RNFL Clockface Measurements (4284)	11	false
+1.2.840.10008.6.1.1538	MacularThicknessKeyMeasurements4285	Macular Thickness Key Measurements (4285)	11	false
+1.2.840.10008.6.1.1539	GanglionCellMeasurementExtent4286	Ganglion Cell Measurement Extent (4286)	11	false
+1.2.840.10008.6.1.1540	GanglionCellKeyMeasurements4287	Ganglion Cell Key Measurements (4287)	11	false
+1.2.840.10008.6.1.1541	GanglionCellSectorMeasurements4288	Ganglion Cell Sector Measurements (4288)	11	false
+1.2.840.10008.6.1.1542	GanglionCellSectorMethods4289	Ganglion Cell Sector Methods (4289)	11	false
+1.2.840.10008.6.1.1543	EndothelialCellCountMeasurements4290	Endothelial Cell Count Measurements (4290)	11	false
+1.2.840.10008.6.1.1544	OphthalmicImageROIMeasurements4291	Ophthalmic Image ROI Measurements (4291)	11	false
+1.2.840.10008.6.1.1545	RTPlanApprovalAssertion9584	RT Plan Approval Assertion (9584)	11	false
+1.2.840.10008.6.1.1546	EstimatedDeliveryDateMethod12026	Estimated Delivery Date Method (12026)	11	false
+1.2.840.10008.6.1.1547	RTDoseCalculationAlgorithmFamily9585	RT Dose Calculation Algorithm Family (9585)	11	false
+1.2.840.10008.6.1.1548	DoseIndexForDoseCalibration10012	Dose Index for Dose Calibration (10012)	11	false
+1.2.840.10008.6.1.1549	UltrasoundAttenuationImagingSite12036	Ultrasound Attenuation Imaging Site (12036)	11	false
+1.2.840.10008.6.1.1550	FetalAnatomySurveyAssessment12040	Fetal Anatomy Survey Assessment (12040)	11	false
+1.2.840.10008.6.1.1551	FetalAnatomySurveyAssessmentHead12041	Fetal Anatomy Survey Assessment - Head (12041)	11	false
+1.2.840.10008.6.1.1552	FetalAnatomySurveyAssessmentFaceAndNeck12042	Fetal Anatomy Survey Assessment - Face and Neck (12042)	11	false
+1.2.840.10008.6.1.1553	FetalAnatomySurveyAssessmentChest12043	Fetal Anatomy Survey Assessment - Chest (12043)	11	false
+1.2.840.10008.6.1.1554	FetalAnatomySurveyAssessmentHeart12044	Fetal Anatomy Survey Assessment - Heart (12044)	11	false
+1.2.840.10008.6.1.1555	FetalAnatomySurveyAssessmentAbdomenAndPelvis12045	Fetal Anatomy Survey Assessment - Abdomen and Pelvis (12045)	11	false
+1.2.840.10008.6.1.1556	FetalAnatomySurveyAssessmentSpine12046	Fetal Anatomy Survey Assessment - Spine (12046)	11	false
+1.2.840.10008.6.1.1557	FetalAnatomySurveyAssessmentExtremities12047	Fetal Anatomy Survey Assessment - Extremities (12047)	11	false
+1.2.840.10008.6.1.1558	FetalAnatomySurveyAssessmentMaternal12048	Fetal Anatomy Survey Assessment - Maternal (12048)	11	false
+1.2.840.10008.6.1.1559	FetalAnatomySurveyPracticeGuideline12049	Fetal Anatomy Survey Practice Guideline (12049)	11	false
+1.2.840.10008.6.1.1560	SensitiveContentCategory900	Sensitive Content Category (900)	11	false
+1.2.840.10008.6.1.1561	SensitiveContentDetail901	Sensitive Content Detail (901)	11	false
+1.2.840.10008.6.1.1562	ApplicationTypeCode406	Application Type Code (406)	11	false
+1.2.840.10008.6.1.1563	XRayModulationType10035	X-Ray Modulation Type (10035)	11	false
+1.2.840.10008.6.1.1564	RadiotherapyDoseRealWorldUnits9586	Radiotherapy Dose Real World Units (9586)	11	false
+1.2.840.10008.6.1.1565	RadiotherapyDoseInterpretedTypeCodes9587	Radiotherapy Dose Interpreted Type Codes (9587)	11	false
+1.2.840.10008.6.1.1566	RadiotherapyDoseInterpretedTypeModifierCodes9588	Radiotherapy Dose Interpreted Type Modifier Codes (9588)	11	false
+1.2.840.10008.6.1.1567	RadiotherapyDoseIntentCodes9589	Radiotherapy Dose Intent Codes (9589)	11	false
+1.2.840.10008.6.1.1568	QualitySegmentationPropertyType7164	Quality Segmentation Property Type (7164)	11	false
+1.2.840.10008.6.1.1569	UltrasoundZScorePopulationIndex12027	Ultrasound Z-Score Population Index (12027)	11	false
+1.2.840.10008.6.1.1570	FetalUltrasoundZScoreReferenceAuthority12028	Fetal Ultrasound Z-Score Reference Authority (12028)	11	false
+1.2.840.10008.6.1.1571	MetalArtifactReductionAlgorithmFamily10036	Metal Artifact Reduction Algorithm Family (10036)	11	false

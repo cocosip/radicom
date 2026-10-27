@@ -1,0 +1,10 @@
+[package]
+name = "xtask"
+description = "Code generation and maintenance tasks for the radicom workspace"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+quick-xml = "0.37"
+flate2.workspace = true

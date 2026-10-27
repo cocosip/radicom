@@ -5,6 +5,7 @@ members = [
     "crates/radicom-dict",
     "crates/radicom-network",
     "crates/radicom-json",
+    "xtask",
 ]
 
 [workspace.package]
