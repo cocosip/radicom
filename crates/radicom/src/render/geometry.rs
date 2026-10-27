@@ -277,6 +277,93 @@ pub fn can_draw_localizer(source: &FrameGeometry, destination: &FrameGeometry) -
     source.frame_of_reference_uid == destination.frame_of_reference_uid
 }
 
+/// Projects the four corners of `source` onto `destination`'s image plane and
+/// returns them as pixel points (fo-dicom `CalculateProjectionLocalizer`).
+///
+/// Returns an empty vector when either frame lacks 3D geometry. The four points
+/// form the projected rectangle; for orthogonal frames it collapses to a line.
+pub fn projection_localizer(source: &FrameGeometry, destination: &FrameGeometry) -> Vec<Point2> {
+    if !source.has_geometry_data() || !destination.has_geometry_data() || destination.direction_normal.is_zero() {
+        return Vec::new();
+    }
+    // the four source corners in patient space (TLHC, TRHC, BRHC, BLHC)
+    let corners = [
+        source.point_top_left,
+        source.point_top_right,
+        source.point_bottom_right,
+        source.point_bottom_left,
+    ];
+    let mut out = Vec::with_capacity(4);
+    for corner in corners {
+        // rotate the corner (relative to the destination origin) into the
+        // destination's row/column frame, then divide by spacing
+        let d = Vector3::new(
+            corner.x - destination.point_top_left.x,
+            corner.y - destination.point_top_left.y,
+            corner.z - destination.point_top_left.z,
+        );
+        let col = if nearly_zero(destination.spacing_between_columns) {
+            0.0
+        } else {
+            d.dot(&destination.direction_row) / destination.spacing_between_columns
+        };
+        let row = if nearly_zero(destination.spacing_between_rows) {
+            0.0
+        } else {
+            d.dot(&destination.direction_column) / destination.spacing_between_rows
+        };
+        out.push(Point2::new(col.round(), row.round()));
+    }
+    out
+}
+
+/// Computes the line where the `source` plane crosses the `destination` plane,
+/// in destination pixel space (fo-dicom `CalculateIntersectionLocalizer`).
+///
+/// Returns `None` when the planes do not cross the source rectangle at exactly
+/// two edge points (no, parallel, or tangential intersection).
+pub fn intersection_localizer(source: &FrameGeometry, destination: &FrameGeometry) -> Option<(Point2, Point2)> {
+    if destination.direction_normal.is_zero() {
+        return None;
+    }
+    let normal = &destination.direction_normal;
+    let to_vec = |p: Point3| Vector3::new(p.x, p.y, p.z);
+
+    // signed distance of each source corner from the destination plane
+    let n_p = normal.dot(&to_vec(destination.point_top_left));
+    let n_a = normal.dot(&to_vec(source.point_top_left));
+    let n_b = normal.dot(&to_vec(source.point_top_right));
+    let n_c = normal.dot(&to_vec(source.point_bottom_right));
+    let n_d = normal.dot(&to_vec(source.point_bottom_left));
+
+    let mut crossings: Vec<Point3> = Vec::with_capacity(2);
+    // walk the four edges, recording an in-range crossing on each
+    let edges = [
+        (source.point_top_left, source.point_top_right, n_a, n_b),
+        (source.point_top_right, source.point_bottom_right, n_b, n_c),
+        (source.point_bottom_right, source.point_bottom_left, n_c, n_d),
+        (source.point_bottom_left, source.point_top_left, n_d, n_a),
+    ];
+    for (from, to, na, nb) in edges {
+        if (nb - na).abs() > 1e-6 {
+            let t = (n_p - na) / (nb - na);
+            if t > 0.0 && t <= 1.0 {
+                crossings.push(Point3::new(
+                    from.x + t * (to.x - from.x),
+                    from.y + t * (to.y - from.y),
+                    from.z + t * (to.z - from.z),
+                ));
+            }
+        }
+    }
+    if crossings.len() != 2 {
+        return None;
+    }
+    let start = destination.transform_patient_to_image(crossings[0]).ok()?;
+    let end = destination.transform_patient_to_image(crossings[1]).ok()?;
+    Some((Point2::new(start.x.round(), start.y.round()), Point2::new(end.x.round(), end.y.round())))
+}
+
 /// Classifies a normal vector by its nearest axis (fo-dicom `NearestAxis`):
 /// X→Sagittal, Y→Coronal, Z→Axial.
 fn classify(normal: Vector3) -> FrameOrientation {
@@ -427,5 +514,69 @@ mod tests {
         let mut other = sagittal.clone();
         other.frame_of_reference_uid = "9.9.9".to_string();
         assert!(!can_draw_localizer(&axial, &other));
+    }
+
+    /// A sagittal frame centered so its Z extent brackets the axial plane (z=50),
+    /// spanning Y (rows) and Z (columns), same frame of reference as the axial helper.
+    fn sagittal_at_origin() -> FrameGeometry {
+        FrameGeometry::build(
+            "1.2.3.4".to_string(),
+            512,
+            512,
+            0.5,
+            0.5,
+            Some([0.0, -100.0, -100.0]), // z range -100..156 brackets the axial plane z=50
+            Some([0.0, 1.0, 0.0, 0.0, 0.0, 1.0]), // row=+Y, col=+Z, normal=+X
+        )
+    }
+
+    #[test]
+    fn projection_localizer_returns_four_points() {
+        let axial = FrameGeometry::from_dataset(&axial_dataset()).unwrap();
+        let sagittal = sagittal_at_origin();
+        let points = projection_localizer(&sagittal, &axial);
+        assert_eq!(points.len(), 4, "the four projected corners are returned");
+    }
+
+    #[test]
+    fn projection_localizer_is_empty_without_geometry() {
+        let axial = FrameGeometry::from_dataset(&axial_dataset()).unwrap();
+        let flat = FrameGeometry::build(String::new(), 4, 4, 0.0, 0.0, None, None); // no spacing → no geometry
+        assert!(projection_localizer(&flat, &axial).is_empty());
+        assert!(projection_localizer(&axial, &flat).is_empty());
+    }
+
+    #[test]
+    fn intersection_localizer_finds_the_crossing_line() {
+        // The sagittal frame sits at patient x = 0; the axial frame spans x in
+        // [-100, 156], so the plane x=0 crosses it → a two-point line.
+        let axial = FrameGeometry::from_dataset(&axial_dataset()).unwrap();
+        let sagittal = sagittal_at_origin();
+        let line = intersection_localizer(&sagittal, &axial).expect("the planes cross the source rectangle");
+        assert_ne!(line.0, line.1, "the crossing is a real segment, not one point");
+    }
+
+    #[test]
+    fn intersection_localizer_returns_none_for_parallel_planes() {
+        // two axial planes (parallel) never cross
+        let a = FrameGeometry::from_dataset(&axial_dataset()).unwrap();
+        let b = FrameGeometry::from_dataset(&axial_dataset()).unwrap();
+        assert!(intersection_localizer(&a, &b).is_none());
+    }
+
+    #[test]
+    fn intersection_localizer_returns_none_when_the_frame_is_missed() {
+        // move the sagittal plane far outside the axial image (x = 10000)
+        let axial = FrameGeometry::from_dataset(&axial_dataset()).unwrap();
+        let far = FrameGeometry::build(
+            "1.2.3.4".to_string(),
+            512,
+            512,
+            0.5,
+            0.5,
+            Some([10000.0, -100.0, 50.0]),
+            Some([0.0, 1.0, 0.0, 0.0, 0.0, 1.0]),
+        );
+        assert!(intersection_localizer(&far, &axial).is_none(), "the plane never crosses the source rectangle");
     }
 }
