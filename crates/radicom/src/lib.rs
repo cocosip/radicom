@@ -22,6 +22,8 @@ pub mod pixel;
 pub mod sr;
 pub mod validation;
 
+pub mod anonymizer;
+
 pub use error::{DataError, Error, FileError, ReaderError, ValidationFailure};
 pub use model::dictionary::{
     default_dictionary, load_xml, set_default_dictionary, Dictionary, DictionaryEntry, RuntimeEntry,

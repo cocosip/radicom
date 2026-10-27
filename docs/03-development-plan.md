@@ -88,7 +88,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 | M4 | Pixel & codec interfaces | Done | Codec boundary frozen for radicom-codecs; 208 tests green |
 | M5 | Network core | Complete | PDU codec, association, PDV assembly, message codec, engine state, C-ECHO/C-STORE over TCP and TLS; 150 tests at completion |
 | M6 | Network services | Complete except reference-peer interop | SRV-04..06, NET-04, CLI-01..02 (c3f75ab..a060c9c); 210 network tests, 218 with TLS. SRV-07/08 stay P2/M8 |
-| M7 | Serialization & media | In progress (JSON-01, XML-01, MEDIA-01, SR-01/02 done) | DICOM JSON, DICOM XML export, DICOMDIR and Structured Reports landed; MEDIA-02 icon, JSON-02 BulkDataURI and the anonymizer remain |
+| M7 | Serialization & media | In progress (JSON-01, XML-01, MEDIA-01, SR-01/02, ANON-01 done) | DICOM JSON, XML export, DICOMDIR, Structured Reports and the PS3.15 anonymizer landed; MEDIA-02 icon and JSON-02 BulkDataURI remain |
 | M8 | Rendering & enhancements | Deferred (P2) | |
 
 ### 3.2 Feature-group status (fine-grained)
@@ -124,7 +124,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 | Media (DICOMDIR) | MEDIA-01..03 | In progress | MEDIA-01 read/write done: PATIENT/STUDY/SERIES/leaf tree, absolute byte offsets measured from the serialized file, dirty-offset tolerance. MEDIA-02 icon and MEDIA-03 scanner remain |
 | Structured report | SR-01..02 | Not started | |
 | Printing | PRINT-01..02 | Deferred (P2) | |
-| Anonymizer | ANON-01 | Not started | |
+| Anonymizer | ANON-01 | Done | PS3.15 Basic Profile (655-row CSV from fo-dicom, dependency-free matcher): D/Z/X/K/C/U actions, recursive sequences, consistent UID mapping, file-meta SOP instance sync. 17 tests |
 | Rendering | REND-01..11 | Deferred (P2) | Spec: [10-rendering.md](10-rendering.md) |
 | Hosting helper | HOST-01 | Deferred (P2) | Spec: [07-network.md](07-network.md) §8.1 |
 | DSLs | MATCH-01, XFORM-01 | Deferred (P2) | |
@@ -134,6 +134,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 
 | Date | Item | Milestone |
 |---|---|---|
+| 2026-10-27 | M7 continues: PS3.15 anonymizer (ANON-01). The 655-row Basic Profile CSV (extracted from fo-dicom's DicomAnonymizerGenerated.cs, MS-PL) drives a dependency-free tag-pattern matcher (literals, [classes], {n}); actions D/Z/X/K/C/U apply per element with recursive sequences, consistent UID remapping and file-meta SOP instance sync. Verified against fo-dicom's own anonymizer test expectations (PatientName/ID blank under the basic profile, StudyDate blanked Z, SeriesDate removed X). 17 tests, workspace 261, clippy clean | M7 |
 | 2026-10-27 | M7 continues: Structured Reports (SR-01/02). CodeItem auto-dispatches short/long/URN code forms; ContentItem models all 14 value types and 7 relationships with typed constructors (TEXT/CODE/PNAME/DATE/TIME/DATETIME/UIDREF/container) and container children; StructuredReport opens/saves with explicit-length sequences. 18 sr tests, workspace 244, clippy clean | M7 |
 | 2026-10-27 | M7 continues: DICOM XML export (XML-01). One-way NativeDicomModel export: tag/vr/keyword attributes, Value number=n, PN group elements, SQ Item nesting, InlineBinary base64, fragment sequences rendered as repeated InlineBinary. No reader (per spec). Tests parse the output with quick-xml as a dev-dependency to prove well-formedness; the runtime crate adds no XML dependency | M7 |
 | 2026-10-27 | M7 continues: DICOMDIR read/write (MEDIA-01). Tree built from PATIENT/STUDY/SERIES/leaf records keyed by PatientID/StudyUID/SeriesUID; storage records by SOP class. Offsets are absolute file positions, measured by serializing a placeholder layout then reading the real item positions back. Dirty offsets degrade to roots instead of failing. 19 media tests, workspace 226, clippy clean | M7 |

@@ -18,3 +18,15 @@ attribution in their headers. Regenerate after replacing the data files:
 ```
 cargo xtask gen-dict
 ```
+
+## Anonymizer profile
+
+`crates/radicom/src/anonymizer/ps3.15.csv` is the PS3.15 de-identification
+map, extracted one-time from fo-dicom
+`FO-DICOM.Core/DicomAnonymizerGenerated.cs` (`DefaultProfile`, 655 rows).
+Columns: `tag-pattern; BasicProfile; RetainSafePrivate; RetainUIDs;
+RetainDeviceIdent; RetainInstitutionIdent; RetainPatientChars;
+RetainLongFullDates; RetainLongModifDates; CleanDesc; CleanStructdCont;
+CleanGraph`. It is compiled into `radicom` with `include_str!` and parsed by
+the dependency-free matcher in `radicom::anonymizer::profile`, so the core
+crate needs no regex dependency. Same MS-PL attribution applies.
