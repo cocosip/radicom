@@ -19,6 +19,7 @@ pub mod io;
 pub mod media;
 pub mod model;
 pub mod pixel;
+pub mod print;
 pub mod sr;
 pub mod validation;
 

@@ -89,7 +89,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 | M5 | Network core | Complete | PDU codec, association, PDV assembly, message codec, engine state, C-ECHO/C-STORE over TCP and TLS; 150 tests at completion |
 | M6 | Network services | Complete except reference-peer interop | SRV-04..06, NET-04, CLI-01..02 (c3f75ab..a060c9c); 210 network tests, 218 with TLS. SRV-07/08 stay P2/M8 |
 | M7 | Serialization, media, SR, anonymization | Done (P1; MEDIA-03 scanner included) | All M7 features: DICOM JSON (01/02), XML export (01), DICOMDIR (01/02/03), Structured Reports (01/02), PS3.15 anonymizer (01). 277 core + 33 json + 210 network tests, clippy clean |
-| M8 | Rendering & enhancements | Deferred (P2) | |
+| M8 | Rendering & enhancements | In progress (PRINT-01 done, P2) | Printing data models + layout maths landed; render pipeline (REND-01..11), PRINT-02 render_to_image and the rest remain |
 
 ### 3.2 Feature-group status (fine-grained)
 
@@ -123,7 +123,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 | JSON/XML | JSON-01..02, XML-01 | Done | JSON-01 PS3.18 model (PN groups, byte-backed round-trips, tolerant reader); JSON-02 BulkDataURI via a `BulkDataUri` buffer, bidirectional; XML-01 one-way NativeDicomModel export verified well-formed by a quick-xml parse |
 | Media (DICOMDIR) | MEDIA-01..03 | Done | MEDIA-01 read/write; MEDIA-02 IconGenerator (≤128×128 8-bit MONOCHROME2); MEDIA-03 DirectoryScanner (glob filter, depth/error policy, progress/file events) + DicomDirectoryBuilder. Scanner is synchronous (core has no runtime; callers offload to a blocking thread) |
 | Structured report | SR-01..02 | Not started | |
-| Printing | PRINT-01..02 | Deferred (P2) | |
+| Printing | PRINT-01..02 | In progress | PRINT-01 models+layout done: ImageDisplayFormat (STANDARD/ROW/COL/SLIDE/SUPERSLIDE/CUSTOM), per-cell layout rectangles, film-size parsing, FilmSession/FilmBox/ImageBox datasets. PRINT-02 render_to_image awaits the REND-07 backend |
 | Anonymizer | ANON-01 | Done | PS3.15 Basic Profile (655-row CSV from fo-dicom, dependency-free matcher): D/Z/X/K/C/U actions, recursive sequences, consistent UID mapping, file-meta SOP instance sync. 17 tests |
 | Rendering | REND-01..11 | Deferred (P2) | Spec: [10-rendering.md](10-rendering.md) |
 | Hosting helper | HOST-01 | Deferred (P2) | Spec: [07-network.md](07-network.md) §8.1 |
@@ -134,6 +134,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 
 | Date | Item | Milestone |
 |---|---|---|
+| 2026-10-27 | M8 started: printing data models + layout (PRINT-01). ImageDisplayFormat parses all six forms and lays out STANDARD/ROW/COL/SLIDE grids as per-cell rectangles inset by a margin; FilmSize converts named (A4/A3/8INX10IN) and NNCMXNNCM strings to millimetres; FilmSession/FilmBox/ImageBox wrap datasets with validated format/size setters and initialize_image_boxes. render_to_image (PRINT-02) deferred until the REND-07 backend exists. 19 print tests, workspace 296, clippy clean | M8 |
 | 2026-10-27 | M7 complete: DICOMDIR directory scanner (MEDIA-03). Recursive walk with a dependency-free glob (`*`/`?` within a segment), configurable max_depth and Skip/Stop error policy, Progress/File events via a ScanVisitor, and a DicomDirectoryBuilder that turns matched files into a DICOMDIR. Synchronous by design (core has no async runtime; async callers offload to a blocking thread), documented in the module header. 7 scanner tests, workspace 277, clippy clean | M7 |
 | 2026-10-27 | M7 continues: DICOMDIR icons (MEDIA-02). IconGenerator trait + BasicIconGenerator: pick a frame (RepresentativeFrameNumber else midpoint), box-downsample to ≤128×128, build an 8-bit MONOCHROME2 icon dataset, attach as (0088,0200); add_file_with_icon wires it in and it survives save/open. 8 icon tests, workspace 270, clippy clean | M7 |
 | 2026-10-27 | M7 continues: PS3.15 anonymizer (ANON-01). The 655-row Basic Profile CSV (extracted from fo-dicom's DicomAnonymizerGenerated.cs, MS-PL) drives a dependency-free tag-pattern matcher (literals, [classes], {n}); actions D/Z/X/K/C/U apply per element with recursive sequences, consistent UID remapping and file-meta SOP instance sync. Verified against fo-dicom's own anonymizer test expectations (PatientName/ID blank under the basic profile, StudyDate blanked Z, SeriesDate removed X). 17 tests, workspace 261, clippy clean | M7 |
