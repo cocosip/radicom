@@ -1,0 +1,165 @@
+//! Network error type (docs/07-network.md §11).
+//!
+//! Every failure mode of the protocol engine maps onto this set; nothing
+//! escapes as a generic IO error when a specific variant applies.
+
+use std::io;
+
+/// Result alias for the network crate.
+pub type Result<T> = std::result::Result<T, NetworkError>;
+
+/// Association rejection reasons, split by source (§3.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RejectResult {
+    Permanent,
+    Transient,
+}
+
+impl RejectResult {
+    pub fn code(self) -> u8 {
+        match self {
+            RejectResult::Permanent => 1,
+            RejectResult::Transient => 2,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(RejectResult::Permanent),
+            2 => Some(RejectResult::Transient),
+            _ => None,
+        }
+    }
+}
+
+/// Who rejected the association.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RejectSource {
+    /// 1 — the called AE (service user).
+    User,
+    /// 2 — the ACSE provider.
+    ProviderAcse,
+    /// 3 — the presentation provider.
+    ProviderPresentation,
+}
+
+impl RejectSource {
+    pub fn code(self) -> u8 {
+        match self {
+            RejectSource::User => 1,
+            RejectSource::ProviderAcse => 2,
+            RejectSource::ProviderPresentation => 3,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(RejectSource::User),
+            2 => Some(RejectSource::ProviderAcse),
+            3 => Some(RejectSource::ProviderPresentation),
+            _ => None,
+        }
+    }
+}
+
+/// A-ABORT source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbortSource {
+    /// 0 — the service user (DUL user).
+    User,
+    /// 1 — reserved / unknown, treated as provider.
+    Unknown,
+    /// 2 — the service provider.
+    Provider,
+}
+
+impl AbortSource {
+    pub fn code(self) -> u8 {
+        match self {
+            AbortSource::User => 0,
+            AbortSource::Unknown => 1,
+            AbortSource::Provider => 2,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(AbortSource::User),
+            1 => Some(AbortSource::Unknown),
+            2 => Some(AbortSource::Provider),
+            _ => None,
+        }
+    }
+}
+
+/// All network failures (docs/07-network.md §11).
+#[derive(Debug, thiserror::Error)]
+pub enum NetworkError {
+    #[error("association rejected (result {result}, source {source_code}, reason {reason})")]
+    Reject { result: u8, source_code: u8, reason: u8 },
+    #[error("association aborted (source {source_code}, reason {reason})")]
+    Abort { source_code: u8, reason: u8 },
+    #[error("association request timed out after {attempts} attempt(s)")]
+    AssociationRequestTimedOut { attempts: u32 },
+    #[error("request {message_id} timed out")]
+    RequestTimedOut { message_id: u16 },
+    #[error("connection closed prematurely")]
+    ClosedPrematurely { source: Option<Box<NetworkError>> },
+    #[error("protocol violation: {0}")]
+    Protocol(&'static str),
+    #[error("io error: {0}")]
+    Io(#[from] io::Error),
+    /// C-GET/C-MOVE sub-operation handlers must be registered up front.
+    #[error("no reverse C-STORE handler registered (required for C-GET)")]
+    ReverseStoreHandlerMissing,
+    /// A request needs a presentation context the peer did not accept.
+    #[error("SOP class {sop_class} is not supported by the association")]
+    SopClassNotSupported { sop_class: String },
+}
+
+impl NetworkError {
+    /// Wraps a protocol violation with a static message.
+    pub fn protocol(message: &'static str) -> Self {
+        NetworkError::Protocol(message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reject_codes_round_trip() {
+        assert_eq!(RejectResult::from_code(RejectResult::Permanent.code()), Some(RejectResult::Permanent));
+        assert_eq!(RejectResult::from_code(RejectResult::Transient.code()), Some(RejectResult::Transient));
+        assert_eq!(RejectResult::from_code(0), None);
+        assert_eq!(RejectResult::from_code(3), None);
+
+        for source in [RejectSource::User, RejectSource::ProviderAcse, RejectSource::ProviderPresentation] {
+            assert_eq!(RejectSource::from_code(source.code()), Some(source));
+        }
+        assert_eq!(RejectSource::from_code(4), None);
+    }
+
+    #[test]
+    fn abort_codes_round_trip() {
+        for source in [AbortSource::User, AbortSource::Unknown, AbortSource::Provider] {
+            assert_eq!(AbortSource::from_code(source.code()), Some(source));
+        }
+        assert_eq!(AbortSource::from_code(9), None);
+    }
+
+    #[test]
+    fn display_names_the_failure() {
+        let err = NetworkError::RequestTimedOut { message_id: 7 };
+        assert!(err.to_string().contains("request 7 timed out"), "got {err}");
+        let err = NetworkError::protocol("bad PDU type");
+        assert!(err.to_string().contains("bad PDU type"));
+    }
+
+    #[test]
+    fn io_errors_convert() {
+        let err: NetworkError = io::Error::new(io::ErrorKind::UnexpectedEof, "short").into();
+        assert!(matches!(err, NetworkError::Io(_)));
+    }
+}
