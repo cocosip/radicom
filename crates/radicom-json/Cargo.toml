@@ -1,0 +1,14 @@
+[package]
+name = "radicom-json"
+description = "DICOM JSON (PS3.18) serialization for radicom"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+radicom = { path = "../radicom" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]

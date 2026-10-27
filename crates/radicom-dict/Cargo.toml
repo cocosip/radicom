@@ -1,0 +1,8 @@
+[package]
+name = "radicom-dict"
+description = "Generated DICOM dictionary tables: tag constants, UID constants, dictionary lookups"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]

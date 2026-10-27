@@ -1,0 +1,24 @@
+[package]
+name = "radicom"
+description = "DICOM processing library: data model, file IO, pixel data facade, codec interfaces and transcoder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+radicom-dict = { path = "../radicom-dict" }
+bytes.workspace = true
+thiserror.workspace = true
+once_cell.workspace = true
+chrono.workspace = true
+encoding_rs.workspace = true
+flate2.workspace = true
+regex = { workspace = true, optional = true }
+
+[features]
+default = []
+render = []
+anonymize = ["dep:regex"]
+
+[dev-dependencies]
+rayon.workspace = true

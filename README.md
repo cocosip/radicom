@@ -2,6 +2,8 @@
 
 A DICOM processing and encoding/decoding library for Rust, modeled on [fo-dicom](https://github.com/fo-dicom/fo-dicom) (Fellow Oak DICOM).
 
+Repository: <https://github.com/cocosip/radicom>
+
 radicom covers the DICOM data model, file I/O, network communication (DIMSE), serialization, media files, structured reports, printing data models, anonymization, pixel data access and the codec **interfaces** plus transcoder. The concrete image codec implementations (JPEG, JPEG-LS, JPEG 2000, HTJ2K, RLE native codecs) live in the separate **radicom-codecs** project — mirroring the relationship between `FO-DICOM.Core` and `fo-dicom.Codecs`.
 
 ## Documentation
