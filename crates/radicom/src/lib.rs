@@ -15,6 +15,7 @@
 pub mod encoding;
 pub mod error;
 pub mod generated;
+pub mod io;
 pub mod model;
 pub mod validation;
 
