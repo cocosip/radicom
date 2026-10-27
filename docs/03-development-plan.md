@@ -84,7 +84,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 | M0 | Scaffolding | Done | Workspace + 4 crates + xtask gen-dict committed (8e1be2a, fe25717, 8188021); build/tests/clippy green |
 | M1 | Identifier system | Done | TAG/VR/UID/TS/DICT/VM/MaskedTag/tag-index committed (343bd56..16847ac); 5347-tag + 1928-UID generated tables verified by tests; exit condition met |
 | M2 | Dataset & elements | Done | DA/DT/TM, buffers, element model, PersonName, dataset, charsets, validators, functional groups/equality/datetime (a792ecb..bfa3e6f); 110 tests green; exit condition met |
-| M3 | File & IO | Not started | |
+| M3 | File & IO | In progress | Byte source/target (4cc33e9) and the parser + dataset builder (RD-01..05, T1–T10) landed; writer (WR-01..03) and DicomFile (FILE-01..06) remain |
 | M4 | Pixel & codec interfaces | Not started | Boundary freeze gates radicom-codecs kickoff |
 | M5 | Network core | Not started | |
 | M6 | Network services | Not started | |
@@ -105,8 +105,8 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 | Charset | ENC-01..04 | Done | committed fae89f5 |
 | Validation | VAL-01..03 | Done | committed 4c428e9; dataset write-path integration pending M3 |
 | Buffers | BUF-01..02 | Done | memory domain; file/stream windows in M3 (93fae61) |
-| Byte source/target | IO-01..03 | Not started | |
-| Reader | RD-01..05 | Not started | |
+| Byte source/target | IO-02..03 | Done | ByteSourceReader/ByteTargetWriter with endian-aware scalars, chunked buffer streaming (4cc33e9); IO-01 file/dir refs pending |
+| Reader | RD-01..05 | Done | Recursive-descent parser + DatasetBuilder observer; tolerance rows T1–T10 each have a test; depth cap verified at the default 2 MiB stack |
 | Writer | WR-01..03 | Not started | |
 | DicomFile | FILE-01..06 | Not started | |
 | PixelData | PIX-01..05 | Not started | |
@@ -133,6 +133,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 
 | Date | Item | Milestone |
 |---|---|---|
+| 2026-10-27 | M3 parser: recursive-descent `DicomReader` + `DatasetBuilder` observer (RD-01..05); tolerance rows T1–T10 each covered by a test; SQ item events, fragment offset table, private creator binding and deflate (RD-04) implemented; 136 tests, clippy clean | M3 |
 | 2026-10-27 | M2 dataset and elements complete: DA/DT/TM parsers, buffer layer, element value model + conversions, PersonName, Dataset with private tags/walker, charsets, validators, functional groups/equality/datetime composition; 110 tests, clippy clean | M2 |
 
 | Date | Item | Milestone |
@@ -165,6 +166,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-10-27 | radicom team | M3 progress: parser + dataset builder landed; `ParseObserver::on_begin_fragment` now receives the decoded basic offset table; the parser frame was split (`step` vs `parse_level`) so the 256-level cap holds on a 2 MiB stack |
 | 2026-10-27 | radicom team | Parity re-audit: platform capabilities mapped to Rust equivalents (HOST-01/OBS-02/PRINT-02/INF-07/UID-05); rendering module spec added (10-rendering.md); absolute fo-dicom paths removed from all docs |
 | 2026-10-27 | radicom team | Scope change: no built-in codecs in radicom — CODEC-04 dropped (RLE moves to radicom-codecs), default codec registry empty, divergence D10 strengthened, M4 acceptance re-based on the mock codec |
 | 2026-10-27 | radicom team | Coverage audit against the complete fo-dicom file inventory: added exclusion table (01 §0), REND-10 (icon rendering) and REND-11 (spatial transform + math utils), divergences D10–D12; license references corrected to MS-PL |

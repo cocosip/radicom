@@ -24,7 +24,7 @@ radicom covers the DICOM data model, file I/O, network communication (DIMSE), se
 
 ## Status
 
-Planning and documentation phase complete; implementation not started. See the progress tables in the development plan for current status.
+Milestones M0–M2 are complete (workspace, identifier system, dataset/elements); M3 (file IO) is in progress — buffers, byte source/target and the parser with its malformed-data tolerance rules are implemented and tested. See the progress tables in the development plan for the current state.
 
 ## License
 

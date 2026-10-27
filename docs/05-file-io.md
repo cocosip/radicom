@@ -1,6 +1,6 @@
 # Module Spec: File and IO (Buffers, Parser, Writer, DicomFile)
 
-> Status: design phase (milestone M3; see [03-development-plan.md](03-development-plan.md) §3)
+> Status: in progress (milestone M3; see [03-development-plan.md](03-development-plan.md) §3) — buffers, byte source/target and the parser (RD-01..05) are implemented; writer and DicomFile are next
 > Feature IDs covered: BUF-01..02, IO-01..03, RD-01..05, WR-01..03, FILE-01..06
 > Behavior baseline: fo-dicom `IO/` (Reader, Writer, Buffer), `DicomFile.cs`, `DicomFileReader.Preprocess`, tolerance behaviors accumulated in fo-dicom issue history
 
