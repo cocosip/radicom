@@ -21,6 +21,7 @@ pub use model::dictionary::{
     default_dictionary, load_xml, set_default_dictionary, Dictionary, DictionaryEntry, RuntimeEntry,
 };
 pub use model::endian::Endian;
+pub use model::masked_tag::MaskedTag;
 pub use model::tag::Tag;
 pub use model::transfer_syntax::{self as transfer_syntax_registry, TransferSyntax};
 pub use model::uid::{StorageCategory, Uid, UidGenerator, UidType};

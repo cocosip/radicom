@@ -2,9 +2,11 @@
 //! dictionaries (docs/04-data-model.md).
 
 pub mod dictionary;
+pub mod masked_tag;
 pub mod endian;
 pub mod private_creator;
 pub mod tag;
+pub mod tag_index;
 pub mod transfer_syntax;
 pub mod uid;
 pub mod vm;
