@@ -14,6 +14,10 @@
 
 use base64::Engine as _;
 use radicom::model::buffer::{MemoryBuffer, SharedBuffer};
+
+pub mod xml;
+
+pub use xml::dataset_to_xml;
 use radicom::model::dataset::Dataset;
 use radicom::model::element::DicomElement;
 use radicom::model::item::{DicomItem, DicomSequence};

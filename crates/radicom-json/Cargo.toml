@@ -13,3 +13,5 @@ thiserror.workspace = true
 base64.workspace = true
 
 [dev-dependencies]
+# parser used only by tests to prove the XML export is well-formed
+quick-xml.workspace = true

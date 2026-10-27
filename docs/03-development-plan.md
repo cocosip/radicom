@@ -88,7 +88,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 | M4 | Pixel & codec interfaces | Done | Codec boundary frozen for radicom-codecs; 208 tests green |
 | M5 | Network core | Complete | PDU codec, association, PDV assembly, message codec, engine state, C-ECHO/C-STORE over TCP and TLS; 150 tests at completion |
 | M6 | Network services | Complete except reference-peer interop | SRV-04..06, NET-04, CLI-01..02 (c3f75ab..a060c9c); 210 network tests, 218 with TLS. SRV-07/08 stay P2/M8 |
-| M7 | Serialization & media | In progress (JSON-01, MEDIA-01 done) | DICOM JSON (c907f6f) and DICOMDIR read/write (MEDIA-01) landed; MEDIA-02 icon, XML-01, SR and the anonymizer remain |
+| M7 | Serialization & media | In progress (JSON-01, XML-01, MEDIA-01 done) | DICOM JSON, one-way DICOM XML export and DICOMDIR read/write landed; MEDIA-02 icon, JSON-02 BulkDataURI, SR and the anonymizer remain |
 | M8 | Rendering & enhancements | Deferred (P2) | |
 
 ### 3.2 Feature-group status (fine-grained)
@@ -119,7 +119,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 | Client | CLI-01..02 | Done | CLI-01 high-level `DicomClient` (association reuse, retry, events) and CLI-02 expert layer (`Connection`, `ResponseStream`) committed bcdfda3, a060c9c |
 | DIMSE model | DIMSE-01 | Done | All 22 command fields with request/response pairing, command group length recomputed, status classification with mask classes, LO-truncated error comments |
 | Observability | OBS-01..02 | Not started | OBS-02 (OTel wiring) deferred to M8 |
-| JSON/XML | JSON-01..02, XML-01 | In progress | JSON-01 done: PS3.18 model with PN groups, AT, sequences, number modes and a tolerant reader. JSON-02 (BulkDataURI) and XML-01 remain |
+| JSON/XML | JSON-01..02, XML-01 | In progress | JSON-01 done (PS3.18 model, PN groups, byte-backed round-trips, tolerant reader). XML-01 done: one-way NativeDicomModel export, verified well-formed by a quick-xml parse in tests. JSON-02 (BulkDataURI) remains |
 | Media (DICOMDIR) | MEDIA-01..03 | In progress | MEDIA-01 read/write done: PATIENT/STUDY/SERIES/leaf tree, absolute byte offsets measured from the serialized file, dirty-offset tolerance. MEDIA-02 icon and MEDIA-03 scanner remain |
 | Structured report | SR-01..02 | Not started | |
 | Printing | PRINT-01..02 | Deferred (P2) | |
@@ -133,6 +133,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 
 | Date | Item | Milestone |
 |---|---|---|
+| 2026-10-27 | M7 continues: DICOM XML export (XML-01). One-way NativeDicomModel export: tag/vr/keyword attributes, Value number=n, PN group elements, SQ Item nesting, InlineBinary base64, fragment sequences rendered as repeated InlineBinary. No reader (per spec). Tests parse the output with quick-xml as a dev-dependency to prove well-formedness; the runtime crate adds no XML dependency | M7 |
 | 2026-10-27 | M7 continues: DICOMDIR read/write (MEDIA-01). Tree built from PATIENT/STUDY/SERIES/leaf records keyed by PatientID/StudyUID/SeriesUID; storage records by SOP class. Offsets are absolute file positions, measured by serializing a placeholder layout then reading the real item positions back. Dirty offsets degrade to roots instead of failing. 19 media tests, workspace 226, clippy clean | M7 |
 | 2026-10-27 | M7 started: DICOM JSON (JSON-01). PS3.18 model with PN groups, byte-backed AT/US round-trips, three number modes, tolerant reading and fragment rejection. 23 radicom-json tests, clippy clean | M7 |
 | 2026-10-27 | M6 services (partial): C-GET (SRV-05), C-MOVE (SRV-06), extended negotiation + user identity (NET-04) and the high-level client (CLI-01). 203 network tests, 211 with TLS, clippy clean | M6 |
