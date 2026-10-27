@@ -15,6 +15,7 @@ use crate::pixel::overlay::OverlayData;
 use crate::pixel::PixelData;
 
 pub mod geometry;
+pub mod interpolation;
 pub mod math;
 pub mod spatial;
 
@@ -22,6 +23,7 @@ pub use geometry::{
     can_draw_localizer, intersection_localizer, projection_localizer, FrameGeometry, FrameGeometryType,
     FrameOrientation,
 };
+pub use interpolation::{bilinear_color24, bilinear_grayscale, nearest_grayscale};
 pub use math::{BitList, Histogram, Interval, Matrix, MovingAverage, Point2, Point3, Rect, Vector3};
 pub use spatial::SpatialTransform;
 
