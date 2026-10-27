@@ -13,6 +13,7 @@
 //! this crate only defines the [`pixel::codec`] interfaces and registry.
 
 pub mod encoding;
+pub mod dump;
 pub mod error;
 pub mod generated;
 pub mod io;

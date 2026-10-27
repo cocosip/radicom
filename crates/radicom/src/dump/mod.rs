@@ -1,0 +1,261 @@
+//! Dataset dump formatting (INF-04; docs/01-feature-list.md INF-04, INF-07).
+//!
+//! Renders a `Dataset` as indented text — tag, VR, dictionary keyword and value
+//! — with truncation controls. This is the library half of the `radicom-dump`
+//! CLI (INF-07), mirroring fo-dicom's `FO-DICOM.Dump`.
+
+use crate::model::dataset::Dataset;
+use crate::model::dictionary::default_dictionary;
+use crate::model::element::ElementValue;
+use crate::model::item::DicomItem;
+use crate::model::tag::Tag;
+
+/// Dump formatting options (INF-04).
+#[derive(Debug, Clone)]
+pub struct DumpOptions {
+    /// Maximum characters of a string value before it is elided with `…`.
+    pub max_value_chars: usize,
+    /// Maximum bytes of binary data shown in the hex preview.
+    pub max_binary_bytes: usize,
+    /// Indent width per sequence level.
+    pub indent: usize,
+    /// Include private elements (odd groups).
+    pub show_private: bool,
+}
+
+impl Default for DumpOptions {
+    fn default() -> Self {
+        DumpOptions { max_value_chars: 64, max_binary_bytes: 16, indent: 2, show_private: true }
+    }
+}
+
+/// Formats a dataset (and all nested sequences) as a multi-line string (INF-04).
+pub fn dump_dataset(dataset: &Dataset, options: &DumpOptions) -> String {
+    let mut out = String::new();
+    write_level(dataset, 0, options, &mut out);
+    out
+}
+
+/// Formats one element's line at `depth`.
+fn write_level(dataset: &Dataset, depth: usize, options: &DumpOptions, out: &mut String) {
+    let dictionary = default_dictionary();
+    let pad = " ".repeat(depth * options.indent);
+    for item in dataset.items() {
+        let tag = item.tag().clone();
+        // skip private elements unless requested (allowed as a trust-boundary option)
+        if !options.show_private && tag.group() % 2 == 1 {
+            continue;
+        }
+        let name = dictionary.entry(&tag).keyword;
+        let tag_text = format!("({:04X},{:04X})", tag.group(), tag.element());
+        match item {
+            DicomItem::Element(e) => {
+                let value = render_value(e.value(), e.vr(), options);
+                out.push_str(&format!("{pad}{tag_text} {:<2} {name:<30} {value}\n", e.vr().code()));
+            }
+            DicomItem::Sequence(s) => {
+                out.push_str(&format!("{pad}{tag_text} SQ {name:<30} ({} item(s))\n", s.items().len()));
+                for (index, item_ds) in s.items().iter().enumerate() {
+                    out.push_str(&format!("{pad}{}item #{index}\n", " ".repeat(options.indent)));
+                    write_level(item_ds, depth + 2, options, out);
+                }
+            }
+            DicomItem::Fragments(f) => {
+                out.push_str(&format!(
+                    "{pad}{tag_text} {:<2} {name:<30} ({} fragment(s))\n",
+                    f.vr().code(),
+                    f.fragments().len()
+                ));
+            }
+        }
+    }
+}
+
+/// Renders an element value with truncation (INF-04).
+fn render_value(value: &ElementValue, vr: crate::model::vr::Vr, options: &DumpOptions) -> String {
+    match value {
+        ElementValue::Str(text) => {
+            let text = text.as_str();
+            if text.is_empty() {
+                return "(empty)".to_string();
+            }
+            if text.chars().count() > options.max_value_chars {
+                let truncated: String = text.chars().take(options.max_value_chars).collect();
+                format!("{truncated}… ({} chars)", text.chars().count())
+            } else {
+                text.to_string()
+            }
+        }
+        ElementValue::Bytes(buffer) => {
+            let bytes = buffer.data();
+            let bytes: &[u8] = bytes.as_ref();
+            if vr.is_string() && !bytes.is_empty() {
+                // string-typed Other values: show as text when printable
+                if let Ok(text) = std::str::from_utf8(bytes) {
+                    let text = text.trim_end_matches('\0');
+                    if text.is_empty() {
+                        return "(empty)".to_string();
+                    }
+                    if text.chars().take(options.max_value_chars).all(|c| !c.is_control() || c == '\n') {
+                        return render_str(text, options);
+                    }
+                }
+            }
+            if bytes.is_empty() {
+                return "(empty)".to_string();
+            }
+            let shown = bytes.len().min(options.max_binary_bytes);
+            let hex: Vec<String> = bytes[..shown].iter().map(|b| format!("{b:02X}")).collect();
+            let suffix = if bytes.len() > shown { format!(" … ({} bytes)", bytes.len()) } else { String::new() };
+            format!("[{}]{suffix}", hex.join(" "))
+        }
+    }
+}
+
+fn render_str(text: &str, options: &DumpOptions) -> String {
+    if text.chars().count() > options.max_value_chars {
+        let truncated: String = text.chars().take(options.max_value_chars).collect();
+        format!("{truncated}… ({} chars)", text.chars().count())
+    } else {
+        text.to_string()
+    }
+}
+
+/// A one-line summary of pixel data, for the CLI (INF-07).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PixelSummary {
+    pub rows: u16,
+    pub columns: u16,
+    pub frames: u32,
+    pub bits_allocated: u16,
+    pub samples_per_pixel: u16,
+    pub photometric_interpretation: String,
+}
+
+impl PixelSummary {
+    pub fn one_line(&self) -> String {
+        format!(
+            "{}x{} × {} frame(s), {} bits, {} sample(s)/pixel, {}",
+            self.columns, self.rows, self.frames, self.bits_allocated, self.samples_per_pixel, self.photometric_interpretation
+        )
+    }
+}
+
+/// Reads the pixel-data summary from a dataset, if it carries pixel data (INF-07).
+pub fn pixel_summary(dataset: &Dataset) -> Option<PixelSummary> {
+    let rows = dataset.try_get::<u16>(Tag::new(0x0028, 0x0010))?;
+    let columns = dataset.try_get::<u16>(Tag::new(0x0028, 0x0011))?;
+    let bits_allocated = dataset.try_get::<u16>(Tag::new(0x0028, 0x0100)).unwrap_or(0);
+    let samples_per_pixel = dataset.try_get::<u16>(Tag::new(0x0028, 0x0002)).unwrap_or(1);
+    let frames = dataset
+        .try_get_str(Tag::new(0x0028, 0x0008))
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(1);
+    let photometric = dataset.try_get_str(Tag::new(0x0028, 0x0004)).unwrap_or_else(|| "?".to_string());
+    Some(PixelSummary {
+        rows,
+        columns,
+        frames,
+        bits_allocated,
+        samples_per_pixel,
+        photometric_interpretation: photometric.trim().to_string(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::vr::Vr;
+    use std::sync::Arc;
+
+    fn sample_dataset() -> Dataset {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "DOE^JOHN");
+        ds.insert_str(Tag::new(0x0008, 0x0060), Vr::Cs, "CT");
+        let mut item = Dataset::new();
+        item.insert_str(Tag::new(0x0008, 0x0100), Vr::Sh, "1");
+        ds.insert_sequence(Tag::new(0x0008, 0x1140)).push(item);
+        ds
+    }
+
+    #[test]
+    fn a_dump_lists_tag_vr_keyword_and_value() {
+        let out = dump_dataset(&sample_dataset(), &DumpOptions::default());
+        assert!(out.contains("(0010,0010)"), "shows the tag");
+        assert!(out.contains("PatientName"), "shows the dictionary keyword");
+        assert!(out.contains("DOE^JOHN"), "shows the value");
+        assert!(out.contains("(0008,0060)"), "shows the second element");
+    }
+
+    #[test]
+    fn a_sequence_is_rendered_with_its_items() {
+        let out = dump_dataset(&sample_dataset(), &DumpOptions::default());
+        assert!(out.contains("SQ"), "marks the sequence");
+        assert!(out.contains("item #0"), "shows the nested item");
+        assert!(out.contains("ReferencedImageSequence") || out.contains("(0008,1140)"), "shows the SQ tag");
+    }
+
+    #[test]
+    fn long_values_are_truncated_to_the_limit() {
+        let mut ds = Dataset::new();
+        let long = "A".repeat(100);
+        ds.insert_str(Tag::new(0x0008, 0x0008), Vr::Cs, long);
+        let options = DumpOptions { max_value_chars: 10, ..Default::default() };
+        let out = dump_dataset(&ds, &options);
+        assert!(out.contains("…"), "long value is elided");
+        assert!(!out.contains(&"A".repeat(20)), "the full value is not printed");
+    }
+
+    #[test]
+    fn binary_data_shows_a_hex_preview() {
+        let mut ds = Dataset::new();
+        let bytes: Vec<u8> = (0u8..32).collect();
+        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
+            Tag::new(0x7FE0, 0x0010),
+            Vr::Ob,
+            Arc::new(crate::model::buffer::MemoryBuffer::from(bytes)),
+        )));
+        let options = DumpOptions { max_binary_bytes: 4, ..Default::default() };
+        let out = dump_dataset(&ds, &options);
+        assert!(out.contains("00 01 02 03"), "shows the bounded hex preview");
+        assert!(out.contains("32 bytes"), "reports the full size");
+    }
+
+    #[test]
+    fn an_empty_value_is_labelled() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::new(0x0008, 0x0060), Vr::Cs, "");
+        let out = dump_dataset(&ds, &DumpOptions::default());
+        assert!(out.contains("(empty)"), "empty values are labelled");
+    }
+
+    #[test]
+    fn private_elements_can_be_hidden() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::new(0x0009, 0x0010), Vr::Lo, "PRIVATE");
+        let shown = dump_dataset(&ds, &DumpOptions { show_private: true, ..Default::default() });
+        assert!(shown.contains("PRIVATE"));
+        let hidden = dump_dataset(&ds, &DumpOptions { show_private: false, ..Default::default() });
+        assert!(!hidden.contains("PRIVATE"), "private element is filtered out");
+    }
+
+    #[test]
+    fn a_pixel_summary_reports_the_image_shape() {
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::new(0x0028, 0x0010), 512u16);
+        ds.insert_value(Tag::new(0x0028, 0x0011), 256u16);
+        ds.insert_value(Tag::new(0x0028, 0x0100), 16u16);
+        ds.insert_value(Tag::new(0x0028, 0x0002), 1u16);
+        ds.insert_str(Tag::new(0x0028, 0x0004), Vr::Cs, "MONOCHROME2");
+        let summary = pixel_summary(&ds).unwrap();
+        assert_eq!(summary.rows, 512);
+        assert_eq!(summary.columns, 256);
+        assert_eq!(summary.bits_allocated, 16);
+        assert!(summary.one_line().contains("256x512"));
+    }
+
+    #[test]
+    fn a_non_image_dataset_has_no_pixel_summary() {
+        assert!(pixel_summary(&sample_dataset()).is_none());
+    }
+}
