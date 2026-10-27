@@ -85,10 +85,10 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 | M1 | Identifier system | Done | TAG/VR/UID/TS/DICT/VM/MaskedTag/tag-index committed (343bd56..16847ac); 5347-tag + 1928-UID generated tables verified by tests; exit condition met |
 | M2 | Dataset & elements | Done | DA/DT/TM, buffers, element model, PersonName, dataset, charsets, validators, functional groups/equality/datetime (a792ecb..bfa3e6f); 110 tests green; exit condition met |
 | M3 | File & IO | Complete | Byte source/target (4cc33e9), parser (8fa5ae7), writer (a2c4317) and DicomFile all landed; 163 tests, clippy clean. FILE-02 on-demand windows remain P1 |
-| M4 | Pixel & codec interfaces | Not started | Boundary freeze gates radicom-codecs kickoff |
-| M5 | Network core | Not started | |
-| M6 | Network services | Not started | |
-| M7 | Serialization & media | Not started | |
+| M4 | Pixel & codec interfaces | Done | Codec boundary frozen for radicom-codecs; 208 tests green |
+| M5 | Network core | Complete | PDU codec, association, PDV assembly, message codec, engine state, C-ECHO/C-STORE over TCP and TLS; 150 tests at completion |
+| M6 | Network services | Complete except reference-peer interop | SRV-04..06, NET-04, CLI-01..02 (c3f75ab..a060c9c); 210 network tests, 218 with TLS. SRV-07/08 stay P2/M8 |
+| M7 | Serialization & media | In progress (JSON-01 done) | DICOM JSON model committed c907f6f with 23 tests; XML, DICOMDIR, SR and the anonymizer remain |
 | M8 | Rendering & enhancements | Deferred (P2) | |
 
 ### 3.2 Feature-group status (fine-grained)
@@ -116,10 +116,10 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 | Association | NET-03..04 | Done | Negotiation with odd context IDs and dedup, accept/reject matrix, syntax priority, role selection, message routing; the SCU side drives handshake, C-ECHO, C-STORE, C-FIND, C-GET, C-MOVE and release/abort. Extended negotiation and user identity are negotiated end to end (per-SOP-class grant/refuse, identity refusal rejects, a required positive response must arrive) |
 | Protocol engine | NET-05..08 | Done | PDV assembly and PDU fragmentation with lossless round-trips; message codec for command+dataset with the command always first; pending table, watchdog, circuit breaker, lifecycle and bounded queue |
 | Server & services | SRV-01..08 | In progress | SRV-01..06 done: server, C-ECHO, C-STORE receive with an injectable spool sink, C-FIND with streamed matches and level presets, C-GET with reverse C-STORE sub-operations on the same association, and C-MOVE with the outbound store helper (Move Originator always written). SRV-07/08 in M8 |
-| Client | CLI-01..02 | In progress | CLI-01 done: `DicomClient` reuses associations, retries unreachable peers and fails a rejection at once. CLI-02 (expert layer) not started |
+| Client | CLI-01..02 | Done | CLI-01 high-level `DicomClient` (association reuse, retry, events) and CLI-02 expert layer (`Connection`, `ResponseStream`) committed bcdfda3, a060c9c |
 | DIMSE model | DIMSE-01 | Done | All 22 command fields with request/response pairing, command group length recomputed, status classification with mask classes, LO-truncated error comments |
 | Observability | OBS-01..02 | Not started | OBS-02 (OTel wiring) deferred to M8 |
-| JSON/XML | JSON-01..02, XML-01 | Not started | |
+| JSON/XML | JSON-01..02, XML-01 | In progress | JSON-01 done: PS3.18 model with PN groups, AT, sequences, number modes and a tolerant reader. JSON-02 (BulkDataURI) and XML-01 remain |
 | Media (DICOMDIR) | MEDIA-01..03 | Not started | |
 | Structured report | SR-01..02 | Not started | |
 | Printing | PRINT-01..02 | Deferred (P2) | |
@@ -133,6 +133,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 
 | Date | Item | Milestone |
 |---|---|---|
+| 2026-10-27 | M7 started: DICOM JSON (JSON-01). PS3.18 model with PN groups, byte-backed AT/US round-trips, three number modes, tolerant reading and fragment rejection. 23 radicom-json tests, clippy clean | M7 |
 | 2026-10-27 | M6 services (partial): C-GET (SRV-05), C-MOVE (SRV-06), extended negotiation + user identity (NET-04) and the high-level client (CLI-01). 203 network tests, 211 with TLS, clippy clean | M6 |
 | 2026-10-27 | M6 started: C-FIND (SRV-04) end-to-end. Level presets map to the standard SOP classes, the SCP streams matches from a provider stream, and a provider that ends early still gets one terminal response. 150 network tests, clippy clean | M6 |
 | 2026-10-27 | M5 complete: TLS for SCU and SCP under the optional `tls` feature. Plain TCP and TLS share the whole protocol path through a generic connection; a failed handshake ends only that connection. 144 network tests with TLS, 136 without, clippy clean under both feature sets | M5 |
@@ -174,6 +175,8 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-10-27 | radicom team | M7 JSON landed (JSON-01). Fixed while testing: US/AT elements are byte-backed in the model, so the reader must build them with `new_bytes` (a `new_str` path panicked on a debug assert) and integer VRs must serialize as JSON integers, not `512.0`. `base64` became a workspace dependency for InlineBinary |
+| 2026-10-27 | radicom team | CLI-02 expert layer landed: `Connection` enforces one association at a time and `ResponseStream` is a real `Iterator`. M6 is now complete apart from reference-peer interop |
 | 2026-10-27 | radicom team | M6 services landed in three commits. Fixed while testing: the PDU decoder put item 0x56 into `requested` for both directions, so every negotiated answer was lost (the PDU type now decides); the C-GET path only proposed the retrieve model, leaving the SCP no storage context and failing every reverse sub-operation; user identity was validated after connecting, so a bad identity surfaced as a connection error. Still open in M6: CLI-02 expert layer, reference-peer interop |
 | 2026-10-27 | radicom team | M5 network core landed in four commits. Fixed while testing: command-set integers were written with their string VR preference so US fields travelled as ASCII; the SCU ignored the peer maximum PDU length. M5 is not finished — see the gap list in its Done entry |
 | 2026-10-27 | radicom team | M4 landed. Fixed while reviewing: `add_frame` indexed from `(0028,0008)` (which reads 1 when absent) so the first frame landed at index 1; overlays were extracted after the output claimed the target syntax, tripping the decompression guard. The global codec registry is process-wide, so registry-touching tests now serialize on a test lock |
