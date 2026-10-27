@@ -20,6 +20,8 @@ rustls-pemfile = { workspace = true, optional = true }
 [features]
 default = []
 tls = ["dep:tokio-rustls", "dep:rustls-pemfile"]
+# OBS-02: TracingMetrics emits fo-dicom-aligned metrics via `tracing` field
+# conventions (no `opentelemetry` dependency; downstream bridges to OTel).
 otel = []
 
 [dev-dependencies]

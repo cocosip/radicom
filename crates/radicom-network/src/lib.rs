@@ -42,6 +42,8 @@ pub use error::{AbortSource, NetworkError, RejectResult, RejectSource, Result};
 pub use expert::{send as send_expert, Connection, ConnectionEvent, ExpertRequest, ExpertResponse, ResponseStream};
 pub use hosting::{HostedDicomServer, HostedServerConfig, ServerHealth};
 pub use observability::{CountingMetrics, MetricsCollector, MetricsSnapshot, NoopMetrics};
+#[cfg(feature = "otel")]
+pub use observability::TracingMetrics;
 pub use nservice::{is_n_request, NServiceRequest, NServiceResponse, N_REQUEST_FIELDS};
 pub use extended::{
     apply_answer, validate_common_extended, AppInfo, ExtendedNegotiationPolicy, FindAppInfo, RetrieveAppInfo,

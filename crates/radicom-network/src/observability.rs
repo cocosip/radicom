@@ -106,6 +106,61 @@ impl MetricsCollector for CountingMetrics {
     }
 }
 
+/// OBS-02: emits the metrics through `tracing` using the `monotonic_counter.*` /
+/// `gauge.*` field conventions that downstream `tracing-opentelemetry` (or any
+/// metrics layer) turns into OTel instruments — with **no** `opentelemetry`
+/// dependency in this crate. This mirrors fo-dicom's `FO-DICOM.Instrumentation`
+/// package, which emits via .NET's built-in `System.Diagnostics.Metrics` and
+/// only references OpenTelemetry in optional `AddMeter`/`AddSource` glue.
+///
+/// Metric-name mapping (ours ↔ fo-dicom):
+/// - `network_sent_bytes`     ↔ `fellowoakdicom.network.sent`
+/// - `network_received_bytes` ↔ `fellowoakdicom.network.received`
+/// - `network_connections`    ↔ `fellowoakdicom.network.connections`
+/// - `network_concurrent_connections` (gauge) ↔ `fellowoakdicom.network.concurrentconnections`
+#[cfg(feature = "otel")]
+mod tracing_metrics {
+    use super::MetricsCollector;
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    const TARGET: &str = "radicom::network";
+
+    #[derive(Debug, Default)]
+    pub struct TracingMetrics {
+        concurrent: AtomicI64,
+    }
+
+    impl TracingMetrics {
+        pub fn new() -> Self {
+            Self::default()
+        }
+    }
+
+    impl MetricsCollector for TracingMetrics {
+        fn on_bytes_sent(&self, bytes: u64) {
+            tracing::debug!(target: TARGET, { monotonic_counter.network_sent_bytes = bytes }, "network bytes sent");
+        }
+        fn on_bytes_received(&self, bytes: u64) {
+            tracing::debug!(target: TARGET, { monotonic_counter.network_received_bytes = bytes }, "network bytes received");
+        }
+        fn on_connection_opened(&self) {
+            tracing::debug!(target: TARGET, { monotonic_counter.network_connections = 1_i64 }, "connection opened");
+            let current = self.concurrent.fetch_add(1, Ordering::Relaxed) + 1;
+            tracing::debug!(target: TARGET, { gauge.network_concurrent_connections = current }, "concurrent connections");
+        }
+        fn on_connection_closed(&self) {
+            let current = self.concurrent.fetch_sub(1, Ordering::Relaxed) - 1;
+            tracing::debug!(target: TARGET, { gauge.network_concurrent_connections = current }, "concurrent connections");
+        }
+        fn on_association_opened(&self) {
+            tracing::debug!(target: TARGET, { monotonic_counter.network_associations = 1_i64 }, "association opened");
+        }
+    }
+}
+
+#[cfg(feature = "otel")]
+pub use tracing_metrics::TracingMetrics;
+
 /// An `AsyncRead`/`AsyncWrite` wrapper that reports transferred bytes to a
 /// collector (one insertion point measures the whole connection).
 pub struct CountingStream<S> {
@@ -281,5 +336,45 @@ mod tests {
         m.on_bytes_sent(1);
         m.on_connection_opened();
         // nothing to observe; the point is it must not panic
+    }
+
+    #[cfg(feature = "otel")]
+    #[test]
+    fn tracing_metrics_emit_metric_events() {
+        use std::sync::atomic::AtomicUsize;
+
+        #[derive(Clone)]
+        struct Counter(Arc<AtomicUsize>);
+        impl tracing::Subscriber for Counter {
+            fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _attrs: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+            fn event(&self, _event: &tracing::Event<'_>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+            fn enter(&self, _span: &tracing::span::Id) {}
+            fn exit(&self, _span: &tracing::span::Id) {}
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let metrics = TracingMetrics::new();
+        tracing::subscriber::with_default(Counter(count.clone()), || {
+            metrics.on_bytes_sent(10);
+            metrics.on_bytes_received(20);
+            metrics.on_connection_opened(); // counter + gauge
+            metrics.on_connection_closed(); // gauge
+            metrics.on_association_opened(); // counter
+        });
+        // 5 calls; connection_open contributes two events => 6
+        assert!(
+            count.load(Ordering::Relaxed) >= 6,
+            "expected metric events, got {}",
+            count.load(Ordering::Relaxed)
+        );
     }
 }
