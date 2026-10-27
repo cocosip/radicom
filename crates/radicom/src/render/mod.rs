@@ -209,18 +209,39 @@ impl RawImage {
                 raw.push(self.bytes[i]);
             }
         }
+        self.encode_png(&raw, 0) // colour type 0 = grayscale
+    }
+
+    /// Encodes the image as an 8-bit RGB PNG (3 channels, no alpha).
+    ///
+    /// Used for colour/palette render output; grayscale output still uses
+    /// [`to_png`](Self::to_png) so it stays a compact single-channel PNG.
+    pub fn to_png_rgb(&self) -> Vec<u8> {
+        let mut raw = Vec::with_capacity((self.width * self.height * 3 + self.height) as usize);
+        for y in 0..self.height {
+            raw.push(0); // filter type 0 (None)
+            for x in 0..self.width {
+                let i = ((y * self.width + x) * 4) as usize;
+                // BGRA → RGB
+                raw.push(self.bytes[i + 2]);
+                raw.push(self.bytes[i + 1]);
+                raw.push(self.bytes[i]);
+            }
+        }
+        self.encode_png(&raw, 2) // colour type 2 = truecolour RGB
+    }
+
+    /// Wraps filtered scanlines in the PNG container with the given colour type.
+    fn encode_png(&self, raw: &[u8], color_type: u8) -> Vec<u8> {
         let mut png = Vec::new();
         png.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
-        // IHDR
         let mut ihdr = Vec::with_capacity(13);
         ihdr.extend_from_slice(&self.width.to_be_bytes());
         ihdr.extend_from_slice(&self.height.to_be_bytes());
-        ihdr.extend_from_slice(&[8, 0, 0, 0, 0]); // 8-bit, grayscale, deflate, filter 0, no interlace
+        ihdr.extend_from_slice(&[8, color_type, 0, 0, 0]); // 8-bit, color_type, deflate, filter 0, no interlace
         write_chunk(&mut png, b"IHDR", &ihdr);
-        // IDAT (zlib-compressed filtered scanlines)
-        let compressed = zlib_compress(&raw);
+        let compressed = zlib_compress(raw);
         write_chunk(&mut png, b"IDAT", &compressed);
-        // IEND
         write_chunk(&mut png, b"IEND", &[]);
         png
     }
@@ -321,6 +342,106 @@ pub fn render_grayscale_frame(dataset: &Dataset, frame: u32) -> Result<RawImage,
 fn unsupported(message: &str) -> Error {
     Error::Data(DataError::Other { message: message.to_string() })
 }
+
+/// Renders one frame, choosing the pipeline by photometric interpretation
+/// (REND-02, docs §2): MONOCHROME → grayscale window; RGB → colour assembly;
+/// PALETTE COLOR → palette index lookup. Other PIs error.
+pub fn render_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error> {
+    use crate::pixel::photometric::PhotometricInterpretation as Pi;
+    let pi = dataset
+        .try_get_str(Tag::new(0x0028, 0x0004))
+        .map(|s| Pi::parse(&s))
+        .unwrap_or(Pi::Monochrome2);
+    match pi {
+        Pi::Monochrome1 | Pi::Monochrome2 => render_grayscale_frame(dataset, frame),
+        Pi::Rgb => render_rgb_frame(dataset, frame),
+        Pi::PaletteColor => render_palette_frame(dataset, frame),
+        _ => Err(unsupported("this photometric interpretation is not rendered yet")),
+    }
+}
+
+/// Reads `count` native samples for a frame, honouring 8/16-bit depth.
+///
+/// Returns `(samples, width, height, (samples_per_pixel, planar_configuration))`.
+fn read_frame_samples(
+    pixel: &PixelData<'_>,
+    frame: u32,
+) -> Result<(Vec<u16>, u32, u32), Error> {
+    let (width, height) = (pixel.width(), pixel.height());
+    let bits = pixel.bits_allocated()?;
+    if !matches!(bits, 8 | 16) {
+        return Err(unsupported(&format!("bits allocated {bits} is not rendered")));
+    }
+    if pixel.transfer_syntax().is_encapsulated() {
+        return Err(unsupported("compressed frames need the codec layer"));
+    }
+    let buffer = pixel.get_frame(frame)?;
+    let raw = buffer.data();
+    let raw: &[u8] = raw.as_ref();
+    let samples = if bits == 8 {
+        raw.iter().map(|b| *b as u16).collect()
+    } else {
+        raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
+    };
+    Ok((samples, width, height))
+}
+
+/// RgbColorPipeline (docs §2): 3 samples per pixel → BGRA directly.
+fn render_rgb_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error> {
+    let mut owned = dataset.clone();
+    let pixel = PixelData::from_dataset(&mut owned)?;
+    if pixel.samples_per_pixel() != 3 {
+        return Err(unsupported("RGB expects 3 samples per pixel"));
+    }
+    let planar = pixel.planar_configuration() == 1;
+    let bits = pixel.bits_allocated()?;
+    let (samples, width, height) = read_frame_samples(&pixel, frame)?;
+    let count = (width as usize) * (height as usize);
+    if samples.len() < count * 3 {
+        return Err(unsupported("frame is shorter than rows×cols×3 samples"));
+    }
+    let to8 = |v: u16| -> u8 {
+        if bits == 16 { (v >> 8) as u8 } else { v as u8 }
+    };
+    let at = |index: usize, channel: usize| -> u16 {
+        // planar configuration 1 stores channel planes sequentially
+        if planar {
+            samples[channel * count + index]
+        } else {
+            samples[index * 3 + channel]
+        }
+    };
+    let mut bytes = Vec::with_capacity(count * 4);
+    for i in 0..count {
+        let r = to8(at(i, 0));
+        let g = to8(at(i, 1));
+        let b = to8(at(i, 2));
+        bytes.extend_from_slice(&[b, g, r, 0xFF]);
+    }
+    Ok(RawImage::new(width, height, bytes))
+}
+
+/// PaletteColorPipeline (docs §2): palette index → 256-entry R/G/B LUT.
+fn render_palette_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error> {
+    let mut owned = dataset.clone();
+    let pixel = PixelData::from_dataset(&mut owned)?;
+    if pixel.samples_per_pixel() != 1 {
+        return Err(unsupported("PALETTE COLOR expects 1 sample per pixel"));
+    }
+    let palette = pixel.palette_color_lut().ok_or_else(|| unsupported("PALETTE COLOR but no palette LUT"))?;
+    let (samples, width, height) = read_frame_samples(&pixel, frame)?;
+    let count = (width as usize) * (height as usize);
+    if samples.len() < count {
+        return Err(unsupported("frame is shorter than rows×cols samples"));
+    }
+    let mut bytes = Vec::with_capacity(count * 4);
+    for &index in &samples[..count] {
+        let color = palette.get(index as usize).copied().unwrap_or(crate::pixel::Color32::new(0, 0, 0));
+        bytes.extend_from_slice(&[color.b, color.g, color.r, 0xFF]);
+    }
+    Ok(RawImage::new(width, height, bytes))
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -453,5 +574,111 @@ mod tests {
         let mut crc = Crc32::new();
         crc.update(b"123456789");
         assert_eq!(crc.finish(), 0xCBF4_3926);
+    }
+
+    fn color_image(pi: &str, samples_per_pixel: u16, bits: u16, samples: &[u16], planar: u16) -> Dataset {
+        let count = samples.len() as u16 / samples_per_pixel.max(1);
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::new(0x0028, 0x0002), samples_per_pixel);
+        ds.insert_str(Tag::new(0x0028, 0x0004), Vr::Cs, pi);
+        // square-ish frames for the test sizes used below
+        ds.insert_value(Tag::new(0x0028, 0x0010), 1u16);
+        ds.insert_value(Tag::new(0x0028, 0x0011), count);
+        ds.insert_value(Tag::new(0x0028, 0x0100), bits);
+        ds.insert_value(Tag::new(0x0028, 0x0101), bits);
+        ds.insert_value(Tag::new(0x0028, 0x0102), bits - 1);
+        ds.insert_value(Tag::new(0x0028, 0x0103), 0u16);
+        if samples_per_pixel > 1 {
+            ds.insert_value(Tag::new(0x0028, 0x0006), planar);
+        }
+        let mut bytes = Vec::new();
+        for &s in samples {
+            if bits == 8 {
+                bytes.push(s as u8);
+            } else {
+                bytes.extend_from_slice(&s.to_le_bytes());
+            }
+        }
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::new(0x7FE0, 0x0010),
+                Vr::Ob,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(bytes)),
+            ),
+        ));
+        ds.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        ds
+    }
+
+    #[test]
+    fn an_rgb_frame_renders_interleaved_colour() {
+        // 2 pixels: red (255,0,0) and green (0,255,0), interleaved RGB, 8-bit
+        let ds = color_image("RGB", 3, 8, &[255, 0, 0, 0, 255, 0], 0);
+        let image = render_frame(&ds, 0).unwrap();
+        assert_eq!(image.width(), 2);
+        let b = image.as_bytes();
+        // first pixel BGRA = (0,0,255,255) = red
+        assert_eq!(&b[0..4], &[0, 0, 255, 255]);
+        // second pixel = green (0,255,0)
+        assert_eq!(&b[4..8], &[0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn a_planar_rgb_frame_renders_the_same_as_interleaved() {
+        // same two pixels, planar configuration 1: R plane, G plane, B plane
+        let ds = color_image("RGB", 3, 8, &[255, 0, 0, 255, 0, 0], 1);
+        let image = render_frame(&ds, 0).unwrap();
+        let b = image.as_bytes();
+        assert_eq!(&b[0..4], &[0, 0, 255, 255], "pixel 0 is red");
+        assert_eq!(&b[4..8], &[0, 255, 0, 255], "pixel 1 is green");
+    }
+
+    fn us_bytes(values: &[u16]) -> crate::model::buffer::SharedBuffer {
+        let mut bytes = Vec::with_capacity(values.len() * 2);
+        for &v in values {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(bytes))
+    }
+
+    #[test]
+    fn a_palette_frame_maps_indices_through_the_colour_lut() {
+        let mut ds = color_image("PALETTE COLOR", 1, 8, &[0, 1], 0);
+        // read_lut reads descriptors as >=8 raw bytes: [_, count@2, first@4, bits@6]
+        let desc = || us_bytes(&[0, 2, 0, 8]); // first=0, count=2, bits=8
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(Tag::new(0x0028, 0x1101), Vr::Us, desc()),
+        ));
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(Tag::new(0x0028, 0x1102), Vr::Us, desc()),
+        ));
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(Tag::new(0x0028, 0x1103), Vr::Us, desc()),
+        ));
+        // 8-bit data: index 0 → red (255,0,0), index 1 → blue (0,0,255)
+        let data = |vals: [u8; 2]| std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vals.to_vec())) as crate::model::buffer::SharedBuffer;
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(Tag::new(0x0028, 0x1201), Vr::Ow, data([255, 0])),
+        ));
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(Tag::new(0x0028, 0x1202), Vr::Ow, data([0, 0])),
+        ));
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(Tag::new(0x0028, 0x1203), Vr::Ow, data([0, 255])),
+        ));
+        let image = render_frame(&ds, 0).unwrap();
+        let b = image.as_bytes();
+        assert_eq!(&b[0..4], &[0, 0, 255, 255], "index 0 is red");
+        assert_eq!(&b[4..8], &[255, 0, 0, 255], "index 1 is blue");
+    }
+
+    #[test]
+    fn rgb_png_is_truecolour_with_three_channels() {
+        let ds = color_image("RGB", 3, 8, &[255, 0, 0, 0, 255, 0], 0);
+        let image = render_frame(&ds, 0).unwrap();
+        let png = image.to_png_rgb();
+        assert_eq!(&png[12..16], b"IHDR");
+        // colour type is byte 9 of IHDR data (offset 16..29)
+        assert_eq!(png[16 + 9], 2, "PNG colour type 2 = truecolour");
     }
 }
