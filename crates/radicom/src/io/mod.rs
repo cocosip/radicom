@@ -5,6 +5,7 @@ pub mod dataset_builder;
 pub mod file;
 pub mod pool;
 pub mod reader;
+pub mod trace;
 pub mod writer;
 
 pub use pool::{BufferPool, PooledBuffer};

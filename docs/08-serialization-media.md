@@ -145,6 +145,12 @@ The generator instance keeps `replaced_uids` across calls for consistency.
 
 ## 7. Dump and Logging (INF-03/04)
 
+> Implemented: `radicom::dump` holds the formatter (`dump_dataset`/`DumpOptions`).
+> `radicom::logging` is the `tracing` facade: `targets::{NETWORK,CODEC,IO,ENCODING,PRINT}`,
+> `Dataset::to_dump_string()` / `to_dump_string_with(options)` / `write_to_log(level)`.
+> `radicom::io::trace` provides `TraceObserver` (a `ParseObserver` logging every
+> parse event at debug on `radicom::io`) and a `trace(bytes, syntax)` helper.
+
 - `dataset.to_dump_string(opts)` / `write_to_log(level)`: hierarchical indentation, `TAG VR Name : value` per line; string truncation (default 64 chars), binary as hex (first N bytes), SQ depth markers; console colorization optional.
 - Parser trace: an observer that logs every parse event at debug level (`radicom::io::trace`).
 - Log target names: `radicom::network`, `radicom::codec`, `radicom::io`, `radicom::encoding`, `radicom::print`.

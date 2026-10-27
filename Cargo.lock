@@ -462,6 +462,7 @@ dependencies = [
  "rayon",
  "regex",
  "thiserror",
+ "tracing",
  "uuid",
 ]
 

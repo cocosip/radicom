@@ -16,6 +16,7 @@ flate2.workspace = true
 quick-xml.workspace = true
 regex = { workspace = true, optional = true }
 uuid.workspace = true
+tracing.workspace = true
 
 [features]
 default = []
