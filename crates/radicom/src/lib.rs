@@ -16,6 +16,7 @@ pub mod encoding;
 pub mod error;
 pub mod generated;
 pub mod model;
+pub mod validation;
 
 pub use error::{DataError, Error, FileError, ReaderError, ValidationFailure};
 pub use model::dictionary::{

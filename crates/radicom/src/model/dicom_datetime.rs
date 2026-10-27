@@ -233,6 +233,28 @@ pub fn parse_dt(s: &str) -> Result<Range<DtPoint>, Error> {
     }
 }
 
+/// Validates DT offsets anywhere in the string: single-value parsing binds
+/// a trailing suffix as an offset, but a range split can swallow an
+/// out-of-range offset (e.g. `-1500`) as the range end; this pre-check
+/// rejects such inputs outright.
+pub fn has_invalid_dt_offset(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    for i in 1..bytes.len() {
+        if bytes[i] == b'+' || bytes[i] == b'-' {
+            let nums: String = s[i + 1..].chars().take_while(|c| c.is_ascii_digit()).collect();
+            let hour: u32 = match nums.len() {
+                2 => nums.parse().unwrap_or(u32::MAX),
+                4 => nums[..2].parse().unwrap_or(u32::MAX),
+                _ => continue,
+            };
+            if hour > 14 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 // -- canonical formatting ---------------------------------------------------
 
 /// Formats DA canonically: `YYYYMMDD`.
