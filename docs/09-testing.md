@@ -28,6 +28,12 @@ Test naming: `<area>_<behavior>__<case>` for easy triage; every tolerance test e
 
 ## 3. Test Data Inventory (INF-06)
 
+> Implemented: a minimal 13-file subset lives in `tests-data/` (with a
+> `README.md` provenance note and the fo-dicom MS-PL license). The
+> `crates/radicom/tests/corpus.rs` baselines parse every file, assert
+> write→parse→write byte stability, and assert a group-length-normalised
+> semantic round-trip (charset files via byte stability only).
+
 Mirrors the categories fo-dicom's test data covers; import the minimal set (fo-dicom's test data ships under the repository's **MS-PL** license — retain the notice per file batch and record provenance in `tests-data/README.md`):
 
 | Category | Examples needed |
