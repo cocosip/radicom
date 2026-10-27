@@ -24,3 +24,7 @@ anonymize = ["dep:regex"]
 
 [dev-dependencies]
 rayon.workspace = true
+
+[[bench]]
+name = "core"
+harness = false
