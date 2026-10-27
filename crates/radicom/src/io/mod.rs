@@ -3,3 +3,4 @@
 pub mod byte_source;
 pub mod dataset_builder;
 pub mod reader;
+pub mod writer;

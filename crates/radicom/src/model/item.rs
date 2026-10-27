@@ -93,12 +93,14 @@ impl DicomFragmentSequence {
         &self.fragments
     }
 
-    /// Appends a fragment and maintains the basic offset table: each entry
-    /// records the fragment's start byte. A computed offset beyond
-    /// `u32::MAX` clears the table (readers then fall back to the
-    /// fragment-count == frame-count mapping, spec 06 §1.4).
+    /// Appends a fragment and maintains the basic offset table: each entry is
+    /// the byte distance from the first fragment's item tag to this
+    /// fragment's item tag, i.e. every preceding fragment contributes its
+    /// 8-byte item header plus its padded length (docs/05-file-io.md §5.2).
+    /// A computed offset beyond `u32::MAX` clears the table (readers then
+    /// fall back to the fragment-count == frame-count mapping, spec 06 §1.4).
     pub fn push_fragment(&mut self, fragment: SharedBuffer) {
-        let start: u64 = self.fragments.iter().map(|f| f.size()).sum();
+        let start: u64 = self.fragments.iter().map(|f| 8 + f.size() + f.size() % 2).sum();
         if start <= u32::MAX as u64 {
             self.offset_table.push(start as u32);
         } else {
@@ -204,11 +206,13 @@ use std::sync::Arc;
         let mut f = DicomFragmentSequence::new(Tag::new(0x7FE0, 0x0010), Vr::Ob);
         f.push_fragment(Arc::new(MemoryBuffer::from(vec![1, 2])));
         assert_eq!(f.offset_table(), &[0], "first fragment starts at 0");
+        // each preceding fragment contributes its 8-byte item header plus its
+        // (padded) length
         f.push_fragment(Arc::new(MemoryBuffer::from(vec![3, 4, 5])));
-        assert_eq!(f.offset_table(), &[0, 2], "second starts after the first");
+        assert_eq!(f.offset_table(), &[0, 10], "8-byte header + 2-byte value");
         f.push_fragment(Arc::new(MemoryBuffer::from(vec![6])));
-        assert_eq!(f.offset_table(), &[0, 2, 5]);
-        // manual construction (parser path) resets tracking
+        assert_eq!(f.offset_table(), &[0, 10, 22], "odd fragments pad to even");
+        // manual construction (parser path) replaces tracking entirely
         f.set_offset_table(vec![7]);
         assert_eq!(f.offset_table(), &[7]);
     }

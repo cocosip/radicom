@@ -97,7 +97,8 @@ impl ParseObserver for DatasetBuilder {
         }
 
         let element = if vr.is_string() {
-            DicomElement::new_str(tag.clone(), vr, self.decode_str(&buffer.data(), vr == Vr::Pn))
+            let text = self.decode_str(&buffer.data(), vr == Vr::Pn);
+            DicomElement::new_str(tag.clone(), vr, trim_value_padding(vr, text))
         } else {
             DicomElement::new_bytes(tag.clone(), vr, buffer)
         };
@@ -178,6 +179,16 @@ impl ParseObserver for DatasetBuilder {
         self.current().insert_or_update(DicomItem::Fragments(frags));
         Ok(())
     }
+}
+
+/// Strips the value padding (PS3.5 §6.2): UI pads with NUL, string VRs with
+/// a space. Without this a round-trip would grow the value on every write.
+fn trim_value_padding(vr: Vr, mut text: String) -> String {
+    let pad = vr.padding();
+    while text.ends_with(pad as char) {
+        text.pop();
+    }
+    text
 }
 
 /// Convenience: parse a byte slice into a dataset. Deflated transfer
