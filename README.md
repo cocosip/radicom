@@ -24,7 +24,7 @@ radicom covers the DICOM data model, file I/O, network communication (DIMSE), se
 
 ## Status
 
-Milestones M0–M4 are complete (workspace, identifier system, dataset/elements, file IO, pixel data + codec boundary). Reading and writing round-trip across explicit/implicit VR, both endiannesses, sequences, encapsulated pixel data and deflate; the parser covers the malformed-data tolerance corpus (T1–T10). radicom ships **zero built-in codecs** — the `pixel::codec` traits and registry are the frozen boundary that radicom-codecs implements. Network (M5) is next. See the progress tables in the development plan.
+Milestones M0–M4 are complete (workspace, identifier system, dataset/elements, file IO, pixel data + codec boundary); M5 (network core) is in progress. Reading and writing round-trip across explicit/implicit VR, both endiannesses, sequences, encapsulated pixel data and deflate; the parser covers the malformed-data tolerance corpus (T1–T10). radicom ships **zero built-in codecs** — the `pixel::codec` traits and registry are the frozen boundary that radicom-codecs implements. The DIMSE stack already speaks PDU, DIMSE commands, association negotiation and C-ECHO over TCP; streaming sends, C-STORE receive, C-FIND/C-GET/C-MOVE and TLS are next. See the progress tables in the development plan.
 
 ## License
 
