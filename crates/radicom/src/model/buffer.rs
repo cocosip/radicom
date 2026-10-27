@@ -389,6 +389,215 @@ impl<F: Fn() -> Vec<u8> + Send + Sync> ByteBuffer for LazyBuffer<F> {
     }
 }
 
+// -- file / stream domain implementations (BUF-02) -----------------------
+//
+// These keep large values out of the in-memory dataset: a value is a window
+// into a file (or a temp-file spill of a non-seekable stream) and bytes are
+// read on demand. `data()` materializes the whole value once into a cache,
+// while `get_byte_range`/`copy_to` stream without ever holding it all.
+
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::Mutex;
+
+/// A process-unique temp path (never collides across concurrent callers/PIDs).
+fn temp_path(tag: &str) -> PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, AtomicOrdering::Relaxed);
+    std::env::temp_dir().join(format!("radicom-buf-{}-{seq}-{tag}.tmp", std::process::id()))
+}
+
+/// Deletes the temp file on drop (after the owning file handle has closed).
+#[derive(Debug)]
+struct TempFile {
+    path: PathBuf,
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// A lazy read-only window over `[offset, offset+len)` of a file
+/// (fo-dicom file byte window; BUF-02).
+#[derive(Debug)]
+pub struct FileWindow {
+    file: Mutex<std::fs::File>,
+    offset: u64,
+    len: u64,
+    cache: once_cell::sync::OnceCell<Bytes>,
+}
+
+impl FileWindow {
+    /// Opens `path` and windows `len` bytes starting at `offset`.
+    pub fn open(path: impl AsRef<Path>, offset: u64, len: u64) -> io::Result<Self> {
+        let file = std::fs::OpenOptions::new().read(true).open(path.as_ref())?;
+        Ok(FileWindow { file: Mutex::new(file), offset, len, cache: once_cell::sync::OnceCell::new() })
+    }
+
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn read_all(&self) -> io::Result<Vec<u8>> {
+        let mut buf = vec![0u8; self.len as usize];
+        self.read_into(0, &mut buf)?;
+        Ok(buf)
+    }
+
+    fn read_into(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        let mut file = self.file.lock().expect("file window mutex poisoned");
+        file.seek(SeekFrom::Start(self.offset + offset))?;
+        file.read_exact(buf)
+    }
+}
+
+impl ByteBuffer for FileWindow {
+    fn size(&self) -> u64 {
+        self.len
+    }
+    fn is_memory(&self) -> bool {
+        false
+    }
+    fn data(&self) -> std::borrow::Cow<'_, [u8]> {
+        let bytes = self.cache.get_or_init(|| Bytes::from(self.read_all().expect("file window read")));
+        std::borrow::Cow::Borrowed(bytes)
+    }
+    fn get_byte_range(&self, offset: u64, buf: &mut [u8]) {
+        debug_assert!(offset + buf.len() as u64 <= self.len, "range out of bounds");
+        self.read_into(offset, buf).expect("file window range read");
+    }
+    fn copy_to(&self, w: &mut dyn io::Write) -> io::Result<u64> {
+        const CHUNK: usize = 1024 * 1024;
+        let mut chunk = vec![0u8; CHUNK];
+        let mut offset = 0u64;
+        while offset < self.len {
+            let take = ((self.len - offset) as usize).min(CHUNK);
+            self.read_into(offset, &mut chunk[..take])?;
+            w.write_all(&chunk[..take])?;
+            offset += take as u64;
+        }
+        Ok(self.len)
+    }
+}
+
+/// A temp-file spill of a large value (fo-dicom temp-file byte buffer; BUF-02).
+///
+/// The file is removed when the buffer is dropped. Field order matters: the
+/// [`FileWindow`] (and its open handle) must drop before [`TempFile`] deletes
+/// the path, which is required on Windows.
+#[derive(Debug)]
+pub struct TempFileSpill {
+    window: FileWindow,
+    _temp: TempFile,
+}
+
+impl TempFileSpill {
+    /// Writes `bytes` to a temp file and windows the whole file.
+    pub fn from_bytes(bytes: impl AsRef<[u8]>) -> io::Result<Self> {
+        let bytes = bytes.as_ref();
+        let path = temp_path("spill");
+        std::fs::write(&path, bytes)?;
+        let window = FileWindow::open(&path, 0, bytes.len() as u64)?;
+        Ok(TempFileSpill { window, _temp: TempFile { path } })
+    }
+
+    /// Reads exactly `len` bytes from `reader` into a temp file, then windows it.
+    pub fn from_reader<R: Read>(mut reader: R, len: u64) -> io::Result<Self> {
+        use std::io::Write as _;
+        let path = temp_path("spill");
+        let mut file = std::fs::File::create(&path)?;
+        let mut remaining = len;
+        let mut chunk = vec![0u8; 8192];
+        while remaining > 0 {
+            let take = remaining.min(chunk.len() as u64) as usize;
+            reader.read_exact(&mut chunk[..take])?;
+            file.write_all(&chunk[..take])?;
+            remaining -= take as u64;
+        }
+        file.flush()?;
+        drop(file);
+        let window = FileWindow::open(&path, 0, len)?;
+        Ok(TempFileSpill { window, _temp: TempFile { path } })
+    }
+}
+
+impl ByteBuffer for TempFileSpill {
+    fn size(&self) -> u64 {
+        self.window.size()
+    }
+    fn is_memory(&self) -> bool {
+        false
+    }
+    fn data(&self) -> std::borrow::Cow<'_, [u8]> {
+        self.window.data()
+    }
+    fn get_byte_range(&self, offset: u64, buf: &mut [u8]) {
+        self.window.get_byte_range(offset, buf);
+    }
+    fn copy_to(&self, w: &mut dyn io::Write) -> io::Result<u64> {
+        self.window.copy_to(w)
+    }
+}
+
+/// A serialized window over a non-seekable stream (fo-dicom stream byte buffer;
+/// BUF-02). The stream is spilled to a temp file on first access, once.
+pub struct StreamWindow {
+    len: u64,
+    source: Mutex<Option<Box<dyn Read + Send>>>,
+    spill: once_cell::sync::OnceCell<TempFileSpill>,
+}
+
+impl StreamWindow {
+    /// Wraps `reader`, which will yield exactly `len` bytes.
+    pub fn new(reader: Box<dyn Read + Send>, len: u64) -> Self {
+        StreamWindow { len, source: Mutex::new(Some(reader)), spill: once_cell::sync::OnceCell::new() }
+    }
+
+    fn ensure(&self) -> &TempFileSpill {
+        self.spill.get_or_init(|| {
+            let mut guard = self.source.lock().expect("stream window mutex poisoned");
+            let reader = guard.take().expect("stream window source already consumed");
+            TempFileSpill::from_reader(reader, self.len).expect("spill stream to temp file")
+        })
+    }
+}
+
+impl std::fmt::Debug for StreamWindow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamWindow").field("len", &self.len).field("spilled", &self.spill.get().is_some()).finish()
+    }
+}
+
+impl ByteBuffer for StreamWindow {
+    fn size(&self) -> u64 {
+        self.len
+    }
+    fn is_memory(&self) -> bool {
+        false
+    }
+    fn data(&self) -> std::borrow::Cow<'_, [u8]> {
+        self.ensure().data()
+    }
+    fn get_byte_range(&self, offset: u64, buf: &mut [u8]) {
+        self.ensure().get_byte_range(offset, buf);
+    }
+    fn copy_to(&self, w: &mut dyn io::Write) -> io::Result<u64> {
+        self.ensure().copy_to(w)
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,5 +700,55 @@ mod tests {
         assert_eq!(&*lazy.data(), &[9, 8, 7]);
         assert_eq!(&*lazy.data(), &[9, 8, 7], "second access uses the cache");
         assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn file_window_reads_lazily_and_in_ranges() {
+        let path = std::env::temp_dir().join(format!("radicom-test-fw-{}.bin", std::process::id()));
+        let payload: Vec<u8> = (0..100u8).collect();
+        std::fs::write(&path, &payload).unwrap();
+        {
+            let w = FileWindow::open(&path, 10, 20).unwrap();
+            assert_eq!(w.size(), 20);
+            assert!(!w.is_memory(), "a file window is not in memory");
+            assert_eq!(&*w.data(), &payload[10..30]);
+            assert_eq!(&*w.data(), &payload[10..30], "second read uses the cache");
+            let mut out = [0u8; 5];
+            w.get_byte_range(3, &mut out);
+            assert_eq!(out, payload[13..18]);
+            let mut sink = Vec::new();
+            assert_eq!(w.copy_to(&mut sink).unwrap(), 20);
+            assert_eq!(sink, payload[10..30]);
+        }
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn temp_file_spill_round_trips() {
+        let payload: Vec<u8> = (0..50u8).collect();
+        let spill = TempFileSpill::from_bytes(&payload).unwrap();
+        assert_eq!(spill.size(), 50);
+        assert!(!spill.is_memory());
+        assert_eq!(&*spill.data(), &payload[..]);
+        let mut out = [0u8; 4];
+        spill.get_byte_range(10, &mut out);
+        assert_eq!(out, payload[10..14]);
+        let mut sink = Vec::new();
+        assert_eq!(spill.copy_to(&mut sink).unwrap(), 50);
+        assert_eq!(sink, payload);
+    }
+
+    #[test]
+    fn stream_window_spills_a_non_seekable_stream_once() {
+        let payload: Vec<u8> = (0..40u8).collect();
+        let reader = std::io::Cursor::new(payload.clone());
+        let sw = StreamWindow::new(Box::new(reader), payload.len() as u64);
+        assert_eq!(sw.size(), 40);
+        assert!(!sw.is_memory());
+        assert_eq!(&*sw.data(), &payload[..]);
+        assert_eq!(&*sw.data(), &payload[..], "spill happens once, then cached");
+        let mut out = [0u8; 3];
+        sw.get_byte_range(5, &mut out);
+        assert_eq!(out, payload[5..8]);
     }
 }
