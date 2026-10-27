@@ -11,7 +11,11 @@
 use crate::error::{DataError, Error};
 use crate::model::dataset::Dataset;
 use crate::model::tag::Tag;
+use crate::pixel::overlay::OverlayData;
 use crate::pixel::PixelData;
+
+/// Default overlay colour: magenta `0xFF_FF00FF` (docs §1.2).
+pub const DEFAULT_OVERLAY_COLOR: crate::pixel::Color32 = crate::pixel::Color32::new(0xFF, 0x00, 0xFF);
 
 /// VOI LUT function selector (docs §3, §4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,6 +249,57 @@ impl RawImage {
         write_chunk(&mut png, b"IEND", &[]);
         png
     }
+
+    /// OR-composites one overlay onto this image (docs §1.3 step 4).
+    ///
+    /// Sets overlay bits to `color`, placed at the overlay's Origin (1-based,
+    /// so the top-left pixel lands at `origin - 1`). Pixels outside the image
+    /// are clipped, never panicking (docs §10 checklist).
+    pub fn composite_overlay(
+        &mut self,
+        overlay: &OverlayData,
+        dataset: &Dataset,
+        color: crate::pixel::Color32,
+    ) -> Result<(), Error> {
+        let bits = overlay.load(dataset)?;
+        let bits = bits.data();
+        let bits: &[u8] = bits.as_ref();
+        let ov_rows = overlay.rows() as usize;
+        let ov_cols = overlay.columns() as usize;
+        if ov_rows == 0 || ov_cols == 0 {
+            return Ok(());
+        }
+        // a buffer too small to hold the overlay's bit plane is skipped (docs §1.3)
+        let row_bytes = ov_cols.div_ceil(8);
+        if bits.len() < row_bytes * ov_rows {
+            return Ok(());
+        }
+        // Origin is 1-based; the composite starts at origin-1
+        let (origin_x, origin_y) = overlay.origin();
+        let base_x = origin_x as isize - 1;
+        let base_y = origin_y as isize - 1;
+
+        for oy in 0..ov_rows {
+            for ox in 0..ov_cols {
+                let set = bits[oy * row_bytes + ox / 8] & (0x80 >> (ox % 8)) != 0;
+                if !set {
+                    continue;
+                }
+                let px = base_x + ox as isize;
+                let py = base_y + oy as isize;
+                if px < 0 || py < 0 || px >= self.width as isize || py >= self.height as isize {
+                    continue; // clipped
+                }
+                let i = ((py as u32 * self.width + px as u32) * 4) as usize;
+                // BGRA (the render byte layout) — overlay sets the pixel to `color`
+                self.bytes[i] = color.b;
+                self.bytes[i + 1] = color.g;
+                self.bytes[i + 2] = color.r;
+                self.bytes[i + 3] = 0xFF;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Writes one PNG chunk: length, type, data, CRC32(type + data).
@@ -358,6 +413,37 @@ pub fn render_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error> {
         Pi::PaletteColor => render_palette_frame(dataset, frame),
         _ => Err(unsupported("this photometric interpretation is not rendered yet")),
     }
+}
+
+/// Renders one frame and composites its overlays in `color` (docs §1.3 step 4).
+///
+/// Only overlays whose frame range covers `frame` are drawn (frame 0 by
+/// default; multi-frame overlays offset by FrameOrigin). Overlays failing to
+/// load (e.g. bit position inside stored bits) are skipped, not fatal.
+pub fn render_frame_with_overlays(
+    dataset: &Dataset,
+    frame: u32,
+    color: crate::pixel::Color32,
+) -> Result<RawImage, Error> {
+    let mut image = render_frame(dataset, frame)?;
+    for overlay in OverlayData::from_dataset(dataset) {
+        if !overlay_covers_frame(&overlay, frame) {
+            continue;
+        }
+        if let Err(_error) = image.composite_overlay(&overlay, dataset, color) {
+            // a malformed overlay must not break the render (docs §10)
+            continue;
+        }
+    }
+    Ok(image)
+}
+
+/// True when `overlay` applies to `frame` (docs §1.3 frame-range filtering).
+fn overlay_covers_frame(overlay: &OverlayData, frame: u32) -> bool {
+    let (frame_origin, _) = overlay.frame_origin();
+    let first = frame_origin.max(1) as u32 - 1;
+    let count = overlay.number_of_frames().max(1);
+    frame >= first && frame < first + count
 }
 
 /// Reads `count` native samples for a frame, honouring 8/16-bit depth.
@@ -680,5 +766,77 @@ mod tests {
         assert_eq!(&png[12..16], b"IHDR");
         // colour type is byte 9 of IHDR data (offset 16..29)
         assert_eq!(png[16 + 9], 2, "PNG colour type 2 = truecolour");
+    }
+
+    /// Builds a dataset with a grayscale image plus one embedded overlay group
+    /// packed into the pixel-data bits (bit position = bits_stored).
+    fn image_with_embedded_overlay(overlay_pixels: &[(u16, u16)]) -> Dataset {
+        // 4x4 8-bit MONOCHROME2 image, all mid-grey (128)
+        let (w, h) = (4u16, 4u16);
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::new(0x0028, 0x0002), 1u16);
+        ds.insert_str(Tag::new(0x0028, 0x0004), Vr::Cs, "MONOCHROME2");
+        ds.insert_value(Tag::new(0x0028, 0x0010), h);
+        ds.insert_value(Tag::new(0x0028, 0x0011), w);
+        ds.insert_value(Tag::new(0x0028, 0x0100), 16u16); // 16-bit so a spare overlay bit exists
+        ds.insert_value(Tag::new(0x0028, 0x0101), 8u16); // 8 bits stored → overlay bit at 8
+        ds.insert_value(Tag::new(0x0028, 0x0102), 7u16);
+        ds.insert_value(Tag::new(0x0028, 0x0103), 0u16);
+        // window via DS strings (center 128, width 256)
+        ds.insert_str(Tag::new(0x0028, 0x1050), Vr::Ds, "128");
+        ds.insert_str(Tag::new(0x0028, 0x1051), Vr::Ds, "256");
+        // overlay group 0x6000 covering the whole image, bit position 8
+        ds.insert_value(Tag::new(0x6000, 0x0010), h); // rows
+        ds.insert_value(Tag::new(0x6000, 0x0011), w); // columns
+        ds.insert_str(Tag::new(0x6000, 0x0040), Vr::Cs, "G"); // type
+        ds.insert_value(Tag::new(0x6000, 0x0100), 1u16); // bits allocated
+        ds.insert_value(Tag::new(0x6000, 0x0102), 8u16); // bit position = stored bits
+        ds.insert_value(Tag::new(0x6000, 0x0051), 1i16); // origin y = 1
+        ds.insert_value(Tag::new(0x6000, 0x0050), 1i16); // origin x = 1
+        // 16-bit pixel data: base value 128, with overlay bit set at the specified pixels
+        let mut bytes = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let mut v = 128u16;
+                if overlay_pixels.contains(&(x, y)) {
+                    v |= 1 << 8; // overlay bit
+                }
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::new(0x7FE0, 0x0010),
+                Vr::Ob,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(bytes)),
+            ),
+        ));
+        ds.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        ds
+    }
+
+    #[test]
+    fn an_overlay_is_composited_in_the_overlay_colour() {
+        // overlay bits at (0,0) and (2,1)
+        let ds = image_with_embedded_overlay(&[(0, 0), (2, 1)]);
+        let image = render_frame_with_overlays(&ds, 0, DEFAULT_OVERLAY_COLOR).unwrap();
+        let b = image.as_bytes();
+        // pixel (0,0) → index 0: magenta (r=255,g=0,b=255) in BGRA
+        assert_eq!(&b[0..4], &[255, 0, 255, 255], "overlay pixel is magenta");
+        // pixel (1,0) has no overlay bit → stays grey (128)
+        assert_eq!(b[4], 128, "non-overlay pixel keeps its grey value");
+        // pixel (2,1) is overlay: row 1, col 2 → index (1*4+2)
+        let i = (4 + 2) * 4; // row 1, col 2
+        assert_eq!(&b[i..i + 4], &[255, 0, 255, 255], "second overlay pixel is magenta");
+    }
+
+    #[test]
+    fn an_overlay_origin_outside_the_image_is_clipped_not_panicking() {
+        let mut ds = image_with_embedded_overlay(&[]);
+        // push the overlay origin far outside the 4x4 image
+        ds.insert_value(Tag::new(0x6000, 0x0050), 100i16);
+        ds.insert_value(Tag::new(0x6000, 0x0051), 100i16);
+        let image = render_frame_with_overlays(&ds, 0, DEFAULT_OVERLAY_COLOR).unwrap();
+        assert_eq!(image.width(), 4); // rendered without panic
     }
 }
