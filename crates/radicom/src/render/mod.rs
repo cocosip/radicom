@@ -28,7 +28,7 @@ pub use geometry::{
 pub use icon::IconImage;
 pub use interpolation::{bilinear_color24, bilinear_grayscale, nearest_grayscale};
 pub use math::{BitList, Histogram, Interval, Matrix, MovingAverage, Point2, Point3, Rect, Vector3};
-pub use reconstruction::{ImageData, Slice, VolumeData};
+pub use reconstruction::{DicomGenerator, ImageData, Slice, Stack, StackType, VolumeData};
 pub use spatial::SpatialTransform;
 
 /// Default overlay colour: magenta `0xFF_FF00FF` (docs §1.2).

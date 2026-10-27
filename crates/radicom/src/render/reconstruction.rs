@@ -6,12 +6,14 @@
 //! fo-dicom `Imaging/Reconstruction` (`ImageData`, `VolumeData.GetCut`, `Slice`)
 //! for the common native MONOCHROME case.
 //!
-//! Scope: `get_cut`/`Slice` and `VolumeData::from_datasets` are implemented.
-//! `Stack` spacing resampling and `DicomGenerator` series writing are deferred
-//! (see the journal) — they are the round-trip write path, not the core geometry.
+//! Scope: `get_cut`/`Slice`, `VolumeData::from_datasets`, `Stack` spacing
+//! resampling and `DicomGenerator` series write-back are all implemented here.
 
 use crate::error::{DataError, Error};
 use crate::model::dataset::Dataset;
+use crate::model::tag::Tag;
+use crate::model::uid::Uid;
+use crate::model::vr::Vr;
 use crate::pixel::PixelData;
 use crate::render::geometry::FrameGeometry;
 use crate::render::math::{Point2, Point3, Vector3};
@@ -96,6 +98,8 @@ pub struct VolumeData {
     slices: Vec<ImageData>,
     sort_orders: Vec<f64>,
     slices_normal: Vector3,
+    bounding_min: Point3,
+    bounding_max: Point3,
 }
 
 impl VolumeData {
@@ -121,7 +125,35 @@ impl VolumeData {
         images.sort_by(|a, b| a.sorting_value.partial_cmp(&b.sorting_value).unwrap());
         let sort_orders: Vec<f64> = images.iter().map(|i| i.sorting_value()).collect();
         let slices_normal = images[0].geometry.direction_normal();
-        Ok(VolumeData { slices: images, sort_orders, slices_normal })
+
+        // union of every slice's bounding box
+        let mut bounding_min = Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+        let mut bounding_max = Point3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for image in &images {
+            let (min, max) = image.geometry.bounding_box();
+            bounding_min = Point3::new(
+                bounding_min.x.min(min.x),
+                bounding_min.y.min(min.y),
+                bounding_min.z.min(min.z),
+            );
+            bounding_max = Point3::new(
+                bounding_max.x.max(max.x),
+                bounding_max.y.max(max.y),
+                bounding_max.z.max(max.z),
+            );
+        }
+
+        Ok(VolumeData { slices: images, sort_orders, slices_normal, bounding_min, bounding_max })
+    }
+
+    /// Volume bounding-box minimum corner (patient space).
+    pub fn bounding_min(&self) -> Point3 {
+        self.bounding_min
+    }
+
+    /// Volume bounding-box maximum corner (patient space).
+    pub fn bounding_max(&self) -> Point3 {
+        self.bounding_max
     }
 
     /// Number of slices in the volume.
@@ -280,6 +312,22 @@ impl Slice {
             .map(|&v| (((v - min) / range) * 255.0).round().clamp(0.0, 255.0) as u8)
             .collect()
     }
+
+    /// Renders the raw sample values as little-endian bytes of `bytes_per_pixel`
+    /// width (fo-dicom `RenderRawData`): 1 byte truncates, 2 bytes little-endian.
+    pub fn render_raw_data(&self, bytes_per_pixel: u8) -> Vec<u8> {
+        match bytes_per_pixel {
+            1 => self.output.iter().map(|&v| v.round() as u8).collect(),
+            2 => {
+                let mut out = Vec::with_capacity(self.output.len() * 2);
+                for &v in &self.output {
+                    out.extend_from_slice(&(v.round() as u16).to_le_bytes());
+                }
+                out
+            }
+            _ => Vec::new(),
+        }
+    }
 }
 
 /// Reads native MONOCHROME samples, rescaled by RescaleSlope/Intercept (0028,1053/1052).
@@ -335,6 +383,151 @@ fn point_to_vector(p: &Point3) -> Vector3 {
 
 fn invalid(message: &str) -> Error {
     Error::Data(DataError::Other { message: format!("MPR: {message}") })
+}
+
+/// The orthogonal plane a new [`Stack`] is cut along (fo-dicom `StackType`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StackType {
+    Axial,
+    Coronal,
+    Sagittal,
+}
+
+/// A regular stack of slices resampled from a volume along a `StackType` axis
+/// (fo-dicom `Stack`).
+#[derive(Debug, Clone)]
+pub struct Stack {
+    slices: Vec<Slice>,
+    slice_distance: f64,
+}
+
+impl Stack {
+    /// Cuts a new stack out of `volume` at `spacing` in-plane and `slice_distance`
+    /// between slices.
+    pub fn new(volume: &VolumeData, stack_type: StackType, spacing: f64, slice_distance: f64) -> Stack {
+        let min = volume.bounding_min();
+        let max = volume.bounding_max();
+        let (dx, dy, dz) = (max.x - min.x, max.y - min.y, max.z - min.z);
+        let top_left0 = Point3::new(min.x, min.y, max.z);
+
+        // (per-slice step, row dir, col dir, rows, cols, axis extent)
+        let (step, row_dir, col_dir, rows, cols, extent) = match stack_type {
+            StackType::Axial => (
+                Vector3::new(0.0, 0.0, -slice_distance),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+                (dy / spacing) as u32,
+                (dx / spacing) as u32,
+                dz,
+            ),
+            StackType::Coronal => (
+                Vector3::new(0.0, slice_distance, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 0.0, -1.0),
+                (dz / spacing) as u32,
+                (dx / spacing) as u32,
+                dy,
+            ),
+            StackType::Sagittal => (
+                Vector3::new(slice_distance, 0.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+                Vector3::new(0.0, 0.0, -1.0),
+                (dz / spacing) as u32,
+                (dy / spacing) as u32,
+                dx,
+            ),
+        };
+
+        let count = (extent / slice_distance).floor() as i64 + 1;
+        let mut slices = Vec::new();
+        let mut top_left = top_left0;
+        for _ in 0..count.max(1) {
+            slices.push(volume.get_cut(top_left, row_dir, col_dir, rows, cols, spacing));
+            top_left = Point3::new(top_left.x + step.x, top_left.y + step.y, top_left.z + step.z);
+        }
+        Stack { slices, slice_distance }
+    }
+
+    /// The generated slices.
+    pub fn slices(&self) -> &[Slice] {
+        &self.slices
+    }
+
+    /// The spacing between slices.
+    pub fn slice_distance(&self) -> f64 {
+        self.slice_distance
+    }
+}
+
+/// Writes a [`Stack`] back as a new series of datasets (fo-dicom `DicomGenerator`).
+///
+/// Each output dataset is a clone of the common source dataset with fresh series /
+/// SOP Instance UIDs, recomputed geometry and appends its slice pixels through the
+/// PixelData facade.
+pub struct DicomGenerator {
+    common_dataset: Dataset,
+}
+
+impl DicomGenerator {
+    pub fn new(common_dataset: Dataset) -> Self {
+        DicomGenerator { common_dataset }
+    }
+
+    /// Stores the stack as one dataset per slice, described by `new_series_description`.
+    pub fn store_as_dicom(&self, stack: &Stack, new_series_description: &str) -> Vec<Dataset> {
+        let new_series_uid = Uid::generate_value();
+        let mut out = Vec::with_capacity(stack.slices().len());
+        for (index, slice) in stack.slices().iter().enumerate() {
+            let mut ds = self.common_dataset.clone();
+            let rows = slice.rows() as u16;
+            let cols = slice.columns() as u16;
+
+            ds.insert_str(Tag::new(0x0008, 0x103E), Vr::Lo, new_series_description);
+            ds.insert_str(Tag::new(0x0020, 0x000E), Vr::Ui, new_series_uid.clone());
+            ds.insert_str(Tag::new(0x0008, 0x0018), Vr::Ui, Uid::generate_value());
+            ds.insert_value(Tag::new(0x0020, 0x0013), (index + 1) as i32);
+
+            ds.insert_value(Tag::new(0x0028, 0x0010), rows);
+            ds.insert_value(Tag::new(0x0028, 0x0011), cols);
+            let tl = slice.top_left();
+            ds.insert_str(Tag::new(0x0020, 0x0032), Vr::Ds, format!("{}\\{}\\{}", tl.x, tl.y, tl.z));
+            let rd = slice.row_direction();
+            let cd = slice.column_direction();
+            ds.insert_str(
+                Tag::new(0x0020, 0x0037),
+                Vr::Ds,
+                format!("{}\\{}\\{}\\{}\\{}\\{}", rd.x, rd.y, rd.z, cd.x, cd.y, cd.z),
+            );
+            ds.insert_str(Tag::new(0x0028, 0x0030), Vr::Ds, format!("{}\\{}", slice.spacing(), slice.spacing()));
+            ds.insert_str(Tag::new(0x0018, 0x0050), Vr::Ds, format!("{}", stack.slice_distance()));
+
+            // infer the smallest storage width from the observed maximum
+            let (_, max_value) = slice.min_max();
+            let bits_stored = if max_value <= 255.0 {
+                8u16
+            } else {
+                16
+            };
+            ds.insert_value(Tag::new(0x0028, 0x0100), bits_stored); // BitsAllocated
+            ds.insert_value(Tag::new(0x0028, 0x0101), bits_stored); // BitsStored
+            ds.insert_value(Tag::new(0x0028, 0x0102), bits_stored - 1); // HighBit
+            ds.insert_value(Tag::new(0x0028, 0x0103), 0u16); // PixelRepresentation unsigned
+            ds.insert_value(Tag::new(0x0028, 0x0002), 1u16); // SamplesPerPixel
+            if !ds.contains(&Tag::new(0x0028, 0x0004)) {
+                ds.insert_str(Tag::new(0x0028, 0x0004), Vr::Cs, "MONOCHROME2");
+            }
+
+            let bytes_per_pixel = if bits_stored <= 8 { 1u8 } else { 2u8 };
+            let frame = slice.render_raw_data(bytes_per_pixel);
+            {
+                let mut pixel = PixelData::create_new(&mut ds).expect("create pixel data");
+                pixel.add_frame(frame).expect("append frame");
+            }
+
+            out.push(ds);
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -461,5 +654,46 @@ mod tests {
         all.push(flat);
         let volume = VolumeData::from_datasets(&all).unwrap();
         assert_eq!(volume.len(), 2, "the geometry-less slice is dropped");
+    }
+
+    #[test]
+    fn a_stack_generates_a_series_of_slices() {
+        // 4x4 slices at z = 0..3, spacing 1 mm → an axial stack with spacing 1
+        let slices: Vec<Dataset> = (0..4).map(|z| axial_slice(z as f64, 100)).collect();
+        let volume = VolumeData::from_datasets(&slices).unwrap();
+        let stack = Stack::new(&volume, StackType::Axial, 1.0, 1.0);
+        assert!(!stack.slices().is_empty(), "at least one slice is produced");
+        assert_eq!(stack.slice_distance(), 1.0);
+        // every generated cut has the requested geometry
+        for slice in stack.slices() {
+            assert!(slice.rows() > 0 && slice.columns() > 0);
+        }
+    }
+
+    #[test]
+    fn dicom_generator_writes_one_dataset_per_slice() {
+        let slices: Vec<Dataset> = (0..4).map(|z| axial_slice(z as f64, 100)).collect();
+        let volume = VolumeData::from_datasets(&slices).unwrap();
+        let stack = Stack::new(&volume, StackType::Axial, 1.0, 1.0);
+
+        let generator = DicomGenerator::new(slices[0].clone());
+        let outputs = generator.store_as_dicom(&stack, "MPR axial");
+        assert_eq!(outputs.len(), stack.slices().len());
+
+        let mut sops = std::collections::HashSet::new();
+        for (i, ds) in outputs.iter().enumerate() {
+            // fresh SOP Instance UID per slice
+            let sop = ds.try_get_str(Tag::new(0x0008, 0x0018)).unwrap();
+            assert!(Uid::is_valid(&sop));
+            assert!(sops.insert(sop), "SOP Instance UIDs are unique");
+            // geometry + pixel tags present
+            assert!(ds.get::<u16>(Tag::new(0x0028, 0x0010)).is_ok(), "Rows set");
+            assert!(ds.get::<u16>(Tag::new(0x0028, 0x0011)).is_ok(), "Columns set");
+            assert_eq!(ds.get::<i32>(Tag::new(0x0020, 0x0013)).unwrap(), (i + 1) as i32);
+            // the pixel data decodes back through the facade
+            let mut owned = ds.clone();
+            let pixel = PixelData::from_dataset(&mut owned).unwrap();
+            assert!(pixel.get_frame(0).is_ok(), "pixel data written");
+        }
     }
 }
