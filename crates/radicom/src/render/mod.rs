@@ -16,12 +16,14 @@ use crate::pixel::PixelData;
 
 pub mod geometry;
 pub mod math;
+pub mod spatial;
 
 pub use geometry::{
     can_draw_localizer, intersection_localizer, projection_localizer, FrameGeometry, FrameGeometryType,
     FrameOrientation,
 };
 pub use math::{BitList, Histogram, Interval, Matrix, MovingAverage, Point2, Point3, Rect, Vector3};
+pub use spatial::SpatialTransform;
 
 /// Default overlay colour: magenta `0xFF_FF00FF` (docs §1.2).
 pub const DEFAULT_OVERLAY_COLOR: crate::pixel::Color32 = crate::pixel::Color32::new(0xFF, 0x00, 0xFF);
