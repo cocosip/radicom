@@ -457,6 +457,29 @@ mod tests {
 
 }
 
+
+// -- content equality (DS-07) -----------------------------------------------
+
+impl PartialEq for ElementValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (ElementValue::Str(a), ElementValue::Str(b)) => a == b,
+            (ElementValue::Bytes(a), ElementValue::Bytes(b)) => a.size() == b.size() && a.data() == b.data(),
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq for DicomElement {
+    /// Deep content equality: tag + VR + value bytes (recursion happens at
+    /// the item/dataset layers).
+    fn eq(&self, other: &Self) -> bool {
+        self.tag == other.tag && self.vr == other.vr && self.value == other.value
+    }
+}
+
+impl Eq for DicomElement {}
+
 // -- write-side conversion (IntoElement, DS-03 dispatch) ------------------
 
 /// Conversion from Rust values into elements (DS-03 dispatch matrix).

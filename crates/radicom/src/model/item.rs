@@ -140,6 +140,42 @@ impl DicomItem {
     }
 }
 
+
+impl PartialEq for DicomSequence {
+    fn eq(&self, other: &Self) -> bool {
+        self.tag == other.tag && self.items == other.items
+    }
+}
+impl Eq for DicomSequence {}
+
+impl PartialEq for DicomFragmentSequence {
+    /// Content equality: offset table and fragment bytes.
+    fn eq(&self, other: &Self) -> bool {
+        self.tag == other.tag
+            && self.vr == other.vr
+            && self.offset_table == other.offset_table
+            && self.fragments.len() == other.fragments.len()
+            && self
+                .fragments
+                .iter()
+                .zip(other.fragments.iter())
+                .all(|(a, b)| a.size() == b.size() && a.data() == b.data())
+    }
+}
+impl Eq for DicomFragmentSequence {}
+
+impl PartialEq for DicomItem {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (DicomItem::Element(a), DicomItem::Element(b)) => a == b,
+            (DicomItem::Sequence(a), DicomItem::Sequence(b)) => a == b,
+            (DicomItem::Fragments(a), DicomItem::Fragments(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+impl Eq for DicomItem {}
+
 impl From<DicomElement> for DicomItem {
     fn from(e: DicomElement) -> Self {
         DicomItem::Element(e)

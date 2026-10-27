@@ -643,3 +643,225 @@ mod tests {
         assert_eq!(buf.size(), 1);
     }
 }
+
+// -- derived operations (DS-06, DS-07, DS-08) -------------------------------
+
+impl PartialEq for Dataset {
+    /// Deep content equality: same item count and every tag's item equal
+    /// (recursive through sequences). Transfer syntax and validation flags
+    /// are not part of content.
+    fn eq(&self, other: &Self) -> bool {
+        self.items.len() == other.items.len()
+            && self.items.iter().zip(other.items.iter()).all(|((ta, ia), (tb, ib))| ta == tb && ia == ib)
+    }
+}
+
+impl Eq for Dataset {}
+
+/// Shared functional groups sequence (0020,9116).
+pub const SHARED_FUNCTIONAL_GROUPS: Tag = Tag::new(0x0020, 0x9116);
+/// Per-frame functional groups sequence (0020,9111).
+pub const PER_FRAME_FUNCTIONAL_GROUPS: Tag = Tag::new(0x0020, 0x9111);
+/// Timezone offset from UTC (0008,0201), `±hhmm`.
+pub const TIMEZONE_OFFSET_FROM_UTC: Tag = Tag::new(0x0008, 0x0201);
+
+impl Dataset {
+    /// Flattens enhanced-multiframe functional groups for one frame into a
+    /// transient dataset (DS-06): SharedFunctionalGroups items first, then
+    /// the PerFrameFunctionalGroups item for `frame`. Empty sequences are
+    /// skipped; other items copy whole with insert_or_update semantics.
+    pub fn functional_groups(&self, frame: u32) -> Result<Dataset, Error> {
+        let mut out = Dataset::with_transfer_syntax(self.transfer_syntax.clone());
+        fn push_source(out: &mut Dataset, source: &Dataset) {
+            for item in source.items() {
+                if let DicomItem::Sequence(seq) = item {
+                    if seq.is_empty() {
+                        continue; // skip empty functional group macros
+                    }
+                }
+                out.insert_or_update(item.clone());
+            }
+        }
+        if let Some(shared) = self.try_get_sequence(SHARED_FUNCTIONAL_GROUPS) {
+            if let Some(first) = shared.items().first() {
+                push_source(&mut out, first);
+            }
+        }
+        if let Some(per_frame) = self.try_get_sequence(PER_FRAME_FUNCTIONAL_GROUPS) {
+            let item = per_frame.items().get(frame as usize).ok_or_else(|| {
+                Error::Data(DataError::IndexOutOfRange {
+                    tag: TagRef(PER_FRAME_FUNCTIONAL_GROUPS.group(), PER_FRAME_FUNCTIONAL_GROUPS.element()),
+                    index: frame as usize,
+                    count: per_frame.len(),
+                })
+            })?;
+            push_source(&mut out, item);
+        }
+        Ok(out)
+    }
+
+    /// Composes a naive date-time from separate DA and TM elements (DS-08);
+    /// a missing time defaults to midnight.
+    pub fn get_datetime(
+        &self,
+        date_tag: impl AsRef<Tag>,
+        time_tag: impl AsRef<Tag>,
+    ) -> Result<chrono::NaiveDateTime, Error> {
+        let date: chrono::NaiveDate = self.get(date_tag)?;
+        let time: chrono::NaiveTime = self.get_or(time_tag.as_ref().clone(), chrono::NaiveTime::MIN);
+        Ok(chrono::NaiveDateTime::new(date, time))
+    }
+
+    pub fn try_get_datetime(
+        &self,
+        date_tag: impl AsRef<Tag>,
+        time_tag: impl AsRef<Tag>,
+    ) -> Option<chrono::NaiveDateTime> {
+        self.get_datetime(date_tag, time_tag).ok()
+    }
+
+    /// Composes a timezone-aware date-time, reading
+    /// TimezoneOffsetFromUTC (0008,0201, `±hhmm`); without it the value is
+    /// presented as UTC.
+    pub fn get_datetime_with_offset(
+        &self,
+        date_tag: impl AsRef<Tag>,
+        time_tag: impl AsRef<Tag>,
+    ) -> Result<chrono::DateTime<chrono::FixedOffset>, Error> {
+        let naive = self.get_datetime(date_tag, time_tag)?;
+        let offset = match self.try_get_str(TIMEZONE_OFFSET_FROM_UTC) {
+            Some(tz) => {
+                let t = tz.trim();
+                let invalid = || {
+                    Error::Data(DataError::Other {
+                        message: format!("invalid TimezoneOffsetFromUTC \"{tz}\""),
+                    })
+                };
+                let bytes = t.as_bytes();
+                if t.len() != 5 || !matches!(bytes[0], b'+' | b'-') {
+                    return Err(invalid());
+                }
+                let sign = if bytes[0] == b'-' { -1 } else { 1 };
+                let h: i32 = t[1..3].parse().map_err(|_| invalid())?;
+                let m: i32 = t[3..5].parse().map_err(|_| invalid())?;
+                let secs = sign * (h * 3600 + m * 60);
+                chrono::FixedOffset::east_opt(secs).ok_or_else(invalid)?
+            }
+            None => chrono::FixedOffset::east_opt(0).expect("zero offset"),
+        };
+        use chrono::TimeZone;
+        // the naive value is local time AT the offset (DICOM DT semantics)
+        offset
+            .from_local_datetime(&naive)
+            .single()
+            .ok_or_else(|| Error::Data(DataError::Other {
+                message: "date-time does not exist in the given offset".into(),
+            }))
+    }
+}
+
+#[cfg(test)]
+mod derived_tests {
+    use super::*;
+    const PATIENT_ID: Tag = Tag::new(0x0010, 0x0020);
+
+    fn enhanced_dataset() -> Dataset {
+        let mut ds = Dataset::new();
+        {
+            let shared = ds.insert_sequence(SHARED_FUNCTIONAL_GROUPS);
+            let mut item = Dataset::new();
+            item.insert_str(Tag::new(0x0018, 0x0050), Vr::Ds, "2.5"); // SliceThickness
+            item.insert_sequence(Tag::new(0x0020, 0x9113)); // empty sequence: skipped
+            shared.push(item);
+        }
+        {
+            let per = ds.insert_sequence(PER_FRAME_FUNCTIONAL_GROUPS);
+            let mut f0 = Dataset::new();
+            f0.insert_str(Tag::new(0x0020, 0x1041), Vr::Ds, "-5.0"); // SliceLocation
+            per.push(f0);
+            let mut f1 = Dataset::new();
+            f1.insert_str(Tag::new(0x0020, 0x1041), Vr::Ds, "-2.5");
+            per.push(f1);
+        }
+        ds
+    }
+
+    #[test]
+    fn functional_groups_flatten() {
+        let ds = enhanced_dataset();
+        let f0 = ds.functional_groups(0).unwrap();
+        assert_eq!(f0.get_str(Tag::new(0x0018, 0x0050)).unwrap(), "2.5", "shared contributes");
+        assert_eq!(f0.get_str(Tag::new(0x0020, 0x1041)).unwrap(), "-5.0", "frame 0 location");
+        let f1 = ds.functional_groups(1).unwrap();
+        assert_eq!(f1.get_str(Tag::new(0x0020, 0x1041)).unwrap(), "-2.5");
+
+        // empty sequences are not carried over
+        assert!(f0.try_get_sequence(Tag::new(0x0020, 0x9113)).is_none());
+
+        // out-of-range frame errors
+        assert!(ds.functional_groups(7).is_err());
+    }
+
+    #[test]
+    fn content_equality_is_deep() {
+        let mut a = Dataset::new();
+        a.insert_str(PATIENT_ID, Vr::Lo, "X");
+        {
+            let seq = a.insert_sequence(Tag::new(0x0008, 0x1140));
+            let mut item = Dataset::new();
+            item.insert_str(Tag::new(0x0008, 0x1150), Vr::Ui, "1.2.3");
+            seq.push(item);
+        }
+        let mut b = Dataset::new();
+        b.insert_str(PATIENT_ID, Vr::Lo, "X");
+        {
+            let seq = b.insert_sequence(Tag::new(0x0008, 0x1140));
+            let mut item = Dataset::new();
+            item.insert_str(Tag::new(0x0008, 0x1150), Vr::Ui, "1.2.3");
+            seq.push(item);
+        }
+        assert_eq!(a, b, "identical content compares equal");
+
+        // different transfer syntax does not affect content equality
+        b.set_transfer_syntax(syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone());
+        assert_eq!(a, b);
+
+        // a value difference breaks it
+        b.insert_str(PATIENT_ID, Vr::Lo, "Y");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn datetime_composition() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::new(0x0008, 0x0022), Vr::Da, "20240305"); // AcquisitionDate
+        ds.insert_str(Tag::new(0x0008, 0x0032), Vr::Tm, "103015"); // AcquisitionTime
+
+        let dt = ds
+            .get_datetime(Tag::new(0x0008, 0x0022), Tag::new(0x0008, 0x0032))
+            .unwrap();
+        assert_eq!(dt.to_string(), "2024-03-05 10:30:15");
+
+        // missing time -> midnight
+        let mut no_time = Dataset::new();
+        no_time.insert_str(Tag::new(0x0008, 0x0022), Vr::Da, "20240305");
+        let dt = no_time
+            .get_datetime(Tag::new(0x0008, 0x0022), Tag::new(0x0008, 0x0032))
+            .unwrap();
+        assert_eq!(dt.to_string(), "2024-03-05 00:00:00");
+
+        // with timezone offset
+        ds.insert_str(TIMEZONE_OFFSET_FROM_UTC, Vr::Sh, "+0530");
+        let tz = ds
+            .get_datetime_with_offset(Tag::new(0x0008, 0x0022), Tag::new(0x0008, 0x0032))
+            .unwrap();
+        assert_eq!(tz.offset().local_minus_utc(), 5 * 3600 + 30 * 60);
+        assert_eq!(tz.to_rfc3339(), "2024-03-05T10:30:15+05:30");
+
+        // invalid offset errors
+        ds.insert_str(TIMEZONE_OFFSET_FROM_UTC, Vr::Sh, "0530");
+        assert!(ds
+            .get_datetime_with_offset(Tag::new(0x0008, 0x0022), Tag::new(0x0008, 0x0032))
+            .is_err());
+    }
+}
