@@ -13,8 +13,9 @@ fn main() {
     let arg = std::env::args().nth(1);
     match arg.as_deref() {
         Some("gen-dict") => gen_dict(),
+        Some("regen-goldens") => regen_goldens(),
         _ => {
-            eprintln!("usage: cargo xtask gen-dict");
+            eprintln!("usage: cargo xtask <gen-dict|regen-goldens>");
             std::process::exit(2);
         }
     }
@@ -425,4 +426,36 @@ fn gen_dict() {
         private_rows.len(),
         uids.len()
     );
+}
+
+/// Regenerates the golden snapshot files under `tests-data/goldens/`
+/// (docs/09-testing.md §4). Sources are deterministic corpus files, so the
+/// outputs are reproducible; the integration tests in `radicom`/`radicom-json`
+/// fail when they drift.
+fn regen_goldens() {
+    let root = root();
+    let data_dir = root.join("tests-data");
+    let golden_dir = data_dir.join("goldens");
+    fs::create_dir_all(&golden_dir).expect("create goldens dir");
+
+    // (source relative to tests-data, golden filename) — dump snapshots.
+    let dump_cases = [
+        ("explicit-le/GH178.dcm", "GH178.dump.txt"),
+        ("media/DICOMDIR", "dicomdir.dump.txt"),
+    ];
+    for (source, golden) in dump_cases {
+        let bytes = fs::read(data_dir.join(source)).unwrap_or_else(|e| panic!("read {source}: {e}"));
+        let file = radicom::io::file::DicomFile::from_bytes(&bytes, &Default::default())
+            .unwrap_or_else(|e| panic!("parse {source}: {e}"));
+        fs::write(golden_dir.join(golden), file.dataset.to_dump_string())
+            .unwrap_or_else(|e| panic!("write {golden}: {e}"));
+    }
+
+    // JSON snapshot of the same rich reference dataset.
+    let bytes = fs::read(data_dir.join("explicit-le/GH178.dcm")).expect("read GH178 for json");
+    let file = radicom::io::file::DicomFile::from_bytes(&bytes, &Default::default()).expect("parse GH178");
+    let json = radicom_json::dataset_to_json(&file.dataset, &Default::default()).expect("encode json");
+    fs::write(golden_dir.join("GH178.json"), json).expect("write GH178.json");
+
+    eprintln!("regen-goldens: wrote dump + json snapshots to {}", golden_dir.display());
 }

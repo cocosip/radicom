@@ -1,0 +1,765 @@
+(0004,1130) CS FileSetID                      RLE_COMPRESSION
+(0004,1200) UL OffsetOfTheFirstDirectoryRecordOfTheRootDirectoryEntity [94 01 00 00]
+(0004,1202) UL OffsetOfTheLastDirectoryRecordOfTheRootDirectoryEntity [38 33 00 00]
+(0004,1212) US FileSetConsistencyFlag         [00 00]
+(0004,1220) SQ DirectoryRecordSequence        (80 item(s))
+  item #0
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [10 04 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [FA 01 00 00]
+    (0004,1430) CS DirectoryRecordType            PATIENT
+    (0010,0010) PN PatientName                    CompressedSamples^SC1
+    (0010,0020) LO PatientID                      12SC1
+  item #1
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [A0 02 00 00]
+    (0004,1430) CS DirectoryRecordType            STUDY
+    (0008,0020) DA StudyDate                      20031208
+    (0008,0030) TM StudyTime                      063649
+    (0008,0050) SH AccessionNumber                (empty)
+    (0008,1030) LO StudyDescription               (empty)
+    (0020,000D) UI StudyInstanceUID               1.3.6.1.4.1.5962.1.2.12.20031208063649.855
+    (0020,0010) SH StudyID                        12SC1
+  item #2
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [20 03 00 00]
+    (0004,1430) CS DirectoryRecordType            SERIES
+    (0008,0060) CS Modality                       CT
+    (0020,000E) UI SeriesInstanceUID              1.3.6.1.4.1.5962.1.3.12.1.20031208063649.855
+    (0020,0011) IS SeriesNumber                   1
+  item #3
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [00 00 00 00]
+    (0004,1430) CS DirectoryRecordType            IMAGE
+    (0004,1500) CS ReferencedFileID               IMAGES\RLE\SC1_RLE
+    (0004,1510) UI ReferencedSOPClassUIDInFile    1.2.840.10008.5.1.4.1.1.7
+    (0004,1511) UI ReferencedSOPInstanceUIDInFile 1.2.276.0.7230010.3.1.4.1787205428.2356.1071048148.1
+    (0004,1512) UI ReferencedTransferSyntaxUIDInFile 1.2.840.10008.1.2.5
+    (0008,0008) CS ImageType                      DERIVED\SECONDARY
+    (0020,0013) IS InstanceNumber                 8
+  item #4
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [B0 06 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [74 04 00 00]
+    (0004,1430) CS DirectoryRecordType            PATIENT
+    (0010,0010) PN PatientName                    CompressedSamples^MG1
+    (0010,0020) LO PatientID                      3MG1
+  item #5
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [40 05 00 00]
+    (0004,1430) CS DirectoryRecordType            STUDY
+    (0008,0020) DA StudyDate                      20031208
+    (0008,0030) TM StudyTime                      063649
+    (0008,0050) SH AccessionNumber                (empty)
+    (0008,1030) LO StudyDescription               Malignant mass with micro-calcifications
+    (0020,000D) UI StudyInstanceUID               1.3.6.1.4.1.5962.1.2.3.20031208063649.855
+    (0020,0010) SH StudyID                        3MG1
+  item #6
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [C0 05 00 00]
+    (0004,1430) CS DirectoryRecordType            SERIES
+    (0008,0060) CS Modality                       RG
+    (0020,000E) UI SeriesInstanceUID              1.3.6.1.4.1.5962.1.3.3.1.20031208063649.855
+    (0020,0011) IS SeriesNumber                   1
+  item #7
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [00 00 00 00]
+    (0004,1430) CS DirectoryRecordType            IMAGE
+    (0004,1500) CS ReferencedFileID               IMAGES\RLE\MG1_RLE
+    (0004,1510) UI ReferencedSOPClassUIDInFile    1.2.840.10008.5.1.4.1.1.7
+    (0004,1511) UI ReferencedSOPInstanceUIDInFile 1.2.276.0.7230010.3.1.4.1787205428.2347.1071048147.1
+    (0004,1512) UI ReferencedTransferSyntaxUIDInFile 1.2.840.10008.1.2.5
+    (0008,0008) CS ImageType                      DERIVED\SECONDARY
+    (0020,0013) IS InstanceNumber                 8
+  item #8
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [2E 09 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [14 07 00 00]
+    (0004,1430) CS DirectoryRecordType            PATIENT
+    (0010,0010) PN PatientName                    CompressedSamples^MR1
+    (0010,0020) LO PatientID                      4MR1
+  item #9
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [B8 07 00 00]
+    (0004,1430) CS DirectoryRecordType            STUDY
+    (0008,0020) DA StudyDate                      20031208
+    (0008,0030) TM StudyTime                      063649
+    (0008,0050) SH AccessionNumber                (empty)
+    (0008,1030) LO StudyDescription               (empty)
+    (0020,000D) UI StudyInstanceUID               1.3.6.1.4.1.5962.1.2.4.20031208063649.855
+    (0020,0010) SH StudyID                        4MR1
+  item #10
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [38 08 00 00]
+    (0004,1430) CS DirectoryRecordType            SERIES
+    (0008,0060) CS Modality                       MR
+    (0020,000E) UI SeriesInstanceUID              1.3.6.1.4.1.5962.1.3.4.1.20031208063649.855
+    (0020,0011) IS SeriesNumber                   1
+  item #11
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [00 00 00 00]
+    (0004,1430) CS DirectoryRecordType            IMAGE
+    (0004,1500) CS ReferencedFileID               IMAGES\RLE\MR1_RLE
+    (0004,1510) UI ReferencedSOPClassUIDInFile    1.2.840.10008.5.1.4.1.1.4
+    (0004,1511) UI ReferencedSOPInstanceUIDInFile 1.2.276.0.7230010.3.1.4.1787205428.2348.1071048147.1
+    (0004,1512) UI ReferencedTransferSyntaxUIDInFile 1.2.840.10008.1.2.5
+    (0008,0008) CS ImageType                      DERIVED\SECONDARY\OTHER
+    (0020,0013) IS InstanceNumber                 8
+  item #12
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 0C 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [A4 09 00 00]
+    (0004,1430) CS DirectoryRecordType            PATIENT
+    (0008,0005) CS SpecificCharacterSet           ISO_IR 100
+    (0010,0010) PN PatientName                    CompressedSamples^MR2
+    (0010,0020) LO PatientID                      5MR2
+  item #13
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [62 0A 00 00]
+    (0004,1430) CS DirectoryRecordType            STUDY
+    (0008,0005) CS SpecificCharacterSet           ISO_IR 100
+    (0008,0020) DA StudyDate                      20031208
+    (0008,0030) TM StudyTime                      063649
+    (0008,0050) SH AccessionNumber                (empty)
+    (0008,1030) LO StudyDescription               SHOULDER
+    (0020,000D) UI StudyInstanceUID               1.3.6.1.4.1.5962.1.2.5.20031208063649.855
+    (0020,0010) SH StudyID                        5MR2
+  item #14
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [F4 0A 00 00]
+    (0004,1430) CS DirectoryRecordType            SERIES
+    (0008,0005) CS SpecificCharacterSet           ISO_IR 100
+    (0008,0060) CS Modality                       MR
+    (0020,000E) UI SeriesInstanceUID              1.3.6.1.4.1.5962.1.3.5.1.20031208063649.855
+    (0020,0011) IS SeriesNumber                   1
+  item #15
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [00 00 00 00]
+    (0004,1430) CS DirectoryRecordType            IMAGE
+    (0004,1500) CS ReferencedFileID               IMAGES\RLE\MR2_RLE
+    (0004,1510) UI ReferencedSOPClassUIDInFile    1.2.840.10008.5.1.4.1.1.4
+    (0004,1511) UI ReferencedSOPInstanceUIDInFile 1.2.276.0.7230010.3.1.4.1787205428.2349.1071048147.1
+    (0004,1512) UI ReferencedTransferSyntaxUIDInFile 1.2.840.10008.1.2.5
+    (0008,0005) CS SpecificCharacterSet           ISO_IR 100
+    (0008,0008) CS ImageType                      DERIVED\SECONDARY\OTHER\M\SE
+    (0020,0013) IS InstanceNumber                 8
+  item #16
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [CC 0E 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [76 0C 00 00]
+    (0004,1430) CS DirectoryRecordType            PATIENT
+    (0008,0005) CS SpecificCharacterSet           ISO_IR 100
+    (0010,0010) PN PatientName                    CompressedSamples^MR3
+    (0010,0020) LO PatientID                      6MR3
+  item #17
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [38 0D 00 00]
+    (0004,1430) CS DirectoryRecordType            STUDY
+    (0008,0005) CS SpecificCharacterSet           ISO_IR 100
+    (0008,0020) DA StudyDate                      20031208
+    (0008,0030) TM StudyTime                      063649
+    (0008,0050) SH AccessionNumber                (empty)
+    (0008,1030) LO StudyDescription               e+1 KNEE-RT.
+    (0020,000D) UI StudyInstanceUID               1.3.6.1.4.1.5962.1.2.6.20031208063649.855
+    (0020,0010) SH StudyID                        6MR3
+  item #18
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [CA 0D 00 00]
+    (0004,1430) CS DirectoryRecordType            SERIES
+    (0008,0005) CS SpecificCharacterSet           ISO_IR 100
+    (0008,0060) CS Modality                       MR
+    (0020,000E) UI SeriesInstanceUID              1.3.6.1.4.1.5962.1.3.6.1.20031208063649.855
+    (0020,0011) IS SeriesNumber                   1
+  item #19
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [00 00 00 00]
+    (0004,1430) CS DirectoryRecordType            IMAGE
+    (0004,1500) CS ReferencedFileID               IMAGES\RLE\MR3_RLE
+    (0004,1510) UI ReferencedSOPClassUIDInFile    1.2.840.10008.5.1.4.1.1.4
+    (0004,1511) UI ReferencedSOPInstanceUIDInFile 1.2.276.0.7230010.3.1.4.1787205428.2350.1071048147.1
+    (0004,1512) UI ReferencedTransferSyntaxUIDInFile 1.2.840.10008.1.2.5
+    (0008,0005) CS SpecificCharacterSet           ISO_IR 100
+    (0008,0008) CS ImageType                      DERIVED\SECONDARY
+    (0020,0013) IS InstanceNumber                 8
+  item #20
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [9C 11 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [42 0F 00 00]
+    (0004,1430) CS DirectoryRecordType            PATIENT
+    (0008,0005) CS SpecificCharacterSet           ISO_IR 100
+    (0010,0010) PN PatientName                    CompressedSamples^MR4
+    (0010,0020) LO PatientID                      7MR4
+  item #21
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [FE 0F 00 00]
+    (0004,1430) CS DirectoryRecordType            STUDY
+    (0008,0005) CS SpecificCharacterSet           ISO_IR 100
+    (0008,0020) DA StudyDate                      20031208
+    (0008,0030) TM StudyTime                      063649
+    (0008,0050) SH AccessionNumber                (empty)
+    (0008,1030) LO StudyDescription               BRAIN
+    (0020,000D) UI StudyInstanceUID               1.3.6.1.4.1.5962.1.2.7.20031208063649.855
+    (0020,0010) SH StudyID                        7MR4
+  item #22
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [90 10 00 00]
+    (0004,1430) CS DirectoryRecordType            SERIES
+    (0008,0005) CS SpecificCharacterSet           ISO_IR 100
+    (0008,0060) CS Modality                       MR
+    (0020,000E) UI SeriesInstanceUID              1.3.6.1.4.1.5962.1.3.7.1.20031208063649.855
+    (0020,0011) IS SeriesNumber                   1
+  item #23
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [00 00 00 00]
+    (0004,1430) CS DirectoryRecordType            IMAGE
+    (0004,1500) CS ReferencedFileID               IMAGES\RLE\MR4_RLE
+    (0004,1510) UI ReferencedSOPClassUIDInFile    1.2.840.10008.5.1.4.1.1.4
+    (0004,1511) UI ReferencedSOPInstanceUIDInFile 1.2.276.0.7230010.3.1.4.1787205428.2351.1071048147.1
+    (0004,1512) UI ReferencedTransferSyntaxUIDInFile 1.2.840.10008.1.2.5
+    (0008,0005) CS SpecificCharacterSet           ISO_IR 100
+    (0008,0008) CS ImageType                      DERIVED\SECONDARY\OTHER\R\IR
+    (0020,0013) IS InstanceNumber                 8
+  item #24
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [38 14 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [00 12 00 00]
+    (0004,1430) CS DirectoryRecordType            PATIENT
+    (0010,0010) PN PatientName                    CompressedSamples^NM1
+    (0010,0020) LO PatientID                      8NM1
+  item #25
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [B4 12 00 00]
+    (0004,1430) CS DirectoryRecordType            STUDY
+    (0008,0020) DA StudyDate                      20031208
+    (0008,0030) TM StudyTime                      063649
+    (0008,0050) SH AccessionNumber                (empty)
+    (0008,1030) LO StudyDescription               Whole Body Bone
+    (0020,000D) UI StudyInstanceUID               1.3.6.1.4.1.5962.1.2.8.20031208063649.855
+    (0020,0010) SH StudyID                        8NM1
+  item #26
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [34 13 00 00]
+    (0004,1430) CS DirectoryRecordType            SERIES
+    (0008,0060) CS Modality                       NM
+    (0020,000E) UI SeriesInstanceUID              1.3.6.1.4.1.5962.1.3.8.1.20031208063649.855
+    (0020,0011) IS SeriesNumber                   1
+  item #27
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [00 00 00 00]
+    (0004,1430) CS DirectoryRecordType            IMAGE
+    (0004,1500) CS ReferencedFileID               IMAGES\RLE\NM1_RLE
+    (0004,1510) UI ReferencedSOPClassUIDInFile    1.2.840.10008.5.1.4.1.1.7
+    (0004,1511) UI ReferencedSOPInstanceUIDInFile 1.2.276.0.7230010.3.1.4.1787205428.2352.1071048147.1
+    (0004,1512) UI ReferencedTransferSyntaxUIDInFile 1.2.840.10008.1.2.5
+    (0008,0008) CS ImageType                      DERIVED\SECONDARY\WHOLE BODY\EMISSION
+    (0020,0013) IS InstanceNumber                 8
+  item #28
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [C2 16 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [9E 14 00 00]
+    (0004,1430) CS DirectoryRecordType            PATIENT
+    (0010,0010) PN PatientName                    CompressedSamples^US1
+    (0010,0020) LO PatientID                      13US1
+  item #29
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [44 15 00 00]
+    (0004,1430) CS DirectoryRecordType            STUDY
+    (0008,0020) DA StudyDate                      20031208
+    (0008,0030) TM StudyTime                      063649
+    (0008,0050) SH AccessionNumber                (empty)
+    (0008,1030) LO StudyDescription               (empty)
+    (0020,000D) UI StudyInstanceUID               1.3.6.1.4.1.5962.1.2.13.20031208063649.855
+    (0020,0010) SH StudyID                        13US1
+  item #30
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [C4 15 00 00]
+    (0004,1430) CS DirectoryRecordType            SERIES
+    (0008,0060) CS Modality                       US
+    (0020,000E) UI SeriesInstanceUID              1.3.6.1.4.1.5962.1.3.13.1.20031208063649.855
+    (0020,0011) IS SeriesNumber                   1
+  item #31
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [00 00 00 00]
+    (0004,1430) CS DirectoryRecordType            IMAGE
+    (0004,1500) CS ReferencedFileID               IMAGES\RLE\US1_RLE
+    (0004,1510) UI ReferencedSOPClassUIDInFile    1.2.840.10008.5.1.4.1.1.6.1
+    (0004,1511) UI ReferencedSOPInstanceUIDInFile 1.2.276.0.7230010.3.1.4.1787205428.2357.1071048148.1
+    (0004,1512) UI ReferencedTransferSyntaxUIDInFile 1.2.840.10008.1.2.5
+    (0008,0008) CS ImageType                      DERIVED\SECONDARY\SMALL PARTS
+    (0020,0013) IS InstanceNumber                 8
+  item #32
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [50 19 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [28 17 00 00]
+    (0004,1430) CS DirectoryRecordType            PATIENT
+    (0010,0010) PN PatientName                    CompressedSamples^VL1
+    (0010,0020) LO PatientID                      14VL1
+  item #33
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [E0 17 00 00]
+    (0004,1430) CS DirectoryRecordType            STUDY
+    (0008,0020) DA StudyDate                      20031208
+    (0008,0030) TM StudyTime                      063649
+    (0008,0050) SH AccessionNumber                (empty)
+    (0008,1030) LO StudyDescription               Barretts Esophagus
+    (0020,000D) UI StudyInstanceUID               1.3.6.1.4.1.5962.1.2.14.20031208063649.855
+    (0020,0010) SH StudyID                        14VL1
+  item #34
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [60 18 00 00]
+    (0004,1430) CS DirectoryRecordType            SERIES
+    (0008,0060) CS Modality                       OT
+    (0020,000E) UI SeriesInstanceUID              1.3.6.1.4.1.5962.1.3.14.1.20031208063649.855
+    (0020,0011) IS SeriesNumber                   1
+  item #35
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [00 00 00 00]
+    (0004,1430) CS DirectoryRecordType            IMAGE
+    (0004,1500) CS ReferencedFileID               IMAGES\RLE\VL1_RLE
+    (0004,1510) UI ReferencedSOPClassUIDInFile    1.2.840.10008.5.1.4.1.1.7
+    (0004,1511) UI ReferencedSOPInstanceUIDInFile 1.2.276.0.7230010.3.1.4.1787205428.2358.1071048148.1
+    (0004,1512) UI ReferencedTransferSyntaxUIDInFile 1.2.840.10008.1.2.5
+    (0008,0008) CS ImageType                      DERIVED\SECONDARY
+    (0020,0013) IS InstanceNumber                 8
+  item #36
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [DC 1B 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [B6 19 00 00]
+    (0004,1430) CS DirectoryRecordType            PATIENT
+    (0010,0010) PN PatientName                    CompressedSamples^VL2
+    (0010,0020) LO PatientID                      15VL2
+  item #37
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [6C 1A 00 00]
+    (0004,1430) CS DirectoryRecordType            STUDY
+    (0008,0020) DA StudyDate                      20031208
+    (0008,0030) TM StudyTime                      063649
+    (0008,0050) SH AccessionNumber                (empty)
+    (0008,1030) LO StudyDescription               Prepyloric Ulcer
+    (0020,000D) UI StudyInstanceUID               1.3.6.1.4.1.5962.1.2.15.20031208063649.855
+    (0020,0010) SH StudyID                        15VL2
+  item #38
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [EC 1A 00 00]
+    (0004,1430) CS DirectoryRecordType            SERIES
+    (0008,0060) CS Modality                       OT
+    (0020,000E) UI SeriesInstanceUID              1.3.6.1.4.1.5962.1.3.15.1.20031208063649.855
+    (0020,0011) IS SeriesNumber                   1
+  item #39
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [00 00 00 00]
+    (0004,1430) CS DirectoryRecordType            IMAGE
+    (0004,1500) CS ReferencedFileID               IMAGES\RLE\VL2_RLE
+    (0004,1510) UI ReferencedSOPClassUIDInFile    1.2.840.10008.5.1.4.1.1.7
+    (0004,1511) UI ReferencedSOPInstanceUIDInFile 1.2.276.0.7230010.3.1.4.1787205428.2359.1071048149.1
+    (0004,1512) UI ReferencedTransferSyntaxUIDInFile 1.2.840.10008.1.2.5
+    (0008,0008) CS ImageType                      DERIVED\SECONDARY
+    (0020,0013) IS InstanceNumber                 8
+  item #40
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [74 1E 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [42 1C 00 00]
+    (0004,1430) CS DirectoryRecordType            PATIENT
+    (0010,0010) PN PatientName                    CompressedSamples^VL3
+    (0010,0020) LO PatientID                      16VL3
+  item #41
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [04 1D 00 00]
+    (0004,1430) CS DirectoryRecordType            STUDY
+    (0008,0020) DA StudyDate                      20031208
+    (0008,0030) TM StudyTime                      063649
+    (0008,0050) SH AccessionNumber                (empty)
+    (0008,1030) LO StudyDescription               Arterio-venous Malformation
+    (0020,000D) UI StudyInstanceUID               1.3.6.1.4.1.5962.1.2.16.20031208063649.855
+    (0020,0010) SH StudyID                        16VL3
+  item #42
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [84 1D 00 00]
+    (0004,1430) CS DirectoryRecordType            SERIES
+    (0008,0060) CS Modality                       OT
+    (0020,000E) UI SeriesInstanceUID              1.3.6.1.4.1.5962.1.3.16.1.20031208063649.855
+    (0020,0011) IS SeriesNumber                   1
+  item #43
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [00 00 00 00]
+    (0004,1430) CS DirectoryRecordType            IMAGE
+    (0004,1500) CS ReferencedFileID               IMAGES\RLE\VL3_RLE
+    (0004,1510) UI ReferencedSOPClassUIDInFile    1.2.840.10008.5.1.4.1.1.7
+    (0004,1511) UI ReferencedSOPInstanceUIDInFile 1.2.276.0.7230010.3.1.4.1787205428.2360.1071048149.1
+    (0004,1512) UI ReferencedTransferSyntaxUIDInFile 1.2.840.10008.1.2.5
+    (0008,0008) CS ImageType                      DERIVED\SECONDARY
+    (0020,0013) IS InstanceNumber                 8
+  item #44
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [FA 20 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [DA 1E 00 00]
+    (0004,1430) CS DirectoryRecordType            PATIENT
+    (0010,0010) PN PatientName                    CompressedSamples^VL4
+    (0010,0020) LO PatientID                      17VL4
+  item #45
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [8A 1F 00 00]
+    (0004,1430) CS DirectoryRecordType            STUDY
+    (0008,0020) DA StudyDate                      20031208
+    (0008,0030) TM StudyTime                      063649
+    (0008,0050) SH AccessionNumber                (empty)
+    (0008,1030) LO StudyDescription               Fundoscopy
+    (0020,000D) UI StudyInstanceUID               1.3.6.1.4.1.5962.1.2.17.20031208063649.855
+    (0020,0010) SH StudyID                        17VL4
+  item #46
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [0A 20 00 00]
+    (0004,1430) CS DirectoryRecordType            SERIES
+    (0008,0060) CS Modality                       OT
+    (0020,000E) UI SeriesInstanceUID              1.3.6.1.4.1.5962.1.3.17.1.20031208063649.855
+    (0020,0011) IS SeriesNumber                   1
+  item #47
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [00 00 00 00]
+    (0004,1430) CS DirectoryRecordType            IMAGE
+    (0004,1500) CS ReferencedFileID               IMAGES\RLE\VL4_RLE
+    (0004,1510) UI ReferencedSOPClassUIDInFile    1.2.840.10008.5.1.4.1.1.7
+    (0004,1511) UI ReferencedSOPInstanceUIDInFile 1.2.276.0.7230010.3.1.4.1787205428.2361.1071048149.1
+    (0004,1512) UI ReferencedTransferSyntaxUIDInFile 1.2.840.10008.1.2.5
+    (0008,0008) CS ImageType                      DERIVED\SECONDARY
+    (0020,0013) IS InstanceNumber                 8
+  item #48
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [84 23 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [60 21 00 00]
+    (0004,1430) CS DirectoryRecordType            PATIENT
+    (0010,0010) PN PatientName                    CompressedSamples^VL5
+    (0010,0020) LO PatientID                      18VL5
+  item #49
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [14 22 00 00]
+    (0004,1430) CS DirectoryRecordType            STUDY
+    (0008,0020) DA StudyDate                      20031208
+    (0008,0030) TM StudyTime                      063649
+    (0008,0050) SH AccessionNumber                (empty)
+    (0008,1030) LO StudyDescription               Whole Prostate
+    (0020,000D) UI StudyInstanceUID               1.3.6.1.4.1.5962.1.2.18.20031208063649.855
+    (0020,0010) SH StudyID                        18VL5
+  item #50
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [94 22 00 00]
+    (0004,1430) CS DirectoryRecordType            SERIES
+    (0008,0060) CS Modality                       OT
+    (0020,000E) UI SeriesInstanceUID              1.3.6.1.4.1.5962.1.3.18.1.20031208063649.855
+    (0020,0011) IS SeriesNumber                   1
+  item #51
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [00 00 00 00]
+    (0004,1430) CS DirectoryRecordType            IMAGE
+    (0004,1500) CS ReferencedFileID               IMAGES\RLE\VL5_RLE
+    (0004,1510) UI ReferencedSOPClassUIDInFile    1.2.840.10008.5.1.4.1.1.7
+    (0004,1511) UI ReferencedSOPInstanceUIDInFile 1.2.276.0.7230010.3.1.4.1787205428.2362.1071048150.1
+    (0004,1512) UI ReferencedTransferSyntaxUIDInFile 1.2.840.10008.1.2.5
+    (0008,0008) CS ImageType                      DERIVED\SECONDARY
+    (0020,0013) IS InstanceNumber                 8
+  item #52
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [1C 26 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [EA 23 00 00]
+    (0004,1430) CS DirectoryRecordType            PATIENT
+    (0010,0010) PN PatientName                    CompressedSamples^VL6
+    (0010,0020) LO PatientID                      19VL6
+  item #53
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [AC 24 00 00]
+    (0004,1430) CS DirectoryRecordType            STUDY
+    (0008,0020) DA StudyDate                      20031208
+    (0008,0030) TM StudyTime                      063649
+    (0008,0050) SH AccessionNumber                (empty)
+    (0008,1030) LO StudyDescription               Stomach Body Biopsy - Micro
+    (0020,000D) UI StudyInstanceUID               1.3.6.1.4.1.5962.1.2.19.20031208063649.855
+    (0020,0010) SH StudyID                        19VL6
+  item #54
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [2C 25 00 00]
+    (0004,1430) CS DirectoryRecordType            SERIES
+    (0008,0060) CS Modality                       OT
+    (0020,000E) UI SeriesInstanceUID              1.3.6.1.4.1.5962.1.3.19.1.20031208063649.855
+    (0020,0011) IS SeriesNumber                   1
+  item #55
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [00 00 00 00]
+    (0004,1430) CS DirectoryRecordType            IMAGE
+    (0004,1500) CS ReferencedFileID               IMAGES\RLE\VL6_RLE
+    (0004,1510) UI ReferencedSOPClassUIDInFile    1.2.840.10008.5.1.4.1.1.7
+    (0004,1511) UI ReferencedSOPInstanceUIDInFile 1.2.276.0.7230010.3.1.4.1787205428.2363.1071048150.1
+    (0004,1512) UI ReferencedTransferSyntaxUIDInFile 1.2.840.10008.1.2.5
+    (0008,0008) CS ImageType                      DERIVED\SECONDARY
+    (0020,0013) IS InstanceNumber                 8
+  item #56
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [98 28 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [82 26 00 00]
+    (0004,1430) CS DirectoryRecordType            PATIENT
+    (0010,0010) PN PatientName                    CompressedSamples^XA1
+    (0010,0020) LO PatientID                      20XA1
+  item #57
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [28 27 00 00]
+    (0004,1430) CS DirectoryRecordType            STUDY
+    (0008,0020) DA StudyDate                      20031208
+    (0008,0030) TM StudyTime                      063649
+    (0008,0050) SH AccessionNumber                (empty)
+    (0008,1030) LO StudyDescription               (empty)
+    (0020,000D) UI StudyInstanceUID               1.3.6.1.4.1.5962.1.2.20.20031208063649.855
+    (0020,0010) SH StudyID                        20XA1
+  item #58
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [A8 27 00 00]
+    (0004,1430) CS DirectoryRecordType            SERIES
+    (0008,0060) CS Modality                       XA
+    (0020,000E) UI SeriesInstanceUID              1.3.6.1.4.1.5962.1.3.20.1.20031208063649.855
+    (0020,0011) IS SeriesNumber                   1
+  item #59
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [00 00 00 00]
+    (0004,1430) CS DirectoryRecordType            IMAGE
+    (0004,1500) CS ReferencedFileID               IMAGES\RLE\XA1_RLE
+    (0004,1510) UI ReferencedSOPClassUIDInFile    1.2.840.10008.5.1.4.1.1.7
+    (0004,1511) UI ReferencedSOPInstanceUIDInFile 1.2.276.0.7230010.3.1.4.1787205428.2364.1071048150.1
+    (0004,1512) UI ReferencedTransferSyntaxUIDInFile 1.2.840.10008.1.2.5
+    (0008,0008) CS ImageType                      DERIVED\SECONDARY
+    (0020,0013) IS InstanceNumber                 8
+  item #60
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [62 2B 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [0E 29 00 00]
+    (0004,1430) CS DirectoryRecordType            PATIENT
+    (0008,0005) CS SpecificCharacterSet           ISO_IR 100
+    (0010,0010) PN PatientName                    CompressedSamples^CT1
+    (0010,0020) LO PatientID                      1CT1
+  item #61
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [C8 29 00 00]
+    (0004,1430) CS DirectoryRecordType            STUDY
+    (0008,0005) CS SpecificCharacterSet           ISO_IR 100
+    (0008,0020) DA StudyDate                      20031208
+    (0008,0030) TM StudyTime                      063649
+    (0008,0050) SH AccessionNumber                (empty)
+    (0008,1030) LO StudyDescription               e+1
+    (0020,000D) UI StudyInstanceUID               1.3.6.1.4.1.5962.1.2.1.20031208063649.855
+    (0020,0010) SH StudyID                        1CT1
+  item #62
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [5A 2A 00 00]
+    (0004,1430) CS DirectoryRecordType            SERIES
+    (0008,0005) CS SpecificCharacterSet           ISO_IR 100
+    (0008,0060) CS Modality                       CT
+    (0020,000E) UI SeriesInstanceUID              1.3.6.1.4.1.5962.1.3.1.1.20031208063649.855
+    (0020,0011) IS SeriesNumber                   1
+  item #63
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [00 00 00 00]
+    (0004,1430) CS DirectoryRecordType            IMAGE
+    (0004,1500) CS ReferencedFileID               IMAGES\RLE\CT1_RLE
+    (0004,1510) UI ReferencedSOPClassUIDInFile    1.2.840.10008.5.1.4.1.1.2
+    (0004,1511) UI ReferencedSOPInstanceUIDInFile 1.2.276.0.7230010.3.1.4.1787205428.2345.1071048146.1
+    (0004,1512) UI ReferencedTransferSyntaxUIDInFile 1.2.840.10008.1.2.5
+    (0008,0005) CS SpecificCharacterSet           ISO_IR 100
+    (0008,0008) CS ImageType                      DERIVED\SECONDARY\AXIAL
+    (0020,0013) IS InstanceNumber                 8
+  item #64
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [E0 2D 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [C6 2B 00 00]
+    (0004,1430) CS DirectoryRecordType            PATIENT
+    (0010,0010) PN PatientName                    CompressedSamples^CT2
+    (0010,0020) LO PatientID                      2CT2
+  item #65
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [6A 2C 00 00]
+    (0004,1430) CS DirectoryRecordType            STUDY
+    (0008,0020) DA StudyDate                      20031208
+    (0008,0030) TM StudyTime                      063649
+    (0008,0050) SH AccessionNumber                (empty)
+    (0008,1030) LO StudyDescription               (empty)
+    (0020,000D) UI StudyInstanceUID               1.3.6.1.4.1.5962.1.2.2.20031208063649.855
+    (0020,0010) SH StudyID                        2CT2
+  item #66
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [EA 2C 00 00]
+    (0004,1430) CS DirectoryRecordType            SERIES
+    (0008,0060) CS Modality                       CT
+    (0020,000E) UI SeriesInstanceUID              1.3.6.1.4.1.5962.1.3.2.1.20031208063649.855
+    (0020,0011) IS SeriesNumber                   1
+  item #67
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [00 00 00 00]
+    (0004,1430) CS DirectoryRecordType            IMAGE
+    (0004,1500) CS ReferencedFileID               IMAGES\RLE\CT2_RLE
+    (0004,1510) UI ReferencedSOPClassUIDInFile    1.2.840.10008.5.1.4.1.1.2
+    (0004,1511) UI ReferencedSOPInstanceUIDInFile 1.2.276.0.7230010.3.1.4.1787205428.2346.1071048146.1
+    (0004,1512) UI ReferencedTransferSyntaxUIDInFile 1.2.840.10008.1.2.5
+    (0008,0008) CS ImageType                      DERIVED\SECONDARY\AXIAL
+    (0020,0013) IS InstanceNumber                 8
+  item #68
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [B2 30 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [56 2E 00 00]
+    (0004,1430) CS DirectoryRecordType            PATIENT
+    (0008,0005) CS SpecificCharacterSet           ISO_IR 100
+    (0010,0010) PN PatientName                    CompressedSamples^RG1
+    (0010,0020) LO PatientID                      9RG1
+  item #69
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [1E 2F 00 00]
+    (0004,1430) CS DirectoryRecordType            STUDY
+    (0008,0005) CS SpecificCharacterSet           ISO_IR 100
+    (0008,0020) DA StudyDate                      20031208
+    (0008,0030) TM StudyTime                      063649
+    (0008,0050) SH AccessionNumber                exam Number
+    (0008,1030) LO StudyDescription               THORAX
+    (0020,000D) UI StudyInstanceUID               1.3.6.1.4.1.5962.1.2.9.20031208063649.855
+    (0020,0010) SH StudyID                        9RG1
+  item #70
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [B0 2F 00 00]
+    (0004,1430) CS DirectoryRecordType            SERIES
+    (0008,0005) CS SpecificCharacterSet           ISO_IR 100
+    (0008,0060) CS Modality                       CR
+    (0020,000E) UI SeriesInstanceUID              1.3.6.1.4.1.5962.1.3.9.1.20031208063649.855
+    (0020,0011) IS SeriesNumber                   1
+  item #71
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [00 00 00 00]
+    (0004,1430) CS DirectoryRecordType            IMAGE
+    (0004,1500) CS ReferencedFileID               IMAGES\RLE\RG1_RLE
+    (0004,1510) UI ReferencedSOPClassUIDInFile    1.2.840.10008.5.1.4.1.1.1
+    (0004,1511) UI ReferencedSOPInstanceUIDInFile 1.2.276.0.7230010.3.1.4.1787205428.2353.1071048148.1
+    (0004,1512) UI ReferencedTransferSyntaxUIDInFile 1.2.840.10008.1.2.5
+    (0008,0005) CS SpecificCharacterSet           ISO_IR 100
+    (0008,0008) CS ImageType                      DERIVED\SECONDARY
+    (0020,0013) IS InstanceNumber                 8
+  item #72
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [38 33 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [18 31 00 00]
+    (0004,1430) CS DirectoryRecordType            PATIENT
+    (0010,0010) PN PatientName                    CompressedSamples^RG2
+    (0010,0020) LO PatientID                      10RG2
+  item #73
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [C8 31 00 00]
+    (0004,1430) CS DirectoryRecordType            STUDY
+    (0008,0020) DA StudyDate                      20031208
+    (0008,0030) TM StudyTime                      063649
+    (0008,0050) SH AccessionNumber                (empty)
+    (0008,1030) LO StudyDescription               HIP JOINT
+    (0020,000D) UI StudyInstanceUID               1.3.6.1.4.1.5962.1.2.10.20031208063649.855
+    (0020,0010) SH StudyID                        10RG2
+  item #74
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [48 32 00 00]
+    (0004,1430) CS DirectoryRecordType            SERIES
+    (0008,0060) CS Modality                       CR
+    (0020,000E) UI SeriesInstanceUID              1.3.6.1.4.1.5962.1.3.10.1.20031208063649.855
+    (0020,0011) IS SeriesNumber                   1
+  item #75
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [00 00 00 00]
+    (0004,1430) CS DirectoryRecordType            IMAGE
+    (0004,1500) CS ReferencedFileID               IMAGES\RLE\RG2_RLE
+    (0004,1510) UI ReferencedSOPClassUIDInFile    1.2.840.10008.5.1.4.1.1.1
+    (0004,1511) UI ReferencedSOPInstanceUIDInFile 1.2.276.0.7230010.3.1.4.1787205428.2354.1071048148.1
+    (0004,1512) UI ReferencedTransferSyntaxUIDInFile 1.2.840.10008.1.2.5
+    (0008,0008) CS ImageType                      DERIVED\SECONDARY
+    (0020,0013) IS InstanceNumber                 8
+  item #76
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [9E 33 00 00]
+    (0004,1430) CS DirectoryRecordType            PATIENT
+    (0010,0010) PN PatientName                    CompressedSamples^RG3
+    (0010,0020) LO PatientID                      11RG3
+  item #77
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [74 34 00 00]
+    (0004,1430) CS DirectoryRecordType            STUDY
+    (0008,0020) DA StudyDate                      20031208
+    (0008,0030) TM StudyTime                      063649
+    (0008,0050) SH AccessionNumber                FUJI95706
+    (0008,1030) LO StudyDescription               Non-ossifying fibroma of distal tibia
+    (0020,000D) UI StudyInstanceUID               1.3.6.1.4.1.5962.1.2.11.20031208063649.855
+    (0020,0010) SH StudyID                        11RG3
+  item #78
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [F4 34 00 00]
+    (0004,1430) CS DirectoryRecordType            SERIES
+    (0008,0060) CS Modality                       CR
+    (0020,000E) UI SeriesInstanceUID              1.3.6.1.4.1.5962.1.3.11.1.20031208063649.855
+    (0020,0011) IS SeriesNumber                   1
+  item #79
+    (0004,1400) UL OffsetOfTheNextDirectoryRecord [00 00 00 00]
+    (0004,1410) US RecordInUseFlag                [FF FF]
+    (0004,1420) UL OffsetOfReferencedLowerLevelDirectoryEntity [00 00 00 00]
+    (0004,1430) CS DirectoryRecordType            IMAGE
+    (0004,1500) CS ReferencedFileID               IMAGES\RLE\RG3_RLE
+    (0004,1510) UI ReferencedSOPClassUIDInFile    1.2.840.10008.5.1.4.1.1.1
+    (0004,1511) UI ReferencedSOPInstanceUIDInFile 1.2.276.0.7230010.3.1.4.1787205428.2355.1071048148.1
+    (0004,1512) UI ReferencedTransferSyntaxUIDInFile 1.2.840.10008.1.2.5
+    (0008,0008) CS ImageType                      DERIVED\SECONDARY
+    (0020,0013) IS InstanceNumber                 8

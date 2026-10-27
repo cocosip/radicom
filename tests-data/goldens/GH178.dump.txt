@@ -1,0 +1,152 @@
+(0008,0000) UL Unknown                        [16 02 00 00]
+(0008,0005) CS SpecificCharacterSet           ISO_IR 100
+(0008,0008) CS ImageType                      DERIVED\SECONDARY\SCREEN SAVE
+(0008,0012) DA InstanceCreationDate           20140106
+(0008,0013) TM InstanceCreationTime           081425
+(0008,0016) UI SOPClassUID                    1.2.840.10008.5.1.4.1.1.7
+(0008,0018) UI SOPInstanceUID                 1.2.840.113619.2.284.3.17442826.413.1388989542.640
+(0008,0020) DA StudyDate                      20140106
+(0008,0021) DA SeriesDate                     20140106
+(0008,0022) DA AcquisitionDate                20140106
+(0008,0023) DA ContentDate                    20140106
+(0008,0030) TM StudyTime                      081425
+(0008,0031) TM SeriesTime                     081425
+(0008,0032) TM AcquisitionTime                081425
+(0008,0033) TM ContentTime                    081425
+(0008,0050) SH AccessionNumber                9999999
+(0008,0060) CS Modality                       CT
+(0008,0064) CS ConversionType                 WSD
+(0008,0070) LO Manufacturer                   GE MEDICAL SYSTEMS
+(0008,0080) LO InstitutionName                XXXXXXXXXXXXXXXXXXXXXXXXXX
+(0008,0090) PN ReferringPhysicianName         XXXXXXXXX^XXXXXXXX
+(0008,1010) SH StationName                    ct01
+(0008,1030) LO StudyDescription               CT THORACO-ABDOMINAL
+(0008,103E) LO SeriesDescription              Rapport dose.
+(0008,1050) PN PerformingPhysicianName        (empty)
+(0008,1090) LO ManufacturerModelName          LightSpeed VCT
+(0008,1110) SQ ReferencedStudySequence        (1 item(s))
+  item #0
+    (0008,0000) UL Unknown                        [90 00 00 00]
+    (0008,1150) UI ReferencedSOPClassUID          1.2.840.10008.3.1.2.3.1
+    (0008,1155) UI ReferencedSOPInstanceUID       1.2.840.113681.1.99.2994400
+(0010,0000) UL Unknown                        [64 00 00 00]
+(0010,0010) PN PatientName                    XXXXXX^XXXXXX
+(0010,0020) LO PatientID                      55555
+(0010,0030) DA PatientBirthDate               19000101
+(0010,0040) CS PatientSex                     M
+(0010,1000) LO OtherPatientIDs                (empty)
+(0010,1010) AS PatientAge                     081Y
+(0010,1030) DS PatientWeight                  80
+(0010,21B0) LT AdditionalPatientHistory       (empty)
+(0018,0000) UL Unknown                        [4A 00 00 00]
+(0018,1030) LO ProtocolName                   5.8 TAP : 4 HELICES (SANS/THXABDO ART/AP PORT/TARDIF)
+(0018,5100) CS PatientPosition                HFS
+(0020,0000) UL Unknown                        [8A 00 00 00]
+(0020,000D) UI StudyInstanceUID               1.2.840.113681.1.99.2994400
+(0020,000E) UI SeriesInstanceUID              1.2.840.113619.2.284.3.17442826.413.1388989542.639
+(0020,0010) SH StudyID                        16768
+(0020,0011) IS SeriesNumber                   999
+(0020,0013) IS InstanceNumber                 1
+(0020,0020) CS PatientOrientation             (empty)
+(0028,0000) UL Unknown                        [90 00 00 00]
+(0028,0002) US SamplesPerPixel                [01 00]
+(0028,0004) CS PhotometricInterpretation      MONOCHROME2
+(0028,0010) US Rows                           [00 02]
+(0028,0011) US Columns                        [00 02]
+(0028,0100) US BitsAllocated                  [10 00]
+(0028,0101) US BitsStored                     [10 00]
+(0028,0102) US HighBit                        [0F 00]
+(0028,0103) US PixelRepresentation            [01 00]
+(0028,1050) DS WindowCenter                   -2
+(0028,1051) DS WindowWidth                    1
+(0028,1052) DS RescaleIntercept               -1024
+(0028,1053) DS RescaleSlope                   1
+(0028,1054) LO RescaleType                    HU
+(0040,0000) UL Unknown                        [84 00 00 00]
+(0040,0275) SQ RequestAttributesSequence      (1 item(s))
+  item #0
+    (0008,0000) UL Unknown                        [A4 00 00 00]
+    (0008,0050) SH AccessionNumber                2994400
+    (0008,1110) SQ ReferencedStudySequence        (1 item(s))
+      item #0
+        (0008,0000) UL Unknown                        [90 00 00 00]
+        (0008,1150) UI ReferencedSOPClassUID          1.2.840.10008.3.1.2.3.1
+        (0008,1155) UI ReferencedSOPInstanceUID       1.2.840.113681.1.99.2994400
+    (0020,0000) UL Unknown                        [48 00 00 00]
+    (0020,000D) UI StudyInstanceUID               1.2.840.113681.1.99.2994400
+    (0032,0000) UL Unknown                        [38 00 00 00]
+    (0032,1060) LO RequestedProcedureDescription  CT THORACO-ABDOMINAL
+    (0040,0000) UL Unknown                        [40 00 00 00]
+    (0040,0009) SH ScheduledProcedureStepID       723031
+    (0040,1001) SH RequestedProcedureID           723031
+(0040,0301) US TotalNumberOfExposures         [04 00]
+(0040,030E) SQ ExposureDoseSequence           (4 item(s))
+  item #0
+    (0018,0000) UL Unknown                        [5C 01 00 00]
+    (0018,0015) CS BodyPartExamined               CHEST
+    (0018,0060) DS KVP                            100
+    (0018,1150) IS ExposureTime                   7099
+    (0018,8151) DS XRayTubeCurrentInuA            10000.00
+    (0018,9302) CS AcquisitionType                CONSTANT_ANGLE
+    (0018,9306) FD SingleCollimationWidth         [00 00 00 00 00 00 F4 3F]
+    (0018,9307) FD TotalCollimationWidth          [00 00 00 00 00 30 86 40]
+    (0018,9346) SQ CTDIPhantomTypeCodeSequence    (1 item(s))
+      item #0
+        (0008,0000) UL Unknown                        [80 00 00 00]
+        (0008,0100) SH CodeValue                      113691
+        (0008,0102) SH CodingSchemeDesignator         DCM
+        (0008,0104) LO CodeMeaning                    IEC Body Dosimetry Phantom
+  item #1
+    (0018,0000) UL Unknown                        [5C 01 00 00]
+    (0018,0015) CS BodyPartExamined               CHEST
+    (0018,0060) DS KVP                            120
+    (0018,1150) IS ExposureTime                   7099
+    (0018,8151) DS XRayTubeCurrentInuA            10000.00
+    (0018,9302) CS AcquisitionType                CONSTANT_ANGLE
+    (0018,9306) FD SingleCollimationWidth         [00 00 00 00 00 00 F4 3F]
+    (0018,9307) FD TotalCollimationWidth          [00 00 00 00 00 30 86 40]
+    (0018,9346) SQ CTDIPhantomTypeCodeSequence    (1 item(s))
+      item #0
+        (0008,0000) UL Unknown                        [80 00 00 00]
+        (0008,0100) SH CodeValue                      113691
+        (0008,0102) SH CodingSchemeDesignator         DCM
+        (0008,0104) LO CodeMeaning                    IEC Body Dosimetry Phantom
+  item #2
+    (0018,0000) UL Unknown                        [90 01 00 00]
+    (0018,0015) CS BodyPartExamined               CHEST
+    (0018,0060) DS KVP                            120
+    (0018,1150) IS ExposureTime                   4533
+    (0018,8151) DS XRayTubeCurrentInuA            536200.01
+    (0018,9302) CS AcquisitionType                SPIRAL
+    (0018,9306) FD SingleCollimationWidth         [D7 A3 70 3D 0A D7 E3 3F]
+    (0018,9307) FD TotalCollimationWidth          [00 00 00 00 00 00 14 40]
+    (0018,9311) FD SpiralPitchFactor              [14 AE 47 E1 7A 14 F6 3F]
+    (0018,9345) FD CTDIvol                        [5C 8F C2 F5 28 DC 2E 40]
+    (0018,9346) SQ CTDIPhantomTypeCodeSequence    (1 item(s))
+      item #0
+        (0008,0000) UL Unknown                        [80 00 00 00]
+        (0008,0100) SH CodeValue                      113691
+        (0008,0102) SH CodingSchemeDesignator         DCM
+        (0008,0104) LO CodeMeaning                    IEC Body Dosimetry Phantom
+  item #3
+    (0018,0000) UL Unknown                        [90 01 00 00]
+    (0018,0015) CS BodyPartExamined               CHEST
+    (0018,0060) DS KVP                            120
+    (0018,1150) IS ExposureTime                   6380
+    (0018,8151) DS XRayTubeCurrentInuA            484600.01
+    (0018,9302) CS AcquisitionType                SPIRAL
+    (0018,9306) FD SingleCollimationWidth         [D7 A3 70 3D 0A D7 E3 3F]
+    (0018,9307) FD TotalCollimationWidth          [00 00 00 00 00 00 14 40]
+    (0018,9311) FD SpiralPitchFactor              [14 AE 47 E1 7A 14 F6 3F]
+    (0018,9345) FD CTDIvol                        [48 E1 7A 14 AE 87 33 40]
+    (0018,9346) SQ CTDIPhantomTypeCodeSequence    (1 item(s))
+      item #0
+        (0008,0000) UL Unknown                        [80 00 00 00]
+        (0008,0100) SH CodeValue                      113691
+        (0008,0102) SH CodingSchemeDesignator         DCM
+        (0008,0104) LO CodeMeaning                    IEC Body Dosimetry Phantom
+(0040,0310) ST CommentsOnRadiationDose        TotalDLP=1748.68
+Event=1
+Event=2
+Event=3 DLP=769.67
+Event=4 … (74 chars)

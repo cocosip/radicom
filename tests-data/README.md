@@ -47,6 +47,20 @@ license. Files are used here only as inert test fixtures.
   the byte-stability baseline instead: a PN re-encoding can change the in-memory
   string representation without changing the on-wire bytes (docs §4 tolerance).
 
+## Goldens
+
+`tests-data/goldens/` holds committed snapshots produced by
+`cargo xtask regen-goldens` from deterministic corpus files:
+
+| Golden | Source | Produced from |
+|---|---|---|
+| `GH178.dump.txt` | `explicit-le/GH178.dcm` | dataset dump |
+| `dicomdir.dump.txt` | `media/DICOMDIR` | dataset dump (includes record offsets) |
+| `GH178.json` | `explicit-le/GH178.dcm` | DICOM JSON |
+
+`crates/radicom/tests/goldens.rs` and `crates/radicom-json/tests/goldens.rs`
+fail when a golden drifts; regenerate only after reviewing an intended change.
+
 ## Adding files
 
 Keep the set minimal and small. Add a row above, extend the `CORPUS` manifest in

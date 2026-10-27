@@ -51,6 +51,12 @@ Mirrors the categories fo-dicom's test data covers; import the minimal set (fo-d
 
 ## 4. Round-Trip and Golden Testing
 
+> Implemented: golden snapshots live in `tests-data/goldens/` (`GH178.dump.txt`,
+> `dicomdir.dump.txt`, `GH178.json`) and are regenerated with
+> `cargo xtask regen-goldens`. `crates/radicom/tests/goldens.rs` and
+> `crates/radicom-json/tests/goldens.rs` fail when the produced dump/JSON drifts
+> from the committed golden.
+
 - **Byte-level round-trip**: parse → write with identical options → byte-equal file. Applies to the syntax matrix and structure categories.
 - **Semantic round-trip**: where byte equality is impossible (group-length removal, padding choices), compare via dataset deep equality (DS-07).
 - **Goldens**: generated once, reviewed, then enforced: JSON outputs, DICOMDIR offsets, dump strings, PDU byte streams. (RLE frame goldens are enforced in the radicom-codecs project.)
