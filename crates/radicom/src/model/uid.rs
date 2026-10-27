@@ -253,7 +253,8 @@ impl Uid {
         if !s.chars().all(|c| c.is_ascii_digit() || c == '.') {
             return false;
         }
-        s.split('.').all(|comp| !comp.is_empty() && comp.as_bytes()[0] != b'0')
+        // each component is digits with no leading zero, except the single "0"
+        s.split('.').all(|comp| !comp.is_empty() && (comp == "0" || comp.as_bytes()[0] != b'0'))
     }
 
     pub fn is_valid_uid(&self) -> bool {
@@ -395,6 +396,9 @@ mod tests {
         assert!(!Uid::is_valid("01.2"), "leading zero");
         assert!(!Uid::is_valid("1.02"), "leading zero in component");
         assert!(!Uid::is_valid("1..2"), "empty component");
+        // a single "0" component is valid (PS3.5: only multi-digit leading zeros
+        // are forbidden) — real roots like 1.2.826.0.1 rely on this
+        assert!(Uid::is_valid("1.2.826.0.1.3680043.10.999"), "single 0 component allowed");
         assert!(!Uid::is_valid(".1"), "empty first component");
     }
 
@@ -421,7 +425,11 @@ mod tests {
     #[test]
     fn append_sequence() {
         assert_eq!(Uid::append("1.2.3", 4).unwrap(), "1.2.3.4");
-        assert!(Uid::append("0.1", 2).is_err(), "base with leading zero produces invalid UI");
+        // a single "0" component is a valid root component (PS3.5), so appending
+        // to it yields a valid UID rather than an error
+        assert_eq!(Uid::append("0.1", 2).unwrap(), "0.1.2");
+        // a genuine multi-digit leading zero is still rejected
+        assert!(Uid::append("01.2", 3).is_err(), "multi-digit leading zero is invalid");
     }
 
     #[test]

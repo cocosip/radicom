@@ -17,6 +17,7 @@ pub mod expert;
 pub mod extended;
 pub mod message;
 pub mod pdu;
+pub mod print_sop;
 pub mod server;
 pub mod services;
 pub mod store;
@@ -43,4 +44,7 @@ pub use extended::{
 pub use pdu::{
     Abort, Associate, AssociateRj, AsyncOperations, CommonExtended, ExtendedNegotiation, PData, Pdu, PduType, Pdv,
     PresentationContext, RoleSelection, UserIdentity, UserInformation, APPLICATION_CONTEXT, MAX_PDU_SIZE,
+};
+pub use print_sop::{
+    network_identifier_from_mac, parse_mac, try_get_network_identifier, MetaSopClasses,
 };
