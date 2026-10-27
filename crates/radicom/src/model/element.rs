@@ -456,3 +456,187 @@ mod tests {
     }
 
 }
+
+// -- write-side conversion (IntoElement, DS-03 dispatch) ------------------
+
+/// Conversion from Rust values into elements (DS-03 dispatch matrix).
+/// `preferred_vr` hints the dictionary resolver; the dataset layer picks
+/// the final VR from the dictionary entry whose value type matches.
+pub trait IntoElement {
+    fn preferred_vr(&self) -> Option<Vr>;
+    fn into_element(self, tag: Tag, vr: Vr) -> DicomElement;
+}
+
+fn join_multi(parts: &[String]) -> String {
+    parts.join("\\")
+}
+
+impl IntoElement for &str {
+    fn preferred_vr(&self) -> Option<Vr> {
+        None
+    }
+    fn into_element(self, tag: Tag, vr: Vr) -> DicomElement {
+        DicomElement::new_str(tag, vr, self)
+    }
+}
+
+impl IntoElement for String {
+    fn preferred_vr(&self) -> Option<Vr> {
+        None
+    }
+    fn into_element(self, tag: Tag, vr: Vr) -> DicomElement {
+        DicomElement::new_str(tag, vr, self)
+    }
+}
+
+impl IntoElement for Vec<String> {
+    fn preferred_vr(&self) -> Option<Vr> {
+        None
+    }
+    fn into_element(self, tag: Tag, vr: Vr) -> DicomElement {
+        DicomElement::new_str(tag, vr, join_multi(&self))
+    }
+}
+
+impl IntoElement for Uid {
+    fn preferred_vr(&self) -> Option<Vr> {
+        Some(Vr::Ui)
+    }
+    fn into_element(self, tag: Tag, vr: Vr) -> DicomElement {
+        DicomElement::new_str(tag, vr, self.value().to_string())
+    }
+}
+
+impl IntoElement for Arc<TransferSyntax> {
+    fn preferred_vr(&self) -> Option<Vr> {
+        Some(Vr::Ui)
+    }
+    fn into_element(self, tag: Tag, vr: Vr) -> DicomElement {
+        DicomElement::new_str(tag, vr, self.uid().to_string())
+    }
+}
+
+impl IntoElement for PersonName {
+    fn preferred_vr(&self) -> Option<Vr> {
+        Some(Vr::Pn)
+    }
+    fn into_element(self, tag: Tag, vr: Vr) -> DicomElement {
+        DicomElement::new_str(tag, vr, self.to_string())
+    }
+}
+
+macro_rules! impl_into_int_string {
+    ($t:ty) => {
+        impl IntoElement for $t {
+            fn preferred_vr(&self) -> Option<Vr> {
+                Some(Vr::Is)
+            }
+            fn into_element(self, tag: Tag, vr: Vr) -> DicomElement {
+                match vr {
+                    Vr::Is | Vr::Ds => {
+                        DicomElement::new_str(tag, vr, self.to_string())
+                    }
+                    Vr::Ss | Vr::Us => {
+                        let v = self as i64 as i16;
+                        DicomElement::new_bytes(tag, vr, Arc::new(MemoryBuffer::from(v.to_le_bytes().to_vec())))
+                    }
+                    Vr::Sl | Vr::Ul => {
+                        let v = self as i64 as i32;
+                        DicomElement::new_bytes(tag, vr, Arc::new(MemoryBuffer::from(v.to_le_bytes().to_vec())))
+                    }
+                    Vr::Sv | Vr::Uv => {
+                        let v = self as i64;
+                        DicomElement::new_bytes(tag, vr, Arc::new(MemoryBuffer::from(v.to_le_bytes().to_vec())))
+                    }
+                    _ => DicomElement::new_str(tag, vr, self.to_string()),
+                }
+            }
+        }
+    };
+}
+impl_into_int_string!(i8);
+impl_into_int_string!(u8);
+impl_into_int_string!(i16);
+impl_into_int_string!(u16);
+impl_into_int_string!(i32);
+impl_into_int_string!(u32);
+impl_into_int_string!(i64);
+impl_into_int_string!(u64);
+
+macro_rules! impl_into_float {
+    ($t:ty) => {
+        impl IntoElement for $t {
+            fn preferred_vr(&self) -> Option<Vr> {
+                Some(Vr::Ds)
+            }
+            fn into_element(self, tag: Tag, vr: Vr) -> DicomElement {
+                match vr {
+                    Vr::Fl => {
+                        let v = self as f32;
+                        DicomElement::new_bytes(tag, vr, Arc::new(MemoryBuffer::from(v.to_le_bytes().to_vec())))
+                    }
+                    Vr::Fd => {
+                        let v = self as f64;
+                        DicomElement::new_bytes(tag, vr, Arc::new(MemoryBuffer::from(v.to_le_bytes().to_vec())))
+                    }
+                    _ => DicomElement::new_str(tag, vr, crate::model::person_name::format_ds(self as f64)),
+                }
+            }
+        }
+    };
+}
+impl_into_float!(f32);
+impl_into_float!(f64);
+
+impl IntoElement for NaiveDate {
+    fn preferred_vr(&self) -> Option<Vr> {
+        Some(Vr::Da)
+    }
+    fn into_element(self, tag: Tag, vr: Vr) -> DicomElement {
+        let text = match vr {
+            Vr::Da => crate::model::dicom_datetime::format_da(self),
+            Vr::Dt => crate::model::dicom_datetime::format_dt(DtPoint {
+                naive: self.and_hms_opt(0, 0, 0).expect("midnight"),
+                offset: None,
+            }),
+            _ => crate::model::dicom_datetime::format_da(self),
+        };
+        DicomElement::new_str(tag, vr, text)
+    }
+}
+
+impl IntoElement for NaiveTime {
+    fn preferred_vr(&self) -> Option<Vr> {
+        Some(Vr::Tm)
+    }
+    fn into_element(self, tag: Tag, vr: Vr) -> DicomElement {
+        DicomElement::new_str(tag, vr, crate::model::dicom_datetime::format_tm(self))
+    }
+}
+
+impl IntoElement for DtPoint {
+    fn preferred_vr(&self) -> Option<Vr> {
+        Some(Vr::Dt)
+    }
+    fn into_element(self, tag: Tag, vr: Vr) -> DicomElement {
+        DicomElement::new_str(tag, vr, crate::model::dicom_datetime::format_dt(self))
+    }
+}
+
+impl IntoElement for Vec<u8> {
+    fn preferred_vr(&self) -> Option<Vr> {
+        Some(Vr::Ob)
+    }
+    fn into_element(self, tag: Tag, vr: Vr) -> DicomElement {
+        DicomElement::new_bytes(tag, vr, Arc::new(MemoryBuffer::from(self)))
+    }
+}
+
+impl IntoElement for SharedBuffer {
+    fn preferred_vr(&self) -> Option<Vr> {
+        Some(Vr::Ob)
+    }
+    fn into_element(self, tag: Tag, vr: Vr) -> DicomElement {
+        DicomElement::new_bytes(tag, vr, self)
+    }
+}

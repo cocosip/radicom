@@ -184,6 +184,12 @@ impl std::fmt::Display for Tag {
     }
 }
 
+impl AsRef<Tag> for Tag {
+    fn as_ref(&self) -> &Tag {
+        self
+    }
+}
+
 impl From<&Tag> for TagRef {
     fn from(t: &Tag) -> TagRef {
         TagRef(t.group, t.element)

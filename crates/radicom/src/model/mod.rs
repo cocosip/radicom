@@ -2,6 +2,8 @@
 //! dictionaries (docs/04-data-model.md).
 
 pub mod buffer;
+pub mod dataset;
+pub mod item;
 pub mod dicom_datetime;
 pub mod element;
 pub mod person_name;
