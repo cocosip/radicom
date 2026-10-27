@@ -1,0 +1,14 @@
+//! Structured Reports (SR-01/02; docs/08-serialization-media.md §4).
+//!
+//! An SR is a tree of content items over a `DicomFile`. This module builds and
+//! reads that tree with the value type checked at construction time, and
+//! provides the reusable `CodeItem` support type plus `StructuredReport`
+//! document open/save.
+
+pub mod code_item;
+pub mod content_item;
+pub mod structured_report;
+
+pub use code_item::CodeItem;
+pub use content_item::{ContentItem, Relationship, ValueType};
+pub use structured_report::StructuredReport;
