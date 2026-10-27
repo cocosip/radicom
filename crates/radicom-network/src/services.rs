@@ -235,6 +235,36 @@ pub trait ServiceProvider: Send + Sync {
             Err(NetworkError::protocol("C-GET is not supported by this provider"))
         }))
     }
+
+    /// Answers an N-EVENT-REPORT (§7.6). Defaults to unsupported.
+    async fn on_n_event_report(&self, _request: &crate::nservice::NServiceRequest) -> Result<crate::nservice::NServiceResponse> {
+        Err(NetworkError::protocol("N-EVENT-REPORT is not supported by this provider"))
+    }
+
+    /// Answers an N-GET (§7.6). Defaults to unsupported.
+    async fn on_n_get(&self, _request: &crate::nservice::NServiceRequest) -> Result<crate::nservice::NServiceResponse> {
+        Err(NetworkError::protocol("N-GET is not supported by this provider"))
+    }
+
+    /// Answers an N-SET (§7.6). Defaults to unsupported.
+    async fn on_n_set(&self, _request: &crate::nservice::NServiceRequest) -> Result<crate::nservice::NServiceResponse> {
+        Err(NetworkError::protocol("N-SET is not supported by this provider"))
+    }
+
+    /// Answers an N-ACTION (§7.6). Defaults to unsupported.
+    async fn on_n_action(&self, _request: &crate::nservice::NServiceRequest) -> Result<crate::nservice::NServiceResponse> {
+        Err(NetworkError::protocol("N-ACTION is not supported by this provider"))
+    }
+
+    /// Answers an N-CREATE (§7.6). Defaults to unsupported.
+    async fn on_n_create(&self, _request: &crate::nservice::NServiceRequest) -> Result<crate::nservice::NServiceResponse> {
+        Err(NetworkError::protocol("N-CREATE is not supported by this provider"))
+    }
+
+    /// Answers an N-DELETE (§7.6). Defaults to unsupported.
+    async fn on_n_delete(&self, _request: &crate::nservice::NServiceRequest) -> Result<crate::nservice::NServiceResponse> {
+        Err(NetworkError::protocol("N-DELETE is not supported by this provider"))
+    }
 }
 
 /// The built-in Verification SCP: answers C-ECHO with Success (§7.1).

@@ -264,6 +264,10 @@ where
                                         | CommandField::CFindRq
                                         | CommandField::CMoveRq
                                         | CommandField::CGetRq
+                                        | CommandField::NEventReportRq
+                                        | CommandField::NCreateRq
+                                        | CommandField::NSetRq
+                                        | CommandField::NActionRq
                                 );
                             if expects_dataset {
                                 // the dataset arrives in later PDVs
@@ -341,6 +345,12 @@ where
             let _cancelled = command.message_id_being_responded_to;
             Ok(())
         }
+        // N-services without a dataset (N-GET / N-DELETE, and any N request
+        // sent with the no-dataset flag set) — §7.6 / SRV-07.
+        field if crate::nservice::is_n_request(field) => {
+            let default_syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+            handle_n_service(serving, context_id, command, None, &default_syntax).await
+        }
         other => {
             // unsupported request: answer ProcessingFailure, keep the connection
             serving
@@ -366,7 +376,49 @@ where
         CommandField::CFindRq => handle_c_find(serving, context_id, command, dataset_bytes, syntax).await,
         CommandField::CMoveRq => handle_c_move(serving, context_id, command, dataset_bytes, syntax).await,
         CommandField::CGetRq => handle_c_get(serving, context_id, command, dataset_bytes, syntax).await,
+        field if crate::nservice::is_n_request(field) => {
+            let dataset = match crate::message::decode_dataset(dataset_bytes, syntax) {
+                Ok(dataset) => dataset,
+                Err(error) => return serving.fail(context_id, &command, &error.to_string()).await,
+            };
+            handle_n_service(serving, context_id, command, Some(dataset), syntax).await
+        }
         _ => serving.fail(context_id, &command, "this request does not carry a dataset").await,
+    }
+}
+
+/// Dispatches an N-service request to the matching provider method (§7.6, SRV-07).
+async fn handle_n_service<P: ServiceProvider, S>(
+    serving: &mut Serving<'_, P, S>,
+    context_id: u8,
+    command: Command,
+    dataset: Option<Dataset>,
+    syntax: &Arc<radicom::model::transfer_syntax::TransferSyntax>,
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use crate::nservice::NServiceRequest;
+    let request = NServiceRequest::from_command(&command, dataset);
+    let outcome = match request.field {
+        CommandField::NEventReportRq => serving.provider.on_n_event_report(&request).await,
+        CommandField::NGetRq => serving.provider.on_n_get(&request).await,
+        CommandField::NSetRq => serving.provider.on_n_set(&request).await,
+        CommandField::NActionRq => serving.provider.on_n_action(&request).await,
+        CommandField::NCreateRq => serving.provider.on_n_create(&request).await,
+        CommandField::NDeleteRq => serving.provider.on_n_delete(&request).await,
+        other => {
+            return serving.fail(context_id, &command, &format!("not an N-service: {other:?}")).await;
+        }
+    };
+    match outcome {
+        Ok(response) => {
+            serving
+                .send_with_dataset(context_id, &response.to_command(), response.dataset.as_ref(), syntax)
+                .await
+        }
+        // a provider error becomes a ProcessingFailure, keeping the association alive
+        Err(error) => serving.fail(context_id, &command, &error.to_string()).await,
     }
 }
 
@@ -1537,6 +1589,92 @@ impl Association {
         Ok(())
     }
 
+    /// Sends an N-service request and returns its response (§7.6, SRV-07).
+    ///
+    /// The presentation context is chosen from the request's affected SOP class.
+    /// A request/response dataset is transferred in the negotiated syntax.
+    pub async fn send_n_service(
+        &mut self,
+        request: &crate::nservice::NServiceRequest,
+    ) -> Result<crate::nservice::NServiceResponse> {
+        let sop_class = request
+            .affected_sop_class_uid
+            .as_deref()
+            .ok_or_else(|| NetworkError::protocol("N-service request has no affected SOP class UID"))?;
+        let request_syntax = request
+            .dataset
+            .as_ref()
+            .map(|d| d.transfer_syntax())
+            .unwrap_or_else(|| syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        let context = self.contexts.pick(sop_class, request_syntax.uid())?;
+        let context_id = context.id;
+        let target = transfer_syntax_of(&context.transfer_syntax);
+
+        let command = request.to_command();
+        let command_bytes = crate::message::encode_command(&command.to_dataset())?;
+        let payload = match &request.dataset {
+            Some(dataset) => Some(crate::message::encode_dataset(dataset, &target)?),
+            None => None,
+        };
+        for pdata in self.splitter.split_message(context_id, &command_bytes, payload.as_deref())? {
+            write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
+        }
+
+        let expected = crate::dimse::response_field(request.field)
+            .ok_or_else(|| NetworkError::protocol("N-service request has no response field"))?;
+        let (response_command, response_dataset) =
+            self.await_n_response(request.message_id, expected, &target).await?;
+        Ok(crate::nservice::NServiceResponse::from_command(&response_command, response_dataset))
+    }
+
+    /// Reads the N-service response command (plus any dataset) for `message_id`.
+    async fn await_n_response(
+        &mut self,
+        message_id: u16,
+        expected: CommandField,
+        syntax: &Arc<radicom::model::transfer_syntax::TransferSyntax>,
+    ) -> Result<(Command, Option<Dataset>)> {
+        let mut pending_command: Option<Command> = None;
+        loop {
+            let Some(pdu) = read_pdu(&mut self.stream).await? else {
+                return Err(NetworkError::ClosedPrematurely { source: None });
+            };
+            match pdu {
+                Pdu::PData(pdata) => {
+                    for unit in self.assembler.push_pdata(&pdata)? {
+                        match unit.stream {
+                            Stream::Command => {
+                                let command = command_from_bytes(&unit.bytes)?;
+                                if command.field == expected
+                                    && command.message_id_being_responded_to == Some(message_id)
+                                {
+                                    if command.no_dataset {
+                                        return Ok((command, None));
+                                    }
+                                    pending_command = Some(command);
+                                }
+                            }
+                            Stream::Data => {
+                                if let Some(command) = pending_command.take() {
+                                    let dataset = crate::message::decode_dataset(&unit.bytes, syntax)?;
+                                    return Ok((command, Some(dataset)));
+                                }
+                            }
+                        }
+                    }
+                }
+                Pdu::Abort(abort) => {
+                    return Err(NetworkError::Abort { source_code: abort.source.code(), reason: abort.reason })
+                }
+                Pdu::ReleaseRq => {
+                    write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
+                    return Err(NetworkError::ClosedPrematurely { source: None });
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub async fn release(mut self) -> Result<()> {
         write_pdu(&mut self.stream, &Pdu::ReleaseRq).await?;
         // wait for A-RELEASE-RP, tolerating a peer that just closes
@@ -2649,5 +2787,109 @@ mod tests {
             assert_eq!(response.status, crate::dimse::status::SUCCESS);
             association.release().await.unwrap();
         }
+    }
+
+    const COMMIT_SOP_CLASS: &str = "1.2.840.10008.1.20.1"; // storage commitment push model
+
+    struct CommitProvider;
+
+    #[async_trait::async_trait]
+    impl ServiceProvider for CommitProvider {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec![COMMIT_SOP_CLASS.to_string()]
+        }
+
+        async fn on_n_action(
+            &self,
+            request: &crate::nservice::NServiceRequest,
+        ) -> Result<crate::nservice::NServiceResponse> {
+            // storage commitment answers with a Transaction UID in the response dataset
+            let mut dataset = Dataset::new();
+            dataset.insert_str(Tag::new(0x0008, 0x1195), Vr::Ui, "1.2.3.4.5.6");
+            Ok(crate::nservice::NServiceResponse::success(request, Some(dataset)))
+        }
+
+        async fn on_n_delete(
+            &self,
+            request: &crate::nservice::NServiceRequest,
+        ) -> Result<crate::nservice::NServiceResponse> {
+            // N-DELETE answers with a command-only response
+            Ok(crate::nservice::NServiceResponse::success(request, None))
+        }
+    }
+
+    fn commit_context() -> PresentationContext {
+        PresentationContext::new(1, COMMIT_SOP_CLASS, vec!["1.2.840.10008.1.2.1".to_string()])
+    }
+
+    #[tokio::test]
+    async fn n_action_round_trips_with_a_dataset() {
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(CommitProvider), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association = Association::open(
+            addr,
+            "SCU",
+            "SCP",
+            vec![commit_context()],
+            ClientOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        let mut request = crate::nservice::NServiceRequest::new(CommandField::NActionRq, 1);
+        request.affected_sop_class_uid = Some(COMMIT_SOP_CLASS.to_string());
+        request.affected_sop_instance_uid = Some("1.2.3.4".to_string());
+        request.action_type_id = Some(1);
+        let mut request_dataset = Dataset::new();
+        request_dataset.insert_str(Tag::new(0x0008, 0x0018), Vr::Ui, "1.2.3.4");
+        request.dataset = Some(request_dataset);
+
+        let response = association.send_n_service(&request).await.unwrap();
+        assert_eq!(response.field, CommandField::NActionRsp);
+        assert_eq!(response.status, crate::dimse::status::SUCCESS);
+        let dataset = response.dataset.expect("N-ACTION response carries a dataset");
+        assert_eq!(
+            dataset.try_get_str(Tag::new(0x0008, 0x1195)).as_deref(),
+            Some("1.2.3.4.5.6"),
+            "the Transaction UID comes back in the response dataset"
+        );
+
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn n_delete_round_trips_without_a_dataset() {
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(CommitProvider), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association = Association::open(
+            addr,
+            "SCU",
+            "SCP",
+            vec![commit_context()],
+            ClientOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        let mut request = crate::nservice::NServiceRequest::new(CommandField::NDeleteRq, 2);
+        request.affected_sop_class_uid = Some(COMMIT_SOP_CLASS.to_string());
+        request.affected_sop_instance_uid = Some("1.2.3.4".to_string());
+
+        let response = association.send_n_service(&request).await.unwrap();
+        assert_eq!(response.field, CommandField::NDeleteRsp);
+        assert_eq!(response.status, crate::dimse::status::SUCCESS);
+        assert!(response.dataset.is_none(), "N-DELETE response is command-only");
+
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
     }
 }

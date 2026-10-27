@@ -17,6 +17,7 @@ pub mod expert;
 pub mod extended;
 pub mod hosting;
 pub mod message;
+pub mod nservice;
 pub mod observability;
 pub mod pdu;
 pub mod print_sop;
@@ -41,6 +42,7 @@ pub use error::{AbortSource, NetworkError, RejectResult, RejectSource, Result};
 pub use expert::{send as send_expert, Connection, ConnectionEvent, ExpertRequest, ExpertResponse, ResponseStream};
 pub use hosting::{HostedDicomServer, HostedServerConfig, ServerHealth};
 pub use observability::{CountingMetrics, MetricsCollector, MetricsSnapshot, NoopMetrics};
+pub use nservice::{is_n_request, NServiceRequest, NServiceResponse, N_REQUEST_FIELDS};
 pub use extended::{
     apply_answer, validate_common_extended, AppInfo, ExtendedNegotiationPolicy, FindAppInfo, RetrieveAppInfo,
     StorageAppInfo, StorageOption,
