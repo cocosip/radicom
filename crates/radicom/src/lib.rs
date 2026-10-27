@@ -13,5 +13,7 @@
 //! this crate only defines the [`pixel::codec`] interfaces and registry.
 
 pub mod error;
+pub mod model;
 
 pub use error::{DataError, Error, FileError, ReaderError, ValidationFailure};
+pub use model::tag::Tag;
