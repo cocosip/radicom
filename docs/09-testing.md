@@ -52,10 +52,11 @@ Mirrors the categories fo-dicom's test data covers; import the minimal set (fo-d
 ## 4. Round-Trip and Golden Testing
 
 > Implemented: golden snapshots live in `tests-data/goldens/` (`GH178.dump.txt`,
-> `dicomdir.dump.txt`, `GH178.json`) and are regenerated with
-> `cargo xtask regen-goldens`. `crates/radicom/tests/goldens.rs` and
-> `crates/radicom-json/tests/goldens.rs` fail when the produced dump/JSON drifts
-> from the committed golden.
+> `dicomdir.dump.txt`, `GH178.json`, plus the PDU hex fixtures
+> `associate_rq.hex` / `pdata_cecho.hex`) and are regenerated with
+> `cargo xtask regen-goldens`. `crates/radicom/tests/goldens.rs`,
+> `crates/radicom-json/tests/goldens.rs` and `crates/radicom-network/tests/goldens.rs`
+> fail when the produced dump/JSON/PDU bytes drift from the committed golden.
 
 - **Byte-level round-trip**: parse → write with identical options → byte-equal file. Applies to the syntax matrix and structure categories.
 - **Semantic round-trip**: where byte equality is impossible (group-length removal, padding choices), compare via dataset deep equality (DS-07).

@@ -10,3 +10,4 @@ quick-xml = "0.37"
 flate2.workspace = true
 radicom = { path = "../crates/radicom" }
 radicom-json = { path = "../crates/radicom-json" }
+radicom-network = { path = "../crates/radicom-network" }

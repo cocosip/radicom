@@ -57,9 +57,13 @@ license. Files are used here only as inert test fixtures.
 | `GH178.dump.txt` | `explicit-le/GH178.dcm` | dataset dump |
 | `dicomdir.dump.txt` | `media/DICOMDIR` | dataset dump (includes record offsets) |
 | `GH178.json` | `explicit-le/GH178.dcm` | DICOM JSON |
+| `associate_rq.hex` | — (synthetic) | A-ASSOCIATE-RQ PDU bytes |
+| `pdata_cecho.hex` | — (synthetic) | P-DATA-TF carrying a C-ECHO-RQ command PDV |
 
-`crates/radicom/tests/goldens.rs` and `crates/radicom-json/tests/goldens.rs`
-fail when a golden drifts; regenerate only after reviewing an intended change.
+`crates/radicom/tests/goldens.rs`, `crates/radicom-json/tests/goldens.rs` and
+`crates/radicom-network/tests/goldens.rs` fail when a golden drifts; regenerate
+only after reviewing an intended change. PDU hex fixtures ignore whitespace, so
+only the encoded byte sequence is pinned.
 
 ## Adding files
 

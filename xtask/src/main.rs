@@ -457,5 +457,51 @@ fn regen_goldens() {
     let json = radicom_json::dataset_to_json(&file.dataset, &Default::default()).expect("encode json");
     fs::write(golden_dir.join("GH178.json"), json).expect("write GH178.json");
 
-    eprintln!("regen-goldens: wrote dump + json snapshots to {}", golden_dir.display());
+    // PDU byte-stream goldens (docs/09-testing.md §3 "Network … hex fixtures").
+    // Keep the fixtures below in sync with crates/radicom-network/tests/goldens.rs.
+    let pdu_cases = [("associate_rq.hex", fixture_associate_rq()), ("pdata_cecho.hex", fixture_pdata_cecho())];
+    for (name, bytes) in pdu_cases {
+        fs::write(golden_dir.join(name), hex_lines(&bytes)).unwrap_or_else(|e| panic!("write {name}: {e}"));
+    }
+
+    eprintln!("regen-goldens: wrote dump + json + pdu snapshots to {}", golden_dir.display());
+}
+
+/// 16 hex bytes per line, uppercase, trailing newline. Whitespace is ignored by
+/// the comparison, so only the byte sequence matters.
+fn hex_lines(bytes: &[u8]) -> String {
+    let mut s = String::new();
+    for chunk in bytes.chunks(16) {
+        for (i, b) in chunk.iter().enumerate() {
+            if i > 0 {
+                s.push(' ');
+            }
+            let _ = write!(s, "{b:02X}");
+        }
+        s.push('\n');
+    }
+    s
+}
+
+fn fixture_associate_rq() -> Vec<u8> {
+    use radicom_network::pdu::encode;
+    use radicom_network::{Associate, PresentationContext, Pdu};
+    let mut associate = Associate::new("RADICOM_SCP", "RADICOM_SCU");
+    associate.presentation_contexts.push(PresentationContext::new(
+        1,
+        "1.2.840.10008.1.1",
+        vec!["1.2.840.10008.1.2.1".to_string()],
+    ));
+    encode(&Pdu::AssociateRq(associate))
+}
+
+fn fixture_pdata_cecho() -> Vec<u8> {
+    use radicom_network::message::encode_command;
+    use radicom_network::pdu::encode;
+    use radicom_network::{Command, CommandField, PData, Pdu, Pdv};
+    let mut command = Command::request(CommandField::CEchoRq, 1);
+    command.affected_sop_class_uid = Some("1.2.840.10008.1.1".to_string());
+    let command_bytes = encode_command(&command.to_dataset()).expect("encode command");
+    let pdv = Pdv { context_id: 1, is_command: true, is_last: true, data: command_bytes };
+    encode(&Pdu::PData(PData { pdvs: vec![pdv] }))
 }
