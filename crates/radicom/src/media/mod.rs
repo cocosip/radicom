@@ -225,6 +225,9 @@ impl DicomDirectory {
         let mut dataset = Dataset::new();
         dataset.insert_str(tags::FILE_SET_ID, Vr::Sh, file_set_id.into());
         dataset.insert_value(tags::FILE_SET_CONSISTENCY_FLAG, 1u16);
+        // a DICOMDIR carries its own SOP Instance UID; setting it once keeps the
+        // file identity (and thus every record offset) stable across re-serialisation
+        dataset.insert_str(tags::SOP_INSTANCE_UID, Vr::Ui, crate::model::uid::Uid::generate_value());
         dataset.insert_sequence(tags::DIR_RECORD_SEQUENCE);
         dataset.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
 

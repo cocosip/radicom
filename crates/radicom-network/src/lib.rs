@@ -17,6 +17,7 @@ pub mod expert;
 pub mod extended;
 pub mod hosting;
 pub mod message;
+pub mod observability;
 pub mod pdu;
 pub mod print_sop;
 pub mod server;
@@ -39,6 +40,7 @@ pub use engine::{CircuitBreaker, ConnectionLifecycle, ConnectionState, EngineOpt
 pub use error::{AbortSource, NetworkError, RejectResult, RejectSource, Result};
 pub use expert::{send as send_expert, Connection, ConnectionEvent, ExpertRequest, ExpertResponse, ResponseStream};
 pub use hosting::{HostedDicomServer, HostedServerConfig, ServerHealth};
+pub use observability::{CountingMetrics, MetricsCollector, MetricsSnapshot, NoopMetrics};
 pub use extended::{
     apply_answer, validate_common_extended, AppInfo, ExtendedNegotiationPolicy, FindAppInfo, RetrieveAppInfo,
     StorageAppInfo, StorageOption,

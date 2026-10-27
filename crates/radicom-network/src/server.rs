@@ -44,6 +44,8 @@ pub struct ServerOptions {
     /// TLS material; `None` serves plain TCP (NET-01, `tls` feature).
     #[cfg(feature = "tls")]
     pub tls: Option<crate::tls::TlsOptions>,
+    /// Optional metrics collector (OBS-01); `None` disables instrumentation.
+    pub metrics: Option<std::sync::Arc<dyn crate::observability::MetricsCollector>>,
 }
 
 /// How an SCP handles User Identity negotiation (§4.3).
@@ -87,6 +89,7 @@ impl Default for ServerOptions {
             user_identity: UserIdentityPolicy::default(),
             #[cfg(feature = "tls")]
             tls: None,
+            metrics: None,
         }
     }
 }
@@ -157,13 +160,19 @@ impl<P: ServiceProvider + 'static> DicomServer<P> {
 
 /// Drives one accepted connection through association, one exchange, release (§5).
 async fn serve_connection<P: ServiceProvider, S>(
-    mut stream: S,
+    stream: S,
     provider: Arc<P>,
     options: ServerOptions,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    // -- observability (OBS-01): count this connection's bytes; the guard
+    // reports open/close so every return path is covered ------------------
+    let metrics = options.metrics.clone();
+    let _connection = crate::observability::ConnectionGuard::new(metrics.clone());
+    let mut stream = crate::observability::CountingStream::new(stream, metrics.clone());
+
     // -- association handshake ------------------------------------------
     let Some(Pdu::AssociateRq(request)) = read_pdu(&mut stream).await? else {
         return Err(NetworkError::protocol("expected A-ASSOCIATE-RQ"));
@@ -209,6 +218,8 @@ where
 
     accept.user_information = user;
     write_pdu(&mut stream, &Pdu::AssociateAc(accept)).await?;
+    // the association is now established (OBS-01): report open/close
+    let _association = crate::observability::AssociationGuard::new(metrics.clone());
 
     let accepted = AcceptedContexts::from_negotiated(negotiated);
     let peer_max_pdu = if request.user_information.max_pdu_length == 0 {
@@ -1617,6 +1628,42 @@ mod tests {
 
         association.release().await.unwrap();
         handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_metrics_collector_observes_the_connection() {
+        use crate::observability::{CountingMetrics, MetricsCollector};
+        let metrics = Arc::new(CountingMetrics::new());
+        let options = ServerOptions {
+            metrics: Some(metrics.clone() as Arc<dyn MetricsCollector>),
+            ..Default::default()
+        };
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), options)
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association = Association::open(
+            addr,
+            "MY-SCU",
+            "MY-SCP",
+            vec![echo_context()],
+            ClientOptions::default(),
+        )
+        .await
+        .expect("association accepted");
+        let _ = association.send_c_echo(sop_class::VERIFICATION).await.unwrap();
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.connections_opened, 1, "one connection counted");
+        assert_eq!(snapshot.connections_closed, 1, "the guard closed it");
+        assert_eq!(snapshot.associations_opened, 1, "one association counted");
+        assert_eq!(snapshot.associations_closed, 1);
+        assert!(snapshot.bytes_received > 0, "the A-ASSOCIATE-RQ bytes were counted");
+        assert!(snapshot.bytes_sent > 0, "the accept + echo response bytes were counted");
     }
 
     #[tokio::test]
