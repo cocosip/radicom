@@ -78,6 +78,13 @@ Two registry configurations, same test suite (mirrors fo-dicom's DI-collection p
 
 ## 7. Fuzzing and Robustness
 
+> Implemented (pure `std`, no cargo-fuzz needed): `crates/radicom/tests/fuzz.rs`
+> sweeps arbitrary bytes, byte-mutated valid files and a bogus 4 GiB declared
+> length (rejected by `require`, not allocated) through the parser;
+> `crates/radicom-network/tests/fuzz.rs` sweeps arbitrary PDU byte streams
+> through `pdu::decode`. All must return a typed `Result` without panicking, plus
+> the existing `pdu` unit sweeps (truncations, unknown types, over-length).
+
 - `fuzz/reader`: byte streams → `DicomReader` must terminate with `Success|Stopped|Error` (hang/panic = bug; depth guard covers recursion).
 - `fuzz/pdu`: random PDUs into the engine.
 - Memory guarantees: `ReadLargeOnDemand` windows never load whole values; values above the array cap become composites; C-STORE receive bounded by spooling (assert with allocation counters in one dedicated test).
