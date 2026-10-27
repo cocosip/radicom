@@ -83,7 +83,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 |---|---|---|---|
 | M0 | Scaffolding | Done | Workspace + 4 crates + xtask gen-dict committed (8e1be2a, fe25717, 8188021); build/tests/clippy green |
 | M1 | Identifier system | Done | TAG/VR/UID/TS/DICT/VM/MaskedTag/tag-index committed (343bd56..16847ac); 5347-tag + 1928-UID generated tables verified by tests; exit condition met |
-| M2 | Dataset & elements | Not started | |
+| M2 | Dataset & elements | Done | DA/DT/TM, buffers, element model, PersonName, dataset, charsets, validators, functional groups/equality/datetime (a792ecb..bfa3e6f); 110 tests green; exit condition met |
 | M3 | File & IO | Not started | |
 | M4 | Pixel & codec interfaces | Not started | Boundary freeze gates radicom-codecs kickoff |
 | M5 | Network core | Not started | |
@@ -100,11 +100,11 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 | UID | UID-01..03 | Done | registry seeded from generated table; committed e4905f9. UID-04/05 deferred to M8 |
 | Transfer syntax | TS-01..03 | Done | 56 built-ins + virtual syntaxes; committed c6045f4 |
 | Dictionary | DICT-01..03, VM-01 | Done | lookup precedence, XML load, one-shot default; committed f4fb7a8 |
-| Dataset | DS-01..10 | Not started | |
-| Elements | ELEM-01..05 | Not started | |
-| Charset | ENC-01..04 | Not started | |
-| Validation | VAL-01..03 | Not started | |
-| Buffers | BUF-01..02 | Not started | |
+| Dataset | DS-01..09 | Done | DS-10 (group/masked enumeration) remains P2 |
+| Elements | ELEM-01..04 | Done | ELEM-05 lazy caches pending (P1) |
+| Charset | ENC-01..04 | Done | committed fae89f5 |
+| Validation | VAL-01..03 | Done | committed 4c428e9; dataset write-path integration pending M3 |
+| Buffers | BUF-01..02 | Done | memory domain; file/stream windows in M3 (93fae61) |
 | Byte source/target | IO-01..03 | Not started | |
 | Reader | RD-01..05 | Not started | |
 | Writer | WR-01..03 | Not started | |
@@ -130,6 +130,10 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 | Infrastructure | INF-01..07 | In progress | INF-01 error hierarchy done; INF-05 codegen done (M0); INF-06 test data: generated-table tests done, corpus import pending in M3; INF-07 (dump CLI) in M8 |
 
 ### 3.3 Done list (most recent first)
+
+| Date | Item | Milestone |
+|---|---|---|
+| 2026-10-27 | M2 dataset and elements complete: DA/DT/TM parsers, buffer layer, element value model + conversions, PersonName, Dataset with private tags/walker, charsets, validators, functional groups/equality/datetime composition; 110 tests, clippy clean | M2 |
 
 | Date | Item | Milestone |
 |---|---|---|
