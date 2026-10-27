@@ -8,6 +8,7 @@ pub mod assembler;
 pub mod association;
 pub mod cfind;
 pub mod cget;
+pub mod client;
 pub mod cmove;
 pub mod dimse;
 pub mod engine;
@@ -28,6 +29,7 @@ pub use association::{
 };
 pub use cfind::{CFindRequest, CFindResponse, QueryRetrieveLevel, QueryRoot, RetrieveService};
 pub use cget::{CGetEvent, CGetRequest, CGetResponse};
+pub use client::{ClientEvent, DicomClient, DicomClientOptions};
 pub use cmove::{store_to_destination, CMoveRequest, CMoveResponse, SubOperationSummary};
 pub use dimse::{Command, CommandField, Priority, Status, StatusState};
 pub use engine::{CircuitBreaker, ConnectionLifecycle, ConnectionState, EngineOptions, PendingRequest, PendingTable};
