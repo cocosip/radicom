@@ -25,3 +25,7 @@ otel = []
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 rcgen = "0.13"
+
+[[bench]]
+name = "throughput"
+harness = false

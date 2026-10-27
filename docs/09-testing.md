@@ -72,12 +72,14 @@ Two registry configurations, same test suite (mirrors fo-dicom's DI-collection p
 ## 8. Benchmarks (criterion, M8 but seeded early)
 
 > Implementation note: `criterion` is not vendored in this workspace's offline
-> cache, so the suite is a dependency-free `harness = false` binary that times
-> each operation with `std::time::Instant` (`crates/radicom/benches/core.rs`, run
-> with `cargo bench -p radicom [--features render]`). It covers the
-> `parse_dataset`, `write_dataset`, `get_frame` and `frame_render` rows below;
-> `json_roundtrip` is a bench of the radicom-json crate and `network_throughput` of
-> radicom-network.
+> cache, so the suite is a set of dependency-free `harness = false` binaries that
+> time each operation with `std::time::Instant`. They are split by crate:
+> `crates/radicom/benches/core.rs` (parse_dataset, write_dataset, get_frame, and
+> frame_render under `--features render`) run with `cargo bench -p radicom`;
+> `crates/radicom-json/benches/json.rs` (dataset_to_json, json_to_dataset,
+> json_roundtrip) with `cargo bench -p radicom-json`; and
+> `crates/radicom-network/benches/throughput.rs` (network_throughput, loopback
+> C-STORE MiB/s) with `cargo bench -p radicom-network`.
 
 | Benchmark | Measures |
 |---|---|
