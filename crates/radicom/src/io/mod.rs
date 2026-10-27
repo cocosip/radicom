@@ -3,5 +3,8 @@
 pub mod byte_source;
 pub mod dataset_builder;
 pub mod file;
+pub mod pool;
 pub mod reader;
 pub mod writer;
+
+pub use pool::{BufferPool, PooledBuffer};
