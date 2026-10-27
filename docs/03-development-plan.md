@@ -81,8 +81,8 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 
 | Milestone | Theme | Status | Notes |
 |---|---|---|---|
-| M0 | Scaffolding | Not started | |
-| M1 | Identifier system | Not started | |
+| M0 | Scaffolding | Done | Workspace + 4 crates + xtask gen-dict committed (8e1be2a, fe25717, 8188021); build/tests/clippy green |
+| M1 | Identifier system | Done | TAG/VR/UID/TS/DICT/VM/MaskedTag/tag-index committed (343bd56..16847ac); 5347-tag + 1928-UID generated tables verified by tests; exit condition met |
 | M2 | Dataset & elements | Not started | |
 | M3 | File & IO | Not started | |
 | M4 | Pixel & codec interfaces | Not started | Boundary freeze gates radicom-codecs kickoff |
@@ -95,11 +95,11 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 
 | Group | Features | Status | Notes |
 |---|---|---|---|
-| Tag | TAG-01..05 | Not started | |
-| VR | VR-01..02 | Not started | |
-| UID | UID-01..05 | Not started | UID-04/05 deferred to M8 |
-| Transfer syntax | TS-01..03 | Not started | |
-| Dictionary | DICT-01..03, VM-01 | Not started | |
+| Tag | TAG-01..05 | Done | committed 343bd56, 16847ac |
+| VR | VR-01..02 | Done | golden attribute table test; committed f3c9cff |
+| UID | UID-01..03 | Done | registry seeded from generated table; committed e4905f9. UID-04/05 deferred to M8 |
+| Transfer syntax | TS-01..03 | Done | 56 built-ins + virtual syntaxes; committed c6045f4 |
+| Dictionary | DICT-01..03, VM-01 | Done | lookup precedence, XML load, one-shot default; committed f4fb7a8 |
 | Dataset | DS-01..10 | Not started | |
 | Elements | ELEM-01..05 | Not started | |
 | Charset | ENC-01..04 | Not started | |
@@ -127,9 +127,14 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 | Rendering | REND-01..11 | Deferred (P2) | Spec: [10-rendering.md](10-rendering.md) |
 | Hosting helper | HOST-01 | Deferred (P2) | Spec: [07-network.md](07-network.md) §8.1 |
 | DSLs | MATCH-01, XFORM-01 | Deferred (P2) | |
-| Infrastructure | INF-01..07 | In progress | INF-05/06 start in M0; INF-07 (dump CLI) in M8; this document series completes the planning part |
+| Infrastructure | INF-01..07 | In progress | INF-01 error hierarchy done; INF-05 codegen done (M0); INF-06 test data: generated-table tests done, corpus import pending in M3; INF-07 (dump CLI) in M8 |
 
 ### 3.3 Done list (most recent first)
+
+| Date | Item | Milestone |
+|---|---|---|
+| 2026-10-27 | M1 identifier system complete: Tag/VR/UID/TransferSyntax/Dictionary/VM/MaskedTag/tag-index, 52 tests green, clippy clean | M1 |
+| 2026-10-27 | M0 scaffolding: workspace, four crates, xtask gen-dict producing committed generated tables | M0 |
 
 | Date | Item | Milestone |
 |---|---|---|
