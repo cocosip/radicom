@@ -4,7 +4,10 @@
 //! transcoder and the render module all go through it. It never mutates
 //! elements other than the pixel-module tags it exposes as properties.
 
+pub mod codec;
+pub mod overlay;
 pub mod photometric;
+pub mod transcoder;
 
 use crate::error::{Error, ImagingError};
 use crate::model::buffer::{
@@ -101,30 +104,10 @@ impl<'a> PixelData<'a> {
 
     /// Binds to an existing pixel data element, dispatching on its kind.
     pub fn from_dataset(ds: &'a mut Dataset) -> Result<Self, Error> {
-        let kind = match ds.item(&PIXEL_DATA) {
-            Some(DicomItem::Fragments(_)) => PixelDataKind::Encapsulated,
-            Some(DicomItem::Element(e)) => match e.vr() {
-                Vr::Ow => PixelDataKind::OtherWord,
-                Vr::Ob => PixelDataKind::OtherByte,
-                other => {
-                    return Err(pixel_err(format!("pixel data has unsupported VR {other}")));
-                }
-            },
-            Some(DicomItem::Sequence(_)) => return Err(pixel_err("pixel data is a sequence")),
-            None => {
-                // no element yet: pick the kind the syntax implies
-                let syntax = ds.transfer_syntax();
-                if syntax.is_encapsulated() {
-                    PixelDataKind::Encapsulated
-                } else if matches!(ds.get_or(BITS_ALLOCATED, 8u16), 16 | 32 | 64) {
-                    PixelDataKind::OtherWord
-                } else {
-                    PixelDataKind::OtherByte
-                }
-            }
-        };
+        let kind = kind_of(ds)?;
         Ok(PixelData { dataset: ds, kind })
     }
+
 
     pub fn kind(&self) -> PixelDataKind {
         self.kind
@@ -497,6 +480,28 @@ impl DicomItem {
         match self {
             DicomItem::Element(e) => e.value().as_buffer(),
             _ => None,
+        }
+    }
+}
+/// Storage kind implied by the dataset's existing pixel element and syntax.
+fn kind_of(ds: &Dataset) -> Result<PixelDataKind, Error> {
+    match ds.item(&PIXEL_DATA) {
+        Some(DicomItem::Fragments(_)) => Ok(PixelDataKind::Encapsulated),
+        Some(DicomItem::Element(e)) => match e.vr() {
+            Vr::Ow => Ok(PixelDataKind::OtherWord),
+            Vr::Ob => Ok(PixelDataKind::OtherByte),
+            other => Err(pixel_err(format!("pixel data has unsupported VR {other}"))),
+        },
+        Some(DicomItem::Sequence(_)) => Err(pixel_err("pixel data is a sequence")),
+        None => {
+            // no element yet: pick the kind the syntax implies
+            if ds.transfer_syntax().is_encapsulated() {
+                Ok(PixelDataKind::Encapsulated)
+            } else if matches!(ds.get_or(BITS_ALLOCATED, 8u16), 16 | 32 | 64) {
+                Ok(PixelDataKind::OtherWord)
+            } else {
+                Ok(PixelDataKind::OtherByte)
+            }
         }
     }
 }

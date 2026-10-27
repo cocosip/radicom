@@ -82,6 +82,17 @@ pub struct DicomFile {
 }
 
 impl DicomFile {
+    /// Builds a file in memory from an existing dataset (no source path).
+    pub fn from_dataset(dataset: Dataset) -> Self {
+        DicomFile {
+            file_meta: Dataset::new(),
+            dataset,
+            format: FileFormat::Dicom3,
+            is_partial: false,
+            source: None,
+        }
+    }
+
     /// Opens and parses a file from disk.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         let path = path.as_ref();
