@@ -1,0 +1,388 @@
+//! PDV assembly and PDU fragmentation (NET-05/06; docs/07-network.md §5.2, §5.3).
+//!
+//! Both directions are pure state machines over byte slices, so the wire
+//! behaviour (fragmenting, even padding, command/dataset splitting) is fully
+//! unit-testable without a socket.
+
+use crate::error::{NetworkError, Result};
+use crate::pdu::{PData, Pdv};
+
+/// Which stream a PDV belongs to (§5.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Stream {
+    Command,
+    Data,
+}
+
+/// Reassembles PDVs into complete message units (§5.2).
+///
+/// A unit is complete when a PDV with the `last` bit arrives. Command and
+/// dataset streams are kept apart, keyed by presentation context.
+#[derive(Debug, Clone, Default)]
+pub struct PdvAssembler {
+    command: Vec<u8>,
+    data: Vec<u8>,
+    command_context: Option<u8>,
+    data_context: Option<u8>,
+}
+
+/// A completed message unit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageUnit {
+    pub context_id: u8,
+    pub stream: Stream,
+    pub bytes: Vec<u8>,
+}
+
+impl PdvAssembler {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feeds one P-DATA-TF, returning every unit it completed.
+    pub fn push_pdata(&mut self, pdata: &PData) -> Result<Vec<MessageUnit>> {
+        let mut completed = Vec::new();
+        for pdv in &pdata.pdvs {
+            if let Some(unit) = self.push_pdv(pdv)? {
+                completed.push(unit);
+            }
+        }
+        Ok(completed)
+    }
+
+    /// Feeds one PDV, returning a unit when this PDV completes one.
+    pub fn push_pdv(&mut self, pdv: &Pdv) -> Result<Option<MessageUnit>> {
+        let stream = if pdv.is_command { Stream::Command } else { Stream::Data };
+        let (buffer, context) = match stream {
+            Stream::Command => (&mut self.command, &mut self.command_context),
+            Stream::Data => (&mut self.data, &mut self.data_context),
+        };
+
+        // a PDV that switches context mid-unit is a protocol violation
+        match context {
+            Some(existing) if *existing != pdv.context_id => {
+                return Err(NetworkError::protocol("PDV changed presentation context mid-message"));
+            }
+            Some(_) => {}
+            None => *context = Some(pdv.context_id),
+        }
+
+        buffer.extend_from_slice(&pdv.data);
+        if !pdv.is_last {
+            return Ok(None);
+        }
+
+        let bytes = std::mem::take(buffer);
+        let context_id = context.take().unwrap_or(pdv.context_id);
+        Ok(Some(MessageUnit { context_id, stream, bytes }))
+    }
+
+    /// Bytes buffered for a stream that has not completed yet.
+    pub fn pending_len(&self, stream: Stream) -> usize {
+        match stream {
+            Stream::Command => self.command.len(),
+            Stream::Data => self.data.len(),
+        }
+    }
+
+    /// True when nothing is half-assembled.
+    pub fn is_idle(&self) -> bool {
+        self.command.is_empty() && self.data.is_empty()
+    }
+}
+
+/// Splits outgoing message bytes into P-DATA-TF PDUs (§5.3).
+///
+/// The command stream always travels in its own P-DATA-TF, before the dataset
+/// stream. Each PDV value is even-padded and no PDU exceeds the negotiated
+/// maximum.
+#[derive(Debug, Clone)]
+pub struct PduSplitter {
+    max_pdu: u32,
+    max_pdvs_per_pdu: usize,
+}
+
+impl PduSplitter {
+    /// `max_pdu` is the peer's maximum PDU length; `max_pdvs_per_pdu` exists
+    /// for buggy peers that only accept one PDV per PDU.
+    pub fn new(max_pdu: u32, max_pdvs_per_pdu: usize) -> Self {
+        PduSplitter { max_pdu, max_pdvs_per_pdu: max_pdvs_per_pdu.max(1) }
+    }
+
+    /// The largest PDV value that fits in one PDU, accounting for the 6-byte
+    /// PDU header and the 6-byte PDV header (length, context, message header).
+    pub fn max_pdv_value(&self) -> usize {
+        // a whole PDU must stay within max_pdu, which counts the body only
+        (self.max_pdu as usize).saturating_sub(6)
+    }
+
+    /// Splits one message stream into PDUs (§5.3).
+    ///
+    /// `data` is the complete message; the final PDV carries the `last` bit.
+    /// Each PDU is filled up to the peer's maximum, never beyond it.
+    pub fn split(&self, context_id: u8, is_command: bool, data: &[u8]) -> Result<Vec<PData>> {
+        let body_limit = self.max_pdu as usize;
+        if body_limit <= 6 {
+            return Err(NetworkError::protocol("maximum PDU length leaves no room for a PDV"));
+        }
+        let mut pdus: Vec<PData> = Vec::new();
+        let mut current = PData::default();
+        // bytes already used by the PDVs batched into `current`
+        let mut used = 0usize;
+
+        if data.is_empty() {
+            current.pdvs.push(Pdv { context_id, is_command, is_last: true, data: Vec::new() });
+            pdus.push(current);
+            return Ok(pdus);
+        }
+
+        let mut offset = 0usize;
+        while offset < data.len() {
+            // each PDV costs 6 header bytes plus its even-padded value
+            let room = body_limit.saturating_sub(used).saturating_sub(6);
+            if room == 0 {
+                pdus.push(std::mem::take(&mut current));
+                used = 0;
+                continue;
+            }
+            let end = (offset + room).min(data.len());
+            let is_last = end == data.len();
+            let len = end - offset;
+            current.pdvs.push(Pdv {
+                context_id,
+                is_command,
+                is_last,
+                data: data[offset..end].to_vec(),
+            });
+            // the value is even-padded on the wire, which costs a byte
+            used += 6 + len + len % 2;
+            offset = end;
+            if current.pdvs.len() >= self.max_pdvs_per_pdu || used >= body_limit {
+                pdus.push(std::mem::take(&mut current));
+                used = 0;
+            }
+        }
+        if !current.pdvs.is_empty() {
+            pdus.push(current);
+        }
+        Ok(pdus)
+    }
+
+    /// Splits a command followed by an optional dataset (§5.3: the command
+    /// stream is always its own P-DATA-TF).
+    pub fn split_message(
+        &self,
+        context_id: u8,
+        command: &[u8],
+        dataset: Option<&[u8]>,
+    ) -> Result<Vec<PData>> {
+        let mut pdus = self.split(context_id, true, command)?;
+        if let Some(dataset) = dataset {
+            pdus.extend(self.split(context_id, false, dataset)?);
+        }
+        Ok(pdus)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pdv(context_id: u8, is_command: bool, is_last: bool, data: &[u8]) -> Pdv {
+        Pdv { context_id, is_command, is_last, data: data.to_vec() }
+    }
+
+    #[test]
+    fn assembles_a_single_command_unit() {
+        let mut assembler = PdvAssembler::new();
+        let units = assembler
+            .push_pdata(&PData { pdvs: vec![pdv(1, true, true, &[1, 2, 3])] })
+            .unwrap();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].stream, Stream::Command);
+        assert_eq!(units[0].context_id, 1);
+        assert_eq!(units[0].bytes, vec![1, 2, 3]);
+        assert!(assembler.is_idle());
+    }
+
+    #[test]
+    fn assembles_a_command_split_across_pdvs() {
+        let mut assembler = PdvAssembler::new();
+        assert!(assembler
+            .push_pdata(&PData { pdvs: vec![pdv(1, true, false, &[1, 2])] })
+            .unwrap()
+            .is_empty());
+        assert_eq!(assembler.pending_len(Stream::Command), 2);
+        let units = assembler
+            .push_pdata(&PData { pdvs: vec![pdv(1, true, true, &[3, 4])] })
+            .unwrap();
+        assert_eq!(units[0].bytes, vec![1, 2, 3, 4], "fragments concatenate in order");
+    }
+
+    #[test]
+    fn assembles_a_command_split_across_pdus() {
+        let mut assembler = PdvAssembler::new();
+        assert!(assembler
+            .push_pdata(&PData { pdvs: vec![pdv(1, true, false, &[1])] })
+            .unwrap()
+            .is_empty());
+        assert!(assembler
+            .push_pdata(&PData { pdvs: vec![pdv(1, true, false, &[2])] })
+            .unwrap()
+            .is_empty());
+        let units = assembler
+            .push_pdata(&PData { pdvs: vec![pdv(1, true, true, &[3])] })
+            .unwrap();
+        assert_eq!(units[0].bytes, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn command_and_dataset_streams_stay_separate() {
+        let mut assembler = PdvAssembler::new();
+        let units = assembler
+            .push_pdata(&PData {
+                pdvs: vec![
+                    pdv(1, true, true, &[0xAA]),
+                    pdv(1, false, false, &[1, 2]),
+                    pdv(1, false, true, &[3]),
+                ],
+            })
+            .unwrap();
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].stream, Stream::Command);
+        assert_eq!(units[0].bytes, vec![0xAA]);
+        assert_eq!(units[1].stream, Stream::Data);
+        assert_eq!(units[1].bytes, vec![1, 2, 3], "the dataset unit spans both PDVs");
+    }
+
+    #[test]
+    fn multiple_units_in_one_pdata() {
+        let mut assembler = PdvAssembler::new();
+        let units = assembler
+            .push_pdata(&PData {
+                pdvs: vec![
+                    pdv(1, true, true, &[1]),
+                    pdv(1, false, true, &[2]),
+                    pdv(1, true, true, &[3]),
+                    pdv(1, false, true, &[4]),
+                ],
+            })
+            .unwrap();
+        assert_eq!(units.len(), 4, "two complete messages in one P-DATA-TF");
+        assert_eq!(units.iter().map(|u| u.bytes[0]).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn context_switch_mid_message_is_a_violation() {
+        let mut assembler = PdvAssembler::new();
+        assembler.push_pdata(&PData { pdvs: vec![pdv(1, true, false, &[1])] }).unwrap();
+        match assembler.push_pdata(&PData { pdvs: vec![pdv(3, true, true, &[2])] }) {
+            Err(NetworkError::Protocol(message)) => assert!(message.contains("presentation context"), "got {message}"),
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn splitter_fragments_large_messages() {
+        // max PDU 24 leaves 18 bytes of PDV value, which fills the PDU, so
+        // every PDV gets its own PDU: 40 bytes need 18 + 18 + 4
+        let splitter = PduSplitter::new(24, 16);
+        assert_eq!(splitter.max_pdv_value(), 18);
+        let data = vec![0xAB; 40];
+        let pdus = splitter.split(1, true, &data).unwrap();
+        assert_eq!(pdus.len(), 3, "each PDV fills its PDU");
+        assert_eq!(pdus.iter().map(|p| p.pdvs[0].data.len()).collect::<Vec<_>>(), vec![18, 18, 4]);
+        let total: usize = pdus.iter().flat_map(|p| p.pdvs.iter().map(|d| d.data.len())).sum();
+        assert_eq!(total, 40, "every byte is carried exactly once");
+        // only the very last PDV carries the last bit
+        let last_flags: Vec<bool> = pdus.iter().flat_map(|p| p.pdvs.iter().map(|d| d.is_last)).collect();
+        assert_eq!(last_flags, vec![false, false, true]);
+    }
+
+    #[test]
+    fn splitter_respects_max_pdvs_per_pdu() {
+        let splitter = PduSplitter::new(24, 1);
+        let data = vec![0xCD; 40];
+        let pdus = splitter.split(1, false, &data).unwrap();
+        assert_eq!(pdus.len(), 3, "one PDV per PDU");
+        assert!(pdus.iter().all(|p| p.pdvs.len() == 1), "one PDV per PDU mode");
+    }
+
+    #[test]
+    fn splitter_batches_pdvs_when_allowed() {
+        // max PDU 1024 ⇒ 1018-byte chunks; 4 PDVs of ~300 bytes fit in batches
+        let splitter = PduSplitter::new(1024, 4);
+        let data = vec![0xEE; 3000];
+        let pdus = splitter.split(1, true, &data).unwrap();
+        assert!(pdus.iter().all(|p| p.pdvs.len() <= 4));
+        let total: usize = pdus.iter().flat_map(|p| p.pdvs.iter().map(|d| d.data.len())).sum();
+        assert_eq!(total, 3000);
+    }
+
+    #[test]
+    fn splitter_keeps_an_empty_message_as_one_pdv() {
+        let splitter = PduSplitter::new(16384, 16);
+        let pdus = splitter.split(1, true, &[]).unwrap();
+        assert_eq!(pdus.len(), 1);
+        assert_eq!(pdus[0].pdvs.len(), 1);
+        assert!(pdus[0].pdvs[0].is_last);
+        assert!(pdus[0].pdvs[0].data.is_empty());
+    }
+
+    #[test]
+    fn split_message_sends_the_command_first_in_its_own_pdu() {
+        let splitter = PduSplitter::new(16384, 16);
+        let pdus = splitter.split_message(1, &[0xAA; 10], Some(&[0xBB; 10])).unwrap();
+        assert_eq!(pdus.len(), 2, "command and dataset are separate P-DATA-TFs");
+        assert!(pdus[0].pdvs.iter().all(|d| d.is_command));
+        assert!(pdus[1].pdvs.iter().all(|d| !d.is_command));
+    }
+
+    #[test]
+    fn split_message_without_a_dataset() {
+        let splitter = PduSplitter::new(16384, 16);
+        let pdus = splitter.split_message(1, &[0xAA; 4], None).unwrap();
+        assert_eq!(pdus.len(), 1);
+    }
+
+    #[test]
+    fn zero_max_pdu_is_rejected() {
+        let splitter = PduSplitter::new(0, 16);
+        assert!(splitter.split(1, true, &[1, 2]).is_err());
+    }
+
+    #[test]
+    fn round_trip_through_split_and_assemble() {
+        // the splitter's output must reassemble to the original bytes
+        let splitter = PduSplitter::new(32, 3);
+        let data = vec![0x5A; 100];
+        let pdus = splitter.split(7, false, &data).unwrap();
+        let mut assembler = PdvAssembler::new();
+        let mut units = Vec::new();
+        for pdu in pdus {
+            units.extend(assembler.push_pdata(&pdu).unwrap());
+        }
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].bytes, data, "split then assemble is lossless");
+        assert_eq!(units[0].context_id, 7);
+        assert_eq!(units[0].stream, Stream::Data);
+    }
+
+    #[test]
+    fn round_trip_preserves_the_command_dataset_boundary() {
+        let splitter = PduSplitter::new(64, 2);
+        let command = vec![0x11; 30];
+        let dataset = vec![0x22; 70];
+        let pdus = splitter.split_message(3, &command, Some(&dataset)).unwrap();
+        let mut assembler = PdvAssembler::new();
+        let mut units = Vec::new();
+        for pdu in pdus {
+            units.extend(assembler.push_pdata(&pdu).unwrap());
+        }
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].stream, Stream::Command);
+        assert_eq!(units[0].bytes, command);
+        assert_eq!(units[1].stream, Stream::Data);
+        assert_eq!(units[1].bytes, dataset);
+    }
+}
