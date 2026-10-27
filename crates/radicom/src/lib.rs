@@ -20,7 +20,9 @@ pub use error::{DataError, Error, FileError, ReaderError, ValidationFailure};
 pub use model::dictionary::{
     default_dictionary, load_xml, set_default_dictionary, Dictionary, DictionaryEntry, RuntimeEntry,
 };
+pub use model::element::DicomElement;
 pub use model::endian::Endian;
+pub use model::person_name::PersonName;
 pub use model::masked_tag::MaskedTag;
 pub use model::tag::Tag;
 pub use model::transfer_syntax::{self as transfer_syntax_registry, TransferSyntax};

@@ -3,6 +3,8 @@
 
 pub mod buffer;
 pub mod dicom_datetime;
+pub mod element;
+pub mod person_name;
 pub mod dictionary;
 pub mod masked_tag;
 pub mod endian;
