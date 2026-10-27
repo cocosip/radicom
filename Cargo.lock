@@ -473,6 +473,7 @@ version = "0.1.0"
 name = "radicom-json"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "radicom",
  "serde",
  "serde_json",
