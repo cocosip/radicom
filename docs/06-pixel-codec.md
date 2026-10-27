@@ -1,6 +1,6 @@
 # Module Spec and Interface Contract: Pixel Data, Codec Interfaces, Transcoder
 
-> Status: design phase (milestone M4; see [03-development-plan.md](03-development-plan.md) §3)
+> Status: implemented (milestone M4; see [03-development-plan.md](03-development-plan.md) §3) — PixelData, palette LUT, overlays, the codec contract/registry and the transcoder are done; codec implementations live in radicom-codecs
 > Feature IDs covered: PIX-01..05, CODEC-01..03, CODEC-05, TR-01..03. ~~CODEC-04 (built-in RLE codec)~~ was dropped on 2026-10-27: **radicom ships zero built-in codecs**; every implementation — JPEG family, JPEG-LS, J2K, HTJ2K and DICOM RLE — is provided by radicom-codecs (divergence D10 in [02-architecture.md](02-architecture.md) §12).
 > Behavior baseline: fo-dicom `Imaging/DicomPixelData.cs`, `Imaging/Codec/` (IDicomCodec, DicomCodecParams, TranscoderManager, DicomTranscoder), `Imaging/DicomOverlayData.cs`
 > **This document is the normative interface contract between radicom and radicom-codecs.** After M4's boundary review it is frozen; changes follow semver-major.

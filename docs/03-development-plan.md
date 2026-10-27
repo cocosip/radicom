@@ -16,7 +16,7 @@ Milestones are ordered so that each one delivers a usable, testable increment. F
 | **M1** | Identifier system (Tag/VR/UID/TS/Dictionary) | TAG-01..05, VR-01..02, UID-01..04, TS-01..03, DICT-01..03, VM-01, INF-01 (partial), INF-02 | [04-data-model.md](04-data-model.md) §1–6 | All identifier types usable; generated tables complete; round-trip parse/display tests pass |
 | **M2** | Dataset, elements, charset, validation | DS-01..10, ELEM-01..05, ENC-01..04, VAL-01..03 | [04-data-model.md](04-data-model.md) §7–11 | A dataset can be built programmatically, values read/written in all three API tiers, private tags work, multi-charset strings round-trip, validators pass fo-dicom-aligned cases |
 | **M3** | File and IO | BUF-01..02, IO-01..03, RD-01..05, WR-01..03, FILE-01..06, MEM-01 (deferred to M8 if needed) | [05-file-io.md](05-file-io.md) | Real-world DICOM files (all variants from FILE-03) parse and write back byte-faithfully; large-object policies work; malformed-data corpus (tolerance rows T1–T10) passes |
-| **M4** | Pixel data, codec interfaces, transcoder | PIX-01..05, CODEC-01..03, CODEC-05, TR-01..03 (~~CODEC-04~~ dropped: zero built-in codecs, all implementations incl. RLE live in radicom-codecs) | [06-pixel-codec.md](06-pixel-codec.md) | PixelData facade reads native frames and aggregates encapsulated frames via the offset table; Transcoder's full decision table verified end-to-end with the in-repo test-only mock codec; missing-codec paths fail fast with typed errors; **the codec boundary API is frozen for radicom-codecs** |
+| **M4** | Pixel data, codec interfaces, transcoder | Complete | [06-pixel-codec.md](06-pixel-codec.md) | PixelData facade reads native frames and aggregates encapsulated frames via the offset table; Transcoder's full decision table verified end-to-end with the in-repo test-only mock codec; missing-codec paths fail fast with typed errors; **the codec boundary API is frozen for radicom-codecs** |
 | **M5** | Network core | NET-01..03, NET-05..08, SRV-01..03, DIMSE-01, OBS-01 | [07-network.md](07-network.md) §1–8 | Loopback SCU↔SCP: C-ECHO and C-STORE succeed against a reference peer (e.g. DCMTK/fo-dicom); PDU golden tests pass |
 | **M6** | Network services complete | SRV-04..08, CLI-01..02, NET-04 | [07-network.md](07-network.md) §4, 7, 9 | C-FIND/C-GET/C-MOVE against a reference PACS-like peer; DicomClient send loop with linger/retry/cancel; extended negotiation + user identity |
 | **M7** | Serialization, media, SR, anonymization | JSON-01..02, XML-01, MEDIA-01..03, SR-01..02, ANON-01, INF-03..04 | [08-serialization-media.md](08-serialization-media.md) | DICOM JSON round-trips against fo-dicom-produced samples; DICOMDIR builds and re-reads; SR trees traverse; anonymizer applies the full PS3.15 profile |
@@ -109,9 +109,9 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 | Reader | RD-01..05 | Done | Recursive-descent parser + DatasetBuilder observer; tolerance rows T1–T10 each have a test; depth cap verified at the default 2 MiB stack |
 | Writer | WR-01..03 | Done | DicomWriter + length calculator share one header/length path; WriteOptions, private-SQ explicit length, CP-1066 demotion, group-length recalc/removal, charset-aware value encoding, fragment offset table + delimiters |
 | DicomFile | FILE-01..06 | Done | Format detection (preamble/no-preamble/no-meta/ACR-NEMA, explicit-vs-implicit and endianness probing), meta refresh on save, partial open via stop predicate, deflate on write, `has_valid_header`; FILE-02 large-object windows deferred with BUF-02 P1 |
-| PixelData | PIX-01..05 | Not started | |
-| Codec interface | CODEC-01..03, CODEC-05 | Not started | CODEC-04 dropped 2026-10-27 (no built-in codecs; all implementations incl. RLE in radicom-codecs) |
-| Transcoder | TR-01..03 | Not started | |
+| PixelData | PIX-01..05 | Done | Facade with OB/OW/encapsulated kinds; zero-copy native frames, four-rule encapsulated extraction incl. composite spanning; frame-size special cases; palette LUT; overlay access with embedded bit-plane extraction |
+| Codec interface | CODEC-01..03, CODEC-05 | Done | `Codec`/`DirectTranscoder` traits, parameter structs with contract defaults, global registry (empty by default), JPEG SOF bit-depth scanning. CODEC-04 dropped 2026-10-27 (no built-in codecs; all implementations incl. RLE in radicom-codecs) |
+| Transcoder | TR-01..03 | Done | Five-row decision table, direct-transcode hook, lossy bookkeeping (appended method/ratio), overlay extraction before syntax switch, single-frame decode isolation, file convenience |
 | Network transport | NET-01..02 | Not started | |
 | Association | NET-03..04 | Not started | NET-04 in M6 |
 | Protocol engine | NET-05..08 | Not started | |
@@ -133,6 +133,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 
 | Date | Item | Milestone |
 |---|---|---|
+| 2026-10-27 | M4 complete: PixelData facade (PIX-01..05), codec contract + registry (CODEC-01..03/05) and Transcoder (TR-01..03). Zero built-in codecs; the boundary API is frozen for radicom-codecs. 208 tests, clippy clean | M4 |
 | 2026-10-27 | M3 DicomFile complete: format detection for all FILE-03 variants, meta-group refresh on save, partial open via stop predicate, deflate write path and `has_valid_header`; M3 exit condition reached except FILE-02 on-demand windows (P1, tracked with BUF-02); 163 tests, clippy clean | M3 |
 | 2026-10-27 | M3 writer: `DicomWriter` + length calculator (WR-01..03) sharing one header path; WriteOptions, private-SQ explicit length, CP-1066 UN demotion, group-length recalculation, charset-aware value encoding, fragment offset table; round-trips for explicit/implicit/big-endian/SQ/fragments; 149 tests, clippy clean | M3 |
 | 2026-10-27 | M3 parser: recursive-descent `DicomReader` + `DatasetBuilder` observer (RD-01..05); tolerance rows T1–T10 each covered by a test; SQ item events, fragment offset table, private creator binding and deflate (RD-04) implemented; 136 tests, clippy clean | M3 |
@@ -168,6 +169,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 
 | Date | Author | Change |
 |---|---|---|
+| 2026-10-27 | radicom team | M4 landed. Fixed while reviewing: `add_frame` indexed from `(0028,0008)` (which reads 1 when absent) so the first frame landed at index 1; overlays were extracted after the output claimed the target syntax, tripping the decompression guard. The global codec registry is process-wide, so registry-touching tests now serialize on a test lock |
 | 2026-10-27 | radicom team | M3 complete: DicomFile added (FILE-01..06); ACR-NEMA recognition code is read from the dataset, not the meta group, and `ReadOptions.read` is documented as inert until the on-demand buffer windows land |
 | 2026-10-27 | radicom team | M3 writer landed; `DicomFragmentSequence::push_fragment` now builds the offset table from item headers plus padded lengths, and the reader strips value padding (UI NUL, string space) so round-trips are idempotent |
 | 2026-10-27 | radicom team | M3 progress: parser + dataset builder landed; `ParseObserver::on_begin_fragment` now receives the decoded basic offset table; the parser frame was split (`step` vs `parse_level`) so the 256-level cap holds on a 2 MiB stack |
