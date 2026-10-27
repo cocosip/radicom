@@ -12,6 +12,7 @@
 //! Image codec implementations live in the separate `radicom-codecs` project;
 //! this crate only defines the [`pixel::codec`] interfaces and registry.
 
+pub mod encoding;
 pub mod error;
 pub mod generated;
 pub mod model;
