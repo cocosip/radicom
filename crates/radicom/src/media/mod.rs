@@ -701,7 +701,15 @@ mod tests {
     }
 
     fn temp_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("radicom-dicomdir-{}-{name}.dcm", std::process::id()))
+        // unique per (process, monotonic counter, name) so concurrent test
+        // binaries or a recycled PID can never collide on the same file
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "radicom-dicomdir-{}-{seq}-{name}.dcm",
+            std::process::id()
+        ))
     }
 
     /// An 8x8 8-bit MONOCHROME2 image instance (enough for an icon).
