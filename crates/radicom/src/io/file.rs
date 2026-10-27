@@ -348,12 +348,18 @@ fn looks_explicit(dataset: &[u8]) -> bool {
 
 fn deflate(bytes: &[u8]) -> Result<Vec<u8>, Error> {
     use std::io::Write as _;
+    // PS3.5 A.5: the deflated transfer syntax is **raw DEFLATE (RFC 1951)**, no
+    // zlib header/trailer; an odd-length stream gets one padding byte.
     let mut encoder =
-        flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-    encoder
+        flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut out = encoder
         .write_all(bytes)
         .and_then(|_| encoder.finish())
-        .map_err(|e| Error::Writer(crate::error::WriterError(format!("deflate: {e}"))))
+        .map_err(|e| Error::Writer(crate::error::WriterError(format!("deflate: {e}"))))?;
+    if out.len() % 2 == 1 {
+        out.push(0);
+    }
+    Ok(out)
 }
 
 fn file_err(path: &Path, action: &str, e: std::io::Error) -> Error {

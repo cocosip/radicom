@@ -538,6 +538,25 @@ mod tests {
         use std::io::Write as _;
         let mut plain = Vec::new();
         plain.extend_from_slice(&el_header(0x0010, 0x0020, "LO", b"PID-1"));
+        // PS3.5 A.5: the body is raw DEFLATE (RFC 1951), not zlib-wrapped
+        let mut deflated = Vec::new();
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(&mut deflated, flate2::Compression::default());
+        encoder.write_all(&plain).unwrap();
+        encoder.finish().unwrap();
+
+        let syntax = syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let ds = parse(&deflated, &syntax);
+        assert_eq!(ds.get_str(Tag::new(0x0010, 0x0020)).unwrap(), "PID-1", "T10: transparent inflate");
+    }
+
+    #[test]
+    fn t10_zlib_wrapped_body_still_inflates() {
+        // some non-conformant writers wrap the deflate body in zlib; the reader
+        // falls back to the zlib decoder for those
+        use std::io::Write as _;
+        let mut plain = Vec::new();
+        plain.extend_from_slice(&el_header(0x0010, 0x0020, "LO", b"PID-1"));
         let mut deflated = Vec::new();
         let mut encoder =
             flate2::write::ZlibEncoder::new(&mut deflated, flate2::Compression::default());
@@ -546,7 +565,7 @@ mod tests {
 
         let syntax = syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone();
         let ds = parse(&deflated, &syntax);
-        assert_eq!(ds.get_str(Tag::new(0x0010, 0x0020)).unwrap(), "PID-1", "T10: transparent inflate");
+        assert_eq!(ds.get_str(Tag::new(0x0010, 0x0020)).unwrap(), "PID-1", "zlib fallback inflate");
     }
 
     #[test]

@@ -633,10 +633,20 @@ fn decode_offset_table(buffer: &SharedBuffer, big_endian: bool) -> Vec<u32> {
 
 /// RD-04: inflates a deflated dataset body. The file meta group is never
 /// deflated, so this applies to the dataset bytes only.
+///
+/// PS3.5 A.5: the deflated transfer syntax uses **raw DEFLATE (RFC 1951)** — no
+/// zlib header/trailer. Some non-conformant writers wrap it in zlib anyway, so
+/// try the zlib decoder first (it errors cleanly on raw deflate) and fall back
+/// to the raw decoder. The reverse order would let the raw decoder silently
+/// mis-decode a zlib-wrapped stream.
 pub fn inflate(bytes: &[u8]) -> Result<Vec<u8>, Error> {
     use std::io::Read as _;
     let mut out = Vec::new();
-    flate2::read::ZlibDecoder::new(bytes)
+    if flate2::read::ZlibDecoder::new(bytes).read_to_end(&mut out).is_ok() {
+        return Ok(out);
+    }
+    out.clear();
+    flate2::read::DeflateDecoder::new(bytes)
         .read_to_end(&mut out)
         .map_err(|e| Error::Reader(ReaderError::Other(format!("deflate: {e}"))))?;
     Ok(out)
