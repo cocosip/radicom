@@ -115,12 +115,20 @@ pub enum NetworkError {
     /// A request needs a presentation context the peer did not accept.
     #[error("SOP class {sop_class} is not supported by the association")]
     SopClassNotSupported { sop_class: String },
+    /// TLS setup failed (bad PEM, unusable key, handshake configuration).
+    #[error("TLS error: {0}")]
+    Tls(String),
 }
 
 impl NetworkError {
     /// Wraps a protocol violation with a static message.
     pub fn protocol(message: &'static str) -> Self {
         NetworkError::Protocol(message)
+    }
+
+    /// Wraps a TLS setup failure.
+    pub fn protocol_tls(message: impl Into<String>) -> Self {
+        NetworkError::Tls(message.into())
     }
 }
 

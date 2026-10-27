@@ -36,6 +36,9 @@ pub struct ServerOptions {
     pub association_timeout: Duration,
     /// Where incoming C-STORE instances are put before the provider sees them.
     pub store_sink: crate::store::StoreSink,
+    /// TLS material; `None` serves plain TCP (NET-01, `tls` feature).
+    #[cfg(feature = "tls")]
+    pub tls: Option<crate::tls::TlsOptions>,
 }
 
 impl Default for ServerOptions {
@@ -45,6 +48,8 @@ impl Default for ServerOptions {
             max_pdu_length: 16384,
             association_timeout: Duration::from_secs(10),
             store_sink: crate::store::StoreSink::default(),
+            #[cfg(feature = "tls")]
+            tls: None,
         }
     }
 }
@@ -88,6 +93,14 @@ impl<P: ServiceProvider + 'static> DicomServer<P> {
             let provider = provider.clone();
             let options = options.clone();
             tokio::spawn(async move {
+                #[cfg(feature = "tls")]
+                if let Some(tls) = options.tls.clone() {
+                    // a failed handshake ends this connection only
+                    if let Ok(stream) = tls.accept(stream).await {
+                        let _ = serve_connection(stream, provider, options).await;
+                    }
+                    return;
+                }
                 let _ = serve_connection(stream, provider, options).await;
             });
         }
@@ -96,18 +109,24 @@ impl<P: ServiceProvider + 'static> DicomServer<P> {
     /// Serves exactly one connection, then returns (test and single-shot use).
     pub async fn accept_one(&self) -> Result<()> {
         let (stream, _peer) = self.listener.accept().await.map_err(NetworkError::Io)?;
+        #[cfg(feature = "tls")]
+        if let Some(tls) = self.options.tls.clone() {
+            let stream = tls.accept(stream).await?;
+            return serve_connection(stream, self.provider.clone(), self.options.clone()).await;
+        }
         serve_connection(stream, self.provider.clone(), self.options.clone()).await
     }
 }
 
 /// Drives one accepted connection through association, one exchange, release (§5).
-async fn serve_connection<P: ServiceProvider>(
-    mut stream: TcpStream,
+async fn serve_connection<P: ServiceProvider, S>(
+    mut stream: S,
     provider: Arc<P>,
     options: ServerOptions,
-) -> Result<()> {
-    crate::transport::apply_options(&stream, &TcpOptions::default())?;
-
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     // -- association handshake ------------------------------------------
     let Some(Pdu::AssociateRq(request)) = read_pdu(&mut stream).await? else {
         return Err(NetworkError::protocol("expected A-ASSOCIATE-RQ"));
@@ -216,11 +235,14 @@ fn transfer_syntax_of(uid: &str) -> Arc<radicom::model::transfer_syntax::Transfe
 }
 
 /// Dispatches a command that carries no dataset (§5.1).
-async fn handle_command<P: ServiceProvider>(
-    serving: &mut Serving<'_, P>,
+async fn handle_command<P: ServiceProvider, S>(
+    serving: &mut Serving<'_, P, S>,
     context_id: u8,
     command: Command,
-) -> Result<()> {
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     match command.field {
         CommandField::CEchoRq => {
             let request = CEchoRequest::from_command(&command)?;
@@ -238,13 +260,16 @@ async fn handle_command<P: ServiceProvider>(
 }
 
 /// Dispatches a command together with its dataset — the C-STORE path (§7.2).
-async fn handle_command_with_dataset<P: ServiceProvider>(
-    serving: &mut Serving<'_, P>,
+async fn handle_command_with_dataset<P: ServiceProvider, S>(
+    serving: &mut Serving<'_, P, S>,
     context_id: u8,
     command: Command,
     dataset_bytes: &[u8],
     syntax: &Arc<radicom::model::transfer_syntax::TransferSyntax>,
-) -> Result<()> {
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     if command.field != CommandField::CStoreRq {
         return serving.fail(context_id, &command, "dataset is only supported for C-STORE").await;
     }
@@ -268,14 +293,17 @@ async fn handle_command_with_dataset<P: ServiceProvider>(
 }
 
 /// The per-connection send side, so dispatch helpers stay small.
-struct Serving<'a, P: ServiceProvider> {
-    stream: &'a mut TcpStream,
+struct Serving<'a, P: ServiceProvider, S> {
+    stream: &'a mut S,
     splitter: &'a PduSplitter,
     provider: &'a Arc<P>,
     options: &'a ServerOptions,
 }
 
-impl<P: ServiceProvider> Serving<'_, P> {
+impl<P: ServiceProvider, S> Serving<'_, P, S>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     /// Writes one PDU on the connection.
     async fn send_pdu(&mut self, pdu: &Pdu) -> Result<()> {
         write_pdu(self.stream, pdu).await
@@ -323,12 +351,15 @@ fn parse_command_dataset(bytes: &[u8]) -> Result<Dataset> {
 }
 
 /// Sends a command-only message (§5.3).
-async fn send_command(
-    stream: &mut TcpStream,
+async fn send_command<S>(
+    stream: &mut S,
     splitter: &PduSplitter,
     context_id: u8,
     command: &Command,
-) -> Result<()> {
+) -> Result<()>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
     let bytes = command_bytes(command)?;
     for pdata in splitter.split(context_id, true, &bytes)? {
         write_pdu(stream, &Pdu::PData(pdata)).await?;
@@ -341,17 +372,85 @@ async fn send_command(
 pub struct ClientOptions {
     pub max_pdu_length: u32,
     pub association_timeout: Duration,
+    /// TLS material; `None` connects over plain TCP (NET-01, `tls` feature).
+    #[cfg(feature = "tls")]
+    pub tls: Option<crate::tls::TlsOptions>,
 }
 
 impl Default for ClientOptions {
     fn default() -> Self {
-        ClientOptions { max_pdu_length: 16384, association_timeout: Duration::from_secs(5) }
+        ClientOptions {
+            max_pdu_length: 16384,
+            association_timeout: Duration::from_secs(5),
+            #[cfg(feature = "tls")]
+            tls: None,
+        }
+    }
+}
+
+/// The client-side stream: plain TCP or TLS over TCP (§2.4).
+///
+/// An enum keeps [`Association`] non-generic while still letting TLS share the
+/// whole protocol path.
+enum ClientStream {
+    Plain(TcpStream),
+    #[cfg(feature = "tls")]
+    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
+}
+
+impl tokio::io::AsyncRead for ClientStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ClientStream::Plain(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            #[cfg(feature = "tls")]
+            ClientStream::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_read(cx, buf),
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for ClientStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            ClientStream::Plain(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            #[cfg(feature = "tls")]
+            ClientStream::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ClientStream::Plain(s) => std::pin::Pin::new(s).poll_flush(cx),
+            #[cfg(feature = "tls")]
+            ClientStream::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            ClientStream::Plain(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            #[cfg(feature = "tls")]
+            ClientStream::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_shutdown(cx),
+        }
     }
 }
 
 /// An open association from the SCU side (§9.2 expert layer).
 pub struct Association {
-    stream: TcpStream,
+    stream: ClientStream,
     contexts: AcceptedContexts,
     splitter: PduSplitter,
     assembler: PdvAssembler,
@@ -367,8 +466,16 @@ impl Association {
         presentation_contexts: Vec<PresentationContext>,
         options: ClientOptions,
     ) -> Result<Self> {
-        let mut stream = TcpStream::connect(addr).await.map_err(NetworkError::Io)?;
-        crate::transport::apply_options(&stream, &TcpOptions::default())?;
+        let tcp = TcpStream::connect(addr).await.map_err(NetworkError::Io)?;
+        crate::transport::apply_options(&tcp, &TcpOptions::default())?;
+
+        #[cfg(feature = "tls")]
+        let mut stream = match &options.tls {
+            Some(tls) => ClientStream::Tls(Box::new(tls.connect(tcp).await?)),
+            None => ClientStream::Plain(tcp),
+        };
+        #[cfg(not(feature = "tls"))]
+        let mut stream = ClientStream::Plain(tcp);
 
         let mut request = Associate::new(called_ae, calling_ae);
         request.application_context = APPLICATION_CONTEXT.to_string();

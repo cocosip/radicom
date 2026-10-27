@@ -14,6 +14,7 @@ pub mod pdu;
 pub mod server;
 pub mod services;
 pub mod store;
+pub mod tls;
 pub mod transport;
 
 pub use assembler::{MessageUnit, PduSplitter, PdvAssembler, Stream};

@@ -114,8 +114,8 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 | Transcoder | TR-01..03 | Done | Five-row decision table, direct-transcode hook, lossy bookkeeping (appended method/ratio), overlay extraction before syntax switch, single-frame decode isolation, file convenience |
 | Network transport | NET-01..02 | Done | PDU codec for all seven types with golden round-trips; unknown items skipped, 65535 limit and malformed input typed (never panics); async PDU framing over any stream so TLS shares the path; TCP options and network identifier |
 | Association | NET-03..04 | In progress | Negotiation complete: odd context IDs with dedup, accept/reject matrix, syntax priority, role selection, message routing. Extended negotiation and user identity are carried by the PDU codec; the engine-side wiring lands with NET-04 in M6 |
-| Protocol engine | NET-05..08 | In progress | PDV assembly and PDU fragmentation done (round-trip tested); pending table, watchdog, circuit breaker, lifecycle and bounded queue done. The full receive/send task loop and streaming dataset sends remain |
-| Server & services | SRV-01..08 | In progress | SRV-01 server bind/accept/serve and SRV-02 C-ECHO work end-to-end over TCP; C-STORE request/response model done (SRV-03), the receive sink is next; SRV-04..08 remain. SRV-07/08 in M8 |
+| Protocol engine | NET-05..08 | Done | PDV assembly and PDU fragmentation with lossless round-trips; message codec for command+dataset with the command always first; pending table, watchdog, circuit breaker, lifecycle and bounded queue |
+| Server & services | SRV-01..08 | In progress | SRV-01..03 done end-to-end: server bind/accept/serve, C-ECHO, and C-STORE receive through an injectable spool sink with per-instance failure isolation. SRV-04..08 (C-FIND/C-GET/C-MOVE) remain. SRV-07/08 in M8 |
 | Client | CLI-01..02 | Not started | |
 | DIMSE model | DIMSE-01 | Done | All 22 command fields with request/response pairing, command group length recomputed, status classification with mask classes, LO-truncated error comments |
 | Observability | OBS-01..02 | Not started | OBS-02 (OTel wiring) deferred to M8 |
@@ -133,6 +133,7 @@ Status legend: `Not started` / `In progress` / `Done` / `Blocked` / `Deferred (P
 
 | Date | Item | Milestone |
 |---|---|---|
+| 2026-10-27 | M5 network core (near complete): message codec and C-STORE end-to-end over TCP. A bad instance yields a failure status without dropping the association; a syntax mismatch transcodes through the codec registry. 136 network tests, clippy clean. Remaining for M5: TLS and reference-peer interop | M5 |
 | 2026-10-27 | M5 network core (partial): PDU codec for all seven types, DIMSE command model with all 22 fields, association negotiation, PDV assembly/PDU fragmentation, engine state (pending table, watchdog, breaker, lifecycle), transport framing and a working TCP C-ECHO SCU↔SCP. 115 network tests, clippy clean. Remaining for M5: the full send/receive task loop with streaming dataset PDVs, C-STORE receive sink, TLS, and reference-peer interop | M5 |
 | 2026-10-27 | M4 complete: PixelData facade (PIX-01..05), codec contract + registry (CODEC-01..03/05) and Transcoder (TR-01..03). Zero built-in codecs; the boundary API is frozen for radicom-codecs. 208 tests, clippy clean | M4 |
 | 2026-10-27 | M3 DicomFile complete: format detection for all FILE-03 variants, meta-group refresh on save, partial open via stop predicate, deflate write path and `has_valid_header`; M3 exit condition reached except FILE-02 on-demand windows (P1, tracked with BUF-02); 163 tests, clippy clean | M3 |
