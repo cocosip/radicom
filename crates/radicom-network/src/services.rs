@@ -197,6 +197,15 @@ pub trait ServiceProvider: Send + Sync {
         let _ = request;
         Err(NetworkError::protocol("C-STORE is not supported by this provider"))
     }
+
+    /// Answers a C-FIND with a stream of Pending items and one terminal
+    /// response (§7.3). The default refuses, so a provider opts in explicitly.
+    fn on_c_find<'a>(&'a self, request: &'a crate::cfind::CFindRequest) -> futures::stream::BoxStream<'a, Result<crate::cfind::CFindResponse>> {
+        let _ = request;
+        Box::pin(futures::stream::once(async {
+            Err(NetworkError::protocol("C-FIND is not supported by this provider"))
+        }))
+    }
 }
 
 /// The built-in Verification SCP: answers C-ECHO with Success (§7.1).

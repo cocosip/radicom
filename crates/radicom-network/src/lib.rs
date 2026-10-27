@@ -6,6 +6,7 @@
 
 pub mod assembler;
 pub mod association;
+pub mod cfind;
 pub mod dimse;
 pub mod engine;
 pub mod error;

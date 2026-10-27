@@ -177,12 +177,12 @@ where
                     match unit.stream {
                         Stream::Command => {
                             let command = command_from_bytes(&unit.bytes)?;
-                            // Only C-STORE ever carries a dataset (§7.2). Any
-                            // other request is answered at once: trusting the
-                            // peer's (0000,0800) flag would hang the engine on
-                            // a peer that sets it wrongly.
-                            let expects_dataset =
-                                command.field == CommandField::CStoreRq && !command.no_dataset;
+                            // Only C-STORE and C-FIND carry a dataset (§7.2,
+                            // §7.3). Any other request is answered at once:
+                            // trusting the peer's (0000,0800) flag would hang
+                            // the engine on a peer that sets it wrongly.
+                            let expects_dataset = !command.no_dataset
+                                && matches!(command.field, CommandField::CStoreRq | CommandField::CFindRq);
                             if expects_dataset {
                                 // the dataset arrives in later PDVs
                                 awaiting_dataset = Some((unit.context_id, command));
@@ -270,6 +270,92 @@ async fn handle_command_with_dataset<P: ServiceProvider, S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    match command.field {
+        CommandField::CStoreRq => handle_c_store(serving, context_id, command, dataset_bytes, syntax).await,
+        CommandField::CFindRq => handle_c_find(serving, context_id, command, dataset_bytes, syntax).await,
+        _ => serving.fail(context_id, &command, "this request does not carry a dataset").await,
+    }
+}
+
+/// The C-FIND path: decode the Identifier and stream the matches back (§7.3).
+async fn handle_c_find<P: ServiceProvider, S>(
+    serving: &mut Serving<'_, P, S>,
+    context_id: u8,
+    command: Command,
+    dataset_bytes: &[u8],
+    syntax: &Arc<radicom::model::transfer_syntax::TransferSyntax>,
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let identifier = match crate::message::decode_dataset(dataset_bytes, syntax) {
+        Ok(identifier) => identifier,
+        Err(error) => return serving.fail(context_id, &command, &error.to_string()).await,
+    };
+
+    let request = crate::cfind::CFindRequest {
+        message_id: command.message_id,
+        sop_class_uid: command.affected_sop_class_uid.clone().unwrap_or_default(),
+        priority: command.priority,
+        identifier,
+    };
+
+    // Collect first, then send: the stream borrows the provider, so it cannot
+    // stay alive across the awaited writes without a self-referential borrow.
+    // ponytail: buffered per query; stream straight through if a query ever
+    // outgrows memory.
+    let mut responses = Vec::new();
+    {
+        use futures::StreamExt;
+        let mut stream = serving.provider.on_c_find(&request);
+        while let Some(response) = stream.next().await {
+            match response {
+                Ok(response) => responses.push(response),
+                Err(error) => {
+                    let failure = crate::cfind::CFindResponse::failure(
+                        &request,
+                        crate::dimse::status::PROCESSING_FAILURE,
+                        error.to_string(),
+                    );
+                    responses.push(failure);
+                    break;
+                }
+            }
+            if responses.last().map(|r| !r.is_pending()).unwrap_or(false) {
+                break;
+            }
+        }
+    }
+
+    let mut matches = 0u16;
+    let mut terminated = false;
+    for response in responses {
+        let identifier = response.identifier.clone();
+        if !response.is_pending() {
+            matches = response.completed;
+            terminated = true;
+        }
+        serving.send_with_dataset(context_id, &response.to_command(), identifier.as_ref(), syntax).await?;
+    }
+    if !terminated {
+        // a provider that never terminated its stream still gets a final answer
+        let success = crate::cfind::CFindResponse::success(&request, matches);
+        serving.send(context_id, &success.to_command()).await?;
+    }
+    Ok(())
+}
+
+/// The C-STORE path: spool the instance and hand it to the provider (§7.2).
+async fn handle_c_store<P: ServiceProvider, S>(
+    serving: &mut Serving<'_, P, S>,
+    context_id: u8,
+    command: Command,
+    dataset_bytes: &[u8],
+    syntax: &Arc<radicom::model::transfer_syntax::TransferSyntax>,
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     if command.field != CommandField::CStoreRq {
         return serving.fail(context_id, &command, "dataset is only supported for C-STORE").await;
     }
@@ -312,6 +398,25 @@ where
     /// Sends one command-only message on `context_id`.
     async fn send(&mut self, context_id: u8, command: &Command) -> Result<()> {
         send_command(self.stream, self.splitter, context_id, command).await
+    }
+
+    /// Sends a command followed by an optional dataset (§5.3).
+    async fn send_with_dataset(
+        &mut self,
+        context_id: u8,
+        command: &Command,
+        dataset: Option<&Dataset>,
+        syntax: &Arc<radicom::model::transfer_syntax::TransferSyntax>,
+    ) -> Result<()> {
+        let command_bytes = command_bytes(command)?;
+        let payload = match dataset {
+            Some(dataset) => Some(crate::message::encode_dataset(dataset, syntax)?),
+            None => None,
+        };
+        for pdata in self.splitter.split_message(context_id, &command_bytes, payload.as_deref())? {
+            write_pdu(self.stream, &Pdu::PData(pdata)).await?;
+        }
+        Ok(())
     }
 
     /// Answers with ProcessingFailure and a truncated comment.
@@ -608,6 +713,98 @@ impl Association {
                 affected_sop_instance_uid: String::new(),
                 error_comment: Some("malformed C-STORE response".into()),
             })
+        })
+    }
+
+    /// Runs a C-FIND and returns every match plus the terminal response (§7.3).
+    ///
+    /// Matches are collected because each response carries a full Identifier;
+    /// a caller that needs incremental delivery can drive [`Self::send_c_find_stream`].
+    pub async fn send_c_find(&mut self, request: &crate::cfind::CFindRequest) -> Result<Vec<crate::cfind::CFindResponse>> {
+        let mut all = Vec::new();
+        self.send_c_find_stream(request, |response| {
+            all.push(response);
+            Ok(())
+        })
+        .await?;
+        Ok(all)
+    }
+
+    /// Runs a C-FIND, handing each response to `on_response` as it arrives.
+    pub fn send_c_find_stream<'a, F>(
+        &'a mut self,
+        request: &'a crate::cfind::CFindRequest,
+        mut on_response: F,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>>
+    where
+        F: FnMut(crate::cfind::CFindResponse) -> std::io::Result<()> + 'a,
+    {
+        Box::pin(async move {
+            let context = self.contexts.pick(&request.sop_class_uid, "")?;
+            let context_id = context.id;
+            let syntax = transfer_syntax_of(&context.transfer_syntax);
+            let message_id = request.message_id;
+
+            let command = command_bytes(&request.to_command())?;
+            let identifier = crate::message::encode_dataset(&request.identifier, &syntax)?;
+            for pdata in self.splitter.split_message(context_id, &command, Some(&identifier))? {
+                write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
+            }
+
+            // the Identifier of a Pending response follows its command
+            let mut awaiting_command: Option<Command> = None;
+            loop {
+                let Some(pdu) = read_pdu(&mut self.stream).await? else {
+                    return Err(NetworkError::ClosedPrematurely { source: None });
+                };
+                match pdu {
+                    Pdu::PData(pdata) => {
+                        for unit in self.assembler.push_pdata(&pdata)? {
+                            match unit.stream {
+                                Stream::Command => {
+                                    let command = command_from_bytes(&unit.bytes)?;
+                                    if command.field != CommandField::CFindRsp
+                                        || command.message_id_being_responded_to != Some(message_id)
+                                    {
+                                        continue;
+                                    }
+                                    if command.no_dataset {
+                                        let response = crate::cfind::CFindResponse::from_command(&command, None)?;
+                                        let terminal = !response.is_pending();
+                                        on_response(response)?;
+                                        if terminal {
+                                            return Ok(());
+                                        }
+                                    } else {
+                                        // the match dataset follows
+                                        awaiting_command = Some(command);
+                                    }
+                                }
+                                Stream::Data => {
+                                    let Some(command) = awaiting_command.take() else {
+                                        continue;
+                                    };
+                                    let identifier = crate::message::decode_dataset(&unit.bytes, &syntax)?;
+                                    let response = crate::cfind::CFindResponse::from_command(&command, Some(identifier))?;
+                                    let terminal = !response.is_pending();
+                                    on_response(response)?;
+                                    if terminal {
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Pdu::Abort(abort) => {
+                        return Err(NetworkError::Abort { source_code: abort.source.code(), reason: abort.reason })
+                    }
+                    Pdu::ReleaseRq => {
+                        write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
+                        return Err(NetworkError::ClosedPrematurely { source: None });
+                    }
+                    _ => {}
+                }
+            }
         })
     }
 
@@ -1012,6 +1209,156 @@ mod tests {
         let echo = association.send_c_echo(sop_class::VERIFICATION).await.unwrap();
         assert_eq!(echo.status, crate::dimse::status::SUCCESS);
 
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }    /// A provider answering C-FIND with fixed study matches.
+    struct QueryProvider {
+        matches: Vec<(String, String)>,
+    }
+
+    impl QueryProvider {
+        fn new(matches: Vec<(&str, &str)>) -> Self {
+            QueryProvider {
+                matches: matches.into_iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ServiceProvider for QueryProvider {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec![sop_class::STUDY_ROOT_QR_FIND.to_string()]
+        }
+
+        fn on_c_find<'a>(&'a self, request: &'a crate::cfind::CFindRequest) -> futures::stream::BoxStream<'a, Result<crate::cfind::CFindResponse>> {
+            use futures::StreamExt;
+            let total = self.matches.len() as u16;
+            let items: Vec<_> = self
+                .matches
+                .iter()
+                .map(|(study_uid, patient_name)| {
+                    let mut item = Dataset::new();
+                    item.insert_str(Tag::new(0x0020, 0x000D), Vr::Ui, study_uid.clone());
+                    item.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, patient_name.clone());
+                    Ok(crate::cfind::CFindResponse::pending(request, item))
+                })
+                .collect();
+            futures::stream::iter(items)
+                .chain(futures::stream::once(async move {
+                    Ok(crate::cfind::CFindResponse::success(request, total))
+                }))
+                .boxed()
+        }
+    }
+
+    fn find_context() -> PresentationContext {
+        PresentationContext::new(
+            1,
+            sop_class::STUDY_ROOT_QR_FIND,
+            vec!["1.2.840.10008.1.2".to_string()],
+        )
+    }
+
+    #[tokio::test]
+    async fn loopback_c_find_returns_every_match() {
+        let provider = Arc::new(QueryProvider::new(vec![
+            ("1.2.3.1", "Doe^John"),
+            ("1.2.3.2", "Roe^Jane"),
+        ]));
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            provider.clone(),
+            ServerOptions { store_sink: crate::store::StoreSink::Memory, ..Default::default() },
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association =
+            Association::open(addr, "SCU", "SCP", vec![find_context()], ClientOptions::default())
+                .await
+                .unwrap();
+
+        let request = crate::cfind::CFindRequest::study_query(1)
+            .with_key(0x0010, 0x0020, Vr::Lo, "PID-1");
+        let responses = association.send_c_find(&request).await.unwrap();
+
+        assert_eq!(responses.len(), 3, "two matches plus the terminal response");
+        assert!(responses[0].is_pending() && responses[1].is_pending());
+        assert_eq!(responses[2].status, crate::dimse::status::SUCCESS);
+        assert_eq!(responses[2].completed, 2);
+
+        let first = responses[0].identifier.as_ref().unwrap();
+        assert_eq!(first.get_str(Tag::new(0x0020, 0x000D)).unwrap(), "1.2.3.1");
+        assert_eq!(first.get_str(Tag::new(0x0010, 0x0010)).unwrap(), "Doe^John");
+        let second = responses[1].identifier.as_ref().unwrap();
+        assert_eq!(second.get_str(Tag::new(0x0010, 0x0010)).unwrap(), "Roe^Jane");
+
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn loopback_c_find_with_no_matches_terminates_cleanly() {
+        let provider = Arc::new(QueryProvider::new(vec![]));
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            provider,
+            ServerOptions { store_sink: crate::store::StoreSink::Memory, ..Default::default() },
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association =
+            Association::open(addr, "SCU", "SCP", vec![find_context()], ClientOptions::default())
+                .await
+                .unwrap();
+        let responses = association.send_c_find(&crate::cfind::CFindRequest::study_query(1)).await.unwrap();
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0].status, crate::dimse::status::SUCCESS);
+        assert_eq!(responses[0].completed, 0);
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn loopback_c_find_surfaces_a_provider_failure() {
+        struct BrokenFind;
+        #[async_trait::async_trait]
+        impl ServiceProvider for BrokenFind {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![sop_class::STUDY_ROOT_QR_FIND.to_string()]
+            }
+            fn on_c_find<'a>(&'a self, _request: &'a crate::cfind::CFindRequest) -> futures::stream::BoxStream<'a, Result<crate::cfind::CFindResponse>> {
+                Box::pin(futures::stream::once(async {
+                    Err(NetworkError::protocol("query backend down"))
+                }))
+            }
+        }
+
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(BrokenFind),
+            ServerOptions { store_sink: crate::store::StoreSink::Memory, ..Default::default() },
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association =
+            Association::open(addr, "SCU", "SCP", vec![find_context()], ClientOptions::default())
+                .await
+                .unwrap();
+        let responses = association.send_c_find(&crate::cfind::CFindRequest::study_query(1)).await.unwrap();
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0].state(), crate::dimse::StatusState::Failure);
+        assert!(responses[0].error_comment.is_some());
+
+        // the association survives a failed query
         association.release().await.unwrap();
         handle.await.unwrap().unwrap();
     }
