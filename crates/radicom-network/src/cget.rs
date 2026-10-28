@@ -219,7 +219,9 @@ impl CGetResponse {
 /// What a C-GET provider yields (§7.4).
 ///
 /// The engine owns the socket, so the provider cannot send a C-STORE itself:
-/// it hands the instance over and the engine performs the sub-operation.
+/// it hands the instance over and the engine performs the sub-operation. A
+/// provider can interleave Pending [`CGetResponse`] values to report the real
+/// remaining-sub-operation count while instances are delivered.
 #[derive(Debug, Clone)]
 pub enum CGetEvent {
     /// Deliver this instance to the SCU as a C-STORE sub-operation.

@@ -228,7 +228,9 @@ pub trait ServiceProvider: Send + Sync {
     ///
     /// The provider yields instances; the engine turns each into a reverse
     /// C-STORE sub-operation on the same association, so a provider never
-    /// writes to the socket itself.
+    /// writes to the socket itself. Pending [`crate::cget::CGetResponse`] events
+    /// should carry the provider's remaining-sub-operation count; the engine
+    /// forwards them while consuming the stream.
     fn on_c_get<'a>(&'a self, request: &'a crate::cget::CGetRequest) -> futures::stream::BoxStream<'a, Result<crate::cget::CGetEvent>> {
         let _ = request;
         Box::pin(futures::stream::once(async {

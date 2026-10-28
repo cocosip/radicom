@@ -586,46 +586,25 @@ where
         identifier,
     };
 
-    // Events are collected first: the stream borrows the provider, and the
-    // reverse sub-operations below need the socket exclusively.
-    // ponytail: buffered per request; stream straight through if a retrieve
-    // ever outgrows memory.
-    let mut events = Vec::new();
-    {
-        use futures::StreamExt;
-        let mut stream = serving.provider.on_c_get(&request);
-        while let Some(event) = stream.next().await {
-            match event {
-                Ok(event) => {
-                    let terminal = matches!(&event, crate::cget::CGetEvent::Response(r) if !r.is_pending());
-                    events.push(event);
-                    if terminal {
-                        break;
-                    }
-                }
-                Err(error) => {
-                    events.push(crate::cget::CGetEvent::Response(crate::cget::CGetResponse::failure(
-                        &request,
-                        crate::dimse::status::PROCESSING_FAILURE,
-                        error.to_string(),
-                    )));
-                    break;
-                }
-            }
-        }
-    }
-
+    use futures::StreamExt;
+    let provider = serving.provider.clone();
+    let mut stream = provider.on_c_get(&request);
     let mut summary = crate::cmove::SubOperationSummary::default();
-    // PS3.7 §9.1.3: (0000,1020) counts the C-STORE sub-operations still to be
-    // performed *including* the one the response belongs to, so the first of
-    // three instances reports 3 and only the terminal response reports 0.
-    let mut remaining = events.iter().filter(|e| matches!(e, crate::cget::CGetEvent::Instance(_))).count() as u16;
+    let mut provider_summary = None;
+    let mut saw_instance = false;
     // A provider that reports its own progress owns (0000,1020): forwarding its
-    // numbers beats recomputing them from the instances we happen to see.
-    let provider_reports_progress =
-        events.iter().any(|e| matches!(e, crate::cget::CGetEvent::Response(r) if r.is_pending()));
+    // numbers is the only way to preserve the real remaining count while the
+    // stream is consumed incrementally.
     let mut terminated = false;
-    for event in events {
+    while let Some(event) = stream.next().await {
+        let event = match event {
+            Ok(event) => event,
+            Err(error) => crate::cget::CGetEvent::Response(crate::cget::CGetResponse::failure(
+                &request,
+                crate::dimse::status::PROCESSING_FAILURE,
+                error.to_string(),
+            )),
+        };
         match event {
             crate::cget::CGetEvent::Instance(file) => {
                 let state = match serving.send_reverse_store(&file).await {
@@ -637,27 +616,54 @@ where
                     Err(_) => StatusState::Failure,
                 };
                 summary.record(state);
-                if !provider_reports_progress {
-                    let progress = crate::cget::CGetResponse::pending(&request, remaining, summary);
-                    serving.send(context_id, &progress.to_command()).await?;
-                }
-                remaining = remaining.saturating_sub(1);
+                saw_instance = true;
             }
             crate::cget::CGetEvent::Response(response) => {
-                if !response.is_pending() {
-                    terminated = true;
-                    // the provider's counters are authoritative when it
-                    // reported any; otherwise ours describe what happened
-                    let summary = if response.summary.total() > 0 { response.summary } else { summary };
-                    let terminal = crate::cget::CGetResponse::completed(&request, summary);
-                    serving.send(context_id, &terminal.to_command()).await?;
-                } else {
+                if response.is_pending() {
+                    provider_summary = Some(response.summary);
+                    let mut response = response;
+                    if saw_instance {
+                        response.summary = summary;
+                    }
                     serving.send(context_id, &response.to_command()).await?;
+                } else {
+                    terminated = true;
+                    // Preserve provider failures/warnings even when they have
+                    // no sub-operation counters. Once instances have been
+                    // handed to the engine, its reverse-store outcomes are
+                    // authoritative for the terminal counters.
+                    let terminal = if saw_instance {
+                        if response.state() == crate::dimse::StatusState::Success {
+                            crate::cget::CGetResponse::completed(&request, summary)
+                        } else {
+                            let mut response = response;
+                            response.summary = summary;
+                            response
+                        }
+                    } else if response.state() == crate::dimse::StatusState::Success {
+                        let summary = if response.summary.total() > 0 {
+                            response.summary
+                        } else {
+                            provider_summary.unwrap_or(summary)
+                        };
+                        crate::cget::CGetResponse::completed(&request, summary)
+                    } else {
+                        let mut response = response;
+                        if response.summary.total() == 0 {
+                            response.summary = provider_summary.unwrap_or(summary);
+                        }
+                        response
+                    };
+                    serving.send(context_id, &terminal.to_command()).await?;
                 }
             }
         }
+        if terminated {
+            break;
+        }
     }
     if !terminated {
+        let summary = if saw_instance { summary } else { provider_summary.unwrap_or(summary) };
         let terminal = crate::cget::CGetResponse::completed(&request, summary);
         serving.send(context_id, &terminal.to_command()).await?;
     }
@@ -2794,12 +2800,23 @@ mod tests {
             &'a self,
             request: &'a crate::cget::CGetRequest,
         ) -> futures::stream::BoxStream<'a, Result<crate::cget::CGetEvent>> {
-            let _ = request;
+            let total = self.instances.len() as u16;
             let events: Vec<_> = self
                 .instances
                 .iter()
                 .cloned()
-                .map(|file| Ok(crate::cget::CGetEvent::instance(file)))
+                .enumerate()
+                .flat_map(|(index, file)| {
+                    let remaining = total.saturating_sub(index as u16);
+                    [
+                        Ok(crate::cget::CGetEvent::Response(crate::cget::CGetResponse::pending(
+                            request,
+                            remaining,
+                            crate::cmove::SubOperationSummary::default(),
+                        ))),
+                        Ok(crate::cget::CGetEvent::instance(file)),
+                    ]
+                })
                 .collect();
             Box::pin(futures::stream::iter(events))
         }
@@ -2854,6 +2871,328 @@ mod tests {
         assert_eq!(terminal.status, crate::dimse::status::SUCCESS);
         assert_eq!(terminal.summary.completed, 1);
 
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn loopback_c_get_delivers_pending_before_provider_finishes() {
+        struct GatedGet {
+            release_terminal: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl ServiceProvider for GatedGet {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![sop_class::STUDY_ROOT_QR_GET.to_string()]
+            }
+
+            fn on_c_get<'a>(
+                &'a self,
+                request: &'a crate::cget::CGetRequest,
+            ) -> futures::stream::BoxStream<'a, Result<crate::cget::CGetEvent>> {
+                use futures::StreamExt;
+                let release_terminal = self.release_terminal.clone();
+                let pending = crate::cget::CGetResponse::pending(
+                    request,
+                    1,
+                    crate::cmove::SubOperationSummary::default(),
+                );
+                Box::pin(
+                    futures::stream::once(async move { Ok(crate::cget::CGetEvent::Response(pending)) }).chain(
+                        futures::stream::once(async move {
+                            release_terminal.notified().await;
+                            Ok(crate::cget::CGetEvent::Response(crate::cget::CGetResponse::completed(
+                                request,
+                                crate::cmove::SubOperationSummary::default(),
+                            )))
+                        }),
+                    ),
+                )
+            }
+        }
+
+        let release_terminal = Arc::new(tokio::sync::Notify::new());
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(GatedGet { release_terminal: release_terminal.clone() }),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association =
+            Association::open(addr, "SCU", "SCP", vec![get_context()], ClientOptions::default())
+                .await
+                .unwrap();
+        association.set_reverse_store_handler(Arc::new(|request: &CStoreRequest| Ok(CStoreResponse::success(request))));
+        let request = crate::cget::CGetRequest::study("1.2.3.4", 1);
+        let mut responses = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            association.send_c_get_stream(&request, |response| {
+                let terminal = !response.is_pending();
+                responses.push(response);
+                if !terminal {
+                    release_terminal.notify_one();
+                }
+                Ok(())
+            }),
+        )
+        .await
+        .expect("the first pending response must not wait for the provider's terminal response")
+        .unwrap();
+
+        assert_eq!(responses.len(), 2);
+        assert!(responses[0].is_pending());
+        assert_eq!(responses[1].state(), crate::dimse::StatusState::Success);
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn loopback_c_get_preserves_provider_failure_status() {
+        struct BrokenGet;
+
+        #[async_trait::async_trait]
+        impl ServiceProvider for BrokenGet {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![sop_class::STUDY_ROOT_QR_GET.to_string()]
+            }
+
+            fn on_c_get<'a>(
+                &'a self,
+                _request: &'a crate::cget::CGetRequest,
+            ) -> futures::stream::BoxStream<'a, Result<crate::cget::CGetEvent>> {
+                Box::pin(futures::stream::once(async {
+                    Err(NetworkError::protocol("retrieve backend down"))
+                }))
+            }
+        }
+
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(BrokenGet), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association =
+            Association::open(addr, "SCU", "SCP", vec![get_context()], ClientOptions::default())
+                .await
+                .unwrap();
+        association.set_reverse_store_handler(Arc::new(|request: &CStoreRequest| Ok(CStoreResponse::success(request))));
+        let responses = association
+            .send_c_get(&crate::cget::CGetRequest::study("1.2.3.4", 1))
+            .await
+            .unwrap();
+
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0].state(), crate::dimse::StatusState::Failure);
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn c_get_uses_the_last_provider_summary_when_stream_ends() {
+        struct ProgressOnlyGet;
+
+        #[async_trait::async_trait]
+        impl ServiceProvider for ProgressOnlyGet {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![sop_class::STUDY_ROOT_QR_GET.to_string()]
+            }
+
+            fn on_c_get<'a>(
+                &'a self,
+                request: &'a crate::cget::CGetRequest,
+            ) -> futures::stream::BoxStream<'a, Result<crate::cget::CGetEvent>> {
+                let summary = crate::cmove::SubOperationSummary { completed: 2, failed: 1, warning: 0 };
+                Box::pin(futures::stream::once(async move {
+                    Ok(crate::cget::CGetEvent::Response(crate::cget::CGetResponse::pending(
+                        request, 0, summary,
+                    )))
+                }))
+            }
+        }
+
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(ProgressOnlyGet), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association =
+            Association::open(addr, "SCU", "SCP", vec![get_context()], ClientOptions::default())
+                .await
+                .unwrap();
+        association.set_reverse_store_handler(Arc::new(|request: &CStoreRequest| Ok(CStoreResponse::success(request))));
+        let responses = association
+            .send_c_get(&crate::cget::CGetRequest::study("1.2.3.4", 1))
+            .await
+            .unwrap();
+
+        assert_eq!(responses.len(), 2);
+        let terminal = responses.last().unwrap();
+        assert_eq!(terminal.summary.completed, 2);
+        assert_eq!(terminal.summary.failed, 1);
+        assert_eq!(terminal.state(), crate::dimse::StatusState::Warning);
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn c_get_preserves_completed_count_when_provider_fails_after_an_instance() {
+        struct PartiallyBrokenGet;
+
+        #[async_trait::async_trait]
+        impl ServiceProvider for PartiallyBrokenGet {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![
+                    sop_class::STUDY_ROOT_QR_GET.to_string(),
+                    "1.2.840.10008.5.1.4.1.1.7".to_string(),
+                ]
+            }
+
+            fn on_c_get<'a>(
+                &'a self,
+                _request: &'a crate::cget::CGetRequest,
+            ) -> futures::stream::BoxStream<'a, Result<crate::cget::CGetEvent>> {
+                Box::pin(futures::stream::iter([
+                    Ok(crate::cget::CGetEvent::instance(instance_file())),
+                    Err(NetworkError::protocol("retrieve backend interrupted")),
+                ]))
+            }
+        }
+
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(PartiallyBrokenGet), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association =
+            Association::open(addr, "SCU", "SCP", get_contexts(), ClientOptions::default())
+                .await
+                .unwrap();
+        association.set_reverse_store_handler(Arc::new(|request: &CStoreRequest| Ok(CStoreResponse::success(request))));
+        let responses = association
+            .send_c_get(&crate::cget::CGetRequest::study("1.2.3.4", 1))
+            .await
+            .unwrap();
+
+        assert_eq!(responses.len(), 1);
+        let terminal = responses.last().unwrap();
+        assert_eq!(terminal.state(), crate::dimse::StatusState::Failure);
+        assert_eq!(terminal.summary.completed, 1);
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn c_get_does_not_mask_reverse_store_failure_with_provider_success() {
+        struct StaleSuccessGet;
+
+        #[async_trait::async_trait]
+        impl ServiceProvider for StaleSuccessGet {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![
+                    sop_class::STUDY_ROOT_QR_GET.to_string(),
+                    "1.2.840.10008.5.1.4.1.1.7".to_string(),
+                ]
+            }
+
+            fn on_c_get<'a>(
+                &'a self,
+                request: &'a crate::cget::CGetRequest,
+            ) -> futures::stream::BoxStream<'a, Result<crate::cget::CGetEvent>> {
+                Box::pin(futures::stream::iter([
+                    Ok(crate::cget::CGetEvent::instance(instance_file())),
+                    Ok(crate::cget::CGetEvent::Response(crate::cget::CGetResponse::completed(
+                        request,
+                        crate::cmove::SubOperationSummary { completed: 1, failed: 0, warning: 0 },
+                    ))),
+                ]))
+            }
+        }
+
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(StaleSuccessGet), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association =
+            Association::open(addr, "SCU", "SCP", get_contexts(), ClientOptions::default())
+                .await
+                .unwrap();
+        association.set_reverse_store_handler(Arc::new(|request: &CStoreRequest| {
+            Ok(CStoreResponse::failure(request, crate::dimse::status::STORAGE_FAILURE, "refused"))
+        }));
+        let responses = association
+            .send_c_get(&crate::cget::CGetRequest::study("1.2.3.4", 1))
+            .await
+            .unwrap();
+
+        assert_eq!(responses.len(), 1);
+        let terminal = responses.last().unwrap();
+        assert_eq!(terminal.state(), crate::dimse::StatusState::Failure);
+        assert_eq!(terminal.summary.failed, 1);
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn c_get_overrides_nonzero_provider_counters_after_an_instance() {
+        struct StaleFailureGet;
+
+        #[async_trait::async_trait]
+        impl ServiceProvider for StaleFailureGet {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![
+                    sop_class::STUDY_ROOT_QR_GET.to_string(),
+                    "1.2.840.10008.5.1.4.1.1.7".to_string(),
+                ]
+            }
+
+            fn on_c_get<'a>(
+                &'a self,
+                request: &'a crate::cget::CGetRequest,
+            ) -> futures::stream::BoxStream<'a, Result<crate::cget::CGetEvent>> {
+                let mut response = crate::cget::CGetResponse::failure(
+                    request,
+                    crate::dimse::status::PROCESSING_FAILURE,
+                    "stale provider counters",
+                );
+                response.summary.failed = 7;
+                Box::pin(futures::stream::iter([
+                    Ok(crate::cget::CGetEvent::instance(instance_file())),
+                    Ok(crate::cget::CGetEvent::Response(response)),
+                ]))
+            }
+        }
+
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(StaleFailureGet), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association =
+            Association::open(addr, "SCU", "SCP", get_contexts(), ClientOptions::default())
+                .await
+                .unwrap();
+        association.set_reverse_store_handler(Arc::new(|request: &CStoreRequest| Ok(CStoreResponse::success(request))));
+        let responses = association
+            .send_c_get(&crate::cget::CGetRequest::study("1.2.3.4", 1))
+            .await
+            .unwrap();
+
+        let terminal = responses.last().unwrap();
+        assert_eq!(terminal.state(), crate::dimse::StatusState::Failure);
+        assert_eq!(terminal.summary.completed, 1);
+        assert_eq!(terminal.summary.failed, 0);
         association.release().await.unwrap();
         handle.await.unwrap().unwrap();
     }

@@ -44,7 +44,7 @@
 | C-ECHO SCP | `DicomCEchoProvider` | 已实现 | `server.rs:333-337`、`services.rs:272-287` `VerificationProvider` | — |
 | C-STORE SCP | `DicomCStoreProvider` | 已实现 | `server.rs:672-702` | 但默认 sink 有泄漏与性能问题，见 §2.2、§3.1 |
 | C-FIND SCP | `DicomCFindProvider` | 部分实现 | `server.rs:757-817` | Pending 结果已逐条发送；C-CANCEL 仍未中断 provider，见 §1.3 |
-| C-GET SCP | `DicomCGetProvider`（子操作在服务内发起） | 部分实现 | `server.rs:427-515` | 同源缓冲；`remaining` 只按预缓冲的 `Instance` 计数，见 §2.4 |
+| C-GET SCP | `DicomCGetProvider`（子操作在服务内发起） | 部分实现 | `server.rs:567-665` | provider 事件已逐条消费；Pending 的 `remaining` 由 provider 提供，见 §2.4 |
 | C-MOVE SCP | `DicomCMoveProvider` | 部分实现 | `server.rs:669-757` | Pending/终止响应已逐条发送；C-CANCEL 仍未中断 provider，见 §1.3 |
 | C-CANCEL 处理 | `DicomService.cs` 取消在途请求 | 部分实现 | `server.rs:338-347` | 收下即丢弃（`let _cancelled = ...; Ok(())`），provider 永远不知道被取消 |
 | N-EVENT-REPORT SCP | `IDicomNEventReportRequestProvider` | 已实现 | `services.rs:240-243`、`server.rs:404` | 实现存在；**无任何测试**覆盖（见 §4） |
@@ -84,7 +84,6 @@
 
 | 项 | 位置 | 声明 | 判断 |
 | --- | --- | --- | --- |
-| C-GET 结果全量缓冲 | `server.rs:567-669` `ponytail:` 注释 | "buffered per request; stream straight through if it ever outgrows memory" | C-FIND 与 C-MOVE 已改为逐条发送；C-GET 仍然缓冲，因此 C-CANCEL 仍无法中断该 provider（§1.1） |
 | role selection 默认不协商 | `association.rs:263-275` `accept_roles: false` | 默认拒绝 SCU/SCP 角色选择 | 有意取舍；但意味着 SCP 不能作为 SCU 反向发请求，C-GET 只能走同关联反向 C-STORE |
 | `expert.rs` 的 `RELEASE_TIMEOUT` | `expert.rs:233` | 常量声明 10s | **死代码**：全仓无引用（grep 确认）。不是"有意不实现"，是遗漏 |
 
@@ -191,23 +190,23 @@ if !terminated {
 
 回归测试 `c_move_reports_the_real_counts_when_the_provider_never_terminates` 覆盖了该兜底路径；C-MOVE 现在还会在 provider 产生终止响应前逐条发送 Pending。
 
-### 2.4 【高】C-GET 的 `remaining` 与进度语义错误
+### 2.4 【已调整】C-GET 的 `remaining` 由 provider 进度驱动
 
-位置：`server.rs:479`、`server.rs:492-494`。
+此前位置：`server.rs:479`、`server.rs:492-494`；当前实现位于 `server.rs:567-665`。
 
 ```rust
-let mut remaining = events.iter()
-    .filter(|e| matches!(e, crate::cget::CGetEvent::Instance(_)))
-    .count() as u16;
+while let Some(event) = stream.next().await {
+    // Pending CGetResponse values are forwarded as they arrive.
+}
 ```
 
-问题有三层：
+旧实现的问题有三层：
 
 1. **不是真实剩余量**。provider 完全可以只发 `Response` 而把实例通过其它渠道交付（或先发 Response 后发 Instance）；此时 `remaining=0` 却仍有实例要送。
 2. **不是增量进度**。`(0000,1020)` 在 PS3.4 C-GET 中定义为"还需完成的子操作数"，随每个子操作递减。这里只能对预缓冲的快照递减，provider 若中途再产出实例则计数失效。
 3. **计数与 SCU 观察不一致**。SCU 侧看到的是"剩 N"→"剩 N-1"…但 N 来自缓冲长度，与 terminal 里的 completed 无必然关系。
 
-正确行为：由 provider 的 `pending(remaining, summary)` 直接驱动 `(0000,1020)`（provider 才掌握真实剩余量），服务端只做转发；仅在 provider 不提供时用本地递减兜底。
+当前行为：由 provider 的 `pending(remaining, summary)` 驱动 `(0000,1020)`，服务端逐条转发；这样无需把所有实例收进内存。实例已经交给反向 C-STORE 后，终止计数以实际子操作结果为准，避免 provider 的旧计数掩盖传输失败。若 provider 不产生 Pending 响应，服务端无法从流式实例序列推导总剩余数，因此只发送终止响应；provider 应在需要进度时显式产生 Pending。`c_get_reports_the_remaining_sub_operations` 覆盖了 provider 计数转发。
 
 ### 2.5 【高】服务端无 A-ASSOCIATE-RQ 超时，静默连接无限期占用 task
 
@@ -548,11 +547,11 @@ if end - pos < n { ... }
 
 好消息：`store.rs:66` 用的是 `from_bytes`，所以当前 C-STORE 路径**尚未**吃到这 10–80 倍。但它同时意味着 §3.1 的落盘是一次纯粹的浪费——一旦有人"优化"成 `write_and_parse` 里改用 `DicomFile::open`（看起来更自然），接收吞吐会立刻塌到 1/50。这条应作为"不要改成 open"的显式警告保留。
 
-### 3.5 【中】C-MOVE / C-GET 结果全量缓冲
+### 3.5 【中】C-CANCEL 无法中断流式检索
 
 位置：`server.rs:567-757`。
 
-C-GET 仍先把 provider 的 `BoxStream` 收进 `Vec` 再逐条发送，代价是一次返回大量实例时内存峰值等于全部结果的序列化前体积。C-FIND 与 C-MOVE 已采用逐条发送，首个 Pending 响应可在 provider 产生终端响应前到达 SCU；C-CANCEL 仍需引入可观察的取消状态，才能在 provider 运行期间中断三种服务。
+C-FIND、C-MOVE 与 C-GET 现在都逐条消费 provider stream，首个 Pending 响应可在 provider 产生终端响应前到达 SCU；C-CANCEL 仍需引入可观察的取消状态，才能在 provider 运行期间中断三种服务。
 
 ### 3.6 【中】C-GET 每实例重新构造 `Transcoder` 并整体转码
 
@@ -706,7 +705,7 @@ async fn loopback_honours_a_small_peer_max_pdu() {   // 注释说 "a 64-byte max
 | 3 | C-MOVE 终端计数归零 | `server.rs:727-757` | **已修复** | 用累加 summary 兜底，并有回归测试 |
 | 4 | `max_clients` 不生效 | `server.rs:125-147` | 高 | 小（Semaphore，fo-dicom 有现成模型） |
 | 5 | 服务端无 ACSE 超时 | `server.rs:177` | 高 | 一行（包 `timeout`） |
-| 6 | C-GET `remaining` 语义 | `server.rs:479-494` | 高 | 中（改由 provider 驱动） |
+| 6 | C-GET `remaining` 语义 | `server.rs:567-665` | **部分修复** | Pending 改由 provider 驱动；未提供 Pending 时无法推导总数 |
 | 7 | 客户端 PC 不复用 | `client.rs:149-155` | 中 | 中（需重开关联） |
 | 8 | 默认 C-STORE 慢 4 倍 + 阻塞 IO | `store.rs:60-77` | 中高 | 小（走内存路径 + `spawn_blocking`） |
 | 9 | 请求超时体系缺失（engine 死代码） | `engine.rs`、`client.rs:60` | 中 | 大（需设计接线） |
