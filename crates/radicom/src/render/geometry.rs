@@ -11,6 +11,7 @@
 use super::math::{Point2, Point3, Vector3};
 use crate::error::{DataError, Error};
 use crate::model::dataset::Dataset;
+use crate::model::item::DicomItem;
 use crate::model::tag::Tag;
 
 /// The dominant plane of a frame (fo-dicom `FrameOrientation`).
@@ -50,9 +51,21 @@ pub struct FrameGeometry {
 }
 
 impl FrameGeometry {
-    /// Extracts geometry from a dataset (frame 0; enhanced per-frame groups are
-    /// not read this round).
+    /// Extracts geometry from a dataset for frame 0.
     pub fn from_dataset(dataset: &Dataset) -> Result<Self, Error> {
+        Self::from_dataset_frame(dataset, 0)
+    }
+
+    /// Extracts geometry from a dataset for one frame (fo-dicom
+    /// `FrameGeometry(DicomDataset, int frame)`).
+    ///
+    /// Spacing precedence: ImagerPixelSpacing, PixelSpacing (0028,0030),
+    /// NominalScannedPixelSpacing (0018,2010), then the flattened enhanced
+    /// functional groups (Per-Frame `(5200,9230)` → Pixel Measures `(0028,9110)`,
+    /// then Shared `(5200,9229)`). Position/orientation use the top-level tags
+    /// first, then the same flattened functional groups, so enhanced multi-frame
+    /// geometry is read per frame instead of only from frame 0's top level.
+    pub fn from_dataset_frame(dataset: &Dataset, frame: u32) -> Result<Self, Error> {
         let width = dataset.try_get::<u16>(Tag::COLUMNS).unwrap_or(0) as u32;
         let height = dataset.try_get::<u16>(Tag::ROWS).unwrap_or(0) as u32;
         let frame_of_reference_uid = dataset
@@ -60,13 +73,21 @@ impl FrameGeometry {
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
 
-        // spacing: ImagerPixelSpacing, else PixelSpacing (rows, columns)
+        let functional = functional_group_values(dataset, frame);
+
+        // spacing: top-level ImagerPixelSpacing, PixelSpacing, Nominal... , then
+        // the flattened functional-group values (row, column order in each pair).
         let (spacing_between_rows, spacing_between_columns) = read_pair(dataset, Tag::IMAGER_PIXEL_SPACING)
             .or_else(|| read_pair(dataset, Tag::PIXEL_SPACING))
+            .or_else(|| read_pair(dataset, Tag::NOMINAL_SCANNED_PIXEL_SPACING))
+            .or_else(|| read_pair(&functional, Tag::PIXEL_SPACING))
+            .or_else(|| read_pair(&functional, Tag::IMAGER_PIXEL_SPACING))
             .unwrap_or((0.0, 0.0));
 
-        let position = read_vector(dataset, Tag::IMAGE_POSITION_PATIENT);
-        let orientation = read_orientation(dataset, Tag::IMAGE_ORIENTATION_PATIENT);
+        let position = read_vector(dataset, Tag::IMAGE_POSITION_PATIENT)
+            .or_else(|| read_vector(&functional, Tag::IMAGE_POSITION_PATIENT));
+        let orientation = read_orientation(dataset, Tag::IMAGE_ORIENTATION_PATIENT)
+            .or_else(|| read_orientation(&functional, Tag::IMAGE_ORIENTATION_PATIENT));
 
         Ok(Self::build(
             frame_of_reference_uid,
@@ -424,6 +445,42 @@ fn no_geometry() -> Error {
     })
 }
 
+/// Flattens the shared `(5200,9229)` and per-frame `(5200,9230)` functional
+/// groups for `frame` into a plain dataset, mirroring fo-dicom
+/// `FunctionalGroupValues`: each functional-group macro's first item is expanded
+/// one level (so Pixel Measures `(0028,9110)` contributes its PixelSpacing),
+/// Shared first then Per-Frame so per-frame values win.
+fn functional_group_values(dataset: &Dataset, frame: u32) -> Dataset {
+    fn absorb(out: &mut Dataset, group_item: &Dataset) {
+        for item in group_item.items() {
+            match item {
+                DicomItem::Sequence(seq) => {
+                    if let Some(first) = seq.items().first() {
+                        for inner in first.items() {
+                            out.insert_or_update(inner.clone());
+                        }
+                    }
+                }
+                other => {
+                    out.insert_or_update(other.clone());
+                }
+            }
+        }
+    }
+    let mut out = Dataset::new();
+    if let Some(shared) = dataset.try_get_sequence(Tag::SHARED_FUNCTIONAL_GROUPS_SEQUENCE) {
+        if let Some(item) = shared.items().first() {
+            absorb(&mut out, item);
+        }
+    }
+    if let Some(per_frame) = dataset.try_get_sequence(Tag::PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE) {
+        if let Some(item) = per_frame.items().get(frame as usize) {
+            absorb(&mut out, item);
+        }
+    }
+    out
+}
+
 /// Reads a two-value DS attribute (e.g. PixelSpacing) into `(first, second)`.
 fn read_pair(dataset: &Dataset, tag: Tag) -> Option<(f64, f64)> {
     let text = dataset.try_get_str(tag)?;
@@ -610,5 +667,38 @@ mod tests {
             Some([0.0, 1.0, 0.0, 0.0, 0.0, 1.0]),
         );
         assert!(intersection_localizer(&far, &axial).is_none(), "the plane never crosses the source rectangle");
+    }
+
+    #[test]
+    fn nominal_scanned_pixel_spacing_is_the_spacing_fallback() {
+        // (0018,2010) is used when neither PixelSpacing nor ImagerPixelSpacing is
+        // present (fo-dicom FrameGeometry.cs, third branch).
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::ROWS, 2u16);
+        ds.insert_value(Tag::COLUMNS, 2u16);
+        ds.insert_str(Tag::NOMINAL_SCANNED_PIXEL_SPACING, Vr::Ds, "0.3\\0.4");
+        let geometry = FrameGeometry::from_dataset(&ds).unwrap();
+        assert_eq!(geometry.spacing_between_rows(), 0.3, "rows from the first value");
+        assert_eq!(geometry.spacing_between_columns(), 0.4, "columns from the second value");
+    }
+
+    #[test]
+    fn enhanced_per_frame_pixel_measures_give_each_frame_its_spacing() {
+        // (5200,9230) per-frame item → Pixel Measures (0028,9110) → PixelSpacing
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::ROWS, 2u16);
+        ds.insert_value(Tag::COLUMNS, 2u16);
+        let per_frame = ds.insert_sequence(Tag::PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE);
+        for spacing in ["0.5\\0.6", "0.7\\0.8"] {
+            let mut frame_item = Dataset::new();
+            let mut measures = Dataset::new();
+            measures.insert_str(Tag::PIXEL_SPACING, Vr::Ds, spacing);
+            frame_item.insert_sequence(Tag::PIXEL_MEASURES_SEQUENCE).push(measures);
+            per_frame.push(frame_item);
+        }
+        let f0 = FrameGeometry::from_dataset_frame(&ds, 0).unwrap();
+        assert_eq!((f0.spacing_between_rows(), f0.spacing_between_columns()), (0.5, 0.6));
+        let f1 = FrameGeometry::from_dataset_frame(&ds, 1).unwrap();
+        assert_eq!((f1.spacing_between_rows(), f1.spacing_between_columns()), (0.7, 0.8), "frame 1 uses its own Pixel Measures");
     }
 }

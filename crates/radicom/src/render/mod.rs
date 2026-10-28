@@ -618,34 +618,36 @@ fn first_number(dataset: &Dataset, tag: Tag) -> Option<f64> {
     text.split('\\').next()?.trim().parse::<f64>().ok()
 }
 
-/// Borrows one native 8/16-bit frame's byte window plus its [`BitDepth`].
+/// Borrows one native 1/8/16-bit frame's byte window plus its [`BitDepth`] and
+/// frame dimensions.
 ///
 /// `PixelData::from_dataset` needs `&mut Dataset`, so the dataset is cloned; a
 /// read-only pixel accessor in `pixel/` would remove that clone, but it is out
 /// of this module's scope (§3.4 ceiling, documented at `render_grayscale_with_options`).
-fn frame_sample_buffer(dataset: &Dataset, frame: u32) -> Result<(crate::model::buffer::SharedBuffer, BitDepth), Error> {
+fn frame_sample_buffer(dataset: &Dataset, frame: u32) -> Result<(crate::model::buffer::SharedBuffer, BitDepth, usize, usize), Error> {
     let mut owned = dataset.clone();
     let pixel = PixelData::from_dataset(&mut owned)?;
     let bits = pixel.bits_allocated()?;
-    if !matches!(bits, 8 | 16) || pixel.transfer_syntax().is_encapsulated() {
-        return Err(unsupported("frame values need native 8/16-bit samples"));
+    if !matches!(bits, 1 | 8 | 16) || pixel.transfer_syntax().is_encapsulated() {
+        return Err(unsupported("frame values need native 1/8/16-bit samples"));
     }
     let stored = match pixel.bits_stored() {
         0 => bits,
         s => s.min(bits),
     };
+    let (width, height) = (pixel.width() as usize, pixel.height() as usize);
     let signed = pixel.pixel_representation() != 0;
     let depth = BitDepth::new(bits, stored, pixel.high_bit(), signed);
     let buffer = pixel.get_frame(frame)?;
-    Ok((buffer, depth))
+    Ok((buffer, depth, width, height))
 }
 
-/// Calls `f` once per stored sample of a native 8/16-bit frame, without ever
+/// Calls `f` once per stored sample of a native 1/8/16-bit frame, without ever
 /// materialising the frame as a `Vec` (§3.9). Values are normalised through
 /// [`BitDepth`] and sign-extended from the stored depth, matching the previous
 /// whole-frame `Vec<f64>` result exactly.
 fn visit_frame_stored_values(dataset: &Dataset, frame: u32, mut f: impl FnMut(f64)) -> Result<(), Error> {
-    let (buffer, depth) = frame_sample_buffer(dataset, frame)?;
+    let (buffer, depth, width, height) = frame_sample_buffer(dataset, frame)?;
     let raw = buffer.data();
     let raw: &[u8] = raw.as_ref();
     let signed = depth.signed;
@@ -658,7 +660,11 @@ fn visit_frame_stored_values(dataset: &Dataset, frame: u32, mut f: impl FnMut(f6
             n as f64
         }
     };
-    if depth.allocated == 8 {
+    if depth.allocated == 1 {
+        for bit in unpack_single_bit(raw, width, height) {
+            f(value(bit));
+        }
+    } else if depth.allocated == 8 {
         for &b in raw {
             f(value(b as u16));
         }
@@ -668,6 +674,23 @@ fn visit_frame_stored_values(dataset: &Dataset, frame: u32, mut f: impl FnMut(f6
         }
     }
     Ok(())
+}
+
+/// Unpacks `width`×`height` one-bit samples packed 8 per byte, most-significant
+/// bit first, each row padded to a byte boundary (PS3.3 C.7.6.3.1.1). Reversing
+/// each byte turns the MSB-first stream into an LSB-first one for indexing.
+fn unpack_single_bit(raw: &[u8], width: usize, height: usize) -> Vec<u16> {
+    let flipped = PixelDataConverter::reverse_bits(raw);
+    let row_bytes = width.div_ceil(8);
+    let mut out = Vec::with_capacity(width * height);
+    for y in 0..height {
+        let base = y * row_bytes;
+        for x in 0..width {
+            let byte = flipped.get(base + x / 8).copied().unwrap_or(0);
+            out.push(((byte >> (x % 8)) & 1) as u16);
+        }
+    }
+    out
 }
 
 /// Interprets a normalised `stored`-bit sample as a signed value.
@@ -1023,7 +1046,7 @@ fn render_grayscale_with_threshold(
         return Err(unsupported("only single-sample grayscale can be rendered"));
     }
     let bits = pixel.bits_allocated()?;
-    if !matches!(bits, 8 | 16) {
+    if !matches!(bits, 1 | 8 | 16) {
         return Err(unsupported(&format!("bits allocated {bits} is not rendered")));
     }
     if pixel.transfer_syntax().is_encapsulated() {
@@ -1037,6 +1060,21 @@ fn render_grayscale_with_threshold(
     let buffer = pixel.get_frame(frame)?;
     let raw = buffer.data();
     let raw: &[u8] = raw.as_ref();
+
+    // 1-bit (bilevel) frames are packed 8 pixels per byte, MSB first (PS3.3
+    // C.7.6.3.1.1). They are display-black/white, not windowed data.
+    if bits == 1 {
+        let (w, h) = (width as usize, height as usize);
+        let samples = unpack_single_bit(raw, w, h);
+        let invert = options.invert;
+        let mut bytes = Vec::with_capacity(w * h * 4);
+        for v in samples {
+            let white = (v != 0) ^ invert;
+            let gray = if white { 255u8 } else { 0u8 };
+            bytes.extend_from_slice(&[gray, gray, gray, 0xFF]);
+        }
+        return Ok(RawImage::new(width, height, bytes));
+    }
 
     let signed = pixel.pixel_representation() != 0;
     // Normalise to the low `bits_stored` bits (docs §5) via BitDepth: left-align
@@ -1493,7 +1531,7 @@ fn render_palette_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error
     if pixel.samples_per_pixel() != 1 {
         return Err(unsupported("PALETTE COLOR expects 1 sample per pixel"));
     }
-    let palette = pixel.palette_color_lut().ok_or_else(|| unsupported("PALETTE COLOR but no palette LUT"))?;
+    let palette = pixel.palette_color_lut_checked()?;
     // PS3.3 C.7.6.3.1.5: input value v maps to entry (v - first_mapped), and
     // values outside the table clamp to the first/last entry.
     let first_mapped = pixel.palette_first_mapped().unwrap_or(0);
@@ -1538,11 +1576,11 @@ fn render_ybr_frame(
 ) -> Result<RawImage, Error> {
     let mut owned = dataset.clone();
     let pixel = PixelData::from_dataset(&mut owned)?;
-    // PS3.3 / docs §5: YBR_FULL / YBR_FULL_422 / YBR_PARTIAL_422 are defined only
-    // for interleaved samples (planar configuration 0). A planar configuration of
-    // 1 here is malformed data, not an alternative layout to guess at.
-    if pixel.planar_configuration() == 1 {
-        return Err(unsupported("YBR frames must be interleaved (planar configuration 0)"));
+    // PS3.3 C.7.6.3.1.3: YBR_FULL may be planar (configuration 1); subsampled
+    // YBR (4:2:2) is defined only interleaved.
+    let planar = pixel.planar_configuration() == 1;
+    if planar && subsampled {
+        return Err(unsupported("subsampled YBR must be interleaved (planar configuration 0)"));
     }
     if pixel.transfer_syntax().is_encapsulated() {
         return Err(unsupported("compressed YBR frames need the codec layer"));
@@ -1625,6 +1663,19 @@ fn render_ybr_frame(
                 let (r, g, b) = to_rgb(y, cb, cr);
                 bytes.extend_from_slice(&[b, g, r, 0xFF]);
             }
+        }
+    } else if planar {
+        // 4:4:4 planar (PS3.3 C.7.6.3.1.3): the Y plane, then Cb, then Cr, each
+        // holding `count` samples.
+        if raw.len() < count * 3 * unit {
+            return Err(unsupported("planar YBR frame is shorter than three planes"));
+        }
+        for i in 0..count {
+            let y = read(i * unit);
+            let cb = read((count + i) * unit);
+            let cr = read((2 * count + i) * unit);
+            let (r, g, b) = to_rgb(y, cb, cr);
+            bytes.extend_from_slice(&[b, g, r, 0xFF]);
         }
     } else {
         // 4:4:4: interleaved Y, Cb, Cr per pixel
@@ -1952,6 +2003,42 @@ mod tests {
         assert!(lum(pixels[3]) >= lum(pixels[0]), "brighter stored value renders brighter");
     }
 
+    /// Builds a 1-bit MONOCHROME2 frame from packed bytes (8 pixels per byte).
+    fn single_bit_image(width: u16, height: u16, packed: &[u8]) -> Dataset {
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16);
+        ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
+        ds.insert_value(Tag::ROWS, height);
+        ds.insert_value(Tag::COLUMNS, width);
+        ds.insert_value(Tag::BITS_ALLOCATED, 1u16);
+        ds.insert_value(Tag::BITS_STORED, 1u16);
+        ds.insert_value(Tag::HIGH_BIT, 0u16);
+        ds.insert_value(Tag::PIXEL_REPRESENTATION, 0u16);
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::PIXEL_DATA,
+                Vr::Ob,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(packed.to_vec())),
+            ),
+        ));
+        ds.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        ds
+    }
+
+    fn greys(image: &RawImage) -> Vec<u8> {
+        image.as_bytes().as_chunks::<4>().0.iter().map(|p| p[0]).collect()
+    }
+
+    #[test]
+    fn single_bit_frames_unpack_msb_first_as_black_and_white() {
+        // 2x2, one byte per row: 0b1010_0000 → pixels 1,0,1,0 (PS3.3 C.7.6.3.1.1)
+        let image = render_frame(&single_bit_image(2, 2, &[0b1010_0000, 0b1010_0000]), 0).unwrap();
+        assert_eq!(greys(&image), vec![255, 0, 255, 0], "bit 1 is white, 0 is black");
+        // 8x1, byte 0b1000_0000: the first pixel is the most significant bit
+        let image = render_frame(&single_bit_image(8, 1, &[0b1000_0000]), 0).unwrap();
+        assert_eq!(greys(&image), vec![255, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
     #[test]
     fn parallel_pixel_rows_are_byte_identical_to_serial() {
         // 512x512 = 262144 px exceeds PARALLEL_MIN_PIXELS: threshold 0 takes the
@@ -2202,6 +2289,41 @@ mod tests {
         let image = render_frame(&ds, 0).unwrap();
         let b = image.as_bytes();
         assert!(b[2] > 240 && b[1] < 16 && b[0] < 16, "red-ish BGRA: {:?}", &b[0..4]);
+    }
+
+    /// Builds a `width`×`height` 8-bit YBR_FULL frame with explicit stored order.
+    fn ybr_full_image(width: u16, height: u16, planar: u16, samples: &[u8]) -> Dataset {
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::SAMPLES_PER_PIXEL, 3u16);
+        ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "YBR_FULL");
+        ds.insert_value(Tag::ROWS, height);
+        ds.insert_value(Tag::COLUMNS, width);
+        ds.insert_value(Tag::BITS_ALLOCATED, 8u16);
+        ds.insert_value(Tag::BITS_STORED, 8u16);
+        ds.insert_value(Tag::HIGH_BIT, 7u16);
+        ds.insert_value(Tag::PIXEL_REPRESENTATION, 0u16);
+        ds.insert_value(Tag::PLANAR_CONFIGURATION, planar);
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::PIXEL_DATA,
+                Vr::Ob,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(samples.to_vec())),
+            ),
+        ));
+        ds.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        ds
+    }
+
+    #[test]
+    fn a_planar_ybr_full_frame_renders_like_the_interleaved_one() {
+        // 2x2 pixels p0..p3 = (Y,Cb,Cr): (128,128,128), (100,150,200),
+        // (200,100,50), (50,128,128). Planar = the three channel planes.
+        let interleaved: &[u8] = &[128, 128, 128, 100, 150, 200, 200, 100, 50, 50, 128, 128];
+        let planar: &[u8] = &[128, 100, 200, 50, 128, 150, 100, 128, 128, 200, 50, 128];
+        let a = render_frame(&ybr_full_image(2, 2, 0, interleaved), 0).unwrap();
+        let b = render_frame(&ybr_full_image(2, 2, 1, planar), 0).unwrap();
+        assert_eq!(a.as_bytes(), b.as_bytes(), "planar 1 de-interleaves to the same pixels");
+        assert_eq!(&a.as_bytes()[0..4], &[128, 128, 128, 0xFF], "neutral YCbCr is grey");
     }
 
     /// Builds a 4:2:2 YBR image of `width`×1 with explicit stored bytes.

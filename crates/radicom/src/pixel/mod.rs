@@ -427,20 +427,26 @@ impl<'a> PixelData<'a> {
 
     // -- palette (PIX-04) ---------------------------------------------------
 
-    /// Resolves `PALETTE COLOR` LUTs into 256-entry colour tables (§1.2).
+    /// Resolves `PALETTE COLOR` LUTs into colour tables (§1.2).
+    ///
+    /// Returns `None` when the LUT is missing or fails validation; use
+    /// [`palette_color_lut_checked`](Self::palette_color_lut_checked) to surface
+    /// the typed error.
     pub fn palette_color_lut(&self) -> Option<Vec<Color32>> {
+        self.palette_color_lut_checked().ok()
+    }
+
+    /// Resolves `PALETTE COLOR` LUTs, validating each descriptor and data length
+    /// (§2.3 / PS3.3 C.7.6.3.1.5) instead of fabricating zero entries.
+    pub fn palette_color_lut_checked(&self) -> Result<Vec<Color32>, Error> {
         if self.photometric_interpretation() != Some(PhotometricInterpretation::PaletteColor) {
-            return None;
+            return Err(pixel_err("palette LUT requested for a non-PALETTE COLOR image"));
         }
         let red = self.read_lut(RED_DESCRIPTOR, RED_DATA)?;
         let green = self.read_lut(GREEN_DESCRIPTOR, GREEN_DATA)?;
         let blue = self.read_lut(BLUE_DESCRIPTOR, BLUE_DATA)?;
         let len = red.len().min(green.len()).min(blue.len());
-        Some(
-            (0..len)
-                .map(|i| Color32::new(red[i], green[i], blue[i]))
-                .collect(),
-        )
+        Ok((0..len).map(|i| Color32::new(red[i], green[i], blue[i])).collect())
     }
 
     /// The first input value mapped by the palette LUTs (PS3.3 C.7.6.3.1.5),
@@ -455,41 +461,68 @@ impl<'a> PixelData<'a> {
         Some(u16::from_le_bytes([desc[2], desc[3]]) as i32)
     }
 
-    /// One LUT channel: descriptor-driven 8-bit expansion.
+    /// One LUT channel: descriptor-driven 8-bit expansion, validated against the
+    /// descriptor entry count and the stored data length (§2.3).
     ///
-    /// The LUT Descriptor (PS3.3 C.7.6.3.1.5) is three US values:    /// `[0]` number of entries (0 ⇒ 65536), `[1]` first mapped pixel value,
-    /// `[2]` bits per entry. Each US is little-endian, so the byte layout is
-    /// entries@0..2, first@2..4, bits@4..6 — a 6-byte descriptor.
-    fn read_lut(&self, descriptor_tag: Tag, data_tag: Tag) -> Option<Vec<u8>> {
-        let descriptor = self.dataset.item(&descriptor_tag)?.as_element_buffer()?;
+    /// The LUT Descriptor (PS3.3 C.7.6.3.1.5) is three US values: `[0]` number of
+    /// entries (0 ⇒ 65536), `[1]` first mapped pixel value, `[2]` bits per entry.
+    /// Each US is little-endian, so the byte layout is entries@0..2, first@2..4,
+    /// bits@4..6 — a 6-byte descriptor.
+    fn read_lut(&self, descriptor_tag: Tag, data_tag: Tag) -> Result<Vec<u8>, Error> {
+        let descriptor = self
+            .dataset
+            .item(&descriptor_tag)
+            .and_then(DicomItem::as_element_buffer)
+            .ok_or_else(|| pixel_err("palette LUT descriptor missing"))?;
         let desc = descriptor.data();
         if desc.len() < 6 {
-            return None;
+            return Err(pixel_err("palette LUT descriptor is shorter than 6 bytes"));
         }
         let entries = u16::from_le_bytes([desc[0], desc[1]]);
         // a descriptor count of 0 means 65536 entries (PS3.3 C.7.6.3.1.5)
         let count = if entries == 0 { 65536usize } else { entries as usize };
         let _first_mapped = u16::from_le_bytes([desc[2], desc[3]]);
         let bits = u16::from_le_bytes([desc[4], desc[5]]);
-        let data = self.dataset.item(&data_tag)?.as_element_buffer()?;
+        if !matches!(bits, 8 | 16) {
+            return Err(pixel_err(format!("palette LUT bits per entry {bits} is not 8 or 16")));
+        }
+        // An explicit count may not exceed the index range BitsStored addresses.
+        // A descriptor count of 0 is exempt (it means the full 65536 table).
+        let bits_stored = self.bits_stored();
+        if entries != 0 && bits_stored > 0 && bits_stored < 31 {
+            let addressable = 1usize << bits_stored;
+            if count > addressable {
+                return Err(pixel_err(format!(
+                    "palette LUT entry count {count} exceeds 2^BitsStored ({addressable})"
+                )));
+            }
+        }
+
+        let data = self
+            .dataset
+            .item(&data_tag)
+            .and_then(DicomItem::as_element_buffer)
+            .ok_or_else(|| pixel_err("palette LUT data missing"))?;
         let raw = data.data();
 
         let mut out = Vec::with_capacity(count);
         if raw.len() == count {
             // 8-bit entries (one byte per entry)
-            for i in 0..count {
-                out.push(*raw.get(i).unwrap_or(&0));
-            }
-        } else {
+            out.extend_from_slice(&raw[..count]);
+        } else if raw.len() >= count * 2 {
             // data is two bytes per entry: fo-dicom takes one byte per entry,
             // the high byte (offset 1) when 16-bit-allocated, else the low byte
             let offset = if bits == 16 { 1 } else { 0 };
             for i in 0..count {
-                let byte = *raw.get(i * 2 + offset).unwrap_or(&0);
-                out.push(byte);
+                out.push(raw[i * 2 + offset]);
             }
+        } else {
+            return Err(pixel_err(format!(
+                "palette LUT data length {} does not cover {count} entries",
+                raw.len()
+            )));
         }
-        Some(out)
+        Ok(out)
     }
 }
 
@@ -833,6 +866,47 @@ mod tests {
         }
         let palette = PixelData::from_dataset(&mut ds).unwrap().palette_color_lut().unwrap();
         assert_eq!(palette.len(), 65536, "zero entries expands to 65536");
+    }
+
+    /// A PALETTE COLOR dataset whose three channels share `entries`/`bits` and
+    /// per-channel `data` bytes.
+    fn palette_dataset(entries: u16, bits: u16, data: &[u8]) -> Dataset {
+        let mut ds = mono_dataset(1, 1, 8, 1);
+        ds.insert_str(PHOTOMETRIC_INTERPRETATION, Vr::Cs, "PALETTE COLOR");
+        let mut desc = Vec::new();
+        desc.extend_from_slice(&entries.to_le_bytes());
+        desc.extend_from_slice(&0u16.to_le_bytes());
+        desc.extend_from_slice(&bits.to_le_bytes());
+        let desc: SharedBuffer = Arc::new(MemoryBuffer::from(desc));
+        let data: SharedBuffer = Arc::new(MemoryBuffer::from(data.to_vec()));
+        for (d, t) in [(RED_DESCRIPTOR, RED_DATA), (GREEN_DESCRIPTOR, GREEN_DATA), (BLUE_DESCRIPTOR, BLUE_DATA)] {
+            ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(d, Vr::Us, desc.clone())));
+            ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(t, Vr::Ow, data.clone())));
+        }
+        ds
+    }
+
+    #[test]
+    fn palette_lut_accepts_exactly_the_descriptor_length() {
+        let mut ds = palette_dataset(4, 8, &[10, 20, 30, 40]);
+        let lut = PixelData::from_dataset(&mut ds).unwrap().palette_color_lut_checked().unwrap();
+        assert_eq!(lut.len(), 4);
+        assert_eq!(lut[2], Color32::new(30, 30, 30), "the third entry of every channel is 30");
+    }
+
+    #[test]
+    fn palette_lut_rejects_short_data() {
+        // descriptor says 4 entries but only 2 bytes are present per channel
+        let mut ds = palette_dataset(4, 8, &[10, 20]);
+        assert!(PixelData::from_dataset(&mut ds).unwrap().palette_color_lut_checked().is_err());
+    }
+
+    #[test]
+    fn palette_lut_rejects_a_descriptor_count_beyond_bits_stored() {
+        // BitsStored=8 addresses at most 2^8 = 256 entries; 300 is malformed.
+        let data = vec![0u8; 300];
+        let mut ds = palette_dataset(300, 8, &data);
+        assert!(PixelData::from_dataset(&mut ds).unwrap().palette_color_lut_checked().is_err());
     }
 
     #[test]
