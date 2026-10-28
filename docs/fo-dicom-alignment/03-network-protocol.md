@@ -90,7 +90,7 @@
 | 优先级元素 | `DicomPriority.cs` | **已实现** | `dimse.rs:49-75` `Priority` | `Medium=0`、`High=1`、`Low=2`，缺失/未知值回落 Medium |
 | 状态码分类 | `DicomStatus.cs:Lookup`（mask + 通配 `Bxxx`/`Cxxx`/`A7xx`） | 部分实现 | `dimse.rs:444` `classify` / `dimse.rs:470` `exact_state` | 有按类归并，但**无通配字符串表、无 `AddKnownDicomStatuses` 式可扩展注册** |
 | 状态码常量表 | `DicomStatus.cs:311-515` | 部分实现 | `dimse.rs:483-508` `status` | 常量被别名合并，语义丢失，见 §2.8 |
-| 状态码 → 名称/描述 | `DicomStatus.Description`、`DicomStatus.ToString` | 部分实现 | `dimse.rs:504` `status_description`、`Status::description` | 提供通用描述；仍未按 service class 暴露完整 fo-dicom 描述表 |
+| 状态码 → 名称/描述 | `DicomStatus.Description`、`DicomStatus.ToString` | 部分实现 | `dimse.rs` `status_description_for_service_class`、`Status::description_for` | 已支持 Generic/Storage/QueryRetrieve 上下文；完整可扩展 fo-dicom 状态注册表仍未实现 |
 | 离线命令集解析容错 | `DicomMessage` 从 Dataset 构造 | 已实现 | `dimse.rs:311` `from_dataset` | 缺字段用 `get_or` 兜底 |
 
 ### 1.5 N-Service（DIMSE-N）
@@ -210,7 +210,7 @@ pub const REFUSED_OUT_OF_RESOURCES: u16 = 0xA700;
 
 后果：调用方无法从常量名得知语义；`STORAGE_FAILURE` 与 `STORAGE_OUT_OF_RESOURCES` 数值相同，而 PS3.4 中 C-STORE 的 `A700` 确实是"拒绝：资源不足"，但 `A801`/`A900` 在 Storage 与 Q/R 下含义不同。缺少"按 service class 解析"的能力。
 
-**正确行为**：保留每个数值 + service class 组合的独立命名与描述，或至少提供 `(code, service_class) -> description` 查询；缺失的 `DicomStatus.Lookup` 描述表见 §1.4。
+**当前修复**：`StatusServiceClass` 与 `status_description_for_service_class` 已提供 `(code, service_class) -> description` 查询，覆盖 Storage 与 Query/Retrieve 对 `A900` 的不同语义；完整可扩展 `DicomStatus.Lookup` 注册表仍是后续差异。
 
 ---
 

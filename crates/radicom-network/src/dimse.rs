@@ -473,6 +473,18 @@ impl StatusState {
     }
 }
 
+/// Service-class context for status descriptions whose wording differs by
+/// operation family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusServiceClass {
+    /// Use the generic PS3.7/PS3.4 wording.
+    Generic,
+    /// Storage service classes (C-STORE and related operations).
+    Storage,
+    /// Query/Retrieve service classes (C-FIND, C-GET and C-MOVE).
+    QueryRetrieve,
+}
+
 /// A status code with its classification and optional comment (§6.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
@@ -506,6 +518,11 @@ impl Status {
     pub fn description(&self) -> &'static str {
         status_description(self.code)
     }
+
+    /// Returns a description using the supplied service-class context.
+    pub fn description_for(&self, service_class: StatusServiceClass) -> &'static str {
+        status_description_for_service_class(self.code, service_class)
+    }
 }
 
 /// Returns a generic PS3.7/PS3.4 description for a DIMSE status code.
@@ -526,6 +543,16 @@ pub fn status_description(code: u16) -> &'static str {
         0xB000..=0xBFFF => "Completed with warnings",
         0xC000..=0xCFFF => "Unable to process",
         _ => "Unknown status",
+    }
+}
+
+/// Returns a status description with service-class-specific wording where the
+/// DICOM standard assigns different meanings to the same numeric code.
+pub fn status_description_for_service_class(code: u16, service_class: StatusServiceClass) -> &'static str {
+    match (code, service_class) {
+        (0xA900, StatusServiceClass::Storage) => "Data set does not match SOP class",
+        (0xA900, StatusServiceClass::QueryRetrieve) => "Identifier does not match SOP class",
+        _ => status_description(code),
     }
 }
 
@@ -890,6 +917,26 @@ mod tests {
         assert_eq!(status.description(), "Unable to process");
         assert_eq!(Status::new(0xB123).description(), "Completed with warnings");
         assert_eq!(Status::new(0xDEAD).description(), "Unknown status");
+    }
+
+    #[test]
+    fn status_descriptions_can_use_the_service_class_context() {
+        assert_eq!(
+            status_description_for_service_class(0xA900, StatusServiceClass::Storage),
+            "Data set does not match SOP class"
+        );
+        assert_eq!(
+            status_description_for_service_class(0xA900, StatusServiceClass::QueryRetrieve),
+            "Identifier does not match SOP class"
+        );
+        assert_eq!(
+            status_description_for_service_class(0xA701, StatusServiceClass::QueryRetrieve),
+            "Unable to calculate number of matches"
+        );
+        assert_eq!(
+            Status::new(0xA900).description_for(StatusServiceClass::Storage),
+            "Data set does not match SOP class"
+        );
     }
 
     #[test]
