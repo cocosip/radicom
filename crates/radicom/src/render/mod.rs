@@ -302,8 +302,14 @@ impl GrayscaleRenderOptions {
     pub fn from_histogram(dataset: &Dataset, frame: u32, percent: i32) -> Result<Self, Error> {
         // Two streaming passes over the sample buffer: one for the bin range, one
         // to fill the histogram. Never materialises the frame as a `Vec` (§3.9).
+        // Padding is excluded from the bin range (and cleared below) so a large
+        // 0x0000/0xFFFF spike cannot stretch or dominate the derived window.
+        let pad = first_number(dataset, Tag::PIXEL_PADDING_VALUE);
         let mut range: Option<(f64, f64)> = None;
         visit_frame_stored_values(dataset, frame, |v| {
+            if Some(v) == pad {
+                return;
+            }
             range = Some(match range {
                 Some((lo, hi)) => (lo.min(v), hi.max(v)),
                 None => (v, v),
@@ -314,9 +320,19 @@ impl GrayscaleRenderOptions {
             Some((lo, hi)) => (lo.round() as i32, hi.round() as i32),
             None => return Err(unsupported("frame has no samples for a histogram")),
         };
+        // Guard the bin array against a 32-bit-stored value domain (a 2^32-bin
+        // histogram is not representable); 1/8/16-bit ranges are well under this.
+        if (max as i64 - min as i64) > 1_048_576 {
+            return Err(unsupported("histogram window range is too wide to bin"));
+        }
         let mut histogram = Histogram::new(min, max);
         visit_frame_stored_values(dataset, frame, |v| histogram.add(v.round() as i32))
             .map_err(|_| unsupported("histogram window needs native 8/16-bit samples"))?;
+        // fo-dicom clears the padding bin before choosing the window
+        // (GrayscaleRenderOptions.cs:505 `histogram.Clear(padding)`).
+        if let Some(pad) = pad {
+            histogram.clear(pad.round() as i32);
+        }
         histogram.apply_window_percent(percent.clamp(1, 100));
 
         let start = histogram.window_start() as f64;
@@ -618,7 +634,7 @@ fn first_number(dataset: &Dataset, tag: Tag) -> Option<f64> {
     text.split('\\').next()?.trim().parse::<f64>().ok()
 }
 
-/// Borrows one native 1/8/16-bit frame's byte window plus its [`BitDepth`] and
+/// Borrows one native 1/8/16/32-bit frame's byte window plus its [`BitDepth`] and
 /// frame dimensions.
 ///
 /// `PixelData::from_dataset` needs `&mut Dataset`, so the dataset is cloned; a
@@ -628,8 +644,11 @@ fn frame_sample_buffer(dataset: &Dataset, frame: u32) -> Result<(crate::model::b
     let mut owned = dataset.clone();
     let pixel = PixelData::from_dataset(&mut owned)?;
     let bits = pixel.bits_allocated()?;
-    if !matches!(bits, 1 | 8 | 16) || pixel.transfer_syntax().is_encapsulated() {
-        return Err(unsupported("frame values need native 1/8/16-bit samples"));
+    if bits == 64 {
+        return Err(unsupported("64-bit grayscale samples are not supported (supported: 1, 8, 16, 32)"));
+    }
+    if !matches!(bits, 1 | 8 | 16 | 32) || pixel.transfer_syntax().is_encapsulated() {
+        return Err(unsupported("frame values need native 1/8/16/32-bit samples"));
     }
     let stored = match pixel.bits_stored() {
         0 => bits,
@@ -642,10 +661,10 @@ fn frame_sample_buffer(dataset: &Dataset, frame: u32) -> Result<(crate::model::b
     Ok((buffer, depth, width, height))
 }
 
-/// Calls `f` once per stored sample of a native 1/8/16-bit frame, without ever
-/// materialising the frame as a `Vec` (§3.9). Values are normalised through
-/// [`BitDepth`] and sign-extended from the stored depth, matching the previous
-/// whole-frame `Vec<f64>` result exactly.
+/// Calls `f` once per stored sample of a native 1/8/16/32-bit frame, without
+/// ever materialising the frame as a `Vec` (§3.9). Values are normalised and
+/// sign-extended from the stored depth, matching the previous whole-frame
+/// `Vec<f64>` result exactly.
 fn visit_frame_stored_values(dataset: &Dataset, frame: u32, mut f: impl FnMut(f64)) -> Result<(), Error> {
     let (buffer, depth, width, height) = frame_sample_buffer(dataset, frame)?;
     let raw = buffer.data();
@@ -667,6 +686,10 @@ fn visit_frame_stored_values(dataset: &Dataset, frame: u32, mut f: impl FnMut(f6
     } else if depth.allocated == 8 {
         for &b in raw {
             f(value(b as u16));
+        }
+    } else if depth.allocated == 32 {
+        for c in raw.as_chunks::<4>().0 {
+            f(sample32_value(u32::from_le_bytes([c[0], c[1], c[2], c[3]]), depth));
         }
     } else {
         for c in raw.as_chunks::<2>().0 {
@@ -1046,7 +1069,10 @@ fn render_grayscale_with_threshold(
         return Err(unsupported("only single-sample grayscale can be rendered"));
     }
     let bits = pixel.bits_allocated()?;
-    if !matches!(bits, 1 | 8 | 16) {
+    if bits == 64 {
+        return Err(unsupported("64-bit grayscale samples are not supported (supported: 1, 8, 16, 32)"));
+    }
+    if !matches!(bits, 1 | 8 | 16 | 32) {
         return Err(unsupported(&format!("bits allocated {bits} is not rendered")));
     }
     if pixel.transfer_syntax().is_encapsulated() {
@@ -1081,6 +1107,13 @@ fn render_grayscale_with_threshold(
     // on the high bit, then drop the sub-bit padding.
     let depth = BitDepth::new(bits, pixel.bits_stored(), pixel.high_bit(), signed);
     let count = (width as usize) * (height as usize);
+
+    // 32-bit samples have a value domain far too large for an occurring-range
+    // LUT, so they are mapped per pixel (no 2^32 table). The window/rescale
+    // pipeline is unchanged.
+    if bits == 32 {
+        return render_grayscale_32(raw, width, height, depth, options);
+    }
 
     // Precalculate the window: the mapping is a pure function of the stored
     // value, so evaluate it once per distinct value instead of once per pixel
@@ -1122,6 +1155,46 @@ fn frame_sample_at(raw: &[u8], index: usize, depth: BitDepth) -> u16 {
         let hi = raw.get(index * 2 + 1).copied().unwrap_or(0);
         depth.normalize(u16::from_le_bytes([lo, hi]))
     }
+}
+
+/// A 32-bit stored value as f64, normalised to the stored bits exactly like
+/// fo-dicom `GrayscalePixelDataU32/S32` (left-align on HighBit, then drop the
+/// sub-bit padding) and sign-extended when Pixel Representation is 1.
+fn sample32_value(value: u32, depth: BitDepth) -> f64 {
+    if depth.stored == 0 || depth.stored > 32 || depth.high_bit >= 32 {
+        return if depth.signed { (value as i32) as f64 } else { value as f64 };
+    }
+    let up = (32 - depth.high_bit - 1) as u32;
+    let down = (32 - depth.stored) as u32;
+    if depth.signed {
+        (((value as i32) << up) >> down) as f64
+    } else {
+        ((value << up) >> down) as f64
+    }
+}
+
+/// Renders a 32-bit single-sample grayscale frame. Values are mapped per pixel
+/// through [`GrayscaleRenderOptions::map`] (no occurring-range LUT, whose domain
+/// would be up to 2^32 entries).
+fn render_grayscale_32(
+    raw: &[u8],
+    width: u32,
+    height: u32,
+    depth: BitDepth,
+    options: &GrayscaleRenderOptions,
+) -> Result<RawImage, Error> {
+    let (w, h) = (width as usize, height as usize);
+    let count = w * h;
+    if raw.len() < count * 4 {
+        return Err(unsupported("frame is shorter than rows×cols×4 bytes"));
+    }
+    let mut bytes = Vec::with_capacity(count * 4);
+    for i in 0..count {
+        let v = u32::from_le_bytes([raw[i * 4], raw[i * 4 + 1], raw[i * 4 + 2], raw[i * 4 + 3]]);
+        let gray = options.map(sample32_value(v, depth));
+        bytes.extend_from_slice(&[gray, gray, gray, 0xFF]);
+    }
+    Ok(RawImage::new(width, height, bytes))
 }
 
 /// Emits the output rows of one band into `dst` (the band's own contiguous
@@ -1946,6 +2019,27 @@ mod tests {
     }
 
     #[test]
+    fn from_histogram_ignores_a_padding_spike() {
+        // 9 padding zeros + the real cluster 100..104; with the padding bin
+        // excluded the 100% window is the cluster itself (centre 102, width 4),
+        // identical to the same data without the spike. Without trimming the 9
+        // zeros would stretch the range to 0..104 (centre 52, width 104).
+        let padded = gray_image(14, 1, 8, &[0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 101, 102, 103, 104], None, None);
+        let mut padded = padded;
+        padded.insert_value(Tag::PIXEL_PADDING_VALUE, 0u16);
+        let clean = gray_image(5, 1, 8, &[100, 101, 102, 103, 104], None, None);
+
+        let a = GrayscaleRenderOptions::from_histogram(&padded, 0, 100).unwrap();
+        let b = GrayscaleRenderOptions::from_histogram(&clean, 0, 100).unwrap();
+        assert_eq!((a.window_center, a.window_width), (102.0, 4.0), "window is the real cluster, not 0..104");
+        assert_eq!(
+            (a.window_center, a.window_width),
+            (b.window_center, b.window_width),
+            "padding spike does not change the derived window"
+        );
+    }
+
+    #[test]
     fn invert_reverses_the_output() {
         let mut o = GrayscaleRenderOptions::from_window_level(40.0, 400.0);
         o.invert = true;
@@ -2037,6 +2131,68 @@ mod tests {
         // 8x1, byte 0b1000_0000: the first pixel is the most significant bit
         let image = render_frame(&single_bit_image(8, 1, &[0b1000_0000]), 0).unwrap();
         assert_eq!(greys(&image), vec![255, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    /// Builds a 32-bit MONOCHROME2 frame from raw `u32` sample bits (signed
+    /// values are passed as their two's-complement `u32`).
+    fn gray_image_32(width: u16, height: u16, signed: bool, samples: &[u32], center: f64, width_ds: f64) -> Dataset {
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16);
+        ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
+        ds.insert_value(Tag::ROWS, height);
+        ds.insert_value(Tag::COLUMNS, width);
+        ds.insert_value(Tag::BITS_ALLOCATED, 32u16);
+        ds.insert_value(Tag::BITS_STORED, 32u16);
+        ds.insert_value(Tag::HIGH_BIT, 31u16);
+        ds.insert_value(Tag::PIXEL_REPRESENTATION, if signed { 1u16 } else { 0u16 });
+        ds.insert_str(Tag::WINDOW_CENTER, Vr::Ds, format!("{center}"));
+        ds.insert_str(Tag::WINDOW_WIDTH, Vr::Ds, format!("{width_ds}"));
+        let mut bytes = Vec::new();
+        for &s in samples {
+            bytes.extend_from_slice(&s.to_le_bytes());
+        }
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::PIXEL_DATA,
+                Vr::Ow,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(bytes)),
+            ),
+        ));
+        ds.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        ds
+    }
+
+    #[test]
+    fn thirty_two_bit_grayscale_renders_through_the_window() {
+        // window centre 1500 / width 3000 over 0,1000,2000,3000 → 0,85,170,255
+        let ds = gray_image_32(2, 2, false, &[0, 1000, 2000, 3000], 1500.0, 3000.0);
+        let image = render_frame(&ds, 0).unwrap();
+        assert_eq!(greys(&image), vec![0, 85, 170, 255]);
+    }
+
+    #[test]
+    fn signed_thirty_two_bit_grayscale_renders_negative_values() {
+        // window centre 0 / width 2000 over -1000,-500,0,1000 → 0,64,128,255
+        let samples = [-1000i32, -500, 0, 1000].map(|v| v as u32);
+        let ds = gray_image_32(2, 2, true, &samples, 0.0, 2000.0);
+        let image = render_frame(&ds, 0).unwrap();
+        assert_eq!(greys(&image), vec![0, 64, 128, 255]);
+    }
+
+    #[test]
+    fn sixty_four_bit_grayscale_is_an_explicit_error() {
+        let mut ds = gray_image_32(2, 2, false, &[0, 0, 0, 0], 1.0, 2.0);
+        ds.insert_value(Tag::BITS_ALLOCATED, 64u16);
+        ds.insert_value(Tag::BITS_STORED, 64u16);
+        ds.insert_value(Tag::HIGH_BIT, 63u16);
+        let err = render_frame(&ds, 0).unwrap_err();
+        assert!(format!("{err}").contains("64-bit"), "error names 64-bit explicitly, got: {err}");
+
+        // also explicit when there is no window tag (the min/max derivation path)
+        ds.remove(Tag::WINDOW_CENTER);
+        ds.remove(Tag::WINDOW_WIDTH);
+        let err = render_frame(&ds, 0).unwrap_err();
+        assert!(format!("{err}").contains("64-bit"), "auto-window path also names 64-bit, got: {err}");
     }
 
     #[test]

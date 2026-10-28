@@ -207,6 +207,21 @@ impl Histogram {
         }
     }
 
+    /// Removes every count at `value` (fo-dicom `Histogram.Clear`), so a padding
+    /// spike does not dominate a window derived from the histogram.
+    pub fn clear(&mut self, value: i32) {
+        let pos = self.position(value);
+        if pos < 0 || pos as usize >= self.values.len() {
+            return;
+        }
+        let removed = self.values[pos as usize];
+        self.values[pos as usize] = 0;
+        self.total -= removed;
+        if pos as usize >= self.wstart && pos as usize <= self.wend {
+            self.wtotal -= removed;
+        }
+    }
+
     /// Total number of values added.
     pub fn total(&self) -> i32 {
         self.total
