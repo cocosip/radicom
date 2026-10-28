@@ -63,11 +63,15 @@ impl LutTable {
     /// Builds from a LUT-sequence item's `(0028,3002)` descriptor and
     /// `(0028,3006)` data. Returns `None` when either is missing or malformed.
     pub fn from_item(item: &Dataset) -> Option<LutTable> {
-        let desc = element_bytes(item, Tag::LUT_DESCRIPTOR)?;
+        let descriptor = item.get_element(Tag::LUT_DESCRIPTOR).ok()?;
+        let desc = descriptor.value().as_buffer()?.data();
         if desc.len() < 6 {
             return None;
         }
-        let raw_entries = u16::from_le_bytes([desc[0], desc[1]]) as i32;
+        let raw_entries = match descriptor.vr() {
+            Vr::Ss => i16::from_le_bytes([desc[0], desc[1]]) as i32,
+            _ => u16::from_le_bytes([desc[0], desc[1]]) as i32,
+        };
         // fo-dicom `VOISequenceLUT.GetLUTDescriptor`: a negative entry count
         // "makes no sense" but is accepted as its absolute value
         let count = if raw_entries == 0 { 65536usize } else { raw_entries.unsigned_abs() as usize };
@@ -1923,7 +1927,7 @@ mod tests {
         item.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
                 Tag::LUT_DESCRIPTOR,
-                Vr::Us,
+                Vr::Ss,
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(desc)),
             ),
         ));
@@ -1989,6 +1993,19 @@ mod tests {
         let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
         assert!(o.voi_lut.is_none() && !o.use_voi_lut, "a truncated LUT is not applied");
         assert_eq!((o.window_center, o.window_width), (128.0, 256.0), "falls back to the window tags");
+    }
+
+    #[test]
+    fn a_negative_voi_lut_entry_count_uses_its_absolute_value() {
+        // A negative SS entry count is invalid in principle, but fo-dicom
+        // accepts it by taking the absolute value for compatibility.
+        let mut ds = gray_image(1, 1, 8, &[0], None, None);
+        put_voi_lut_raw(&mut ds, (-3i16) as u16, -1, 8, Vr::Ow, &[10, 20, 30]);
+        let options = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
+        let lut = options.voi_lut.as_ref().expect("the three-entry LUT is accepted");
+        assert_eq!(lut.map(-1.0), 0, "the first entry remains the low endpoint");
+        assert_eq!(lut.map(0.0), 134, "the middle entry remains the midpoint");
+        assert_eq!(lut.map(1.0), 255, "the last entry remains the high endpoint");
     }
 
     #[test]
