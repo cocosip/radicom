@@ -167,13 +167,29 @@ impl MeasuredValue {
         MeasuredValue { value, units }
     }
 
+    /// The DS text of [`value`](Self::value) (PS3.5 §6.2: at most 16 bytes).
+    ///
+    /// Uses the crate's DS formatter (the one `IntoElement for f64` uses), so
+    /// the result is always a legal DS of at most 16 characters — values that
+    /// need more are demoted to 10 significant digits, as fo-dicom's
+    /// `ToDecimalString` does. A non-finite value has no DS form at all and is
+    /// rejected rather than written.
+    pub fn numeric_value_text(&self) -> Result<String, Error> {
+        if !self.value.is_finite() {
+            return Err(no_ds_form(self.value, "it is not a finite number"));
+        }
+        Ok(crate::model::person_name::format_ds(self.value))
+    }
+
     /// Writes NumericValue (DS) and MeasurementUnitsCodeSequence into `dataset`
     /// (the item of a MeasuredValueSequence).
-    pub fn write_into(&self, dataset: &mut Dataset) {
-        dataset.insert_str(tags::NUMERIC_VALUE, Vr::Ds, format!("{}", self.value));
+    pub fn write_into(&self, dataset: &mut Dataset) -> Result<(), Error> {
+        let text = self.numeric_value_text()?;
+        dataset.insert_str(tags::NUMERIC_VALUE, Vr::Ds, text);
         let mut units = Dataset::new();
         self.units.write_into(&mut units);
         dataset.insert_sequence(tags::MEASUREMENT_UNITS_CODE_SEQUENCE).push(units);
+        Ok(())
     }
 
     /// Reads a measured value from a MeasuredValueSequence item (§4.2).
@@ -191,6 +207,13 @@ impl MeasuredValue {
             .ok_or_else(|| Error::Data(DataError::Other { message: "measured value lacks units".into() }))?;
         Ok(MeasuredValue { value, units })
     }
+}
+
+/// The error for a numeric value with no legal DS form.
+fn no_ds_form(value: f64, why: &str) -> Error {
+    Error::Data(DataError::Other {
+        message: format!("numeric value {value} has no DS form within 16 characters: {why}"),
+    })
 }
 
 /// A reference to a SOP instance (COMPOSITE / IMAGE content items, §4.2).
@@ -292,12 +315,19 @@ impl ContentItem {
     }
 
     /// A NUM value: one MeasuredValueSequence item (§4.1).
-    pub fn num(concept_name: CodeItem, relationship: Relationship, measured: MeasuredValue) -> Self {
+    ///
+    /// Fails when the value has no legal DS form (see
+    /// [`MeasuredValue::numeric_value_text`]).
+    pub fn num(
+        concept_name: CodeItem,
+        relationship: Relationship,
+        measured: MeasuredValue,
+    ) -> Result<Self, Error> {
         let mut item = Self::base(concept_name, ValueType::Num, Some(relationship));
         let mut measured_item = Dataset::new();
-        measured.write_into(&mut measured_item);
+        measured.write_into(&mut measured_item)?;
         item.dataset.insert_sequence(tags::MEASURED_VALUE_SEQUENCE).push(measured_item);
-        item
+        Ok(item)
     }
 
     /// A COMPOSITE/IMAGE value: ReferencedSOPSequence items (§4.1).
@@ -437,11 +467,42 @@ mod tests {
     #[test]
     fn a_num_item_carries_a_measured_value_and_units() {
         let units = CodeItem::new("mm", "UCUM").with_meaning("millimeter");
-        let item = ContentItem::num(concept(), Relationship::Contains, MeasuredValue::new(12.5, units.clone()));
+        let item = ContentItem::num(concept(), Relationship::Contains, MeasuredValue::new(12.5, units.clone()))
+            .unwrap();
         assert_eq!(item.value_type(), Some(ValueType::Num));
         let measured = item.measured_value().expect("a measured value round-trips");
         assert_eq!(measured.value, 12.5);
         assert_eq!(measured.units, units);
+    }
+
+    #[test]
+    fn a_measured_value_writes_a_legal_ds_and_rejects_non_finite() {
+        let units = CodeItem::new("mm", "UCUM");
+        // 0.1 + 0.2 needs 19 characters to round-trip; the DS formatter demotes
+        // it to 10 significant digits instead of writing an illegal length
+        let awkward = MeasuredValue::new(0.1 + 0.2, units.clone());
+        let text = awkward.numeric_value_text().unwrap();
+        assert!(text.len() <= 16, "\"{text}\" must fit a DS");
+        assert!(
+            (crate::model::person_name::parse_ds(&text).unwrap() - 0.3).abs() < 1e-9,
+            "the demoted text still reads as 0.3, got {text}"
+        );
+        let item = ContentItem::num(concept(), Relationship::Contains, awkward).unwrap();
+        assert!((item.measured_value().unwrap().value - 0.3).abs() < 1e-9);
+
+        // a value that fits keeps its exact shortest text
+        let measured = MeasuredValue::new(12.5, units.clone());
+        assert_eq!(measured.numeric_value_text().unwrap(), "12.5");
+        let mut ds = Dataset::new();
+        measured.write_into(&mut ds).unwrap();
+        assert_eq!(ds.try_get_str(tags::NUMERIC_VALUE).as_deref(), Some("12.5"));
+
+        // a large magnitude falls back to the exponent form DS allows
+        let large = MeasuredValue::new(1e300, units.clone()).numeric_value_text().unwrap();
+        assert!(large.len() <= 16 && large.contains('e'), "got {large}");
+
+        // a non-finite value has no DS form at all
+        assert!(MeasuredValue::new(f64::NAN, units).numeric_value_text().is_err());
     }
 
     #[test]

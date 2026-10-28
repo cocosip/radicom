@@ -13,6 +13,12 @@ use crate::model::tag::Tag;
 use crate::model::vr::Vr;
 
 /// A coded entry: value + coding scheme (+ optional meaning/version) (§4.2).
+///
+/// Equality is derived, so it compares all four fields **including the meaning
+/// text**; fo-dicom's `DicomCodeItem.Equals` compares only value, scheme and
+/// version. This is deliberately stricter: two entries that describe the same
+/// code differently are kept apart, which matters when a meaning is used as the
+/// display text of a tree node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeItem {
     pub value: String,
@@ -187,6 +193,16 @@ mod tests {
             code.write_into(&mut ds);
             assert_eq!(CodeItem::read_from(&ds).unwrap(), code);
         }
+    }
+
+    #[test]
+    fn equality_includes_the_meaning_text() {
+        // deliberately stricter than fo-dicom's value+scheme+version comparison
+        let finding = CodeItem::new("121071", "DCM").with_meaning("Finding");
+        let observation = CodeItem::new("121071", "DCM").with_meaning("Observation");
+        assert_ne!(finding, observation, "the meaning text participates in equality");
+        assert_eq!(finding, CodeItem::new("121071", "DCM").with_meaning("Finding"));
+        assert_ne!(finding, CodeItem::new("121071", "DCM"), "no meaning differs from a meaning");
     }
 
     #[test]

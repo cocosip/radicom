@@ -11,6 +11,12 @@
 //! Fragment sequences are deliberately not representable (§1.1 of
 //! docs/01-architecture.md §12): they return an error that suggests
 //! transcoding, matching fo-dicom.
+//!
+//! One deliberate divergence from fo-dicom's `JsonDicomConverter` defaults:
+//! `NumberMode::PreferablyAsNumber` is the default here, not `AsNumber`. An
+//! IS/DS value is written as a number only when the number's own text form is
+//! identical, so `"0001"` stays a string where fo-dicom writes `1`; this keeps
+//! the JSON lossless. `NumberMode::AsNumber` matches fo-dicom's behaviour.
 
 use base64::Engine as _;
 use radicom::model::buffer::{MemoryBuffer, SharedBuffer};
@@ -68,7 +74,9 @@ pub struct JsonOptions {
     /// Non-standard: use attribute keywords instead of tags as keys. Only
     /// affects writing, and only when the dictionary knows the tag.
     pub tags_as_keywords: bool,
-    /// Reserved for the read path; parsing is always tolerant (§1.3).
+    /// Validate every element against its VR rules after reading (fo-dicom
+    /// `autoValidate`). The crate-wide validation switch still applies, so a
+    /// scope that disabled validation keeps parsing tolerant.
     pub validate_on_read: bool,
     pub numbers: NumberMode,
     pub format_indented: bool,
@@ -146,7 +154,10 @@ fn sequence_to_value(sequence: &DicomSequence, options: &JsonOptions) -> Result<
     }
     let mut object = Map::new();
     object.insert("vr".to_string(), Value::String("SQ".to_string()));
-    object.insert("Value".to_string(), Value::Array(values));
+    // an empty sequence carries no Value, like fo-dicom (§1.1, PS3.18 Annex F)
+    if !values.is_empty() {
+        object.insert("Value".to_string(), Value::Array(values));
+    }
     Ok(Value::Object(object))
 }
 
@@ -177,8 +188,8 @@ fn element_to_value(element: &DicomElement, options: &JsonOptions) -> Result<Val
     }
 
     if vr == Vr::Sq {
-        // an SQ stored as an element (a length-0 sequence) still serializes as one
-        object.insert("Value".to_string(), Value::Array(Vec::new()));
+        // an SQ stored as an element (a length-0 sequence) serializes as a bare
+        // {"vr":"SQ"}, with no Value array (§1.1)
         return Ok(Value::Object(object));
     }
 
@@ -218,7 +229,11 @@ fn element_values(element: &DicomElement, vr: Vr, options: &JsonOptions) -> Resu
         Vr::Fl | Vr::Fd => {
             Ok(text.split('\\').filter(|p| !p.is_empty()).map(parse_float_value).collect())
         }
-        _ => Ok(text.split('\\').map(|part| Value::String(part.to_string())).collect()),
+        // a zero-length component is `null`, not `""` (§1.1, PS3.18 Annex F)
+        _ => Ok(text
+            .split('\\')
+            .map(|part| if part.is_empty() { Value::Null } else { Value::String(part.to_string()) })
+            .collect()),
     }
 }
 
@@ -360,9 +375,18 @@ fn person_name_value(text: &str) -> Value {
 }
 
 /// Deserializes a dataset from DICOM JSON (§1.4).
-pub fn json_to_dataset(json: &str, _options: &JsonOptions) -> Result<Dataset> {
+///
+/// With [`JsonOptions::validate_on_read`] the result is run through
+/// [`Dataset::validate`], which checks every value against its VR rules and
+/// value multiplicity, recursing into sequences — the equivalent of fo-dicom's
+/// `autoValidate`. Without it, reading stays tolerant (§1.3).
+pub fn json_to_dataset(json: &str, options: &JsonOptions) -> Result<Dataset> {
     let value: Value = serde_json::from_str(json)?;
-    value_to_dataset(&value)
+    let dataset = value_to_dataset(&value)?;
+    if options.validate_on_read {
+        dataset.validate()?;
+    }
+    Ok(dataset)
 }
 
 /// Deserializes a dataset from a JSON value tree (§1.4).
@@ -420,10 +444,16 @@ fn attribute_to_item(tag: Tag, attribute: &Value) -> Result<Option<DicomItem>> {
         ))));
     }
 
-    let values = match object.get("Value") {
+    let values: &[Value] = match object.get("Value") {
         Some(Value::Array(values)) => values,
-        // an attribute without a carrier is an empty element (§1.1)
-        None | Some(Value::Null) => return Ok(Some(DicomItem::Element(DicomElement::new_empty(tag, vr)))),
+        // an attribute without a carrier is an empty element (§1.1) — except an
+        // SQ, which is an empty sequence, not a length-0 element
+        None | Some(Value::Null) => {
+            if vr == Vr::Sq {
+                return Ok(Some(DicomItem::Sequence(DicomSequence::new(tag))));
+            }
+            return Ok(Some(DicomItem::Element(DicomElement::new_empty(tag, vr))));
+        }
         Some(other) => {
             return Err(JsonError::Malformed {
                 tag: tag.to_json_string(),
@@ -864,6 +894,77 @@ mod tests {
                 r#"{"00080016":{"Value":["1.2.840.10008.5.1.4.1.1.7"],"vr":"UI"},"#,
                 r#""0040A730":{"Value":[{"00080100":{"Value":["113100"],"vr":"SH"}}],"vr":"SQ"}}"#
             )
+        );
+    }
+
+    #[test]
+    fn validate_on_read_checks_values_against_their_vr() {
+        // CS allows upper case only; this value is not valid CS
+        let json = r#"{"00080060":{"vr":"CS","Value":["lower case"]}}"#;
+        // reading is tolerant by default (§1.3)
+        assert!(json_to_dataset(json, &JsonOptions::default()).is_ok());
+
+        let strict = JsonOptions { validate_on_read: true, ..Default::default() };
+        match json_to_dataset(json, &strict) {
+            Err(JsonError::Dataset(error)) => {
+                assert!(matches!(error, radicom::Error::Validation(_)), "{error}");
+                assert!(error.to_string().contains("0008,0060"), "the failure names the tag: {error}");
+            }
+            other => panic!("expected a validation failure, got {other:?}"),
+        }
+
+        // a valid dataset passes, but an invalid value nested in an item fails
+        assert!(json_to_dataset(r#"{"00080060":{"vr":"CS","Value":["CT"]}}"#, &strict).is_ok());
+        let nested = r#"{"0040A730":{"vr":"SQ","Value":[{"00080060":{"vr":"CS","Value":["lower case"]}}]}}"#;
+        assert!(json_to_dataset(nested, &strict).is_err(), "validation recurses into items");
+    }
+
+    #[test]
+    fn an_empty_sequence_omits_its_value() {
+        // PS3.18 Annex F / fo-dicom: no items → no "Value" array
+        let mut ds = Dataset::new();
+        ds.insert_sequence(Tag::CONTENT_SEQUENCE);
+        let json = dataset_to_json(&ds, &JsonOptions::default()).unwrap();
+        assert_eq!(json, r#"{"0040A730":{"vr":"SQ"}}"#);
+
+        // and the bare form reads back as an empty sequence, not an SQ element
+        let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
+        let sequence = back.get_sequence(Tag::CONTENT_SEQUENCE).expect("an empty SQ is a sequence");
+        assert!(sequence.items().is_empty());
+    }
+
+    #[test]
+    fn an_empty_value_component_is_null() {
+        // PS3.18 Annex F: a zero-length value component is null, not ""
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::SPECIFIC_CHARACTER_SET, Vr::Cs, "\\ISO 2022 IR 58");
+        let json = dataset_to_json(&ds, &JsonOptions::default()).unwrap();
+        assert_eq!(json, r#"{"00080005":{"Value":[null,"ISO 2022 IR 58"],"vr":"CS"}}"#);
+
+        // reading the null back restores the empty first component
+        let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
+        assert_eq!(back.get_str(Tag::SPECIFIC_CHARACTER_SET).unwrap(), "\\ISO 2022 IR 58");
+    }
+
+    #[test]
+    fn is_values_are_numbers_only_when_that_is_lossless() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::INSTANCE_NUMBER, Vr::Is, "0001");
+
+        // the default keeps "0001": writing 1 back would change the text, so the
+        // string is the lossless form (fo-dicom's AsNumber default writes 1)
+        assert_eq!(
+            dataset_to_json(&ds, &JsonOptions::default()).unwrap(),
+            r#"{"00200013":{"Value":["0001"],"vr":"IS"}}"#
+        );
+
+        let as_number = JsonOptions { numbers: NumberMode::AsNumber, ..Default::default() };
+        assert_eq!(dataset_to_json(&ds, &as_number).unwrap(), r#"{"00200013":{"Value":[1],"vr":"IS"}}"#);
+
+        let as_string = JsonOptions { numbers: NumberMode::AsString, ..Default::default() };
+        assert_eq!(
+            dataset_to_json(&ds, &as_string).unwrap(),
+            r#"{"00200013":{"Value":["0001"],"vr":"IS"}}"#
         );
     }
 }

@@ -2,9 +2,10 @@
 //!
 //! Applies a `SecurityProfile` to a dataset: walk every element, resolve the
 //! action for its tag under the chosen option, and mutate. UIDs are rewritten
-//! consistently (the same old UID always maps to the same new one) via a
-//! per-run `replaced` map, and a file's media-storage SOP instance UID is kept
-//! in sync with the dataset's SOP instance UID (§6.2).
+//! consistently through a map that lives on the `Anonymizer` (fo-dicom's
+//! `ReplacedUIDs`), so the same old UID maps to the same new one across every
+//! dataset and file anonymized by that instance; a file's media-storage SOP
+//! instance UID is kept in sync with the dataset's SOP instance UID (§6.2).
 
 use crate::error::Error;
 use crate::io::file::DicomFile;
@@ -16,6 +17,7 @@ use crate::model::uid::Uid;
 use crate::model::vr::Vr;
 use crate::anonymizer::profile::{Action, AnonOption, SecurityProfile};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 pub mod profile;
 
@@ -35,6 +37,9 @@ pub struct Anonymizer {
     option: AnonOption,
     patient_name: Option<String>,
     patient_id: Option<String>,
+    /// Original → replacement UID, shared by clones and kept across calls
+    /// (fo-dicom `ReplacedUIDs`); a `Mutex` so the methods can stay `&self`.
+    replaced: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl Anonymizer {
@@ -45,12 +50,19 @@ impl Anonymizer {
             option: AnonOption::BasicProfile,
             patient_name: None,
             patient_id: None,
+            replaced: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     /// Uses a custom profile under a chosen option.
     pub fn with_profile(profile: SecurityProfile, option: AnonOption) -> Self {
-        Anonymizer { profile, option, patient_name: None, patient_id: None }
+        Anonymizer {
+            profile,
+            option,
+            patient_name: None,
+            patient_id: None,
+            replaced: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Replaces PatientName / PatientID with the given values when set (§6.2).
@@ -60,9 +72,15 @@ impl Anonymizer {
         self
     }
 
+    /// The original → replacement UID map accumulated so far (§6.2, fo-dicom
+    /// `ReplacedUIDs`). Two instances never share it.
+    pub fn replaced_uids(&self) -> HashMap<String, String> {
+        lock(&self.replaced).clone()
+    }
+
     /// Anonymizes a dataset in place (§6.2).
     pub fn anonymize_in_place(&self, dataset: &mut Dataset) -> Result<(), Error> {
-        let mut replaced = HashMap::new();
+        let mut replaced = lock(&self.replaced);
         self.walk(dataset, &mut replaced)
     }
 
@@ -246,6 +264,11 @@ impl Anonymizer {
 /// Binary VRs (`Other*`/UN) that blank to an empty buffer rather than a dummy.
 fn is_other(vr: Vr) -> bool {
     matches!(vr, Vr::Ob | Vr::Od | Vr::Of | Vr::Ol | Vr::Ov | Vr::Ow | Vr::Un)
+}
+
+/// Locks the UID map; a poisoned mutex still holds a consistent map.
+fn lock(map: &Mutex<HashMap<String, String>>) -> std::sync::MutexGuard<'_, HashMap<String, String>> {
+    map.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
@@ -447,5 +470,51 @@ mod tests {
         let sop = file.dataset.try_get_str(Tag::SOP_INSTANCE_UID).unwrap();
         let meta = file.file_meta.try_get_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID).unwrap();
         assert_eq!(meta, sop, "file meta must track the anonymized instance UID");
+    }
+
+    #[test]
+    fn the_uid_map_lives_on_the_anonymizer_not_on_the_call() {
+        // fo-dicom keeps ReplacedUIDs on the anonymizer so a study's files stay
+        // one study after de-identification
+        let anon = Anonymizer::basic();
+        let mut first = Dataset::new();
+        first.insert_str(Tag::STUDY_INSTANCE_UID, Vr::Ui, "1.2.3.4");
+        anon.anonymize_in_place(&mut first).unwrap();
+        let mut second = Dataset::new();
+        second.insert_str(Tag::STUDY_INSTANCE_UID, Vr::Ui, "1.2.3.4");
+        anon.anonymize_in_place(&mut second).unwrap();
+
+        let a = first.try_get_str(Tag::STUDY_INSTANCE_UID).unwrap();
+        let b = second.try_get_str(Tag::STUDY_INSTANCE_UID).unwrap();
+        assert_ne!(a, "1.2.3.4", "the UID is replaced");
+        assert_eq!(a, b, "one source UID keeps one replacement across calls");
+        assert_eq!(anon.replaced_uids().get("1.2.3.4"), Some(&a), "the map is readable");
+
+        // a second anonymizer starts with an empty map
+        let other = Anonymizer::basic();
+        assert!(other.replaced_uids().is_empty());
+        let mut third = Dataset::new();
+        third.insert_str(Tag::STUDY_INSTANCE_UID, Vr::Ui, "1.2.3.4");
+        other.anonymize_in_place(&mut third).unwrap();
+        assert_ne!(
+            third.try_get_str(Tag::STUDY_INSTANCE_UID).unwrap(),
+            a,
+            "instances do not share a map"
+        );
+    }
+
+    #[test]
+    fn the_clean_graph_option_cleans_private_curve_tags() {
+        // §2.4: CleanGraph must reach the 50xx/60xx rows even though the leading
+        // odd-private-group row matches those tags first
+        let anon = Anonymizer::with_profile(SecurityProfile::basic(), AnonOption::CleanGraph);
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::new(0x5011, 0x1234), Vr::Lo, "raw curve data");
+        anon.anonymize_in_place(&mut ds).unwrap();
+        assert_eq!(
+            ds.try_get_str(Tag::new(0x5011, 0x1234)).as_deref(),
+            Some("ANONYMOUS"),
+            "a CleanGraph-tagged private element is cleaned, not left intact"
+        );
     }
 }

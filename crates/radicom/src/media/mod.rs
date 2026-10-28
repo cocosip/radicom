@@ -374,10 +374,13 @@ impl DicomDirectory {
         record.insert_str(tags::REFERENCED_TRANSFER_SYNTAX, Vr::Ui, dataset.transfer_syntax().uid());
         record.insert_str(tags::REFERENCED_FILE_ID, Vr::Cs, path_to_file_id(referenced_file_id));
 
-        // optional preview (§3.4): built from a clone so the source is untouched
+        // optional preview (§3.4): built from a clone so the source is untouched.
+        // A generator failure only costs the preview — fo-dicom's
+        // AddIconSequence swallows every exception, because a missing icon must
+        // never abort a directory build.
         if let Some(generator) = generator {
             let mut source = dataset.clone();
-            if let Some(icon) = generator.generate(&mut source)? {
+            if let Ok(Some(icon)) = generator.generate(&mut source) {
                 attach_icon(&mut record, icon);
             }
         }
@@ -1010,6 +1013,34 @@ mod tests {
         let icon_sequence = leaf.dataset.try_get_sequence(Tag::ICON_IMAGE_SEQUENCE).unwrap();
         assert_eq!(icon_sequence.items().len(), 1, "the icon round-trips");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_failing_icon_generator_only_costs_the_preview() {
+        // fo-dicom's AddIconSequence swallows icon errors: the record is added
+        // without a preview rather than failing the whole directory
+        struct Failing;
+        impl IconGenerator for Failing {
+            fn generate(&self, _dataset: &mut Dataset) -> Result<Option<Dataset>, Error> {
+                Err(record_error("the icon could not be built"))
+            }
+        }
+
+        let mut dir = DicomDirectory::new("MYFS");
+        dir.add_file_with_icon(&image_instance("P1", "1.2.3", "1.2.3.4", "1.2.3.4.5"), "IMG0001", &Failing)
+            .expect("a failing icon generator must not abort the build");
+
+        assert_eq!(dir.records().len(), 4, "the IMAGE record is still added");
+        assert_eq!(dir.records()[3].record_type(), RecordType::Image);
+        assert!(
+            dir.records()[3].dataset.try_get_sequence(Tag::ICON_IMAGE_SEQUENCE).is_none(),
+            "no icon sequence is attached"
+        );
+
+        // and the directory still writes and reopens as a valid four-record tree
+        let bytes = dir.to_bytes().unwrap();
+        let reopened = DicomDirectory::from_bytes(&bytes).unwrap();
+        assert_eq!(reopened.walk(), vec![(0, 0), (1, 1), (2, 2), (3, 3)]);
     }
 
     /// Byte position of every record item whose `DirectoryRecordType` is

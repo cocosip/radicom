@@ -255,12 +255,18 @@ impl SecurityProfile {
         Ok(SecurityProfile { rows })
     }
 
-    /// The first row matching `tag` wins (§6.2).
+    /// The action for `tag` under `option` (§6.2).
+    ///
+    /// fo-dicom builds one table per option and inserts a row only when that
+    /// option's cell is filled, so a row whose cell is empty for the selected
+    /// option does not shadow the rows below it. Matching the first row and
+    /// *then* looking up the cell (the old behaviour) let the leading
+    /// odd-private-group row swallow every later row for options it does not
+    /// take part in, which is why `CleanGraph` did nothing.
     pub fn action_for(&self, tag: &str, option: AnonOption) -> Option<Action> {
         self.rows
             .iter()
-            .find(|row| row.pattern.matches(tag))
-            .and_then(|row| row.action_for(option))
+            .find_map(|row| row.pattern.matches(tag).then(|| row.action_for(option)).flatten())
     }
 
     pub fn rows(&self) -> &[ProfileRow] {
@@ -300,6 +306,25 @@ mod tests {
         assert_eq!(profile.action_for("0009,0001", AnonOption::BasicProfile), Some(Action::Remove));
         // an even group does not match that row
         assert_ne!(profile.action_for("0008,0001", AnonOption::BasicProfile), Some(Action::Remove));
+    }
+
+    #[test]
+    fn an_option_skips_rows_that_do_not_take_part_in_it() {
+        // The leading row (`[0-9A-F]{3}[13579BDF],...` → X under BasicProfile,
+        // C under RetainSafePrivate) matches every odd private tag, but it has
+        // no CleanGraph cell; the graph rows below it must still be reachable
+        // (fo-dicom: one table per option, rows with an empty cell are absent).
+        let profile = SecurityProfile::basic();
+        assert_eq!(profile.action_for("5011,1234", AnonOption::CleanGraph), Some(Action::Clean));
+        assert_eq!(profile.action_for("6011,3000", AnonOption::CleanGraph), Some(Action::Clean));
+        assert_eq!(profile.action_for("50FF,0001", AnonOption::CleanGraph), Some(Action::Clean));
+
+        // ... while the options the leading row does take part in are unchanged
+        assert_eq!(profile.action_for("5011,1234", AnonOption::BasicProfile), Some(Action::Remove));
+        assert_eq!(profile.action_for("5011,1234", AnonOption::RetainSafePrivate), Some(Action::Clean));
+
+        // a tag no row covers under the option still has no action
+        assert_eq!(profile.action_for("0010,0010", AnonOption::CleanGraph), None);
     }
 
     #[test]

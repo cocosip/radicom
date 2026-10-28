@@ -13,8 +13,9 @@
 //!
 //! There is no reader: XML is a debugging/interchange export only. PN expands
 //! to `Alphabetic`/`Ideographic`/`Phonetic` child elements, binary VRs use
-//! `<InlineBinary>` (base64), and sequences nest their items inside the same
-//! `<DicomAttribute>` element.
+//! `<InlineBinary>` (base64), sequences nest their items inside the same
+//! `<DicomAttribute>` element, and encapsulated pixel data becomes numbered
+//! `<Fragment>` elements.
 
 use base64::Engine as _;
 use radicom::model::dataset::Dataset;
@@ -39,7 +40,8 @@ fn write_dataset(out: &mut String, dataset: &Dataset, depth: usize) {
         match item {
             DicomItem::Element(element) => write_element(out, element, depth),
             DicomItem::Sequence(sequence) => write_sequence(out, sequence, depth),
-            // fragment sequences are not representable in the XML model
+            // encapsulated pixel data exports as numbered <Fragment> elements,
+            // which is what fo-dicom's DicomXML writer does too
             DicomItem::Fragments(fragments) => write_fragments(out, fragments.tag(), fragments.vr(), fragments, depth),
         }
     }
