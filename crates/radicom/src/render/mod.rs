@@ -417,7 +417,8 @@ fn unsupported(message: &str) -> Error {
 
 /// Renders one frame, choosing the pipeline by photometric interpretation
 /// (REND-02, docs §2): MONOCHROME → grayscale window; RGB → colour assembly;
-/// PALETTE COLOR → palette index lookup. Other PIs error.
+/// PALETTE COLOR → palette index lookup; YBR_FULL / YBR_FULL_422 /
+/// YBR_PARTIAL_422 → YCbCr→RGB conversion. Other PIs error.
 pub fn render_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error> {
     use crate::pixel::photometric::PhotometricInterpretation as Pi;
     let pi = dataset
@@ -428,6 +429,9 @@ pub fn render_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error> {
         Pi::Monochrome1 | Pi::Monochrome2 => render_grayscale_frame(dataset, frame),
         Pi::Rgb => render_rgb_frame(dataset, frame),
         Pi::PaletteColor => render_palette_frame(dataset, frame),
+        Pi::YbrFull => render_ybr_frame(dataset, frame, false, false),
+        Pi::YbrFull422 => render_ybr_frame(dataset, frame, false, true),
+        Pi::YbrPartial422 => render_ybr_frame(dataset, frame, true, true),
         _ => Err(unsupported("this photometric interpretation is not rendered yet")),
     }
 }
@@ -541,6 +545,100 @@ fn render_palette_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error
     for &index in &samples[..count] {
         let color = palette.get(index as usize).copied().unwrap_or(crate::pixel::Color32::new(0, 0, 0));
         bytes.extend_from_slice(&[color.b, color.g, color.r, 0xFF]);
+    }
+    Ok(RawImage::new(width, height, bytes))
+}
+
+
+/// YCbCr → RGB pipelines (docs §2, PS3.3 C.7.6.3.1.2): YBR_FULL (4:4:4 full
+/// range), YBR_FULL_422 (4:2:2, full range) and YBR_PARTIAL_422 (4:2:2,
+/// studio/limited range). Compressed YBR_ICT/RCT reach here only via the codec
+/// layer, so this handles native 8/16-bit 4:4:4 and 4:2:2 data.
+fn render_ybr_frame(
+    dataset: &Dataset,
+    frame: u32,
+    partial: bool,
+    subsampled: bool,
+) -> Result<RawImage, Error> {
+    let mut owned = dataset.clone();
+    let pixel = PixelData::from_dataset(&mut owned)?;
+    if pixel.transfer_syntax().is_encapsulated() {
+        return Err(unsupported("compressed YBR frames need the codec layer"));
+    }
+    let bits = pixel.bits_allocated()?;
+    if !matches!(bits, 8 | 16) {
+        return Err(unsupported(&format!("bits allocated {bits} is not rendered")));
+    }
+    let (width, height) = (pixel.width(), pixel.height());
+    let buffer = pixel.get_frame(frame)?;
+    let raw = buffer.data();
+    let raw: &[u8] = raw.as_ref();
+
+    // Read a sample at byte level, honouring 8/16-bit little-endian storage.
+    let read = |byte_index: usize| -> u16 {
+        if bits == 8 {
+            raw[byte_index] as u16
+        } else {
+            u16::from_le_bytes([raw[byte_index], raw[byte_index + 1]])
+        }
+    };
+    let unit = if bits == 8 { 1usize } else { 2usize };
+    let count = (width as usize) * (height as usize);
+
+    // Convert one (Y, Cb, Cr) triple to clamped RGB. Cb/Cr are centred on 128
+    // (full range) or on the studio midpoint 128 after range expansion (partial).
+    let to_rgb = |y: f64, cb: f64, cr: f64| -> (u8, u8, u8) {
+        // ponytail: partial-range expansion assumes 8-bit samples (PS3.3 only
+        // defines YBR_PARTIAL at 8 bits); 16-bit partial would need its own scale.
+        let (y, cb, cr) = if partial {
+            // studio-range 8-bit: Y in [16,235], C in [16,240] → expand to full
+            let y = ((y - 16.0) * (255.0 / 219.0)).clamp(0.0, 255.0);
+            let cb = ((cb - 128.0) * (255.0 / 224.0)).clamp(-128.0, 127.0);
+            let cr = ((cr - 128.0) * (255.0 / 224.0)).clamp(-128.0, 127.0);
+            (y, cb, cr)
+        } else {
+            (y, cb - 128.0, cr - 128.0)
+        };
+        let r = y + 1.402 * cr;
+        let g = y - 0.344_136 * cb - 0.714_136 * cr;
+        let b = y + 1.772 * cb;
+        let cl = |v: f64| v.round().clamp(0.0, 255.0) as u8;
+        (cl(r), cl(g), cl(b))
+    };
+
+    let mut bytes = Vec::with_capacity(count * 4);
+    if subsampled {
+        // 4:2:2: per 2 pixels a group of Y1, Y2, Cb, Cr; every row is padded to
+        // an even pixel count in the stored data.
+        let row_bytes = (width as usize).div_ceil(2) * 4 * unit;
+        if raw.len() < row_bytes * height as usize {
+            return Err(unsupported("4:2:2 frame is shorter than its subsampled layout"));
+        }
+        for row in 0..height as usize {
+            let row_start = row * row_bytes;
+            for col in 0..width as usize {
+                let group = col / 2;
+                let base = row_start + group * 4 * unit;
+                let y = read(base + (col % 2) * unit) as f64;
+                let cb = read(base + 2 * unit) as f64;
+                let cr = read(base + 3 * unit) as f64;
+                let (r, g, b) = to_rgb(y, cb, cr);
+                bytes.extend_from_slice(&[b, g, r, 0xFF]);
+            }
+        }
+    } else {
+        // 4:4:4: interleaved Y, Cb, Cr per pixel
+        if raw.len() < count * 3 * unit {
+            return Err(unsupported("frame is shorter than rows×cols×3 samples"));
+        }
+        for i in 0..count {
+            let base = i * 3 * unit;
+            let y = read(base) as f64;
+            let cb = read(base + unit) as f64;
+            let cr = read(base + 2 * unit) as f64;
+            let (r, g, b) = to_rgb(y, cb, cr);
+            bytes.extend_from_slice(&[b, g, r, 0xFF]);
+        }
     }
     Ok(RawImage::new(width, height, bytes))
 }
@@ -734,6 +832,70 @@ mod tests {
         let b = image.as_bytes();
         assert_eq!(&b[0..4], &[0, 0, 255, 255], "pixel 0 is red");
         assert_eq!(&b[4..8], &[0, 255, 0, 255], "pixel 1 is green");
+    }
+
+    #[test]
+    fn a_ybr_full_frame_converts_to_rgb() {
+        // neutral: Y=128, Cb=128, Cr=128 → mid grey
+        let ds = color_image("YBR_FULL", 3, 8, &[128, 128, 128], 0);
+        let image = render_frame(&ds, 0).unwrap();
+        let b = image.as_bytes();
+        assert_eq!(&b[0..4], &[128, 128, 128, 0xFF], "neutral YCbCr is grey");
+
+        // pure red in the full-range model: Y=76, Cb=85, Cr=255
+        let ds = color_image("YBR_FULL", 3, 8, &[76, 85, 255], 0);
+        let image = render_frame(&ds, 0).unwrap();
+        let b = image.as_bytes();
+        assert!(b[2] > 240 && b[1] < 16 && b[0] < 16, "red-ish BGRA: {:?}", &b[0..4]);
+    }
+
+    /// Builds a 4:2:2 YBR image of `width`×1 with explicit stored bytes.
+    fn ybr422_image(pi: &str, width: u16, bytes: &[u8]) -> Dataset {
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::new(0x0028, 0x0002), 3u16);
+        ds.insert_str(Tag::new(0x0028, 0x0004), Vr::Cs, pi);
+        ds.insert_value(Tag::new(0x0028, 0x0010), 1u16);
+        ds.insert_value(Tag::new(0x0028, 0x0011), width);
+        ds.insert_value(Tag::new(0x0028, 0x0100), 8u16);
+        ds.insert_value(Tag::new(0x0028, 0x0101), 8u16);
+        ds.insert_value(Tag::new(0x0028, 0x0102), 7u16);
+        ds.insert_value(Tag::new(0x0028, 0x0103), 0u16);
+        ds.insert_value(Tag::new(0x0028, 0x0006), 0u16);
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::new(0x7FE0, 0x0010),
+                Vr::Ob,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(bytes.to_vec())),
+            ),
+        ));
+        ds.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        ds
+    }
+
+    #[test]
+    fn a_ybr_full_422_frame_expands_shared_chroma() {
+        // 2 pixels share one CbCr pair: Y1=76, Y2=76, Cb=85, Cr=255 → both red
+        let ds = ybr422_image("YBR_FULL_422", 2, &[76, 76, 85, 255]);
+        let image = render_frame(&ds, 0).unwrap();
+        assert_eq!(image.width(), 2);
+        let b = image.as_bytes();
+        for p in 0..2 {
+            let px = &b[p * 4..p * 4 + 4];
+            assert!(px[2] > 240 && px[1] < 16 && px[0] < 16, "pixel {p} red-ish: {px:?}");
+        }
+    }
+
+    #[test]
+    fn a_ybr_partial_422_frame_expands_studio_range() {
+        // studio-range neutral: Y=126, Cb=128, Cr=128 → ~mid grey after expansion
+        let ds = ybr422_image("YBR_PARTIAL_422", 2, &[126, 126, 128, 128]);
+        let image = render_frame(&ds, 0).unwrap();
+        let b = image.as_bytes();
+        let px = &b[0..4];
+        assert!(
+            px[0].abs_diff(128) <= 2 && px[1].abs_diff(128) <= 2 && px[2].abs_diff(128) <= 2,
+            "partial-range grey expands to ~128: {px:?}"
+        );
     }
 
     fn us_bytes(values: &[u16]) -> crate::model::buffer::SharedBuffer {
