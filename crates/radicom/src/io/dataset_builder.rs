@@ -69,10 +69,11 @@ impl DatasetBuilder {
     }
 
     fn charset_of(value: &str) -> Option<&'static encoding_rs::Encoding> {
-        let first = value.split('\\').next().unwrap_or(value);
-        if first.trim().is_empty() {
-            return None;
-        }
+        // Specific Character Set is multi-valued; a leading empty value means the
+        // default repertoire (ISO-IR 6). Use the first *non-empty* value as the
+        // governing encoding so a list like `\ISO 2022 IR 58` resolves to GBK
+        // rather than falling back to ASCII.
+        let first = value.split('\\').map(str::trim).find(|term| !term.is_empty())?;
         Some(charset_encoding(first))
     }
 

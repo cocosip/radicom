@@ -102,6 +102,26 @@ fn every_corpus_file_round_trips_semantically() {
     }
 }
 
+/// Charset files must decode their textual values to real characters, not
+/// U+FFFD / raw ASCII approximations — a Specific Character Set list whose first
+/// value is empty must still resolve to its first non-empty encoding (ENC-01/02).
+#[test]
+fn charset_corpus_decodes_to_real_characters() {
+    let cases = [
+        ("charset/chrGB2312.dcm", ["张", "小东"]),
+        ("charset/chrJapMulti.dcm", ["やまだ", "たろう"]),
+    ];
+    for (rel, expected) in cases {
+        let bytes = std::fs::read(corpus_dir().join(rel)).unwrap();
+        let file = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
+        let name = file.dataset.try_get_str(Tag::new(0x0010, 0x0010)).unwrap_or_default();
+        assert!(!name.contains('\u{FFFD}'), "{rel}: PatientName has replacement chars: {name:?}");
+        for want in expected {
+            assert!(name.contains(want), "{rel}: PatientName {name:?} should contain {want:?}");
+        }
+    }
+}
+
 /// Recursively removes `(gggg,0000)` group-length elements (redundant on read).
 fn strip_group_lengths(dataset: &mut Dataset) {
     let group_length_tags: Vec<Tag> = dataset
