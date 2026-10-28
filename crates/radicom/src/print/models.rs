@@ -34,10 +34,16 @@ pub mod tags {
     pub const FILM_SIZE_ID: Tag = Tag::FILM_SIZE_ID;
     /// (2010,0060) Magnification Type.
     pub const MAGNIFICATION_TYPE: Tag = Tag::MAGNIFICATION_TYPE;
+    /// (2010,0080) Smoothing Type.
+    pub const SMOOTHING_TYPE: Tag = Tag::SMOOTHING_TYPE;
     /// (2010,0100) Border Density.
     pub const BORDER_DENSITY: Tag = Tag::BORDER_DENSITY;
     /// (2010,0110) Empty Image Density.
     pub const EMPTY_IMAGE_DENSITY: Tag = Tag::EMPTY_IMAGE_DENSITY;
+    /// (2010,0120) Minimum Density.
+    pub const MIN_DENSITY: Tag = Tag::MIN_DENSITY;
+    /// (2010,0130) Maximum Density.
+    pub const MAX_DENSITY: Tag = Tag::MAX_DENSITY;
     /// (2010,0140) Trim.
     pub const TRIM: Tag = Tag::TRIM;
     /// (2010,0510) Referenced Image Box Sequence (in FilmBox).
@@ -46,6 +52,8 @@ pub mod tags {
     pub const IMAGE_POSITION: Tag = Tag::IMAGE_BOX_POSITION;
     /// (2020,0020) Polarity.
     pub const POLARITY: Tag = Tag::POLARITY;
+    /// (2020,0030) Requested Image Size.
+    pub const REQUESTED_IMAGE_SIZE: Tag = Tag::REQUESTED_IMAGE_SIZE;
     /// (2050,0010) Presentation LUT Sequence.
     pub const PRESENTATION_LUT_SEQUENCE: Tag = Tag::PRESENTATION_LUT_SEQUENCE;
     /// (2050,0020) Presentation LUT Shape.
@@ -278,6 +286,53 @@ impl ImageBox {
         self.dataset.try_get_str(tags::POLARITY).as_deref() == Some("REVERSE")
     }
 
+    pub fn set_magnification_type(&mut self, value: impl Into<String>) -> &mut Self {
+        self.dataset.insert_str(tags::MAGNIFICATION_TYPE, Vr::Cs, value);
+        self
+    }
+
+    pub fn magnification_type(&self) -> Option<String> {
+        self.dataset.try_get_str(tags::MAGNIFICATION_TYPE)
+    }
+
+    pub fn set_smoothing_type(&mut self, value: impl Into<String>) -> &mut Self {
+        self.dataset.insert_str(tags::SMOOTHING_TYPE, Vr::Cs, value);
+        self
+    }
+
+    pub fn smoothing_type(&self) -> Option<String> {
+        self.dataset.try_get_str(tags::SMOOTHING_TYPE)
+    }
+
+    pub fn set_min_density(&mut self, value: u16) -> &mut Self {
+        self.dataset.insert_value(tags::MIN_DENSITY, value);
+        self
+    }
+
+    pub fn min_density(&self) -> Option<u16> {
+        self.dataset.try_get(tags::MIN_DENSITY)
+    }
+
+    pub fn set_max_density(&mut self, value: u16) -> &mut Self {
+        self.dataset.insert_value(tags::MAX_DENSITY, value);
+        self
+    }
+
+    pub fn max_density(&self) -> Option<u16> {
+        self.dataset.try_get(tags::MAX_DENSITY)
+    }
+
+    pub fn set_requested_image_size(&mut self, value: f64) -> &mut Self {
+        self.dataset.insert_str(tags::REQUESTED_IMAGE_SIZE, Vr::Ds, value.to_string());
+        self
+    }
+
+    pub fn requested_image_size(&self) -> Option<f64> {
+        self.dataset
+            .try_get_str(tags::REQUESTED_IMAGE_SIZE)
+            .and_then(|value| value.trim().parse().ok())
+    }
+
     /// Attaches one image (a dataset holding pixel data) to the image sequence.
     pub fn push_image(&mut self, image: Dataset) -> &mut Self {
         self.dataset
@@ -386,6 +441,18 @@ mod tests {
         assert_eq!(image_box.position(), Some(2));
         assert!(image_box.polarity(), "REVERSE maps to true");
 
+        image_box
+            .set_magnification_type("REPLICATE")
+            .set_smoothing_type("MEDIUM")
+            .set_min_density(10)
+            .set_max_density(200)
+            .set_requested_image_size(25.5);
+        assert_eq!(image_box.magnification_type().as_deref(), Some("REPLICATE"));
+        assert_eq!(image_box.smoothing_type().as_deref(), Some("MEDIUM"));
+        assert_eq!(image_box.min_density(), Some(10));
+        assert_eq!(image_box.max_density(), Some(200));
+        assert_eq!(image_box.requested_image_size(), Some(25.5));
+
         image_box.push_image(Dataset::new());
         assert_eq!(image_box.image_count(), 1);
     }
@@ -405,12 +472,16 @@ mod tests {
             (tags::FILM_ORIENTATION, "FilmOrientation"),
             (tags::FILM_SIZE_ID, "FilmSizeID"),
             (tags::MAGNIFICATION_TYPE, "MagnificationType"),
+            (tags::SMOOTHING_TYPE, "SmoothingType"),
             (tags::BORDER_DENSITY, "BorderDensity"),
             (tags::EMPTY_IMAGE_DENSITY, "EmptyImageDensity"),
+            (tags::MIN_DENSITY, "MinDensity"),
+            (tags::MAX_DENSITY, "MaxDensity"),
             (tags::TRIM, "Trim"),
             (tags::REFERENCED_IMAGE_BOX_SEQUENCE, "ReferencedImageBoxSequence"),
             (tags::IMAGE_POSITION, "ImageBoxPosition"),
             (tags::POLARITY, "Polarity"),
+            (tags::REQUESTED_IMAGE_SIZE, "RequestedImageSize"),
         ];
         let dictionary = crate::default_dictionary();
         for (tag, keyword) in expected {
