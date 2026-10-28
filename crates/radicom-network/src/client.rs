@@ -133,6 +133,14 @@ impl DicomClient {
         }
     }
 
+    async fn finish_request<T>(&mut self, result: Result<T>) -> Result<T> {
+        if let Err(NetworkError::RequestTimedOut { message_id }) = &result {
+            self.emit(ClientEvent::RequestTimedOut { message_id: *message_id });
+            self.abort().await;
+        }
+        result
+    }
+
     /// True when the current association has reached its request quota (§9.1).
     fn quota_spent(&self) -> bool {
         matches!(self.options.max_requests_per_association, Some(max) if self.sent_on_association >= max)
@@ -239,9 +247,13 @@ impl DicomClient {
             sop_class.clone(),
             vec!["1.2.840.10008.1.2".to_string(), "1.2.840.10008.1.2.1".to_string()],
         );
-        let association = self.ensure_association(vec![context]).await?;
-        let context_id = association.contexts().pick(&sop_class, "").map(|c| c.id).ok();
-        let response = association.send_c_echo(&sop_class).await;
+        let (context_id, response) = {
+            let association = self.ensure_association(vec![context]).await?;
+            let context_id = association.contexts().pick(&sop_class, "").map(|c| c.id).ok();
+            let response = association.send_c_echo(&sop_class).await;
+            (context_id, response)
+        };
+        let response = self.finish_request(response).await;
         if let (Ok(response), Some(context_id)) = (&response, context_id) {
             self.last_request = Some((response.message_id_being_responded_to, context_id));
             self.sent_on_association += 1;
@@ -262,9 +274,13 @@ impl DicomClient {
             sop_class.clone(),
             crate::services::c_store_transfer_syntaxes(&syntax, &[], false),
         );
-        let association = self.ensure_association(vec![context]).await?;
-        let context_id = association.contexts().pick(&sop_class, &syntax).map(|c| c.id).ok();
-        let response = association.send_c_store(file).await;
+        let (context_id, response) = {
+            let association = self.ensure_association(vec![context]).await?;
+            let context_id = association.contexts().pick(&sop_class, &syntax).map(|c| c.id).ok();
+            let response = association.send_c_store(file).await;
+            (context_id, response)
+        };
+        let response = self.finish_request(response).await;
         if let (Ok(response), Some(context_id)) = (&response, context_id) {
             self.last_request = Some((response.message_id_being_responded_to, context_id));
             self.sent_on_association += 1;
@@ -279,9 +295,13 @@ impl DicomClient {
             request.sop_class_uid.clone(),
             vec!["1.2.840.10008.1.2".to_string(), "1.2.840.10008.1.2.1".to_string()],
         );
-        let association = self.ensure_association(vec![context]).await?;
-        let context_id = association.contexts().pick(&request.sop_class_uid, "").map(|c| c.id).ok();
-        let responses = association.send_c_find(request).await?;
+        let (context_id, result) = {
+            let association = self.ensure_association(vec![context]).await?;
+            let context_id = association.contexts().pick(&request.sop_class_uid, "").map(|c| c.id).ok();
+            let result = association.send_c_find(request).await;
+            (context_id, result)
+        };
+        let responses = self.finish_request(result).await?;
         self.sent_on_association += 1;
         if let Some(context_id) = context_id {
             self.last_request = Some((request.message_id, context_id));
@@ -296,9 +316,13 @@ impl DicomClient {
             request.sop_class_uid.clone(),
             vec!["1.2.840.10008.1.2".to_string(), "1.2.840.10008.1.2.1".to_string()],
         );
-        let association = self.ensure_association(vec![context]).await?;
-        let context_id = association.contexts().pick(&request.sop_class_uid, "").map(|c| c.id).ok();
-        let responses = association.send_c_move(request).await?;
+        let (context_id, result) = {
+            let association = self.ensure_association(vec![context]).await?;
+            let context_id = association.contexts().pick(&request.sop_class_uid, "").map(|c| c.id).ok();
+            let result = association.send_c_move(request).await;
+            (context_id, result)
+        };
+        let responses = self.finish_request(result).await?;
         self.sent_on_association += 1;
         if let Some(context_id) = context_id {
             self.last_request = Some((request.message_id, context_id));
@@ -334,9 +358,13 @@ impl DicomClient {
             ));
             next_id = next_id.wrapping_add(2);
         }
-        let association = self.ensure_association(contexts).await?;
-        let context_id = association.contexts().pick(&request.sop_class_uid, "").map(|c| c.id).ok();
-        let responses = association.send_c_get(request).await?;
+        let (context_id, result) = {
+            let association = self.ensure_association(contexts).await?;
+            let context_id = association.contexts().pick(&request.sop_class_uid, "").map(|c| c.id).ok();
+            let result = association.send_c_get(request).await;
+            (context_id, result)
+        };
+        let responses = self.finish_request(result).await?;
         self.sent_on_association += 1;
         if let Some(context_id) = context_id {
             self.last_request = Some((request.message_id, context_id));
@@ -774,6 +802,18 @@ mod tests {
         (addr, attempts)
     }
 
+    /// A peer that accepts the association and then never answers DIMSE.
+    async fn silent_associated_peer() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            crate::test_wire::accept_association(&mut stream).await;
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        (addr, peer)
+    }
+
     fn impatient_options(max_retries: u32) -> DicomClientOptions {
         DicomClientOptions {
             max_consecutive_timeout_retries: max_retries,
@@ -820,6 +860,30 @@ mod tests {
         let events = seen.lock().unwrap();
         assert!(events.contains(&ClientEvent::AssociationRequestTimedOut { attempts: 1 }));
         assert!(events.contains(&ClientEvent::AssociationRequestTimedOut { attempts: 2 }));
+    }
+
+    #[tokio::test]
+    async fn request_timeout_reports_event_and_returns_without_waiting_forever() {
+        let (addr, peer) = silent_associated_peer().await;
+        let seen: Arc<std::sync::Mutex<Vec<ClientEvent>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let options = DicomClientOptions {
+            max_consecutive_timeout_retries: 1,
+            connection: crate::server::ClientOptions {
+                association_timeout: Duration::from_millis(100),
+                request_timeout: Some(Duration::from_millis(50)),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
+            .with_options(options)
+            .with_event_handler(Arc::new(move |event| sink.lock().unwrap().push(event)));
+
+        let error = client.send_c_echo(sop_class::VERIFICATION).await.unwrap_err();
+        assert!(matches!(error, NetworkError::RequestTimedOut { message_id: 1 }));
+        assert!(seen.lock().unwrap().contains(&ClientEvent::RequestTimedOut { message_id: 1 }));
+        peer.abort();
     }
 
     #[tokio::test]

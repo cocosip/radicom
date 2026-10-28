@@ -1055,6 +1055,9 @@ where
 pub struct ClientOptions {
     pub max_pdu_length: u32,
     pub association_timeout: Duration,
+    /// Maximum quiet time while waiting for a response to one DIMSE request.
+    /// `None` keeps the request wait unbounded.
+    pub request_timeout: Option<Duration>,
     /// Socket options applied to the connected stream (§2.12).
     pub tcp: TcpOptions,
     /// How long a graceful release waits for the peer's A-RELEASE-RP before
@@ -1075,6 +1078,7 @@ impl Default for ClientOptions {
         ClientOptions {
             max_pdu_length: 16384,
             association_timeout: Duration::from_secs(5),
+            request_timeout: None,
             release_timeout: Duration::from_secs(10),
             tcp: TcpOptions::default(),
             user_identity: None,
@@ -1156,6 +1160,8 @@ pub struct Association {
     pending: crate::engine::PendingTable,
     /// How long [`Self::release`] waits for the peer's A-RELEASE-RP.
     release_timeout: Duration,
+    /// Maximum quiet time while waiting for a DIMSE response.
+    request_timeout: Option<Duration>,
     /// Answers reverse C-STORE sub-operations; required for C-GET (§7.4).
     reverse_store: Option<ReverseStoreHandler>,
     /// What the peer granted in SOP Class Extended Negotiation (§4.3).
@@ -1288,6 +1294,7 @@ impl Association {
             assembler: PdvAssembler::new(),
             pending: crate::engine::PendingTable::new(),
             release_timeout: options.release_timeout,
+            request_timeout: options.request_timeout,
             reverse_store: None,
             peer_extended,
             peer_identity_response,
@@ -1480,7 +1487,7 @@ impl Association {
             // the Identifier of a Pending response follows its command
             let mut awaiting_command: Option<Command> = None;
             loop {
-                let Some(pdu) = read_pdu(&mut self.stream).await? else {
+                let Some(pdu) = self.read_request_pdu(message_id).await? else {
                     return Err(NetworkError::ClosedPrematurely { source: None });
                 };
                 match pdu {
@@ -1571,7 +1578,7 @@ impl Association {
             }
 
             loop {
-                let Some(pdu) = read_pdu(&mut self.stream).await? else {
+                let Some(pdu) = self.read_request_pdu(message_id).await? else {
                     return Err(NetworkError::ClosedPrematurely { source: None });
                 };
                 match pdu {
@@ -1648,7 +1655,7 @@ impl Association {
             // a reverse C-STORE request awaiting its dataset
             let mut awaiting_store: Option<Command> = None;
             loop {
-                let Some(pdu) = read_pdu(&mut self.stream).await? else {
+                let Some(pdu) = self.read_request_pdu(message_id).await? else {
                     return Err(NetworkError::ClosedPrematurely { source: None });
                 };
                 match pdu {
@@ -1730,9 +1737,19 @@ impl Association {
     }
 
     /// Reads PDUs until the response for `message_id` arrives (§5.2).
+    async fn read_request_pdu(&mut self, message_id: u16) -> Result<Option<Pdu>> {
+        match self.request_timeout {
+            Some(timeout) => tokio::time::timeout(timeout, read_pdu(&mut self.stream))
+                .await
+                .map_err(|_| NetworkError::RequestTimedOut { message_id })?,
+            None => read_pdu(&mut self.stream).await,
+        }
+    }
+
+    /// Reads PDUs until the response for `message_id` arrives (§5.2).
     async fn await_response(&mut self, message_id: u16, expected: CommandField) -> Result<Command> {
         loop {
-            let Some(pdu) = read_pdu(&mut self.stream).await? else {
+            let Some(pdu) = self.read_request_pdu(message_id).await? else {
                 return Err(NetworkError::ClosedPrematurely { source: None });
             };
             match pdu {
@@ -1830,7 +1847,7 @@ impl Association {
     ) -> Result<(Command, Option<Dataset>)> {
         let mut pending_command: Option<Command> = None;
         loop {
-            let Some(pdu) = read_pdu(&mut self.stream).await? else {
+            let Some(pdu) = self.read_request_pdu(message_id).await? else {
                 return Err(NetworkError::ClosedPrematurely { source: None });
             };
             match pdu {

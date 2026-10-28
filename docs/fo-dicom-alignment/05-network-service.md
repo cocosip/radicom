@@ -66,9 +66,9 @@
 | --- | --- | --- | --- | --- |
 | C-ECHO / C-STORE / C-FIND / C-GET / C-MOVE SCU | `DicomClient` + `DicomC*Request` | 已实现 | `client.rs:211/227/248/279/261` | 每个方法自带 `PresentationContext::new(1, ...)`，PC id 恒为 1 |
 | 请求队列 + 一次协商全部 PC | `DicomClient.AddRequestAsync` + `DicomClient.cs:637` `SendRequestAsync` | **缺失** | `client.rs:149-155` `ensure_association` 只在 `association.is_none()` 时协商 | 实测：同一 client 先 C-ECHO 再 C-STORE，第二次报 `SOP class ... is not supported by the association`；见 §2.6 |
-| 每请求响应最多 N 次超时监控 | `DicomService.cs:1516` `WarningRequestTimedOut` + `CheckForTimeouts` | **缺失** | `client.rs:60` `ClientEvent::RequestTimedOut` 声明但全仓无 `emit`；`ClientOptions`（`server.rs:903-927`）无请求超时字段 | 长等待无上限，见 §1.3 |
-| 请求级 watchdog / PendingTable | `_pending` + `Options.RequestTimeout` | **缺失（模块未接线）** | `engine.rs:16-36` `EngineOptions{request_timeout}`、`engine.rs:67` `PendingTable`；`lib.rs:40` 仅 re-export | 全仓 grep `engine::`/`PendingTable` 除自身测试外无调用点，整模块是死代码 |
-| 关联事件 `StateChanged` | `DicomClient.cs:215-221`（6 个事件） | 缺失 | `client.rs:54-61` 只有 4 个变体 | 无状态机可见性 |
+| 每请求响应最多 N 次超时监控 | `DicomService.cs:1516` `WarningRequestTimedOut` + `CheckForTimeouts` | **已实现** | `server.rs` `ClientOptions::request_timeout`；`Association` 所有 DIMSE 响应等待均有超时 | 超时返回 `NetworkError::RequestTimedOut`，高层 client 发出事件并中止关联 |
+| 请求级 watchdog / PendingTable | `_pending` + `Options.RequestTimeout` | **部分实现** | `engine.rs` `PendingTable` 仍负责 ID 与在途请求；超时由关联响应等待直接监控 | 当前是单请求等待超时，尚未实现独立的多请求 watchdog 扫描 |
+| 关联事件 `StateChanged` | `DicomClient.cs:215-221`（6 个事件） | 缺失 | `client.rs` 只有 5 个离散事件变体 | 无统一状态机事件 |
 | `AssociationRequestTimedOut` 事件 | `DicomClient.cs:215-221` | **已实现** | `client.rs` `ClientEvent::AssociationRequestTimedOut`；超时尝试在 `open_association` 发出 | 每次可重试的关联超时都会携带累计尝试次数 |
 | 取消模式 `DicomClientCancellationMode` | `DicomClient.cs:175` `{ImmediatelyReleaseAssociation, ImmediatelyAbortAssociation}` | **缺失** | grep `CancellationMode` 无命中；只有 `client.rs:323` `release` / `client.rs:328` `abort` 两个方法 | 调用方自己组合，库层面无统一取消语义 |
 | 监听式 linger（队列空等 N ms） | `AssociationLingerTimeoutInMs` 默认 50 | 部分实现 | `client.rs:33`、`client.rs:206-208`、`client.rs:138-143` | 只在"配额用尽"时 sleep，队列语义不存在（同步 API 无队列），见 §2.7 |
@@ -92,7 +92,6 @@
 
 - **N-CREATE / N-EVENT-REPORT 无测试**（`services.rs:240-263` 有实现，`server.rs:404` 有分发，测试里只有 N-ACTION/N-DELETE）。
 - **C-CANCEL 到达 SCP 后被丢弃**（`server.rs:338-347`）：注释自己承认"Full mid-stream cancellation needs the streaming C-FIND path"，但这与 `docs/design/05-network.md §7.6` 和 `SRV-08` 的宣称冲突。
-- **`ClientEvent::RequestTimedOut` 永不 emit**（`client.rs:60`）：声明了但没有任何发射点，属"接口画了饼"。
 
 ---
 
