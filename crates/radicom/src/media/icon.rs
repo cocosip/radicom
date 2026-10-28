@@ -25,6 +25,14 @@ pub const MAX_ICON_SIZE: u32 = 128;
 pub trait IconGenerator {
     /// The `IconImageSequence` item for `dataset`, if one can be built.
     fn generate(&self, dataset: &mut Dataset) -> Result<Option<Dataset>, Error>;
+
+    /// The icon for an explicit zero-based source frame.
+    ///
+    /// Implementors that do not support frame selection retain their existing
+    /// behaviour through the default method.
+    fn generate_frame(&self, dataset: &mut Dataset, _frame_index: u32) -> Result<Option<Dataset>, Error> {
+        self.generate(dataset)
+    }
 }
 
 /// The built-in generator: ≤128×128, 8-bit MONOCHROME2 (§3.4).
@@ -33,7 +41,14 @@ pub struct BasicIconGenerator;
 
 impl IconGenerator for BasicIconGenerator {
     fn generate(&self, dataset: &mut Dataset) -> Result<Option<Dataset>, Error> {
-        let Some(icon) = build_icon(dataset)? else {
+        let Some(icon) = build_icon(dataset, None)? else {
+            return Ok(None);
+        };
+        Ok(Some(icon))
+    }
+
+    fn generate_frame(&self, dataset: &mut Dataset, frame_index: u32) -> Result<Option<Dataset>, Error> {
+        let Some(icon) = build_icon(dataset, Some(frame_index))? else {
             return Ok(None);
         };
         Ok(Some(icon))
@@ -41,7 +56,7 @@ impl IconGenerator for BasicIconGenerator {
 }
 
 /// Extracts and downsamples one frame into a MONOCHROME2 icon dataset.
-fn build_icon(dataset: &mut Dataset) -> Result<Option<Dataset>, Error> {
+fn build_icon(dataset: &mut Dataset, requested_frame: Option<u32>) -> Result<Option<Dataset>, Error> {
     let pixel = PixelData::from_dataset(dataset)?;
 
     // only uncompressed single-sample grayscale is supported here
@@ -58,7 +73,7 @@ fn build_icon(dataset: &mut Dataset) -> Result<Option<Dataset>, Error> {
     }
 
     let frames = pixel.number_of_frames().max(1);
-    let frame_index = representative_frame(pixel.dataset(), frames);
+    let frame_index = requested_frame.unwrap_or_else(|| representative_frame(pixel.dataset(), frames));
     let frame = pixel.get_frame(frame_index)?;
     let raw = frame.data();
     let raw: &[u8] = raw.as_ref();
@@ -280,6 +295,14 @@ mod tests {
         let element = icon.get_element(Tag::PIXEL_DATA).unwrap();
         let bytes = element.value().as_buffer().unwrap().data();
         assert_eq!(bytes[0], 20, "the representative frame's value is used");
+    }
+
+    #[test]
+    fn explicit_frame_index_selects_the_requested_frame() {
+        let mut ds = source(4, 4, 2, 8, |_, y| if y < 4 { 10 } else { 20 });
+        let icon = BasicIconGenerator.generate_frame(&mut ds, 1).unwrap().unwrap();
+        let bytes = icon.get_element(Tag::PIXEL_DATA).unwrap().value().as_buffer().unwrap().data();
+        assert_eq!(bytes[0], 20, "frame index is zero-based and selects frame 1");
     }
 
     #[test]
