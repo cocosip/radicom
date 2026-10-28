@@ -246,6 +246,23 @@ where
     let _connection = crate::observability::ConnectionGuard::new(metrics.clone());
     let mut stream = crate::observability::CountingStream::new(stream, metrics.clone());
 
+    let result = serve_connection_inner(&mut stream, provider, options).await;
+    if matches!(result, Err(NetworkError::Protocol(message)) if message != "peer sent a command that is not a request") {
+        let abort = Abort { source: AbortSource::Provider, reason: 0 };
+        let _ = write_pdu(&mut stream, &Pdu::Abort(abort)).await;
+    }
+    result
+}
+
+async fn serve_connection_inner<P: ServiceProvider, S>(
+    mut stream: &mut crate::observability::CountingStream<S>,
+    provider: Arc<P>,
+    options: ServerOptions,
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+
     // -- association handshake ------------------------------------------
     // The ACSE phase has its own timeout: a peer that connects and never sends
     // (or half-sends) an A-ASSOCIATE-RQ must not hold this task and fd forever.
@@ -313,7 +330,7 @@ where
     accept.user_information = user;
     write_pdu(&mut stream, &Pdu::AssociateAc(accept)).await?;
     // the association is now established (OBS-01): report open/close
-    let _association = crate::observability::AssociationGuard::new(metrics.clone());
+    let _association = crate::observability::AssociationGuard::new(options.metrics.clone());
 
     let accepted = AcceptedContexts::from_negotiated(negotiated);
     let peer_max_pdu = if request.user_information.max_pdu_length == 0 {
@@ -3644,6 +3661,38 @@ mod tests {
             let body: Vec<u8> = (0..len).map(|_| next() as u8).collect();
             let _ = drive_malformed_pdata(pdata_frame(&body)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn protocol_errors_after_association_send_a_provider_abort() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let handle = tokio::spawn(serve_connection(
+            server,
+            Arc::new(VerificationProvider),
+            ServerOptions::default(),
+        ));
+
+        let mut request = Associate::new("SCP", "SCU");
+        request.presentation_contexts.push(echo_context());
+        client
+            .write_all(&crate::pdu::encode(&Pdu::AssociateRq(request)).unwrap())
+            .await
+            .unwrap();
+        assert!(matches!(read_pdu(&mut client).await.unwrap(), Some(Pdu::AssociateAc(_))));
+
+        // Unknown PDU types are protocol errors after association. The SCP
+        // must notify the peer with A-ABORT before closing the connection.
+        client.write_all(&[0x09, 0x00, 0, 0, 0, 0]).await.unwrap();
+        match tokio::time::timeout(Duration::from_secs(2), read_pdu(&mut client)).await {
+            Ok(Ok(Some(Pdu::Abort(abort)))) => {
+                assert_eq!(abort.source, AbortSource::Provider);
+                assert_eq!(abort.reason, 0);
+            }
+            other => panic!("expected provider A-ABORT, got {other:?}"),
+        }
+        assert!(handle.await.unwrap().is_err());
     }
 
     /// The contexts a C-GET needs: the retrieve model plus the storage class.

@@ -57,7 +57,7 @@
 | 已连接客户端数 | `DicomServer.cs:201-204` `GetNumberOfConnectedClients` | 缺失 | 无 | `hosting.rs:10-14` 文档自认未提供 |
 | 服务端 A-ASSOCIATE-RQ 读超时 | `DicomService.cs` ACSE 阶段超时 | **缺失** | `server.rs:177` 直接 `read_pdu` 无 timeout；`ServerOptions.association_timeout`（`server.rs:37`）只在客户端 `server.rs:1059` 使用 | 静默 TCP 连接可长期占用一个 task，见 §2.5 |
 | AE title 过滤 | `DicomServer.cs` called-AE 匹配 | 缺失 | `hosting.rs:75-87` 校验了 AE title 但从不参与协商 | `hosting.rs:13-14` 文档自认 |
-| 协议违规时发 A-ABORT | `DicomService.cs:1716-1717` `SendAbortAsync` | **缺失** | `server.rs:144` `let _ = serve_connection(...)`：任何 `Err` 只丢连接，全流程无 `write_pdu(Abort)` | 对端收不到 A-ABORT，只能看到 FIN |
+| 协议违规时发 A-ABORT | `DicomService.cs:1716-1717` `SendAbortAsync` | **已实现** | `server.rs:235-253` `serve_connection` 在协议错误返回前发送 Provider A-ABORT；响应型 command 保留 User-source A-ABORT | 未知 PDU 等协议错误会先收到 reason 0 的 Provider A-ABORT；回归测试覆盖 |
 | 指标钩子 | `INetworkMetricsCollector`（`DataSent/DataReceived/ConnectionEstablished/ConnectionClosed`） | 已实现（超集） | `observability.rs:26-33` | radicom 多了 association 开合两个钩子，属于超集，不是缺陷 |
 
 ### 1.2 客户端（SCU）
@@ -97,7 +97,9 @@
 
 ## 2. 正确性缺陷
 
-### 2.1 【高】对端可触发 panic：任意响应型 command field 到达即 `.expect()` 崩溃
+### 2.1 【已修复】对端可触发 panic：任意响应型 command field 到达即 `.expect()` 崩溃
+
+该问题已修复：服务端现在把协议错误转换为 Provider A-ABORT 后关闭关联；响应型 command 仍走既有的 User-source A-ABORT 路径。`a_response_command_aborts_the_association_instead_of_panicking` 和 `protocol_errors_after_association_send_a_provider_abort` 覆盖这两条行为。以下保留原始复现证据，便于追溯问题背景。
 
 位置：`dimse.rs:225`（`Command::response` 里 `response_field(...).expect(...)`），触发点 `server.rs:354-359`。
 
@@ -700,7 +702,7 @@ async fn loopback_honours_a_small_peer_max_pdu() {   // 注释说 "a 64-byte max
 
 | 顺序 | 问题 | 位置 | 级别 | 修法规模 |
 | --- | --- | --- | --- | --- |
-| 1 | 对端可触发 panic（默认连接级；`panic="abort"` 下进程级 remote DoS） | `dimse.rs:225` ← `server.rs:354-359` | **高（最高）** | 一行（`expect` → 返回错误 / 发 A-ABORT） |
+| 1 | 对端可触发 panic（默认连接级；`panic="abort"` 下进程级 remote DoS） | `dimse.rs:225` ← `server.rs:354-359` | **已修复** | 协议错误路径返回 Provider A-ABORT；响应型 command 保留 User-source A-ABORT |
 | 2 | 默认 sink 临时文件泄漏 | `store.rs:46-49` | 高 | 小（返回路径或删文件） |
 | 3 | C-MOVE 终端计数归零 | `server.rs:594-599` | 高 | 一行（用累加 summary） |
 | 4 | `max_clients` 不生效 | `server.rs:125-147` | 高 | 小（Semaphore，fo-dicom 有现成模型） |
