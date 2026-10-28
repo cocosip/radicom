@@ -14,6 +14,7 @@ use crate::model::tag::Tag;
 use crate::pixel::overlay::OverlayData;
 use crate::pixel::PixelData;
 
+pub mod color_table;
 pub mod geometry;
 pub mod icon;
 pub mod interpolation;
@@ -21,6 +22,7 @@ pub mod math;
 pub mod reconstruction;
 pub mod spatial;
 
+pub use color_table::ColorTable;
 pub use geometry::{
     can_draw_localizer, intersection_localizer, projection_localizer, FrameGeometry, FrameGeometryType,
     FrameOrientation,
@@ -602,6 +604,20 @@ impl RawImage {
             .collect()
     }
 
+    /// Remaps each pixel's grey level through `table` (REND-02 OutputLUT /
+    /// REND-06 `ColorTable`). The blue channel carries the 8-bit grey value.
+    pub fn apply_colormap(&mut self, table: &ColorTable) {
+        for px in self.bytes.chunks_exact_mut(4) {
+            let c = table.get(px[0]);
+            px[0] = c.b;
+            px[1] = c.g;
+            px[2] = c.r;
+            if c.a != 0 {
+                px[3] = c.a;
+            }
+        }
+    }
+
     /// Returns a copy resized by `factor` (fo-dicom `DicomImage.Scale`): the
     /// output dimensions become `round(width*factor) × round(height*factor)`,
     /// bilinearly resampled per colour channel (REND-01/06). A non-positive or
@@ -922,6 +938,7 @@ pub struct DicomImage {
     dataset: Dataset,
     frame: u32,
     window_override: Option<(f64, f64)>,
+    colormap: Option<ColorTable>,
     scale: f64,
     transform: SpatialTransform,
 }
@@ -940,6 +957,7 @@ impl DicomImage {
             dataset: dataset.clone(),
             frame,
             window_override: None,
+            colormap: None,
             scale: 1.0,
             transform: SpatialTransform::new(),
         })
@@ -1003,6 +1021,14 @@ impl DicomImage {
         self
     }
 
+    /// Sets the 256-entry output colormap applied to grayscale output
+    /// (REND-02 OutputLUT / REND-06 `ColorTable`); `None` keeps the plain grey
+    /// output. Has no effect on colour images.
+    pub fn set_colormap(&mut self, colormap: Option<ColorTable>) -> &mut Self {
+        self.colormap = colormap;
+        self
+    }
+
     /// Mutable access to the flip/rotate transform applied at the output stage.
     pub fn transform(&mut self) -> &mut SpatialTransform {
         &mut self.transform
@@ -1040,6 +1066,13 @@ impl DicomImage {
         } else {
             render_frame(&self.dataset, frame)?
         };
+
+        // Output LUT (colormap) applies only to grayscale display, before overlays.
+        if grayscale {
+            if let Some(table) = &self.colormap {
+                image.apply_colormap(table);
+            }
+        }
 
         composite_overlays(&mut image, &self.dataset, frame, DEFAULT_OVERLAY_COLOR);
         if self.transform.is_transformed() {
@@ -1987,6 +2020,23 @@ mod tests {
         img.set_scale(2.0);
         let scaled = img.render().unwrap();
         assert_eq!((scaled.width(), scaled.height()), (4, 4), "scale 2 doubles both dimensions");
+    }
+
+    #[test]
+    fn dicom_image_colormap_tints_the_grayscale_output() {
+        let ds = gray_image(2, 1, 8, &[0, 200], Some(128.0), Some(256.0));
+        let mut img = DicomImage::from_dataset(&ds).unwrap();
+        let base = img.render().unwrap();
+        // The ascending (MONOCHROME2) colormap reproduces the plain grey output.
+        img.set_colormap(Some(ColorTable::monochrome2()));
+        assert_eq!(img.render().unwrap().as_bytes(), base.as_bytes(), "monochrome2 is identity");
+        // An all-red colormap paints every pixel red (BGRA [0,0,255,255]).
+        img.set_colormap(Some(ColorTable::from_entries([crate::pixel::Color32::new(255, 0, 0); 256])));
+        let red = img.render().unwrap();
+        for px in red.as_bytes().chunks_exact(4) {
+            assert_eq!(&px[..3], &[0, 0, 255], "BGRA red");
+            assert_eq!(px[3], 255);
+        }
     }
 
     #[test]
