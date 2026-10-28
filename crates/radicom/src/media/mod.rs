@@ -437,6 +437,11 @@ impl DicomDirectory {
     /// [`record_positions`](Self::record_positions)), so a first write with
     /// placeholder offsets is enough to fix the sizes, and the second write only
     /// fills the values in — offset values are fixed-width ULs.
+    ///
+    /// ponytail: two full serializations per rebuild. One pass would need the
+    /// writer to report where each `(0004,1220)` value landed so the buffer can
+    /// be patched in place; do that if DICOMDIR writing ever shows up in a
+    /// profile (review §3.5).
     fn rebuild(&mut self) -> Result<(), Error> {
         let links: Vec<(Option<usize>, Option<usize>)> = (0..self.records.len())
             .map(|index| (self.next_sibling(index), self.children(index).first().copied()))

@@ -80,6 +80,11 @@ pub fn register_charset(term: &str, encoding_name: &str) -> Result<(), Error> {
 /// Resolves a Specific Character Set term to an encoding; unknown terms
 /// fall back to windows-1252 (encoding_rs's ASCII superset — callers warn,
 /// spec §8.1).
+///
+/// ponytail: every call normalizes into a fresh `String` and takes the registry
+/// lock. Parsing only pays this on a charset switch (the builder caches), so the
+/// cost is confined to the write path; a thread-local term→encoding cache would
+/// remove it if that ever shows up in a profile (review §2.13).
 pub fn charset_encoding(term: &str) -> &'static Encoding {
     ensure_registry();
     let normalized = normalize_term(term);
