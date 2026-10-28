@@ -62,12 +62,21 @@ impl PresentationLutTable {
     /// Builds a table from a sequence item. Errors when the descriptor or data
     /// is missing/malformed or the entry count does not match.
     pub fn from_dataset(item: &Dataset) -> Result<Self, Error> {
-        let desc = element_bytes(item, Tag::LUT_DESCRIPTOR)
-            .ok_or_else(|| data_error("Presentation LUT Sequence item has no LUT Descriptor"))?;
+        let descriptor = item
+            .get_element(Tag::LUT_DESCRIPTOR)
+            .map_err(|_| data_error("Presentation LUT Sequence item has no LUT Descriptor"))?;
+        let desc = descriptor
+            .value()
+            .as_buffer()
+            .ok_or_else(|| data_error("Presentation LUT Descriptor is not byte-backed"))?
+            .data();
         if desc.len() < 6 {
             return Err(data_error("Presentation LUT Descriptor is shorter than 3 US values"));
         }
-        let raw_entries = i16::from_le_bytes([desc[0], desc[1]]) as i32;
+        let raw_entries = match descriptor.vr() {
+            Vr::Ss => i16::from_le_bytes([desc[0], desc[1]]) as i32,
+            _ => u16::from_le_bytes([desc[0], desc[1]]) as i32,
+        };
         // fo-dicom treats a nonsensical negative entry count as its absolute value.
         let count = if raw_entries == 0 { 65536usize } else { raw_entries.unsigned_abs() as usize };
         let first_mapped = i16::from_le_bytes([desc[2], desc[3]]) as i32;
@@ -265,6 +274,27 @@ mod tests {
             Vr::Ow,
             Arc::new(MemoryBuffer::from(vec![0u8, 0])),
         )));
+        let mut film = Dataset::new();
+        film.insert_sequence(Tag::PRESENTATION_LUT_SEQUENCE).push(item);
+        assert!(FilmBox::from_dataset(film).presentation_lut().is_err());
+    }
+
+    #[test]
+    fn a_us_descriptor_keeps_a_large_entry_count_unsigned() {
+        let mut item = Dataset::new();
+        // US entry count 65535 must not become signed -1 (and then count 1).
+        let descriptor = [0xFF, 0xFF, 0x00, 0x00, 0x08, 0x00];
+        item.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::LUT_DESCRIPTOR,
+            Vr::Us,
+            Arc::new(MemoryBuffer::from(descriptor.to_vec())),
+        )));
+        item.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::LUT_DATA,
+            Vr::Ow,
+            Arc::new(MemoryBuffer::from(vec![0u8])),
+        )));
+
         let mut film = Dataset::new();
         film.insert_sequence(Tag::PRESENTATION_LUT_SEQUENCE).push(item);
         assert!(FilmBox::from_dataset(film).presentation_lut().is_err());

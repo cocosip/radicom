@@ -98,7 +98,7 @@
 | `FilmBox`（display format / film size / trim） | ✅ | `print/models.rs:105-204` | |
 | `ImageDisplayFormat` STANDARD/ROW/COL/SLIDE/SUPERSLIDE/CUSTOM | 🟡 | `print/layout.rs:81-134` | 解析齐全；CUSTOM 的布局返回空（:126-162），SLIDE/SUPERSLIDE 恒 1 格 |
 | `ImageBox`（position/polarity/magnification/smoothing/min-max density/requested size） | 🟡 | `print/models.rs:214-258` | 只有 position 与 polarity；`MagnificationType`/`SmoothingType`/`MinDensity`/`MaxDensity`/`RequestedImageSize` 全缺 |
-| `PresentationLut` / `PresentationLUTShape` | ❌ | **无** | `print/models.rs:3` 的模块文档声称存在 `PresentationLut`，实际不存在（grep 只命中该注释）。fo-dicom 有 `PresentationLut.cs`（含 `LutSequence`/`LutDescriptor`/`LutData`/`PresentationLutShape`） |
+| `PresentationLut` / `PresentationLUTShape` | ✅ | `print/presentation_lut.rs:20-183` | 已支持 Shape、Sequence、Descriptor/Data 解析与输出映射；Descriptor entry count 按 VR 解码 |
 | `FilmBox.Initialize()` 默认值填充 | 🟡 | `initialize_image_boxes`（`print/models.rs:178-187`） | 只填 position，且写的是**错误的 tag**，见 §2.6 |
 | 胶片渲染（`FilmBoxExtensions.Print`） | 🟡 | `print/render.rs:51-86` | 画布/裁切/极性可用；magnification/smoothing/border density/requested size 全忽略 |
 | `Save` / `Load` / `Print` / 打印 SCU | ⛔ | 无 | 网络打印不在范围，视为有意不实现 |
@@ -365,7 +365,7 @@ a if a <= 180 => rotate_180(...)
 fn read_frame_samples(...) -> Result<(Vec<u16>, u32, u32), Error> {
 ```
 
-注释承诺四元组，实际三元组。`print/models.rs:3` 声称存在 `PresentationLut`，实际不存在（§1.5）。
+注释承诺四元组，实际三元组。
 
 ---
 
