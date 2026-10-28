@@ -35,12 +35,14 @@ pub struct ScanOptions {
     pub error_policy: ScanErrorPolicy,
     /// Glob filter applied to each file name (e.g. `*.dcm`); `None` accepts all.
     pub glob: Option<String>,
+    /// Require the PS3.10 preamble and `DICM` marker before reporting a file.
+    pub check_for_valid_header: bool,
 }
 
 impl Default for ScanOptions {
     fn default() -> Self {
         // fo-dicom's scanner default: recurse fully, skip errors, no filter
-        ScanOptions { max_depth: None, error_policy: ScanErrorPolicy::Skip, glob: None }
+        ScanOptions { max_depth: None, error_policy: ScanErrorPolicy::Skip, glob: None, check_for_valid_header: false }
     }
 }
 
@@ -159,6 +161,9 @@ where
             if !matcher.matches(name) {
                 continue;
             }
+        }
+        if options.check_for_valid_header && !DicomFile::has_valid_header(&path) {
+            continue;
         }
         let index = summary.files_matched;
         visitor.on_event(ScanEvent::File { path: path.clone(), index });
@@ -371,6 +376,30 @@ mod tests {
         assert_eq!(summary.files_seen, 3, "all files seen");
         assert_eq!(summary.files_matched, 2, "only .dcm matched");
         assert_eq!(seen.len(), 2);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn valid_header_filter_skips_non_dicom_files() {
+        let dir = temp_dir("header");
+        let good = dir.join("good.dcm");
+        let bad = dir.join("bad.dcm");
+        let mut bytes = vec![0u8; 128];
+        bytes.extend_from_slice(b"DICM");
+        fs::write(&good, bytes).unwrap();
+        touch(&bad);
+
+        let options = ScanOptions { check_for_valid_header: true, ..Default::default() };
+        let mut seen = Vec::new();
+        let summary = scan_directory(&dir, &options, &mut |_| {}, |path| {
+            seen.push(path.to_path_buf());
+            Ok::<(), Error>(())
+        })
+        .unwrap();
+
+        assert_eq!(summary.files_seen, 2);
+        assert_eq!(summary.files_matched, 1);
+        assert_eq!(seen, vec![good]);
         let _ = fs::remove_dir_all(dir);
     }
 
