@@ -43,7 +43,7 @@
 | --- | --- | --- | --- | --- |
 | C-ECHO SCP | `DicomCEchoProvider` | 已实现 | `server.rs:333-337`、`services.rs:272-287` `VerificationProvider` | — |
 | C-STORE SCP | `DicomCStoreProvider` | 已实现 | `server.rs:672-702` | 但默认 sink 有泄漏与性能问题，见 §2.2、§3.1 |
-| C-FIND SCP | `DicomCFindProvider` | 部分实现 | `server.rs:604-669` | 结果全量缓冲后才发，无真正流式；C-CANCEL 不中断，见 §1.3 |
+| C-FIND SCP | `DicomCFindProvider` | 部分实现 | `server.rs:757-817` | Pending 结果已逐条发送；C-CANCEL 仍未中断 provider，见 §1.3 |
 | C-GET SCP | `DicomCGetProvider`（子操作在服务内发起） | 部分实现 | `server.rs:427-515` | 同源缓冲；`remaining` 只按预缓冲的 `Instance` 计数，见 §2.4 |
 | C-MOVE SCP | `DicomCMoveProvider` | 部分实现 | `server.rs:519-601` | provider 不终止时终端响应丢真实计数，见 §2.3 |
 | C-CANCEL 处理 | `DicomService.cs` 取消在途请求 | 部分实现 | `server.rs:338-347` | 收下即丢弃（`let _cancelled = ...; Ok(())`），provider 永远不知道被取消 |
@@ -84,7 +84,7 @@
 
 | 项 | 位置 | 声明 | 判断 |
 | --- | --- | --- | --- |
-| C-FIND/C-MOVE/C-GET 结果全量缓冲 | `server.rs:451-452`、`server.rs:560-561`、`server.rs:628-629` `ponytail:` 注释 | "buffered per request; stream straight through if it ever outgrows memory" | 但 `docs/design/05-network.md §6.3` 声称 stream 化，且 `send_c_find_stream` 在 SCU 侧确实流式；SCP 侧不流式是真实缺口，不是"有意不实现"，因为 C-CANCEL 因此无法生效（§1.1） |
+| C-MOVE/C-GET 结果全量缓冲 | `server.rs:567-757` `ponytail:` 注释 | "buffered per request; stream straight through if it ever outgrows memory" | C-FIND 已改为逐条发送；C-MOVE/C-GET 仍然缓冲，因此 C-CANCEL 仍无法中断这些 provider（§1.1） |
 | role selection 默认不协商 | `association.rs:263-275` `accept_roles: false` | 默认拒绝 SCU/SCP 角色选择 | 有意取舍；但意味着 SCP 不能作为 SCU 反向发请求，C-GET 只能走同关联反向 C-STORE |
 | `expert.rs` 的 `RELEASE_TIMEOUT` | `expert.rs:233` | 常量声明 10s | **死代码**：全仓无引用（grep 确认）。不是"有意不实现"，是遗漏 |
 
@@ -549,11 +549,11 @@ if end - pos < n { ... }
 
 好消息：`store.rs:66` 用的是 `from_bytes`，所以当前 C-STORE 路径**尚未**吃到这 10–80 倍。但它同时意味着 §3.1 的落盘是一次纯粹的浪费——一旦有人"优化"成 `write_and_parse` 里改用 `DicomFile::open`（看起来更自然），接收吞吐会立刻塌到 1/50。这条应作为"不要改成 open"的显式警告保留。
 
-### 3.5 【中】C-FIND / C-MOVE / C-GET 结果全量缓冲
+### 3.5 【中】C-MOVE / C-GET 结果全量缓冲
 
-位置：`server.rs:453-476`、`server.rs:562-585`、`server.rs:630-651`。
+位置：`server.rs:567-757`。
 
-三处都是先把 provider 的 `BoxStream` 收进 `Vec` 再逐条发送，注释（`server.rs:451-452`、`560-561`、`628-629`）承认是 `ponytail:` 取舍。代价：一次返回 10 万条 C-FIND 匹配时，SCP 端内存峰值等于全部匹配集的序列化前体积，而 SCU 端已经在等待——首字节延迟从"第一条匹配的时间"退化为"全部匹配的时间"。同时这也是 C-CANCEL 无法生效的直接原因（§1.1）。最小修法：C-FIND 用 `send_c_find_stream` 同样的增量写法（该函数 `server.rs:1287-1372` 已经证明增量可行），把 provider 的 stream 逐条 `send_with_dataset`，把 C-CANCEL 变成一个 `AtomicBool` 供 provider 查询。
+C-MOVE 和 C-GET 仍先把 provider 的 `BoxStream` 收进 `Vec` 再逐条发送，代价是一次返回大量实例时内存峰值等于全部结果的序列化前体积，且 C-CANCEL 无法在 provider 运行期间生效。C-FIND 已采用逐条 `send_with_dataset`，首个 Pending 响应可在 provider 产生终端响应前到达 SCU；后续仍需为三种服务统一引入可观察的取消状态。
 
 ### 3.6 【中】C-GET 每实例重新构造 `Transcoder` 并整体转码
 

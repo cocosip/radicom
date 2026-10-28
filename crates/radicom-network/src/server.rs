@@ -777,42 +777,32 @@ where
         identifier,
     };
 
-    // Collect first, then send: the stream borrows the provider, so it cannot
-    // stay alive across the awaited writes without a self-referential borrow.
-    // ponytail: buffered per query; stream straight through if a query ever
-    // outgrows memory.
-    let mut responses = Vec::new();
-    {
-        use futures::StreamExt;
-        let mut stream = serving.provider.on_c_find(&request);
-        while let Some(response) = stream.next().await {
-            match response {
-                Ok(response) => responses.push(response),
-                Err(error) => {
-                    let failure = crate::cfind::CFindResponse::failure(
-                        &request,
-                        crate::dimse::status::PROCESSING_FAILURE,
-                        error.to_string(),
-                    );
-                    responses.push(failure);
-                    break;
-                }
-            }
-            if responses.last().map(|r| !r.is_pending()).unwrap_or(false) {
-                break;
-            }
-        }
-    }
-
+    // Clone the provider handle so its response stream can stay alive while
+    // the association writes each response. This keeps the first Pending
+    // response observable before a provider has finished producing results.
+    use futures::StreamExt;
+    let provider = serving.provider.clone();
+    let mut stream = provider.on_c_find(&request);
     let mut matches = 0u16;
     let mut terminated = false;
-    for response in responses {
+    while let Some(response) = stream.next().await {
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => crate::cfind::CFindResponse::failure(
+                &request,
+                crate::dimse::status::PROCESSING_FAILURE,
+                error.to_string(),
+            ),
+        };
         let identifier = response.identifier.clone();
         if !response.is_pending() {
             matches = response.completed;
             terminated = true;
         }
         serving.send_with_dataset(context_id, &response.to_command(), identifier.as_ref(), syntax).await?;
+        if terminated {
+            break;
+        }
     }
     if !terminated {
         // a provider that never terminated its stream still gets a final answer
@@ -2475,6 +2465,75 @@ mod tests {
         let second = responses[1].identifier.as_ref().unwrap();
         assert_eq!(second.get_str(Tag::PATIENT_NAME).unwrap(), "Roe^Jane");
 
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn loopback_c_find_delivers_pending_before_provider_finishes() {
+        struct GatedFind {
+            release_terminal: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl ServiceProvider for GatedFind {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![sop_class::STUDY_ROOT_QR_FIND.to_string()]
+            }
+
+            fn on_c_find<'a>(
+                &'a self,
+                request: &'a crate::cfind::CFindRequest,
+            ) -> futures::stream::BoxStream<'a, Result<crate::cfind::CFindResponse>> {
+                use futures::StreamExt;
+                let mut item = Dataset::new();
+                item.insert_str(Tag::STUDY_INSTANCE_UID, Vr::Ui, "1.2.3");
+                let pending = crate::cfind::CFindResponse::pending(request, item);
+                let release_terminal = self.release_terminal.clone();
+                Box::pin(
+                    futures::stream::once(async move { Ok(pending) }).chain(futures::stream::once(async move {
+                        release_terminal.notified().await;
+                        Ok(crate::cfind::CFindResponse::success(request, 1))
+                    })),
+                )
+            }
+        }
+
+        let release_terminal = Arc::new(tokio::sync::Notify::new());
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(GatedFind { release_terminal: release_terminal.clone() }),
+            ServerOptions { store_sink: crate::store::StoreSink::Memory, ..Default::default() },
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association =
+            Association::open(addr, "SCU", "SCP", vec![find_context()], ClientOptions::default())
+                .await
+                .unwrap();
+        let request = crate::cfind::CFindRequest::study_query(1);
+        let mut responses = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            association.send_c_find_stream(&request, |response| {
+                let terminal = !response.is_pending();
+                responses.push(response);
+                if !terminal {
+                    release_terminal.notify_one();
+                }
+                Ok(())
+            }),
+        )
+        .await
+        .expect("the first pending response must not wait for the provider's terminal response")
+        .unwrap();
+
+        assert_eq!(responses.len(), 2);
+        assert!(responses[0].is_pending());
+        assert_eq!(responses[1].status, crate::dimse::status::SUCCESS);
         association.release().await.unwrap();
         handle.await.unwrap().unwrap();
     }
