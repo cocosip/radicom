@@ -687,6 +687,49 @@ impl RawImage {
         self.encode_png(&raw, 2) // colour type 2 = truecolour RGB
     }
 
+    /// Encodes the image as an uncompressed 24-bit BGR Windows BMP (bottom-up,
+    /// rows padded to a 4-byte boundary). Zero-dependency counterpart to
+    /// [`to_png`](Self::to_png) for REND-07's "PNG/BMP export".
+    pub fn to_bmp(&self) -> Vec<u8> {
+        let w = self.width as usize;
+        let h = self.height as usize;
+        let row_bytes = w * 3;
+        let padded_row = (row_bytes + 3) & !3;
+        let image_size = padded_row * h;
+        let file_size = 54 + image_size;
+        let mut out = Vec::with_capacity(file_size);
+        // BITMAPFILEHEADER (14 bytes)
+        out.extend_from_slice(b"BM");
+        out.extend_from_slice(&(file_size as u32).to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // reserved 1
+        out.extend_from_slice(&0u16.to_le_bytes()); // reserved 2
+        out.extend_from_slice(&54u32.to_le_bytes()); // pixel-data offset
+        // BITMAPINFOHEADER (40 bytes)
+        out.extend_from_slice(&40u32.to_le_bytes()); // header size
+        out.extend_from_slice(&(self.width as i32).to_le_bytes());
+        out.extend_from_slice(&(self.height as i32).to_le_bytes()); // positive → bottom-up
+        out.extend_from_slice(&1u16.to_le_bytes()); // planes
+        out.extend_from_slice(&24u16.to_le_bytes()); // bits per pixel
+        out.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB (uncompressed)
+        out.extend_from_slice(&(image_size as u32).to_le_bytes());
+        out.extend_from_slice(&2835i32.to_le_bytes()); // x pixels/metre (~72 dpi)
+        out.extend_from_slice(&2835i32.to_le_bytes()); // y pixels/metre
+        out.extend_from_slice(&0u32.to_le_bytes()); // colours used
+        out.extend_from_slice(&0u32.to_le_bytes()); // important colours
+        // pixel data: bottom-up rows, B,G,R per pixel, row padded to 4 bytes
+        let pad = padded_row - row_bytes;
+        for y in (0..h).rev() {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                out.push(self.bytes[i]); // B
+                out.push(self.bytes[i + 1]); // G
+                out.push(self.bytes[i + 2]); // R
+            }
+            out.resize(out.len() + pad, 0u8);
+        }
+        out
+    }
+
     /// Wraps filtered scanlines in the PNG container with the given colour type.
     fn encode_png(&self, raw: &[u8], color_type: u8) -> Vec<u8> {
         let mut png = Vec::new();
@@ -2076,6 +2119,32 @@ mod tests {
         assert_eq!(&png[12..16], b"IHDR");
         // colour type is byte 9 of IHDR data (offset 16..29)
         assert_eq!(png[16 + 9], 2, "PNG colour type 2 = truecolour");
+    }
+
+    #[test]
+    fn bmp_export_has_a_valid_header_and_bottom_up_pixels() {
+        // 2x2 BGRA: top row red,green; bottom row blue,white.
+        let img = RawImage::new(
+            2,
+            2,
+            vec![
+                0, 0, 255, 255, 0, 255, 0, 255, // row 0: red, green
+                255, 0, 0, 255, 255, 255, 255, 255, // row 1: blue, white
+            ],
+        );
+        let bmp = img.to_bmp();
+        assert_eq!(&bmp[0..2], b"BM");
+        assert_eq!(u32::from_le_bytes([bmp[2], bmp[3], bmp[4], bmp[5]]) as usize, bmp.len(), "file size field");
+        assert_eq!(u32::from_le_bytes([bmp[10], bmp[11], bmp[12], bmp[13]]), 54, "pixel-data offset");
+        assert_eq!(i32::from_le_bytes([bmp[18], bmp[19], bmp[20], bmp[21]]), 2, "width");
+        assert_eq!(i32::from_le_bytes([bmp[22], bmp[23], bmp[24], bmp[25]]), 2, "height");
+        assert_eq!(u16::from_le_bytes([bmp[28], bmp[29]]), 24, "24 bits per pixel");
+        // 2 px * 3 bytes = 6, padded to 8 per row × 2 rows = 16 + 54 header
+        assert_eq!(bmp.len(), 54 + 16);
+        // bottom-up: the first stored row is the BOTTOM row (blue, white) as B,G,R.
+        assert_eq!(&bmp[54..60], &[255, 0, 0, 255, 255, 255], "bottom row blue,white in BGR");
+        // top row (red, green) follows, then 2 padding bytes per row
+        assert_eq!(&bmp[62..68], &[0, 0, 255, 0, 255, 0], "top row red,green in BGR");
     }
 
     /// Builds a dataset with a grayscale image plus one embedded overlay group
