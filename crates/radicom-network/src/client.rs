@@ -7,8 +7,7 @@
 //!
 //! ```text
 //! IDLE → CONNECT → REQUEST-ASSOC ─(timeout: retry ≤N)→ ASSOCIATED
-//!      → SEND (drain) → LINGER (wait for new queued requests)
-//!      → RELEASE → IDLE (retry the remainder) → done
+//!      → SEND → (quota spent: cooldown → RELEASE) → IDLE → done
 //! ```
 
 use crate::cfind::{CFindRequest, CFindResponse};
@@ -26,11 +25,14 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub struct DicomClientOptions {
     /// Requests sent on one association before it is released; `None` keeps
-    /// the association open for as long as requests keep queueing.
+    /// the association open until the caller releases it (no per-association
+    /// quota).
     pub max_requests_per_association: Option<usize>,
-    /// How long a finished association waits for newly queued requests
-    /// before it is released.
-    pub linger: Duration,
+    /// How long a spent association waits before it is released. This is a
+    /// cooldown after the request quota is reached, not fo-dicom's
+    /// listen-style linger: the synchronous API queues nothing while it sleeps
+    /// (§2.7).
+    pub quota_cooldown: Duration,
     /// Association attempts per batch before giving up (consecutive cap).
     pub max_consecutive_timeout_retries: u32,
     /// The transport-level options (max PDU, TLS, user identity, extended
@@ -42,7 +44,7 @@ impl Default for DicomClientOptions {
     fn default() -> Self {
         DicomClientOptions {
             max_requests_per_association: None,
-            linger: Duration::from_millis(50),
+            quota_cooldown: Duration::from_millis(50),
             max_consecutive_timeout_retries: 3,
             connection: ClientOptions::default(),
         }
@@ -134,14 +136,14 @@ impl DicomClient {
         matches!(self.options.max_requests_per_association, Some(max) if self.sent_on_association >= max)
     }
 
-    /// Waits `linger`, then releases the association if the quota is spent.
+    /// Waits the quota cooldown, then releases the association if the quota is
+    /// spent.
     ///
-    /// `linger` only pays off when requests arrive from other tasks; this
-    /// synchronous API queues nothing while it sleeps, so the wait is the
-    /// caller's signal that the burst is over (§9.1).
+    /// The synchronous API queues nothing while it sleeps, so this is a fixed
+    /// delay before the release, not a wait for new work (§2.7).
     async fn retire_if_spent(&mut self) {
         if self.quota_spent() {
-            self.linger().await;
+            self.cooldown().await;
             self.close_association().await;
         }
     }
@@ -217,9 +219,9 @@ impl DicomClient {
         self.last_request = None;
     }
 
-    /// Waits `linger` for more work (§9.1 LINGER state).
-    async fn linger(&self) {
-        tokio::time::sleep(self.options.linger).await;
+    /// Sleeps the quota cooldown (§2.7: a post-quota delay, not a queue wait).
+    async fn cooldown(&self) {
+        tokio::time::sleep(self.options.quota_cooldown).await;
     }
 
     /// Sends a C-ECHO (§7.1, §9.1).
@@ -407,7 +409,7 @@ mod tests {
     fn default_options_match_section_9_1() {
         let options = DicomClientOptions::default();
         assert_eq!(options.max_requests_per_association, None);
-        assert_eq!(options.linger, Duration::from_millis(50));
+        assert_eq!(options.quota_cooldown, Duration::from_millis(50));
         assert_eq!(options.max_consecutive_timeout_retries, 3);
     }
 
@@ -416,7 +418,7 @@ mod tests {
         // one request per association: the second call must reopen
         let options = DicomClientOptions {
             max_requests_per_association: Some(1),
-            linger: Duration::from_millis(0),
+            quota_cooldown: Duration::from_millis(0),
             ..Default::default()
         };
         let mut client = DicomClient::new("SCU", "SCP", "127.0.0.1:0").with_options(options);

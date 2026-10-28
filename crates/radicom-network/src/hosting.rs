@@ -258,6 +258,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stop_then_start_serves_again() {
+        // §4.7: stop must clear the listening/addr pair, and a later start must
+        // bind and accept connections again (there was no restart test).
+        let server = HostedDicomServer::new(HostedServerConfig { port: 0, ..Default::default() }, EchoOnly);
+        server.start().await.unwrap();
+        let first = server.local_addr().expect("bound");
+        let dial = SocketAddr::from(([127, 0, 0, 1], first.port()));
+        assert!(tokio::net::TcpStream::connect(dial).await.is_ok(), "the first listener is up");
+
+        server.stop().await.unwrap();
+        assert!(!server.health().listening);
+        assert!(server.local_addr().is_none(), "stop clears the bound address");
+
+        server.start().await.unwrap();
+        assert!(server.health().listening);
+        let second = server.local_addr().expect("bound again after stop");
+        let dial = SocketAddr::from(([127, 0, 0, 1], second.port()));
+        assert!(tokio::net::TcpStream::connect(dial).await.is_ok(), "the restarted listener accepts connections");
+        server.stop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn health_reports_a_clean_state() {
         let server = HostedDicomServer::new(HostedServerConfig::default(), EchoOnly);
         let health = server.health();

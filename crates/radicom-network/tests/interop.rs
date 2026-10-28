@@ -4,7 +4,9 @@
 //! `DicomClient` over real TCP on 127.0.0.1 — no external peer required, so
 //! radicom's own network stack is exercised end to end in CI.
 //!
-//! `external_peer_*` runs only when `RADICOM_PEER` is set (see docs/04-interop.md).
+//! `external_peer_*` is `#[ignore]`d: it needs `RADICOM_PEER` pointing at a real
+//! DICOM peer, so a plain `cargo test` reports it as ignored rather than a
+//! vacuous pass (docs/04-interop.md).
 
 use async_trait::async_trait;
 use radicom::io::file::DicomFile;
@@ -140,6 +142,7 @@ fn setting(name: &str, default: &str) -> String {
 }
 
 #[tokio::test]
+#[ignore = "needs RADICOM_PEER=host:port pointing at a real DICOM peer; run with --ignored"]
 async fn external_peer_c_echo_and_optional_c_store() {
     let Ok(peer) = std::env::var("RADICOM_PEER") else {
         eprintln!("skip: set RADICOM_PEER=host:port to run interop against a real peer");

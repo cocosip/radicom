@@ -11,7 +11,7 @@ use crate::association::{AcceptedContexts, NegotiationPolicy};
 use crate::dimse::{Command, CommandField, StatusState};
 use crate::error::{AbortSource, NetworkError, RejectResult, RejectSource, Result};
 use crate::pdu::{
-    Abort, Associate, AssociateRj, Pdu, PresentationContext, UserInformation, APPLICATION_CONTEXT,
+    Abort, Associate, AssociateRj, Pdu, PresentationContext, APPLICATION_CONTEXT,
 };
 use crate::services::{CEchoRequest, CEchoResponse, CStoreResponse, ServiceProvider};
 use crate::transport::{read_pdu, write_pdu, TcpOptions};
@@ -228,9 +228,12 @@ where
 
     let mut accept = Associate::new(request.calling_ae.clone(), request.called_ae.clone());
     accept.presentation_contexts = negotiated.iter().map(|c| c.to_wire()).collect();
-    let mut user = UserInformation::new(options.max_pdu_length);
-    user.implementation_class_uid = Some(IMPLEMENTATION_CLASS_UID.to_string());
-    user.implementation_version_name = Some(IMPLEMENTATION_VERSION_NAME.to_string());
+    let mut user = crate::association::build_user_information(
+        options.max_pdu_length,
+        IMPLEMENTATION_CLASS_UID,
+        IMPLEMENTATION_VERSION_NAME,
+        Vec::new(),
+    );
 
     // extended negotiation: the AC echoes one item per requested SOP class (§4.3)
     user.extended_negotiations = options.extended_negotiation.answer(&request.user_information.extended_negotiations);
@@ -759,10 +762,20 @@ where
         return serving.fail(context_id, &command, "dataset is only supported for C-STORE").await;
     }
 
-    // parse failures become a failure status; the connection survives (§5.2)
-    let instance = match serving.options.store_sink.materialize(dataset_bytes, syntax) {
-        Ok(instance) => instance,
-        Err(error) => return serving.fail(context_id, &command, &error.to_string()).await,
+    // parse failures become a failure status; the connection survives (§5.2).
+    // The spool does synchronous file IO, so it runs on the blocking pool: a
+    // slow disk must not stall this (or any other) connection's runtime task
+    // (§3.2).
+    let sink = serving.options.store_sink.clone();
+    let bytes = dataset_bytes.to_vec();
+    let syntax = syntax.clone();
+    let instance = match tokio::task::spawn_blocking(move || sink.materialize(&bytes, &syntax)).await {
+        Ok(Ok(instance)) => instance,
+        Ok(Err(error)) => return serving.fail(context_id, &command, &error.to_string()).await,
+        Err(join) => {
+            let message = format!("spool task failed: {join}");
+            return serving.fail(context_id, &command, &message).await;
+        }
     };
 
     let request = match crate::store::c_store_request_from_message(&command, instance) {
@@ -1133,9 +1146,12 @@ impl Association {
         let mut request = Associate::new(called_ae, calling_ae);
         request.application_context = APPLICATION_CONTEXT.to_string();
         request.presentation_contexts = presentation_contexts;
-        let mut user = UserInformation::new(options.max_pdu_length);
-        user.implementation_class_uid = Some(IMPLEMENTATION_CLASS_UID.to_string());
-        user.implementation_version_name = Some(IMPLEMENTATION_VERSION_NAME.to_string());
+        let mut user = crate::association::build_user_information(
+            options.max_pdu_length,
+            IMPLEMENTATION_CLASS_UID,
+            IMPLEMENTATION_VERSION_NAME,
+            Vec::new(),
+        );
         user.extended_negotiations = options.extended_negotiations.clone();
         user.user_identity = options.user_identity.clone();
         request.user_information = user;
@@ -2928,11 +2944,76 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loopback_honours_a_small_peer_max_pdu() {        // a 64-byte maximum forces the command set into several PDVs
-        let options = ServerOptions { max_pdu_length: 64, ..Default::default() };
-        let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), options).await.unwrap();
-        let addr = server.local_addr();
-        let handle = tokio::spawn(async move { server.accept_one().await });
+    async fn loopback_honours_a_small_peer_max_pdu() {
+        // §4.5: the old test only asserted that C-ECHO succeeded, so any
+        // implementation passed. A 64-byte maximum must actually split the
+        // command set over several P-DATA PDUs, so a fake peer reads the real
+        // wire frames and checks each body length against the negotiated max.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // echo the client's own 64-byte maximum back in the accept
+            let request = crate::test_wire::accept_association(&mut stream).await;
+            assert_eq!(request.user_information.max_pdu_length, 64);
+
+            let mut assembler = PdvAssembler::new();
+            let mut frames = 0usize;
+            let mut command = None;
+            loop {
+                match read_pdu(&mut stream).await.unwrap() {
+                    Some(Pdu::PData(pdata)) => {
+                        frames += 1;
+                        // a P-DATA body is the PDU length field, i.e. the PDU
+                        // less its 6-byte header; every PDV costs 6 header
+                        // bytes plus an even-padded value
+                        let body: usize = pdata
+                            .pdvs
+                            .iter()
+                            .map(|pdv| 6 + pdv.data.len() + pdv.data.len() % 2)
+                            .sum();
+                        assert!(body <= 64, "P-DATA body is {body} bytes, over the negotiated 64");
+                        for unit in assembler.push_pdata(&pdata).unwrap() {
+                            if unit.stream == Stream::Command {
+                                command = Some(command_from_bytes(&unit.bytes).unwrap());
+                            }
+                        }
+                        if let Some(command) = &command {
+                            let reply = Command::response(command, crate::dimse::status::SUCCESS)
+                                .expect("a C-ECHO request has a response field");
+                            let bytes = command_bytes(&reply).unwrap();
+                            let pdv = crate::pdu::Pdv {
+                                context_id: pdata.pdvs[0].context_id,
+                                is_command: true,
+                                is_last: true,
+                                data: bytes,
+                            };
+                            write_pdu(&mut stream, &Pdu::PData(crate::pdu::PData { pdvs: vec![pdv] }))
+                                .await
+                                .unwrap();
+                            // the client answers a response with A-RELEASE-RQ;
+                            // keep the socket open until it does, or its release
+                            // sees a hard reset instead of a clean close
+                            break;
+                        }
+                    }
+                    Some(_) => continue,
+                    None => panic!("the client closed before sending a command"),
+                }
+            }
+            // stay available for the release handshake
+            loop {
+                match read_pdu(&mut stream).await.unwrap() {
+                    Some(Pdu::ReleaseRq) => {
+                        write_pdu(&mut stream, &Pdu::ReleaseRp).await.unwrap();
+                        break;
+                    }
+                    Some(_) => continue,
+                    None => break,
+                }
+            }
+            frames
+        });
 
         let client_options = ClientOptions { max_pdu_length: 64, ..Default::default() };
         let mut association = Association::open(addr, "SCU", "SCP", vec![echo_context()], client_options)
@@ -2941,7 +3022,9 @@ mod tests {
         let response = association.send_c_echo(sop_class::VERIFICATION).await.unwrap();
         assert_eq!(response.status, crate::dimse::status::SUCCESS, "fragmented command still round-trips");
         association.release().await.unwrap();
-        handle.await.unwrap().unwrap();
+
+        let frames = peer.await.unwrap();
+        assert!(frames > 1, "a 64-byte maximum must split the command set over several P-DATA PDUs (got {frames})");
     }
     #[tokio::test]
     async fn server_serves_several_connections() {
@@ -3075,6 +3158,150 @@ mod tests {
 
         association.release().await.unwrap();
         handle.await.unwrap().unwrap();
+    }
+
+    /// A provider that answers the four N-services under test. A request whose
+    /// SOP instance UID is `FAIL` gets a failure status; everything else
+    /// succeeds. This exercises the real dispatch path, not just the builders.
+    struct NServiceEcho;
+
+    fn n_service_answer(request: &crate::nservice::NServiceRequest) -> crate::nservice::NServiceResponse {
+        if request.sop_instance_uid.as_deref() == Some("FAIL") {
+            crate::nservice::NServiceResponse::failure(request, crate::dimse::status::PROCESSING_FAILURE)
+        } else {
+            crate::nservice::NServiceResponse::success(request, None)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ServiceProvider for NServiceEcho {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec![COMMIT_SOP_CLASS.to_string()]
+        }
+        async fn on_n_event_report(
+            &self,
+            request: &crate::nservice::NServiceRequest,
+        ) -> Result<crate::nservice::NServiceResponse> {
+            Ok(n_service_answer(request))
+        }
+        async fn on_n_get(
+            &self,
+            request: &crate::nservice::NServiceRequest,
+        ) -> Result<crate::nservice::NServiceResponse> {
+            Ok(n_service_answer(request))
+        }
+        async fn on_n_set(
+            &self,
+            request: &crate::nservice::NServiceRequest,
+        ) -> Result<crate::nservice::NServiceResponse> {
+            Ok(n_service_answer(request))
+        }
+        async fn on_n_create(
+            &self,
+            request: &crate::nservice::NServiceRequest,
+        ) -> Result<crate::nservice::NServiceResponse> {
+            Ok(n_service_answer(request))
+        }
+    }
+
+    /// Drives one N-service request/response pair through a real association:
+    /// one success and one failure status (§4.7).
+    async fn assert_n_service_round_trip(request_field: CommandField, response_field: CommandField) {
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(NServiceEcho), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+        let mut association =
+            Association::open(addr, "SCU", "SCP", vec![commit_context()], ClientOptions::default())
+                .await
+                .unwrap();
+
+        let mut ok = crate::nservice::NServiceRequest::new(request_field, 1);
+        ok.sop_class_uid = Some(COMMIT_SOP_CLASS.to_string());
+        ok.sop_instance_uid = Some("1.2.3.4".to_string());
+        if request_field == CommandField::NEventReportRq {
+            ok.event_type_id = Some(1);
+        }
+        let response = association.send_n_service(&ok).await.unwrap();
+        assert_eq!(response.field, response_field, "a {request_field:?} is answered with {response_field:?}");
+        assert_eq!(response.status, crate::dimse::status::SUCCESS);
+        assert_eq!(response.message_id_being_responded_to, 1);
+
+        let mut fail = crate::nservice::NServiceRequest::new(request_field, 2);
+        fail.sop_class_uid = Some(COMMIT_SOP_CLASS.to_string());
+        fail.sop_instance_uid = Some("FAIL".to_string());
+        if request_field == CommandField::NEventReportRq {
+            fail.event_type_id = Some(1);
+        }
+        let response = association.send_n_service(&fail).await.unwrap();
+        assert_eq!(response.field, response_field);
+        assert_eq!(response.status, crate::dimse::status::PROCESSING_FAILURE, "a failed provider maps to a failure status");
+
+        // the association survives a failed operation
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn n_event_report_round_trips_through_the_server() {
+        assert_n_service_round_trip(CommandField::NEventReportRq, CommandField::NEventReportRsp).await;
+    }
+
+    #[tokio::test]
+    async fn n_get_round_trips_through_the_server() {
+        assert_n_service_round_trip(CommandField::NGetRq, CommandField::NGetRsp).await;
+    }
+
+    #[tokio::test]
+    async fn n_set_round_trips_through_the_server() {
+        assert_n_service_round_trip(CommandField::NSetRq, CommandField::NSetRsp).await;
+    }
+
+    #[tokio::test]
+    async fn n_create_round_trips_through_the_server() {
+        assert_n_service_round_trip(CommandField::NCreateRq, CommandField::NCreateRsp).await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_stores_complete_through_the_blocking_spool() {
+        // §3.2/§4.7: the default sink spools through spawn_blocking, so several
+        // concurrent C-STOREs must still all succeed and leave the client with
+        // an ordinary response.
+        struct StoreOk;
+        #[async_trait::async_trait]
+        impl ServiceProvider for StoreOk {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec!["1.2.840.10008.5.1.4.1.1.7".to_string()]
+            }
+            async fn on_c_store(&self, request: &CStoreRequest) -> Result<CStoreResponse> {
+                Ok(CStoreResponse::success(request))
+            }
+        }
+
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(StoreOk), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            tasks.push(tokio::spawn(async move {
+                let mut association =
+                    Association::open(addr, "SCU", "SCP", vec![store_context()], ClientOptions::default())
+                        .await
+                        .unwrap();
+                let response = association.send_c_store(&instance_file()).await.unwrap();
+                assert_eq!(response.status, crate::dimse::status::SUCCESS);
+                association.release().await.unwrap();
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
     }
 
     #[tokio::test]

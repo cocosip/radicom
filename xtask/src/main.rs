@@ -459,7 +459,14 @@ fn regen_goldens() {
 
     // PDU byte-stream goldens (docs/02-development-guide.md §5 §3 "Network … hex fixtures").
     // Keep the fixtures below in sync with crates/radicom-network/tests/goldens.rs.
-    let pdu_cases = [("associate_rq.hex", fixture_associate_rq()), ("pdata_cecho.hex", fixture_pdata_cecho())];
+    let pdu_cases = [
+        ("associate_rq.hex", fixture_associate_rq()),
+        ("pdata_cecho.hex", fixture_pdata_cecho()),
+        ("associate_rq_user_info.hex", fixture_associate_rq_user_info()),
+        ("cmd_n_get_rq.hex", fixture_command_n_get_rq()),
+        ("cmd_cget_reverse_store_rq.hex", fixture_command_cget_reverse_store_rq()),
+        ("cmd_cfind_pending_rsp.hex", fixture_command_cfind_pending_rsp()),
+    ];
     for (name, bytes) in pdu_cases {
         fs::write(golden_dir.join(name), hex_lines(&bytes)).unwrap_or_else(|e| panic!("write {name}: {e}"));
     }
@@ -504,4 +511,51 @@ fn fixture_pdata_cecho() -> Vec<u8> {
     let command_bytes = encode_command(&command.to_dataset()).expect("encode command");
     let pdv = Pdv { context_id: 1, is_command: true, is_last: true, data: command_bytes };
     encode(&Pdu::PData(PData { pdvs: vec![pdv] })).expect("encode")
+}
+
+fn fixture_associate_rq_user_info() -> Vec<u8> {
+    use radicom_network::pdu::encode;
+    use radicom_network::{Associate, Pdu, PresentationContext};
+    let mut associate = Associate::new("RADICOM_SCP", "RADICOM_SCU");
+    associate.presentation_contexts.push(PresentationContext::new(
+        1,
+        "1.2.840.10008.1.1",
+        vec!["1.2.840.10008.1.2.1".to_string()],
+    ));
+    associate.user_information = radicom_network::association::build_user_information(
+        16384,
+        "1.2.826.0.1.3680043.10.1330.2",
+        "RADICOM_0_1",
+        Vec::new(),
+    );
+    encode(&Pdu::AssociateRq(associate)).expect("encode")
+}
+
+fn fixture_command_n_get_rq() -> Vec<u8> {
+    use radicom_network::nservice::NServiceRequest;
+    use radicom_network::server::command_bytes;
+    use radicom_network::CommandField;
+    let mut request = NServiceRequest::new(CommandField::NGetRq, 7);
+    request.sop_class_uid = Some("1.2.840.10008.1.20.1".to_string());
+    request.sop_instance_uid = Some("1.2.3.4.5".to_string());
+    command_bytes(&request.to_command()).expect("encode command")
+}
+
+fn fixture_command_cget_reverse_store_rq() -> Vec<u8> {
+    use radicom_network::server::command_bytes;
+    use radicom_network::{Command, CommandField};
+    let mut command = Command::request(CommandField::CStoreRq, 1);
+    command.affected_sop_class_uid = Some("1.2.840.10008.1.2.4.50".to_string());
+    command.affected_sop_instance_uid = Some("1.2.3.4.5.6".to_string());
+    command.no_dataset = false;
+    command_bytes(&command).expect("encode command")
+}
+
+fn fixture_command_cfind_pending_rsp() -> Vec<u8> {
+    use radicom::model::dataset::Dataset;
+    use radicom_network::cfind::{CFindRequest, CFindResponse};
+    use radicom_network::server::command_bytes;
+    let request = CFindRequest::study_query(1);
+    let response = CFindResponse::pending(&request, Dataset::new());
+    command_bytes(&response.to_command()).expect("encode command")
 }
