@@ -721,24 +721,73 @@ where
     let provider = serving.provider.clone();
     let mut stream = provider.on_c_move(&request);
     let mut summary = crate::cmove::SubOperationSummary::default();
+    let mut remaining = 0u16;
     let mut terminated = false;
-    while let Some(response) = stream.next().await {
-        let response = match response {
-            Ok(response) => response,
-            Err(error) => crate::cmove::CMoveResponse::failure(
-                &request,
-                crate::dimse::status::PROCESSING_FAILURE,
-                error.to_string(),
-            ),
-        };
-        if response.is_pending() {
-            summary = response.summary;
-        } else {
-            terminated = true;
+    loop {
+        if let Some(unit) = serving.pending_units.pop_front() {
+            if unit.stream != Stream::Command {
+                return Err(NetworkError::protocol("unexpected dataset while C-MOVE is in flight"));
+            }
+            let cancel = command_from_bytes(&unit.bytes)?;
+            if cancel.field == CommandField::CCancelRq {
+                if cancel.message_id_being_responded_to == Some(request.message_id)
+                    && unit.context_id == context_id
+                {
+                    let mut response = crate::cmove::CMoveResponse::failure(
+                        &request,
+                        crate::dimse::status::CANCEL,
+                        "C-MOVE cancelled",
+                    );
+                    response.remaining = remaining;
+                    response.summary = summary;
+                    serving.send(context_id, &response.to_command()).await?;
+                    return Ok(());
+                }
+                continue;
+            }
+            return Err(NetworkError::protocol("unexpected command while C-MOVE is in flight"));
         }
-        serving.send(context_id, &response.to_command()).await?;
-        if terminated {
-            break;
+
+        tokio::select! {
+            biased;
+            pdu = read_pdu(serving.stream) => {
+                let Some(pdu) = pdu? else { return Ok(()) };
+                match pdu {
+                    Pdu::PData(pdata) => {
+                        let units = serving.assembler.push_pdata(&pdata)?;
+                        serving.pending_units.extend(units);
+                    }
+                    Pdu::Abort(abort) => {
+                        return Err(NetworkError::Abort { source_code: abort.source.code(), reason: abort.reason });
+                    }
+                    Pdu::ReleaseRq => {
+                        serving.send_pdu(&Pdu::ReleaseRp).await?;
+                        return Err(NetworkError::ClosedPrematurely { source: None });
+                    }
+                    _ => return Err(NetworkError::protocol("unexpected PDU while C-MOVE is in flight")),
+                }
+            }
+            response = stream.next() => {
+                let Some(response) = response else { break };
+                let response = match response {
+                    Ok(response) => response,
+                    Err(error) => crate::cmove::CMoveResponse::failure(
+                        &request,
+                        crate::dimse::status::PROCESSING_FAILURE,
+                        error.to_string(),
+                    ),
+                };
+                if response.is_pending() {
+                    remaining = response.remaining;
+                    summary = response.summary;
+                } else {
+                    terminated = true;
+                }
+                serving.send(context_id, &response.to_command()).await?;
+                if terminated {
+                    break;
+                }
+            }
         }
     }
     if !terminated {
@@ -1834,9 +1883,9 @@ impl Association {
     /// `(0000,0120) MessageIDBeingRespondedTo`, matching fo-dicom's
     /// `CCancelRequest = 0x0FFF`. It is sent on `context_id` (a proposed
     /// presentation context id). Note the SCP collects a query's matches before
-    /// The streaming C-FIND handler returns a terminal `CANCEL` response when
-    /// this command names its in-flight request; other services currently
-    /// consume C-CANCEL without interrupting their provider stream.
+    /// The streaming C-FIND/C-MOVE handlers return a terminal `CANCEL`
+    /// response when this command names their in-flight request; C-GET still
+    /// consumes C-CANCEL without interrupting its provider stream.
     pub async fn send_c_cancel(&mut self, context_id: u8, message_id: u16) -> Result<()> {
         let mut command = Command::request(CommandField::CCancelRq, message_id);
         // a C-CANCEL identifies the cancelled request in (0000,0120)
@@ -4066,6 +4115,73 @@ mod tests {
         assert_eq!(responses.len(), 2);
         assert!(responses[0].is_pending());
         assert_eq!(responses[1].state(), crate::dimse::StatusState::Success);
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn loopback_c_move_c_cancel_stops_an_in_flight_provider() {
+        struct CancelableMove;
+
+        #[async_trait::async_trait]
+        impl ServiceProvider for CancelableMove {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![sop_class::STUDY_ROOT_QR_MOVE.to_string()]
+            }
+
+            fn on_c_move<'a>(
+                &'a self,
+                request: &'a crate::cmove::CMoveRequest,
+            ) -> futures::stream::BoxStream<'a, Result<crate::cmove::CMoveResponse>> {
+                use futures::StreamExt;
+                let pending = crate::cmove::CMoveResponse::pending(
+                    request,
+                    7,
+                    crate::cmove::SubOperationSummary { completed: 2, failed: 1, warning: 3 },
+                );
+                Box::pin(futures::stream::once(async move { Ok(pending) }).chain(futures::stream::pending()))
+            }
+        }
+
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(CancelableMove), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association =
+            Association::open(addr, "SCU", "SCP", vec![move_context()], ClientOptions::default())
+                .await
+                .unwrap();
+        let request = crate::cmove::CMoveRequest::study("1.2.3.4", "STORE-SCP", 1);
+        let context_id = association.contexts().all()[0].id;
+        let syntax = transfer_syntax_of(&association.contexts().all()[0].transfer_syntax);
+        let command = bytes::Bytes::from(command_bytes(&request.to_command()).unwrap());
+        let identifier = bytes::Bytes::from(crate::message::encode_dataset(&request.identifier, &syntax).unwrap());
+        for pdata in association.splitter.split_message_bytes(context_id, command, Some(identifier)).unwrap() {
+            write_pdu(&mut association.stream, &Pdu::PData(pdata)).await.unwrap();
+        }
+
+        let pending = association.await_response(1, CommandField::CMoveRsp).await.unwrap();
+        assert_eq!(pending.status, Some(crate::dimse::status::PENDING));
+        assert_eq!(pending.remaining_suboperations, Some(7));
+        assert_eq!(pending.completed_suboperations, Some(2));
+        assert_eq!(pending.failed_suboperations, Some(1));
+        assert_eq!(pending.warning_suboperations, Some(3));
+        association.send_c_cancel(context_id, 1).await.unwrap();
+        let cancelled = tokio::time::timeout(
+            Duration::from_secs(2),
+            association.await_response(1, CommandField::CMoveRsp),
+        )
+        .await
+        .expect("C-CANCEL must stop the in-flight provider")
+        .unwrap();
+        assert_eq!(cancelled.status, Some(crate::dimse::status::CANCEL));
+        assert_eq!(cancelled.remaining_suboperations, Some(7));
+        assert_eq!(cancelled.completed_suboperations, Some(2));
+        assert_eq!(cancelled.failed_suboperations, Some(1));
+        assert_eq!(cancelled.warning_suboperations, Some(3));
+
         association.release().await.unwrap();
         handle.await.unwrap().unwrap();
     }
