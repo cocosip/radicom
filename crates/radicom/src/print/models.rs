@@ -280,10 +280,20 @@ impl ImageBox {
         self.dataset.try_get(tags::IMAGE_POSITION)
     }
 
+    pub fn set_position(&mut self, position: u16) -> &mut Self {
+        self.dataset.insert_value(tags::IMAGE_POSITION, position);
+        self
+    }
+
     /// Polarity `NORMAL` (default) or `REVERSE` (§5).
     pub fn polarity(&self) -> bool {
         // true = reversed
         self.dataset.try_get_str(tags::POLARITY).as_deref() == Some("REVERSE")
+    }
+
+    pub fn set_polarity(&mut self, reverse: bool) -> &mut Self {
+        self.dataset.insert_str(tags::POLARITY, Vr::Cs, if reverse { "REVERSE" } else { "NORMAL" });
+        self
     }
 
     pub fn set_magnification_type(&mut self, value: impl Into<String>) -> &mut Self {
@@ -434,10 +444,8 @@ mod tests {
 
     #[test]
     fn an_image_box_reports_position_polarity_and_images() {
-        let mut dataset = Dataset::new();
-        dataset.insert_value(tags::IMAGE_POSITION, 2u16);
-        dataset.insert_str(tags::POLARITY, Vr::Cs, "REVERSE");
-        let mut image_box = ImageBox::from_dataset(dataset);
+        let mut image_box = ImageBox::from_dataset(Dataset::new());
+        image_box.set_position(2).set_polarity(true);
         assert_eq!(image_box.position(), Some(2));
         assert!(image_box.polarity(), "REVERSE maps to true");
 
