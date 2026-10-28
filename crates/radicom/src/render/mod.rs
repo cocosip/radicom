@@ -695,21 +695,15 @@ impl RawImage {
         if out_w == self.width && out_h == self.height {
             return self.clone();
         }
-        let mut rgb = Vec::with_capacity((self.width * self.height * 3) as usize);
-        for p in self.bytes.as_chunks::<4>().0 {
-            rgb.extend_from_slice(&[p[2], p[1], p[0]]); // B,G,R → R,G,B
-        }
-        let resampled = interpolation::bilinear_color24(
-            &rgb,
+        // resample the render buffer directly: BGRA in, BGRA out, no round trip
+        // through an RGB copy (docs §3.6)
+        let out = interpolation::bilinear_bgra32(
+            &self.bytes,
             self.width as usize,
             self.height as usize,
             out_w as usize,
             out_h as usize,
         );
-        let mut out = Vec::with_capacity((out_w * out_h * 4) as usize);
-        for p in resampled.as_chunks::<3>().0 {
-            out.extend_from_slice(&[p[2], p[1], p[0], 0xFF]); // R,G,B → B,G,R,A
-        }
         RawImage::new(out_w, out_h, out)
     }
 
@@ -2220,6 +2214,25 @@ mod tests {
 
         assert_eq!(img.scaled(1.0).as_bytes(), img.as_bytes(), "unit factor is identity");
         assert_eq!(img.scaled(0.0).as_bytes(), img.as_bytes(), "non-positive factor is identity");
+    }
+
+    #[test]
+    fn scaling_interpolates_in_bgra_order_without_a_colour_round_trip() {
+        // black ↔ white along one row: a 3-wide rescale must blend (not pick a
+        // nearest neighbour) and keep the BGRA channel order
+        let img = RawImage::new(2, 1, vec![0, 0, 0, 255, 250, 250, 250, 255]);
+        let up = img.scaled(1.5); // 2 -> 3 columns (and 1 -> 2 rows)
+        assert_eq!((up.width(), up.height()), (3, 2));
+        let px = |i: usize| {
+            let b = up.as_bytes();
+            (b[i * 4], b[i * 4 + 1], b[i * 4 + 2], b[i * 4 + 3])
+        };
+        assert_eq!(px(0), (0, 0, 0, 255), "left edge keeps the dark end");
+        assert_eq!(px(2), (250, 250, 250, 255), "right edge keeps the light end");
+        let (b, g, r, a) = px(1);
+        assert!(b > 0 && b < 250, "the middle pixel is interpolated, got {b}");
+        assert_eq!((g, r), (b, b), "grey stays grey, so no channel was swapped");
+        assert_eq!(a, 255, "alpha is opaque");
     }
 
     #[test]

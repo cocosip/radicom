@@ -92,6 +92,54 @@ pub fn bilinear_color24(
     output
 }
 
+/// Bilinear rescale of a 32-bit interleaved BGRA image (4 bytes/pixel).
+///
+/// The colour channels are resampled exactly like [`bilinear_color24`]; alpha is
+/// written opaque. Scaling straight from the render buffer avoids converting to
+/// RGB and back, which cost two extra full-image passes
+/// (docs/fo-dicom-alignment/02 §3.6).
+pub fn bilinear_bgra32(
+    input: &[u8],
+    input_width: usize,
+    input_height: usize,
+    output_width: usize,
+    output_height: usize,
+) -> Vec<u8> {
+    let mut output = vec![0u8; output_width * output_height * 4];
+    let x_f = ratio(input_width, output_width);
+    let y_f = ratio(input_height, output_height);
+    let x_max = input_width.saturating_sub(1);
+    let y_max = input_height.saturating_sub(1);
+
+    for y in 0..output_height {
+        let oy0 = y as f64 * y_f;
+        let oy1 = oy0 as usize;
+        let oy2 = if oy1 == y_max { oy1 } else { oy1 + 1 };
+        let dy1 = oy0 - oy1 as f64;
+        let dy2 = 1.0 - dy1;
+        let row1 = input_width * oy1 * 4;
+        let row2 = input_width * oy2 * 4;
+
+        for x in 0..output_width {
+            let ox0 = x as f64 * x_f;
+            let ox1 = ox0 as usize;
+            let ox2 = if ox1 == x_max { ox1 } else { ox1 + 1 };
+            let dx1 = ox0 - ox1 as f64;
+            let dx2 = 1.0 - dx1;
+            let x1 = ox1 * 4;
+            let x2 = ox2 * 4;
+            let base = (output_width * y + x) * 4;
+            for c in 0..3 {
+                let v = dy2 * (dx2 * input[row1 + x1 + c] as f64 + dx1 * input[row1 + x2 + c] as f64)
+                    + dy1 * (dx2 * input[row2 + x1 + c] as f64 + dx1 * input[row2 + x2 + c] as f64);
+                output[base + c] = v as u8;
+            }
+            output[base + 3] = 0xFF;
+        }
+    }
+    output
+}
+
 /// Nearest-neighbour rescale of a single-channel image (for 1-bit data).
 ///
 /// Each output pixel takes the input sample whose fractional coordinate rounds
