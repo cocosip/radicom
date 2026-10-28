@@ -788,6 +788,17 @@ impl Crc32 {
 /// Only uncompressed single-sample grayscale frames are handled this round;
 /// other inputs return an error rather than a wrong image.
 pub fn render_grayscale_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error> {
+    let options = GrayscaleRenderOptions::from_dataset_frame(dataset, frame)?;
+    render_grayscale_with_options(dataset, frame, &options)
+}
+
+/// Renders a grayscale frame with pre-resolved options (lets `DicomImage` apply
+/// its own window overrides).
+fn render_grayscale_with_options(
+    dataset: &Dataset,
+    frame: u32,
+    options: &GrayscaleRenderOptions,
+) -> Result<RawImage, Error> {
     // PixelData borrows the dataset mutably (frame caches); render from a clone.
     let mut owned = dataset.clone();
     let pixel = PixelData::from_dataset(&mut owned)?;
@@ -806,7 +817,6 @@ pub fn render_grayscale_frame(dataset: &Dataset, frame: u32) -> Result<RawImage,
         return Err(unsupported("frame has zero width or height"));
     }
 
-    let options = GrayscaleRenderOptions::from_dataset_frame(dataset, frame)?;
     let buffer = pixel.get_frame(frame)?;
     let raw = buffer.data();
     let raw: &[u8] = raw.as_ref();
@@ -880,16 +890,166 @@ pub fn render_frame_with_overlays(
     color: crate::pixel::Color32,
 ) -> Result<RawImage, Error> {
     let mut image = render_frame(dataset, frame)?;
+    composite_overlays(&mut image, dataset, frame, color);
+    Ok(image)
+}
+
+/// OR-composites every overlay covering `frame` onto `image` in `color`
+/// (docs §1.3 step 4). A malformed overlay is skipped, never fatal.
+fn composite_overlays(
+    image: &mut RawImage,
+    dataset: &Dataset,
+    frame: u32,
+    color: crate::pixel::Color32,
+) {
     for overlay in OverlayData::from_dataset(dataset) {
         if !overlay_covers_frame(&overlay, frame) {
             continue;
         }
-        if let Err(_error) = image.composite_overlay(&overlay, dataset, color) {
+        if image.composite_overlay(&overlay, dataset, color).is_err() {
             // a malformed overlay must not break the render (docs §10)
             continue;
         }
     }
-    Ok(image)
+}
+
+/// High-level rendering entry point (REND-01, docs §1): wraps a dataset and
+/// holds per-render overrides — the current frame, an explicit window that
+/// overrides the dataset's own setting, an output `scale`, and a
+/// [`SpatialTransform`]. `render` applies all of them and composites overlays.
+#[derive(Debug, Clone)]
+pub struct DicomImage {
+    dataset: Dataset,
+    frame: u32,
+    window_override: Option<(f64, f64)>,
+    scale: f64,
+    transform: SpatialTransform,
+}
+
+impl DicomImage {
+    /// Wraps a dataset at frame 0 (docs §1.1).
+    pub fn from_dataset(dataset: &Dataset) -> Result<Self, Error> {
+        Self::from_dataset_frame(dataset, 0)
+    }
+
+    /// Wraps a dataset at a specific frame, verifying pixel data is readable.
+    pub fn from_dataset_frame(dataset: &Dataset, frame: u32) -> Result<Self, Error> {
+        let mut owned = dataset.clone();
+        let _ = PixelData::from_dataset(&mut owned)?;
+        Ok(DicomImage {
+            dataset: dataset.clone(),
+            frame,
+            window_override: None,
+            scale: 1.0,
+            transform: SpatialTransform::new(),
+        })
+    }
+
+    /// Opens a DICOM file and wraps its main dataset.
+    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+        let file = crate::io::file::DicomFile::open(path)?;
+        Self::from_dataset(&file.dataset)
+    }
+
+    fn pixel_info(&self) -> Result<(u32, u32, u32, bool), Error> {
+        let mut owned = self.dataset.clone();
+        let pixel = PixelData::from_dataset(&mut owned)?;
+        let grayscale = pixel.samples_per_pixel() == 1;
+        Ok((pixel.width(), pixel.height(), pixel.number_of_frames(), grayscale))
+    }
+
+    pub fn width(&self) -> Result<u32, Error> {
+        Ok(self.pixel_info()?.0)
+    }
+
+    pub fn height(&self) -> Result<u32, Error> {
+        Ok(self.pixel_info()?.1)
+    }
+
+    pub fn number_of_frames(&self) -> Result<u32, Error> {
+        Ok(self.pixel_info()?.2)
+    }
+
+    pub fn is_grayscale(&self) -> Result<bool, Error> {
+        Ok(self.pixel_info()?.3)
+    }
+
+    /// The frame the default `render` draws.
+    pub fn current_frame(&self) -> u32 {
+        self.frame
+    }
+
+    /// Selects the frame `render` draws.
+    pub fn set_frame(&mut self, frame: u32) -> &mut Self {
+        self.frame = frame;
+        self
+    }
+
+    /// Overrides the dataset's own window for grayscale rendering (docs §1.2).
+    pub fn set_window(&mut self, center: f64, width: f64) -> &mut Self {
+        self.window_override = Some((center, width));
+        self
+    }
+
+    /// Drops a window override, reverting to the dataset's own setting.
+    pub fn clear_window(&mut self) -> &mut Self {
+        self.window_override = None;
+        self
+    }
+
+    /// Render-time scaling factor (docs §1.2 `scale`); 1.0 is unscaled.
+    pub fn set_scale(&mut self, scale: f64) -> &mut Self {
+        self.scale = scale;
+        self
+    }
+
+    /// Mutable access to the flip/rotate transform applied at the output stage.
+    pub fn transform(&mut self) -> &mut SpatialTransform {
+        &mut self.transform
+    }
+
+    /// Renders the current frame.
+    pub fn render(&self) -> Result<RawImage, Error> {
+        self.render_frame(self.frame)
+    }
+
+    /// Renders `frame` applying the window override, overlays, transform and
+    /// scale in order.
+    pub fn render_frame(&self, frame: u32) -> Result<RawImage, Error> {
+        use crate::pixel::photometric::PhotometricInterpretation as Pi;
+        let pi = self
+            .dataset
+            .try_get_str(Tag::new(0x0028, 0x0004))
+            .map(|s| Pi::parse(&s))
+            .unwrap_or(Pi::Monochrome2);
+        // Only true monochrome goes through the window pipeline; palettes are
+        // single-sample but must use the palette path (not grayscale windowing).
+        let grayscale = matches!(pi, Pi::Monochrome1 | Pi::Monochrome2);
+
+        let mut image = if grayscale {
+            let mut options = GrayscaleRenderOptions::from_dataset_frame(&self.dataset, frame)?;
+            if let Some((center, width)) = self.window_override {
+                // an explicit window supersedes any VOI LUT Sequence
+                options.window_center = center;
+                options.window_width = width;
+                options.use_voi_lut = false;
+                options.voi_lut = None;
+                options.voi_lut_function = VoiFunction::Linear;
+            }
+            render_grayscale_with_options(&self.dataset, frame, &options)?
+        } else {
+            render_frame(&self.dataset, frame)?
+        };
+
+        composite_overlays(&mut image, &self.dataset, frame, DEFAULT_OVERLAY_COLOR);
+        if self.transform.is_transformed() {
+            image = self.transform.apply_to(&image);
+        }
+        if self.scale != 1.0 && self.scale.is_finite() && self.scale > 0.0 {
+            image = image.scaled(self.scale);
+        }
+        Ok(image)
+    }
 }
 
 /// True when `overlay` applies to `frame` (docs §1.3 frame-range filtering).
@@ -1758,7 +1918,80 @@ mod tests {
     }
 
     #[test]
-    fn rgb_png_is_truecolour_with_three_channels() {        let ds = color_image("RGB", 3, 8, &[255, 0, 0, 0, 255, 0], 0);
+    fn dicom_image_exposes_geometry_and_renders_like_render_frame() {
+        let ds = gray_image(3, 2, 16, &[0, 1000, 2000, 3000, 4000, 5000], Some(2500.0), Some(5000.0));
+        let img = DicomImage::from_dataset(&ds).unwrap();
+        assert_eq!(img.width().unwrap(), 3);
+        assert_eq!(img.height().unwrap(), 2);
+        assert_eq!(img.number_of_frames().unwrap(), 1);
+        assert!(img.is_grayscale().unwrap());
+        assert_eq!(img.current_frame(), 0);
+        // no overrides → identical to the low-level render
+        assert_eq!(img.render().unwrap().as_bytes(), render_frame(&ds, 0).unwrap().as_bytes());
+    }
+
+    #[test]
+    fn dicom_image_window_override_changes_the_render() {
+        // dataset window 2000/4000 → stored 1000 renders ~mid-dark
+        let ds = gray_image(1, 1, 16, &[1000], Some(2000.0), Some(4000.0));
+        let mut img = DicomImage::from_dataset(&ds).unwrap();
+        let default = img.render().unwrap().as_bytes()[0];
+        img.set_window(1000.0, 2.0); // tight window centred on the value → bright
+        let overridden = img.render().unwrap().as_bytes()[0];
+        assert!(overridden > default, "tight override brightens: {overridden} vs {default}");
+        img.clear_window();
+        assert_eq!(img.render().unwrap().as_bytes()[0], default, "clearing restores the dataset window");
+    }
+
+    #[test]
+    fn dicom_image_renders_palette_through_the_palette_pipeline() {
+        // PALETTE COLOR is single-sample but must NOT go through grayscale
+        // windowing (regression: dispatch must key on PI, not samples).
+        let mut ds = color_image("PALETTE COLOR", 1, 8, &[0, 1], 0);
+        for (desc_tag, data_tag, vals) in [
+            (0x1101u16, 0x1201u16, [255u8, 0]),
+            (0x1102, 0x1202, [0u8, 0]),
+            (0x1103, 0x1203, [0u8, 255]),
+        ] {
+            ds.insert_or_update(crate::model::item::DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(Tag::new(0x0028, desc_tag), Vr::Us, us_bytes(&[2, 0, 8])),
+            ));
+            ds.insert_or_update(crate::model::item::DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(
+                    Tag::new(0x0028, data_tag),
+                    Vr::Ow,
+                    std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vals.to_vec())) as crate::model::buffer::SharedBuffer,
+                ),
+            ));
+        }
+        let img = DicomImage::from_dataset(&ds).unwrap();
+        let a = img.render().unwrap();
+        assert_eq!(a.as_bytes(), render_frame(&ds, 0).unwrap().as_bytes(), "palette path matches render_frame");
+        assert_eq!(&a.as_bytes()[0..4], &[0, 0, 255, 255], "index 0 red");
+        assert_eq!(&a.as_bytes()[4..8], &[255, 0, 0, 255], "index 1 blue");
+    }
+
+    #[test]
+    fn dicom_image_renders_rgb_through_the_colour_pipeline() {
+        let ds = color_image("RGB", 3, 8, &[255, 0, 0, 0, 255, 0], 0);
+        let img = DicomImage::from_dataset(&ds).unwrap();
+        assert_eq!(img.render().unwrap().as_bytes(), render_frame(&ds, 0).unwrap().as_bytes());
+    }
+
+    #[test]
+    fn dicom_image_scale_resizes_the_output() {
+        let ds = gray_image(2, 2, 8, &[0, 85, 170, 255], Some(128.0), Some(256.0));
+        let mut img = DicomImage::from_dataset(&ds).unwrap();
+        let base = img.render().unwrap();
+        assert_eq!((base.width(), base.height()), (2, 2));
+        img.set_scale(2.0);
+        let scaled = img.render().unwrap();
+        assert_eq!((scaled.width(), scaled.height()), (4, 4), "scale 2 doubles both dimensions");
+    }
+
+    #[test]
+    fn rgb_png_is_truecolour_with_three_channels() {
+        let ds = color_image("RGB", 3, 8, &[255, 0, 0, 0, 255, 0], 0);
         let image = render_frame(&ds, 0).unwrap();
         let png = image.to_png_rgb();
         assert_eq!(&png[12..16], b"IHDR");
