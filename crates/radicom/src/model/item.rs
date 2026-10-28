@@ -143,6 +143,20 @@ impl DicomItem {
         }
     }
 
+    pub(crate) fn with_tag(self, tag: Tag) -> Self {
+        match self {
+            DicomItem::Element(element) => DicomItem::Element(element.with_tag(tag)),
+            DicomItem::Sequence(mut sequence) => {
+                sequence.tag = tag;
+                DicomItem::Sequence(sequence)
+            }
+            DicomItem::Fragments(mut fragments) => {
+                fragments.tag = tag;
+                DicomItem::Fragments(fragments)
+            }
+        }
+    }
+
     pub fn vr(&self) -> Vr {
         match self {
             DicomItem::Element(e) => e.vr(),

@@ -72,6 +72,11 @@ impl DicomElement {
         &self.tag
     }
 
+    pub(crate) fn with_tag(mut self, tag: Tag) -> Self {
+        self.tag = tag;
+        self
+    }
+
     pub fn vr(&self) -> Vr {
         self.vr
     }

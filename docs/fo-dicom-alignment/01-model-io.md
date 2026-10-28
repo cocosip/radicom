@@ -71,8 +71,8 @@
 
 | fo-dicom 能力 | 状态 | radicom 对应 | 证据 |
 |---|---|---|---|
-| `Add` / `AddOrUpdate` / `AddOrUpdate(VR, tag, values)` | 🟡 | `insert` / `insert_or_update` / `insert_value` | `dataset.rs:202`、`:222`、`:233`；缺 fo-dicom 那个"显式指定 VR 覆盖字典"的重载 |
-| `AddOrUpdate` 对私有 tag 的 creator 校验 | 🟡 | `resolve_private_write`（`dataset.rs:204`） | 私有 tag 无 creator 时静默丢弃（`dataset.rs:224-227` 的 `if let Some(t)`，失败不报错，与 `insert` 的报错不一致） |
+| `Add` / `AddOrUpdate` / `AddOrUpdate(VR, tag, values)` | 🟡 | `insert` / `insert_or_update` / `insert_value` | `dataset.rs:215`、`:237`、`:246`；缺 fo-dicom 那个"显式指定 VR 覆盖字典"的重载 |
+| `AddOrUpdate` 对私有 tag 的 creator 校验 | 🟡 | `resolve_private_write`（`dataset.rs:464`） | 字典式私有 tag 会自动分配 creator block，并把元素/序列/片段重绑定到具体 block；creator block 耗尽时仍受 `insert_or_update` 无错误返回值的 API 限制 |
 | `GetPrivateTag(tag, create)` | ✅ | `dataset.rs:316` | |
 | `GetCodeItem` / `GetMeasuredValue` / `GetReferencedSOP`（SR 辅助） | ❌ | — | Radicom 的 SR 在 `sr/` 模块（不在本次范围），`Dataset` 无这些便捷方法 |
 | `FunctionalGroupValues(frame)` | ✅ | `dataset.rs:775` `functional_groups` | 返回临时 Dataset，语义一致 |
@@ -408,23 +408,23 @@ std::io::ErrorKind::UnexpectedEof => Error::Reader(ReaderError::Eof { position, 
 
 **最小修复**：无法从 `io::Error` 反推所需字节数，应在调用点把期望长度传给 `io_err`（`io_err_need(e, pos, need)`），或在 `ByteSourceReader` 内统一用 `require` + `read_exact` 组合。
 
-### 2.9 【中】`insert_or_update` 对未解析的私有 tag 静默丢弃
+### 2.9 【已修复，保留 API 限制】`insert_or_update` 对未解析的私有 tag 静默丢弃
 
-`crates/radicom/src/model/dataset.rs:222-228`
+`crates/radicom/src/model/dataset.rs:237-243`
 
 ```rust
 pub fn insert_or_update(&mut self, item: impl Into<DicomItem>) -> &mut Self {
     let item: DicomItem = item.into();
-    if let Some(t) = self.resolve_private_write(item.tag().clone(), false) {
-        self.items.insert(t, item);
+    if let Some(t) = self.resolve_private_write(item.tag().clone(), true) {
+        self.items.insert(t.clone(), item.with_tag(t));
     }
-    self  // 失败时静默返回
+    self
 }
 ```
 
-对比 `insert`（`dataset.rs:202-219`）在同样情况下返回 `PrivateTagResolution` 错误。同一个 `Dataset` 上两个语义相近的方法对同一错误给出"报错"与"静默丢弃"两种行为，调用方无法察觉私有元素丢失。fo-dicom 的 `AddOrUpdate` 在私有 tag 无 creator 时也走 `ValidatePrivate` 抛异常。
+现在空闲 creator block 存在时会先分配 creator 元素，再将传入 item 的 tag 一起绑定到实际 block，避免只更新 `BTreeMap` key 而在序列化时仍写出字典式 element。回归测试 `insert_or_update_resolves_and_retags_new_private_creator` 覆盖了该路径。
 
-**最小修复**：让 `insert_or_update` 返回 `Result`，或在文档中明确"静默丢弃"是契约——但当前文档未提及。
+当前方法保持 `&mut Self` 返回值；当 240 个 creator block 全部占用时仍无法通过该 API 报告失败，调用方可先用 `get_private_tag(tag, true)` 检查容量，或使用返回 `Result` 的 `insert`。
 
 ### 2.10 【中】校验规则与 fo-dicom / PS3.3 的契约差异
 

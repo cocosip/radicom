@@ -233,14 +233,11 @@ impl Dataset {
 
     /// Inserts or replaces (fo-dicom AddOrUpdate semantics).
     ///
-    /// A private tag whose creator slot cannot be resolved is dropped
-    /// silently. The parser binds creators before inserting, so this only
-    /// affects values written by hand; use [`insert`](Self::insert) when an
-    /// unresolved private tag must be an error.
+    /// A dictionary-style private tag allocates its creator block on demand.
     pub fn insert_or_update(&mut self, item: impl Into<DicomItem>) -> &mut Self {
         let item: DicomItem = item.into();
-        if let Some(t) = self.resolve_private_write(item.tag().clone(), false) {
-            self.items.insert(t, item);
+        if let Some(t) = self.resolve_private_write(item.tag().clone(), true) {
+            self.items.insert(t.clone(), item.with_tag(t));
         }
         self
     }
@@ -782,6 +779,32 @@ mod tests {
 
         // non-private and block tags pass through unchanged
         assert_eq!(ds.get_private_tag(Tag::PATIENT_NAME, false), Some(Tag::PATIENT_NAME));
+    }
+
+    #[test]
+    fn insert_or_update_resolves_and_retags_new_private_creator() {
+        let mut ds = Dataset::new();
+        let creator = Arc::new(crate::model::private_creator::PrivateCreator::new("ACME 1.2"));
+        let dict_style = Tag::private(0x0029, 0x0001, creator.clone());
+
+        ds.insert_or_update(DicomElement::new_str(dict_style.clone(), Vr::Lo, "widget"));
+
+        let resolved = ds.get_private_tag(dict_style.clone(), false).expect("creator block allocated");
+        assert_eq!(resolved.element(), 0x1001);
+        assert_eq!(ds.get_str(dict_style).unwrap(), "widget");
+        assert!(ds.items().any(|item| item.tag() == &resolved));
+        assert!(ds.items().all(|item| item.tag().element() != 0x0001));
+
+        let sequence_tag = Tag::private(0x0029, 0x0002, creator.clone());
+        ds.insert_or_update(DicomItem::Sequence(DicomSequence::new(sequence_tag.clone())));
+        assert_eq!(ds.get_sequence(sequence_tag).unwrap().tag().element(), 0x1002);
+
+        let fragments_tag = Tag::private(0x0029, 0x0003, creator);
+        ds.insert_or_update(DicomItem::Fragments(DicomFragmentSequence::new(
+            fragments_tag.clone(),
+            Vr::Ob,
+        )));
+        assert_eq!(ds.item(&fragments_tag).unwrap().tag().element(), 0x1003);
     }
 
     #[test]
