@@ -8,6 +8,8 @@
 //! so no new dependency). Colour/palette pipelines, overlays, spatial
 //! transforms and the optional `image` crate backend are later REND work.
 
+use std::sync::Arc;
+
 use crate::error::{DataError, Error};
 use crate::model::dataset::Dataset;
 use crate::model::tag::Tag;
@@ -203,11 +205,12 @@ pub struct GrayscaleRenderOptions {
     /// True when `(0028,3010)` VOI LUT Sequence is present.
     pub use_voi_lut: bool,
     /// Parsed first VOI LUT item, applied in place of the window function when
-    /// `use_voi_lut` is set (PS3.3 C.11.2.1.1).
-    pub voi_lut: Option<VoiLut>,
+    /// `use_voi_lut` is set (PS3.3 C.11.2.1.1). Shared behind `Arc` so a
+    /// `DicomImage` parses it once and reuses it across frames (§3.3).
+    pub voi_lut: Option<Arc<VoiLut>>,
     /// Parsed first modality LUT item `(0028,3000)`; when present it replaces the
     /// rescale slope/intercept at the modality stage (docs §4).
-    pub modality_lut: Option<ModalityLut>,
+    pub modality_lut: Option<Arc<ModalityLut>>,
 }
 
 impl GrayscaleRenderOptions {
@@ -224,15 +227,26 @@ impl GrayscaleRenderOptions {
     /// from a `(0028,3000)` modality LUT Sequence when present, else
     /// `(0028,1053)`/`(0028,1052)`.
     pub fn from_dataset_frame(dataset: &Dataset, frame: u32) -> Result<Self, Error> {
+        let voi_lut = parse_voi_lut(dataset);
+        let modality_lut = parse_modality_lut(dataset);
+        Self::from_dataset_frame_parts(dataset, frame, voi_lut, modality_lut)
+    }
+
+    /// Builds options for `frame` from already-parsed LUT tables. `DicomImage`
+    /// parses `voi_lut`/`modality_lut` once at construction and passes them here
+    /// per frame, so a multi-frame render never re-parses the LUT (§3.3). The
+    /// window is still resolved per frame (a per-frame window depends on it).
+    fn from_dataset_frame_parts(
+        dataset: &Dataset,
+        frame: u32,
+        voi_lut: Option<Arc<VoiLut>>,
+        modality_lut: Option<Arc<ModalityLut>>,
+    ) -> Result<Self, Error> {
         let rescale_intercept = dataset.try_get::<String>(Tag::RESCALE_INTERCEPT).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
         let rescale_slope = dataset.try_get::<String>(Tag::RESCALE_SLOPE).and_then(|s| s.trim().parse().ok()).unwrap_or(1.0);
 
         // A VOI LUT Sequence takes precedence over WindowCenter/Width (docs §4):
         // when its first item is usable, no window is required.
-        let voi_lut = dataset
-            .try_get_sequence(Tag::VOILUT_SEQUENCE)
-            .and_then(|seq| seq.items().first())
-            .and_then(VoiLut::from_item);
         let (window_center, window_width) = if voi_lut.is_some() {
             (0.0, 0.0)
         } else {
@@ -262,14 +276,6 @@ impl GrayscaleRenderOptions {
         // A modality LUT Sequence (0028,3000) replaces the rescale slope/intercept
         // at the modality stage (docs §4: the sequence LUT takes over). XA/XRF
         // display follows Clunie guidance: the modality LUT is *not* applied.
-        let modality_lut = if is_xa_xrf(dataset) {
-            None
-        } else {
-            dataset
-                .try_get_sequence(Tag::MODALITY_LUT_SEQUENCE)
-                .and_then(|seq| seq.items().first())
-                .and_then(ModalityLut::from_item)
-        };
         let (rescale_slope, rescale_intercept) = if modality_lut.is_some() {
             (1.0, 0.0)
         } else {
@@ -294,16 +300,23 @@ impl GrayscaleRenderOptions {
     /// frame samples to build the histogram; the modality rescale and PI inversion
     /// follow the same rules as `from_dataset`.
     pub fn from_histogram(dataset: &Dataset, frame: u32, percent: i32) -> Result<Self, Error> {
-        let values = frame_stored_values(dataset, frame)
-            .map_err(|_| unsupported("histogram window needs native 8/16-bit samples"))?;
-        let (min, max) = match (values.iter().copied().reduce(f64::min), values.iter().copied().reduce(f64::max)) {
-            (Some(lo), Some(hi)) => (lo.round() as i32, hi.round() as i32),
-            _ => return Err(unsupported("frame has no samples for a histogram")),
+        // Two streaming passes over the sample buffer: one for the bin range, one
+        // to fill the histogram. Never materialises the frame as a `Vec` (§3.9).
+        let mut range: Option<(f64, f64)> = None;
+        visit_frame_stored_values(dataset, frame, |v| {
+            range = Some(match range {
+                Some((lo, hi)) => (lo.min(v), hi.max(v)),
+                None => (v, v),
+            });
+        })
+        .map_err(|_| unsupported("histogram window needs native 8/16-bit samples"))?;
+        let (min, max) = match range {
+            Some((lo, hi)) => (lo.round() as i32, hi.round() as i32),
+            None => return Err(unsupported("frame has no samples for a histogram")),
         };
         let mut histogram = Histogram::new(min, max);
-        for &v in &values {
-            histogram.add(v.round() as i32);
-        }
+        visit_frame_stored_values(dataset, frame, |v| histogram.add(v.round() as i32))
+            .map_err(|_| unsupported("histogram window needs native 8/16-bit samples"))?;
         histogram.apply_window_percent(percent.clamp(1, 100));
 
         let start = histogram.window_start() as f64;
@@ -324,14 +337,22 @@ impl GrayscaleRenderOptions {
         let mut base = GrayscaleRenderOptions::from_window_level(0.0, 1.0);
         base.apply_dataset_modality_and_invert(dataset);
 
-        let mut values = frame_stored_values(dataset, frame)?;
-        // filter padding pixels (both the signed and unsigned readings of the tag)
-        if let Some(pad) = first_number(dataset, Tag::PIXEL_PADDING_VALUE) {
-            values.retain(|&v| v != pad);
-        }
-        let (min, max) = match (values.iter().copied().reduce(f64::min), values.iter().copied().reduce(f64::max)) {
-            (Some(lo), Some(hi)) => (lo, hi),
-            _ => return Err(unsupported("frame has no non-padding samples")),
+        // Stream the non-padding min/max in one pass; no whole-frame `Vec` (§3.9).
+        let pad = first_number(dataset, Tag::PIXEL_PADDING_VALUE);
+        let mut range: Option<(f64, f64)> = None;
+        visit_frame_stored_values(dataset, frame, |v| {
+            // filter padding pixels (both the signed and unsigned readings of the tag)
+            if Some(v) == pad {
+                return;
+            }
+            range = Some(match range {
+                Some((lo, hi)) => (lo.min(v), hi.max(v)),
+                None => (v, v),
+            });
+        })?;
+        let (min, max) = match range {
+            Some((lo, hi)) => (lo, hi),
+            None => return Err(unsupported("frame has no non-padding samples")),
         };
         // map through the modality LUT when present (docs: values mapped first)
         let (min, max) = match &base.modality_lut {
@@ -424,15 +445,10 @@ impl GrayscaleRenderOptions {
             .try_get::<String>(Tag::RESCALE_INTERCEPT)
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(0.0);
-        if !is_xa_xrf(dataset) {
-            self.modality_lut = dataset
-                .try_get_sequence(Tag::MODALITY_LUT_SEQUENCE)
-                .and_then(|seq| seq.items().first())
-                .and_then(ModalityLut::from_item);
-            if self.modality_lut.is_some() {
-                self.rescale_slope = 1.0;
-                self.rescale_intercept = 0.0;
-            }
+        self.modality_lut = parse_modality_lut(dataset);
+        if self.modality_lut.is_some() {
+            self.rescale_slope = 1.0;
+            self.rescale_intercept = 0.0;
         }
         self.invert = dataset
             .try_get_str(Tag::PHOTOMETRIC_INTERPRETATION)
@@ -513,6 +529,28 @@ impl GrayscaleRenderOptions {
     }
 }
 
+/// Parses the first `(0028,3010)` VOI LUT item into a shared table, if usable.
+fn parse_voi_lut(dataset: &Dataset) -> Option<Arc<VoiLut>> {
+    dataset
+        .try_get_sequence(Tag::VOILUT_SEQUENCE)
+        .and_then(|seq| seq.items().first())
+        .and_then(VoiLut::from_item)
+        .map(Arc::new)
+}
+
+/// Parses the first `(0028,3000)` modality LUT item, honouring the XA/XRF
+/// rule that display omits it (Clunie guidance, docs §4).
+fn parse_modality_lut(dataset: &Dataset) -> Option<Arc<ModalityLut>> {
+    if is_xa_xrf(dataset) {
+        return None;
+    }
+    dataset
+        .try_get_sequence(Tag::MODALITY_LUT_SEQUENCE)
+        .and_then(|seq| seq.items().first())
+        .and_then(ModalityLut::from_item)
+        .map(Arc::new)
+}
+
 /// The `(0028,1056)` VOILUTFunction selector (CS). Missing/unknown → LINEAR.
 /// fo-dicom `DicomImage.VOILUTFunction` mapping: SIGMOID / LINEAR_EXACT / LINEAR.
 fn voi_function_from_dataset(dataset: &Dataset) -> VoiFunction {
@@ -580,12 +618,12 @@ fn first_number(dataset: &Dataset, tag: Tag) -> Option<f64> {
     text.split('\\').next()?.trim().parse::<f64>().ok()
 }
 
-/// Decodes one native 8/16-bit frame to signed-aware stored values (f64).
+/// Borrows one native 8/16-bit frame's byte window plus its [`BitDepth`].
 ///
-/// Raw samples are normalised through [`BitDepth`] first: high-aligned depth
-/// metadata (12 bits stored in 16 with HighBit 15) would otherwise feed the
-/// min/max and histogram windows values 16× too large.
-fn frame_stored_values(dataset: &Dataset, frame: u32) -> Result<Vec<f64>, Error> {
+/// `PixelData::from_dataset` needs `&mut Dataset`, so the dataset is cloned; a
+/// read-only pixel accessor in `pixel/` would remove that clone, but it is out
+/// of this module's scope (§3.4 ceiling, documented at `render_grayscale_with_options`).
+fn frame_sample_buffer(dataset: &Dataset, frame: u32) -> Result<(crate::model::buffer::SharedBuffer, BitDepth), Error> {
     let mut owned = dataset.clone();
     let pixel = PixelData::from_dataset(&mut owned)?;
     let bits = pixel.bits_allocated()?;
@@ -599,8 +637,19 @@ fn frame_stored_values(dataset: &Dataset, frame: u32) -> Result<Vec<f64>, Error>
     let signed = pixel.pixel_representation() != 0;
     let depth = BitDepth::new(bits, stored, pixel.high_bit(), signed);
     let buffer = pixel.get_frame(frame)?;
+    Ok((buffer, depth))
+}
+
+/// Calls `f` once per stored sample of a native 8/16-bit frame, without ever
+/// materialising the frame as a `Vec` (§3.9). Values are normalised through
+/// [`BitDepth`] and sign-extended from the stored depth, matching the previous
+/// whole-frame `Vec<f64>` result exactly.
+fn visit_frame_stored_values(dataset: &Dataset, frame: u32, mut f: impl FnMut(f64)) -> Result<(), Error> {
+    let (buffer, depth) = frame_sample_buffer(dataset, frame)?;
     let raw = buffer.data();
     let raw: &[u8] = raw.as_ref();
+    let signed = depth.signed;
+    let stored = depth.stored;
     let value = |v: u16| -> f64 {
         let n = depth.normalize(v);
         if signed {
@@ -609,11 +658,16 @@ fn frame_stored_values(dataset: &Dataset, frame: u32) -> Result<Vec<f64>, Error>
             n as f64
         }
     };
-    if bits == 8 {
-        Ok(raw.iter().map(|b| value(*b as u16)).collect())
+    if depth.allocated == 8 {
+        for &b in raw {
+            f(value(b as u16));
+        }
     } else {
-        Ok(raw.as_chunks::<2>().0.iter().map(|c| value(u16::from_le_bytes([c[0], c[1]]))).collect())
+        for c in raw.as_chunks::<2>().0 {
+            f(value(u16::from_le_bytes([c[0], c[1]])));
+        }
     }
+    Ok(())
 }
 
 /// Interprets a normalised `stored`-bit sample as a signed value.
@@ -942,7 +996,11 @@ fn render_grayscale_with_options(
     frame: u32,
     options: &GrayscaleRenderOptions,
 ) -> Result<RawImage, Error> {
-    // PixelData borrows the dataset mutably (frame caches); render from a clone.
+    // PixelData::from_dataset takes &mut Dataset, so a &Dataset render cannot
+    // borrow it; the dataset is cloned per render (§3.4). Removing this clone
+    // needs a read-only PixelData accessor in `pixel/`, which is outside this
+    // module's scope. ponytail: one BTreeMap rebuild per render; add
+    // PixelData::from_dataset_ref(&Dataset) and drop the clone.
     let mut owned = dataset.clone();
     let pixel = PixelData::from_dataset(&mut owned)?;
     if pixel.samples_per_pixel() != 1 {
@@ -970,27 +1028,34 @@ fn render_grayscale_with_options(
     let depth = BitDepth::new(bits, pixel.bits_stored(), pixel.high_bit(), signed);
     let normalize = |v: u16| -> u16 { depth.normalize(v) };
     let count = (width as usize) * (height as usize);
-    let mut bytes = Vec::with_capacity(count * 4);
+
+    // Decode one sample, normalised to the low `bits_stored` bits.
+    let sample_at = |i: usize| -> u16 {
+        if bits == 8 {
+            normalize(raw.get(i).copied().unwrap_or(0) as u16)
+        } else {
+            let lo = raw.get(i * 2).copied().unwrap_or(0);
+            let hi = raw.get(i * 2 + 1).copied().unwrap_or(0);
+            normalize(u16::from_le_bytes([lo, hi]))
+        }
+    };
 
     // Precalculate the window: the mapping is a pure function of the stored
     // value, so evaluate it once per distinct value instead of once per pixel
     // (docs/fo-dicom-alignment/02 §3.2). The table spans only the range that
     // actually occurs, so a 12-bit frame builds 4096 entries, not 65536.
-    let stored_values: Vec<u16> = (0..count)
-        .map(|i| {
-            if bits == 8 {
-                normalize(raw.get(i).copied().unwrap_or(0) as u16)
-            } else {
-                let lo = raw.get(i * 2).copied().unwrap_or(0);
-                let hi = raw.get(i * 2 + 1).copied().unwrap_or(0);
-                normalize(u16::from_le_bytes([lo, hi]))
-            }
-        })
-        .collect();
-    let (min, max) = match (stored_values.iter().min(), stored_values.iter().max()) {
-        (Some(&lo), Some(&hi)) => (lo, hi),
-        _ => (0, 0),
-    };
+    // Two streaming passes over the sample bytes find min/max and emit output,
+    // instead of holding the whole frame in a `Vec<u16>` (§3.9).
+    let (mut min, mut max) = (u16::MAX, 0u16);
+    for i in 0..count {
+        let v = sample_at(i);
+        if v < min {
+            min = v;
+        }
+        if v > max {
+            max = v;
+        }
+    }
     let to_grey = |v: u16| -> u8 {
         // the sign handling matches the per-pixel form exactly: reinterpret the
         // allocated width, do not sign-extend from BitsStored
@@ -1002,8 +1067,9 @@ fn render_grayscale_with_options(
         options.map(stored)
     };
     let lut: Vec<u8> = (min..=max).map(to_grey).collect();
-    for v in stored_values {
-        let gray = lut[(v - min) as usize];
+    let mut bytes = Vec::with_capacity(count * 4);
+    for i in 0..count {
+        let gray = lut[(sample_at(i) - min) as usize];
         // BGRA with grey in all colour channels, opaque alpha
         bytes.extend_from_slice(&[gray, gray, gray, 0xFF]);
     }
@@ -1090,6 +1156,14 @@ pub struct DicomImage {
     overlay_color: crate::pixel::Color32,
     scale: f64,
     transform: SpatialTransform,
+    /// Geometry cached at construction so the accessors never re-clone (§3.5).
+    width: u32,
+    height: u32,
+    number_of_frames: u32,
+    samples_per_pixel: u16,
+    /// LUT tables parsed once at construction and reused for every frame (§3.3).
+    voi_lut: Option<Arc<VoiLut>>,
+    modality_lut: Option<Arc<ModalityLut>>,
 }
 
 impl DicomImage {
@@ -1100,10 +1174,15 @@ impl DicomImage {
 
     /// Wraps a dataset at a specific frame, verifying pixel data is readable.
     pub fn from_dataset_frame(dataset: &Dataset, frame: u32) -> Result<Self, Error> {
+        // One clone: validate and read the geometry from it, then keep it as the
+        // owned dataset (the previous code cloned twice, §3.5).
         let mut owned = dataset.clone();
-        let _ = PixelData::from_dataset(&mut owned)?;
+        let (width, height, number_of_frames, samples_per_pixel) = {
+            let pixel = PixelData::from_dataset(&mut owned)?;
+            (pixel.width(), pixel.height(), pixel.number_of_frames(), pixel.samples_per_pixel())
+        };
         Ok(DicomImage {
-            dataset: dataset.clone(),
+            dataset: owned,
             frame,
             window_override: None,
             colormap: None,
@@ -1111,6 +1190,12 @@ impl DicomImage {
             overlay_color: DEFAULT_OVERLAY_COLOR,
             scale: 1.0,
             transform: SpatialTransform::new(),
+            width,
+            height,
+            number_of_frames,
+            samples_per_pixel,
+            voi_lut: parse_voi_lut(dataset),
+            modality_lut: parse_modality_lut(dataset),
         })
     }
 
@@ -1120,27 +1205,20 @@ impl DicomImage {
         Self::from_dataset(&file.dataset)
     }
 
-    fn pixel_info(&self) -> Result<(u32, u32, u32, bool), Error> {
-        let mut owned = self.dataset.clone();
-        let pixel = PixelData::from_dataset(&mut owned)?;
-        let grayscale = pixel.samples_per_pixel() == 1;
-        Ok((pixel.width(), pixel.height(), pixel.number_of_frames(), grayscale))
-    }
-
     pub fn width(&self) -> Result<u32, Error> {
-        Ok(self.pixel_info()?.0)
+        Ok(self.width)
     }
 
     pub fn height(&self) -> Result<u32, Error> {
-        Ok(self.pixel_info()?.1)
+        Ok(self.height)
     }
 
     pub fn number_of_frames(&self) -> Result<u32, Error> {
-        Ok(self.pixel_info()?.2)
+        Ok(self.number_of_frames)
     }
 
     pub fn is_grayscale(&self) -> Result<bool, Error> {
-        Ok(self.pixel_info()?.3)
+        Ok(self.samples_per_pixel == 1)
     }
 
     /// The frame the default `render` draws.
@@ -1216,7 +1294,14 @@ impl DicomImage {
         let grayscale = matches!(pi, Pi::Monochrome1 | Pi::Monochrome2);
 
         let mut image = if grayscale {
-            let mut options = GrayscaleRenderOptions::from_dataset_frame(&self.dataset, frame)?;
+            // Reuse the LUT tables parsed once at construction (§3.3); only the
+            // window is resolved per frame.
+            let mut options = GrayscaleRenderOptions::from_dataset_frame_parts(
+                &self.dataset,
+                frame,
+                self.voi_lut.clone(),
+                self.modality_lut.clone(),
+            )?;
             if let Some((center, width)) = self.window_override {
                 // an explicit window supersedes any VOI LUT Sequence
                 options.window_center = center;
@@ -1849,6 +1934,17 @@ mod tests {
         assert_eq!(o.window_width, 20.0);
     }
 
+    #[test]
+    fn from_min_max_streams_a_known_sixteen_bit_frame_window() {
+        // §3.9: the min/max window is derived without materialising a Vec<f64>.
+        // Known samples 7..65535 → centre (7+65535)/2 = 32771, width 65528.
+        let samples = [7u16, 100, 4096, 40000, 65535];
+        let ds = gray_image(5, 1, 16, &samples, None, None);
+        let o = GrayscaleRenderOptions::from_min_max(&ds, 0).unwrap();
+        assert_eq!(o.window_center, 32771.0);
+        assert_eq!(o.window_width, 65528.0);
+    }
+
     /// Wraps one window pair per frame in a PerFrameFunctionalGroupsSequence,
     /// each item holding a FrameVOILUTSequence (0028,9132) with WC/WW.
     fn put_per_frame_windows(ds: &mut Dataset, windows: &[(f64, f64)]) {
@@ -2246,6 +2342,46 @@ mod tests {
         assert_eq!(img.current_frame(), 0);
         // no overrides → identical to the low-level render
         assert_eq!(img.render().unwrap().as_bytes(), render_frame(&ds, 0).unwrap().as_bytes());
+    }
+
+    #[test]
+    fn dicom_image_geometry_matches_the_dataset_attributes() {
+        // §3.5: the cached accessors must agree with the dataset's own tags.
+        let ds = gray_image(3, 2, 16, &[0, 1000, 2000, 3000, 4000, 5000], Some(2500.0), Some(5000.0));
+        let img = DicomImage::from_dataset(&ds).unwrap();
+        assert_eq!(img.width().unwrap(), ds.get_or(Tag::COLUMNS, 0u32));
+        assert_eq!(img.height().unwrap(), ds.get_or(Tag::ROWS, 0u32));
+        assert_eq!(img.number_of_frames().unwrap(), 1);
+        assert_eq!(img.is_grayscale().unwrap(), ds.get_or(Tag::SAMPLES_PER_PIXEL, 1u16) == 1);
+    }
+
+    #[test]
+    fn rendering_the_same_dataset_twice_yields_identical_bytes() {
+        // §3.4: with the dataset borrowed (cloned per render for now) a second
+        // render of the same frame must be byte-identical — no state leaks.
+        let ds = gray_image(4, 3, 16, &[0, 100, 500, 1000, 2048, 4000, 5000, 6000, 7000, 8000, 9000, 10000], Some(5000.0), Some(10000.0));
+        let first = render_frame(&ds, 0).unwrap();
+        let second = render_frame(&ds, 0).unwrap();
+        assert_eq!(first.as_bytes(), second.as_bytes());
+        let img = DicomImage::from_dataset(&ds).unwrap();
+        assert_eq!(img.render().unwrap().as_bytes(), first.as_bytes(), "DicomImage agrees too");
+    }
+
+    #[test]
+    fn dicom_image_renders_multiple_frames_with_a_voi_lut() {
+        // §3.3: the VOI LUT is parsed once per DicomImage; every frame must still
+        // render exactly like the free renderer, which re-parses each call.
+        let mut ds = gray_image(2, 1, 8, &[10, 11, 20, 21], None, None);
+        ds.insert_str(Tag::NUMBER_OF_FRAMES, Vr::Is, "2");
+        put_voi_lut(&mut ds, 10, &[0, 255]);
+        let img = DicomImage::from_dataset(&ds).unwrap();
+        for frame in 0..2u32 {
+            assert_eq!(
+                img.render_frame(frame).unwrap().as_bytes(),
+                render_frame(&ds, frame).unwrap().as_bytes(),
+                "frame {frame} matches the re-parsing renderer",
+            );
+        }
     }
 
     #[test]
