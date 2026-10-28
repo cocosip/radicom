@@ -609,7 +609,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_c_cancel_keeps_the_association_healthy() {
+    async fn cancel_reports_whether_it_named_a_request_that_was_sent() {
+        // §4.1: the previous test cancelled an id whose response had already
+        // arrived and then only asserted "the association still works", which
+        // passes for any implementation, including one that ignores C-CANCEL
+        // entirely. The observable contract here is the return value — true only
+        // for a request this client actually sent — plus a healthy association.
         struct FindProvider;
         #[async_trait::async_trait]
         impl ServiceProvider for FindProvider {
@@ -632,11 +637,14 @@ mod tests {
         let handle = tokio::spawn(async move { server.accept_one().await });
 
         let mut client = DicomClient::new("SCU", "SCP", addr.to_string());
-        // open an association
         client.send_c_find(&CFindRequest::study_query(1)).await.unwrap();
-        // cancel a request; the SCP consumes the 0x0FFF command without erroring
-        assert!(client.cancel(1).await.unwrap(), "cancel is sent on the open association");
-        // the association is still usable for the next request
+
+        assert!(client.cancel(1).await.unwrap(), "the request we just sent is cancellable");
+        assert!(
+            !client.cancel(999).await.unwrap(),
+            "an id this client never sent is not reported as a sent cancel"
+        );
+
         let responses = client.send_c_find(&CFindRequest::study_query(2)).await.unwrap();
         assert_eq!(responses.len(), 1, "the association stayed healthy after C-CANCEL");
 

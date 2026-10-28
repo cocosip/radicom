@@ -1155,17 +1155,29 @@ mod tests {
 
     #[test]
     fn written_offsets_point_at_the_next_sibling_and_first_child() {
+        // §4.2(b): asserting `offset != 0` proves a number was written, not that
+        // it names the right record. Compare against item positions recovered
+        // independently from the record-type values.
         let mut dir = DicomDirectory::new("MYFS");
         dir.add_file(&instance("P1", "1.2.3", "1.2.3.4", CT, "1.2.3.4.5"), "A").unwrap();
         dir.add_file(&instance("P1", "1.2.3", "1.2.3.4", CT, "1.2.3.4.6"), "B").unwrap();
         let bytes = dir.to_bytes().unwrap();
 
+        let studies = record_item_positions(&bytes, "STUDY");
+        let images = record_item_positions(&bytes, "IMAGE");
+        assert_eq!((studies.len(), images.len()), (1, 2), "one study, two images");
+
         let reopened = DicomDirectory::from_bytes(&bytes).unwrap();
-        let patient = reopened.records()[0].dataset.get::<u32>(tags::OFFSET_LOWER).unwrap();
-        assert_ne!(patient, 0, "the patient points at its study");
-        // the first image of the series points at the second
-        let first_image = reopened.records()[3].dataset.get::<u32>(tags::OFFSET_NEXT).unwrap();
-        assert_ne!(first_image, 0, "the first image links its sibling");
+        assert_eq!(
+            reopened.records()[0].dataset.get::<u32>(tags::OFFSET_LOWER).unwrap(),
+            studies[0],
+            "the PATIENT points at its own STUDY record"
+        );
+        assert_eq!(
+            reopened.records()[3].dataset.get::<u32>(tags::OFFSET_NEXT).unwrap(),
+            images[1],
+            "the first IMAGE links the second IMAGE record"
+        );
         let second_image = reopened.records()[4].dataset.get::<u32>(tags::OFFSET_NEXT).ok();
         assert!(second_image.is_none() || second_image == Some(0), "the last image ends the chain");
     }

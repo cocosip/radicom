@@ -199,13 +199,20 @@ mod tests {
 
     #[test]
     fn long_values_are_truncated_to_the_limit() {
+        // §4.2(e): the old form asserted only that the full value is absent,
+        // which a dump that prints no values at all also satisfies. Assert the
+        // elided prefix positively, and that a short value is printed in full.
         let mut ds = Dataset::new();
-        let long = "A".repeat(100);
-        ds.insert_str(Tag::IMAGE_TYPE, Vr::Cs, long);
+        ds.insert_str(Tag::SERIES_DESCRIPTION, Vr::Lo, "SHORT");
+        let long = format!("{}{}", "PREFIX-", "A".repeat(94));
+        ds.insert_str(Tag::IMAGE_TYPE, Vr::Cs, long.clone());
         let options = DumpOptions { max_value_chars: 10, ..Default::default() };
         let out = dump_dataset(&ds, &options);
-        assert!(out.contains("…"), "long value is elided");
-        assert!(!out.contains(&"A".repeat(20)), "the full value is not printed");
+
+        assert!(out.contains("SHORT"), "a value under the limit is printed in full");
+        assert!(out.contains("PREFIX-"), "the printed prefix is the value's real start");
+        assert!(!out.contains(&long), "the full long value is not printed");
+        assert!(out.contains('…'), "the elision is marked");
     }
 
     #[test]

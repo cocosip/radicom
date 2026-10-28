@@ -59,4 +59,45 @@ mod tests {
     fn dictionary_version_is_reported() {
         assert_eq!(super::DICTIONARY_VERSION, "2026b");
     }
+
+    #[test]
+    fn lookups_return_usable_entries_not_just_counts() {
+        // §4.2(d): the shape tests only prove the table length. These assert the
+        // table is actually usable for lookups a caller depends on.
+        let exact = crate::generated::dict::DICTIONARY;
+        let modality = exact
+            .binary_search_by_key(&(0x0008u16, 0x0060u16), |e| (e.group, e.element))
+            .expect("Modality present");
+        assert_eq!(exact[modality].keyword, "Modality");
+        assert_eq!(exact[modality].vr, "CS");
+        assert_eq!(exact[modality].vm, "1");
+
+        let name = exact
+            .binary_search_by_key(&(0x0010u16, 0x0010u16), |e| (e.group, e.element))
+            .expect("PatientName present");
+        assert_eq!(exact[name].keyword, "PatientName");
+        assert_eq!(exact[name].vr, "PN");
+
+        // a private creator family resolves through the private table
+        let family: Vec<&str> = crate::generated::dict::PRIVATE_DICTIONARY
+            .iter()
+            .filter(|e| e.creator == "SIEMENS CSA HEADER")
+            .map(|e| e.keyword)
+            .collect();
+        assert!(!family.is_empty(), "the SIEMENS CSA HEADER family is present");
+        assert!(
+            crate::generated::dict::PRIVATE_DICTIONARY
+                .iter()
+                .all(|e| e.creator != "SIEMENS CSA HEADER" || e.group % 2 == 1),
+            "private rows live in odd groups"
+        );
+
+        // and a well-known UID decodes to its SOP class type
+        let ct = crate::generated::uids::UIDS
+            .iter()
+            .find(|u| u.uid == "1.2.840.10008.5.1.4.1.1.2")
+            .expect("CT Image Storage registered");
+        assert_eq!(ct.keyword, "CTImageStorage");
+        assert_eq!(ct.type_code, 1, "SOP Class");
+    }
 }
