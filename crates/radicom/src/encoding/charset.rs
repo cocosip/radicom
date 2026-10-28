@@ -127,6 +127,13 @@ pub fn decode_multi_charset(bytes: &[u8], first: &'static Encoding, pn: bool) ->
         let (text, _, _) = first.decode(bytes);
         return text.into_owned();
     }
+    // ISO 2022 Korean (KS X 1001, ESC $ ) C): the 7-bit double bytes (0x21-0x7E)
+    // must be shifted to their EUC-KR 8-bit form (0xA1-0xFE) before decoding —
+    // encoding_rs has no stateful ISO-2022-KR decoder. Triggered only when the
+    // stream actually carries the Korean designator; found before ASCI I runs.
+    if let Some(decoded) = decode_korean_iso2022(bytes) {
+        return decoded;
+    }
     fn flush(out: &mut String, bytes: &[u8], range: std::ops::Range<usize>, enc: &'static Encoding) {
         if range.start < range.end {
             let (text, _, _) = enc.decode(&bytes[range]);
@@ -163,8 +170,40 @@ pub fn decode_multi_charset(bytes: &[u8], first: &'static Encoding, pn: bool) ->
     out
 }
 
-/// Length of a recognizable ISO 2022 escape sequence at `bytes[i]`
-/// (0x1B), or `None` when the bytes do not form a known designator.
+/// Decodes an ISO 2022 Korean byte run by shifting its 7-bit double bytes into
+/// their EUC-KR 8-bit form. Returns `None` when the stream has no `ESC $ ) C`
+/// Korean designator (so unrelated charsets keep the per-segment path).
+fn decode_korean_iso2022(bytes: &[u8]) -> Option<String> {
+    const KO: &[u8] = &[0x1B, 0x24, 0x29, 0x43]; // ESC $ ) C (KS X 1001)
+    if !bytes.windows(KO.len()).any(|w| w == KO) {
+        return None;
+    }
+    let mut euc = Vec::with_capacity(bytes.len());
+    let mut korean = false; // inside the KS X 1001 double-byte set
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == 0x1B {
+            if let Some(len) = escape_sequence_len(bytes, i) {
+                let seq = &bytes[i..i + len];
+                // ESC $ ) C enters Korean; any other designator leaves it
+                korean = seq == KO;
+                i += len;
+                continue;
+            }
+        }
+        if korean {
+            euc.push(bytes[i] + 0x80); // 7-bit → EUC-KR 8-bit
+        } else {
+            euc.push(bytes[i]);
+        }
+        i += 1;
+    }
+    let (text, _, _) = encoding_rs::EUC_KR.decode(&euc);
+    Some(text.into_owned())
+}
+
+/// Length of a recognizable ISO 2022 escape sequence at `bytes[i]` (0x1B),
+/// or `None` when the bytes do not form a known designator.
 fn escape_sequence_len(bytes: &[u8], i: usize) -> Option<usize> {
     let rest = &bytes[i..];
     match rest.first()? {
@@ -340,6 +379,35 @@ mod tests {
         let bytes = encode_multi_charset(text, jp, &[], false);
         let back = decode_multi_charset(&bytes, jp, false);
         assert_eq!(back, text);
+    }
+
+    #[test]
+    fn decode_iso2022kr_shifts_double_bytes_to_euc() {
+        // "가" = KS X 1001 0x30 0x21 (7-bit), wrapped in ESC $ ) C ... ESC ( B
+        let base = charset_encoding("ISO 2022 IR 149");
+        let bytes = [0x1Bu8, 0x24, 0x29, 0x43, 0x30, 0x21, 0x1B, 0x28, 0x42];
+        let out = decode_multi_charset(&bytes, base, false);
+        assert_eq!(out, "가", "Korean ISO 2022 must decode, not fall back to ASCII");
+    }
+
+    #[test]
+    fn decode_iso2022kr_mixed_with_ascii() {
+        let base = charset_encoding("ISO 2022 IR 149");
+        // "A" + ESC $ ) C 가(0x30 0x21) + ESC ( B + "B"
+        let bytes = [
+            0x41, 0x1B, 0x24, 0x29, 0x43, 0x30, 0x21, 0x1B, 0x28, 0x42, 0x42,
+        ];
+        let out = decode_multi_charset(&bytes, base, false);
+        assert_eq!(out, "A가B");
+    }
+
+    #[test]
+    fn plain_euc_kr_without_designator_is_unaffected() {
+        // native EUC-KR 8-bit bytes, no ESC → the Korean branch does not trigger
+        let base = charset_encoding("ISO_IR 149");
+        let bytes = [0xB0u8, 0xA1];
+        let out = decode_multi_charset(&bytes, base, false);
+        assert_eq!(out, "가");
     }
 
     #[test]
