@@ -87,7 +87,7 @@ fn write_attribute_open(out: &mut String, tag: &Tag, vr: Vr) {
 fn write_values(out: &mut String, element: &DicomElement, depth: usize) {
     let vr = element.vr();
     if vr == Vr::Pn {
-        write_person_name(out, element.string_value(), depth);
+        write_person_name(out, element, depth);
         return;
     }
     // byte-backed non-binary VRs (parsed US/AT/etc.) render through their text
@@ -148,22 +148,42 @@ fn raw_units_text(raw: &radicom::model::buffer::SharedBuffer, vr: Vr) -> String 
     parts.join("\\")
 }
 
-/// Writes PN groups as `Alphabetic`/`Ideographic`/`Phonetic` child elements (§2).
-fn write_person_name(out: &mut String, text: &str, depth: usize) {
-    // the model keeps PN groups `=`- or `\`-separated; the three-component
-    // form the element stores is `Alphabetic=Ideographic=Phonetic`
-    let mut groups = text.split('=');
-    let components = ["Alphabetic", "Ideographic", "Phonetic"];
-    for component in components {
-        if let Some(value) = groups.next() {
-            if value.is_empty() {
-                continue;
+/// Writes PN as the Native DICOM Model shape (§2, PS3.19 / PS3.18 F.3.1):
+/// one `<PersonName number="n">` per value (VM `\`-separated), each carrying
+/// `<Alphabetic>`/`<Ideographic>`/`<Phonetic>` groups of named component
+/// elements `<FamilyName>`/`<GivenName>`/`<MiddleName>`/`<NamePrefix>`/`<NameSuffix>`.
+fn write_person_name(out: &mut String, element: &DicomElement, depth: usize) {
+    let text = match element.value().as_buffer() {
+        Some(raw) => String::from_utf8_lossy(raw.data().as_ref()).into_owned(),
+        None => element.string_value().to_string(),
+    };
+    const GROUPS: [&str; 3] = ["Alphabetic", "Ideographic", "Phonetic"];
+    const COMPONENTS: [&str; 5] = ["FamilyName", "GivenName", "MiddleName", "NamePrefix", "NameSuffix"];
+    let mut number = 1;
+    for value in text.split('\\') {
+        indent(out, depth);
+        let _ = writeln!(out, "<PersonName number=\"{number}\">");
+        let mut group_iter = value.split('=');
+        for group in GROUPS {
+            let Some(group_text) = group_iter.next() else { break };
+            let parts: Vec<&str> = group_text.split('^').collect();
+            if !parts.iter().any(|p| !p.is_empty()) {
+                continue; // an absent group is omitted
             }
-            indent(out, depth);
-            let _ = write!(out, "<PersonName group=\"{component}\">");
-            // a PN value component uses `^` for separator inside the file
-            let _ = writeln!(out, "{}</PersonName>", escape(value));
+            indent(out, depth + 1);
+            let _ = writeln!(out, "<{group}>");
+            for (index, component) in COMPONENTS.iter().enumerate() {
+                if let Some(part) = parts.get(index).filter(|p| !p.is_empty()) {
+                    indent(out, depth + 2);
+                    let _ = writeln!(out, "<{component}>{}</{component}>", escape(part));
+                }
+            }
+            indent(out, depth + 1);
+            let _ = writeln!(out, "</{group}>");
         }
+        indent(out, depth);
+        out.push_str("</PersonName>\n");
+        number += 1;
     }
 }
 
@@ -184,9 +204,9 @@ fn write_sequence(out: &mut String, sequence: &DicomSequence, depth: usize) {
     indent(out, depth);
     write_attribute_open(out, sequence.tag(), Vr::Sq);
     out.push_str(">\n");
-    for item in sequence.items() {
+    for (index, item) in sequence.items().iter().enumerate() {
         indent(out, depth + 1);
-        out.push_str("<Item>\n");
+        let _ = writeln!(out, "<Item number=\"{}\">", index + 1);
         write_dataset(out, item, depth + 2);
         indent(out, depth + 1);
         out.push_str("</Item>\n");
@@ -270,9 +290,22 @@ mod tests {
     }
 
     #[test]
-    fn a_person_name_expands_to_groups() {
+    fn a_person_name_expands_to_named_component_groups() {
         let xml = dataset_to_xml(&dataset());
-        assert!(xml.contains("<PersonName group=\"Alphabetic\">Doe^John</PersonName>"), "{xml}");
+        assert!(xml.contains("<PersonName number=\"1\">"), "{xml}");
+        assert!(xml.contains("<Alphabetic>"), "{xml}");
+        assert!(xml.contains("<FamilyName>Doe</FamilyName>"), "{xml}");
+        assert!(xml.contains("<GivenName>John</GivenName>"), "{xml}");
+    }
+
+    #[test]
+    fn a_multi_valued_person_name_becomes_numbered_person_name_elements() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Doe^John\\Roe^Jane");
+        let xml = dataset_to_xml(&ds);
+        assert!(xml.contains("<PersonName number=\"1\">") && xml.contains("<PersonName number=\"2\">"), "{xml}");
+        assert!(xml.contains("<FamilyName>Doe</FamilyName>"), "{xml}");
+        assert!(xml.contains("<FamilyName>Roe</FamilyName>"), "the second value is not merged: {xml}");
     }
 
     #[test]
@@ -307,7 +340,7 @@ mod tests {
 
         let xml = dataset_to_xml(&ds);
         assert!(xml.contains("vr=\"SQ\""), "{xml}");
-        assert!(xml.contains("<Item>"), "{xml}");
+        assert!(xml.contains("<Item number=\"1\">"), "{xml}");
         assert!(xml.contains("<Value number=\"1\">1.2.840.10008.5.1.4.1.1.2</Value>"));
         assert!(xml.contains("</Item>"));
     }
