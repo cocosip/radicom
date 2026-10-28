@@ -182,12 +182,19 @@ pub struct GrayscaleRenderOptions {
 }
 
 impl GrayscaleRenderOptions {
-    /// Resolves options from a dataset (docs §4 factory chain).
+    /// Resolves options from a dataset (docs §4 factory chain) for frame 0.
+    pub fn from_dataset(dataset: &Dataset) -> Result<Self, Error> {
+        Self::from_dataset_frame(dataset, 0)
+    }
+
+    /// Resolves options from a dataset for a specific frame (docs §4 chain).
     ///
     /// Priority: a `(0028,3010)` VOI LUT Sequence (else WindowCenter/Width, else
-    /// Smallest/LargestImagePixelValue). Rescale comes from a `(0028,3000)`
-    /// modality LUT Sequence when present, else `(0028,1053)`/`(0028,1052)`.
-    pub fn from_dataset(dataset: &Dataset) -> Result<Self, Error> {
+    /// a per-frame functional-group window `(0028,9132)`, else
+    /// Smallest/LargestImagePixelValue, else decoded pixel min/max). Rescale comes
+    /// from a `(0028,3000)` modality LUT Sequence when present, else
+    /// `(0028,1053)`/`(0028,1052)`.
+    pub fn from_dataset_frame(dataset: &Dataset, frame: u32) -> Result<Self, Error> {
         let rescale_intercept = dataset.try_get::<String>(Tag::new(0x0028, 0x1052)).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
         let rescale_slope = dataset.try_get::<String>(Tag::new(0x0028, 0x1053)).and_then(|s| s.trim().parse().ok()).unwrap_or(1.0);
 
@@ -200,13 +207,16 @@ impl GrayscaleRenderOptions {
         let (window_center, window_width) = if voi_lut.is_some() {
             (0.0, 0.0)
         } else {
-            // Priority 1/3 (tags), else 4 (decode frame 0 and use min/max).
+            // Priority 1/2/3 (tags), else 4 (decode the frame and use min/max).
             match resolve_window(dataset) {
                 Ok(pair) => pair,
-                Err(_) => {
-                    let mm = Self::from_min_max(dataset, 0)?;
-                    (mm.window_center, mm.window_width)
-                }
+                Err(_) => match Self::from_functional_window_level(dataset, frame) {
+                    Ok(pair) => pair,
+                    Err(_) => {
+                        let mm = Self::from_min_max(dataset, frame)?;
+                        (mm.window_center, mm.window_width)
+                    }
+                },
             }
         };
 
@@ -304,6 +314,33 @@ impl GrayscaleRenderOptions {
         base.window_center = (min + max) / 2.0;
         base.window_width = (max - min).max(1.0);
         Ok(base)
+    }
+
+    /// A per-frame functional-group window (REND-04 priority 2, docs §4):
+    /// flattens enhanced-multiframe functional groups for `frame` (DS-06) and
+    /// reads the `(0028,9132)` FrameVOILUTSequence item's WindowCenter/Width,
+    /// falling back to top-level values in the flattened set. Errors when absent.
+    pub fn from_functional_window_level(dataset: &Dataset, frame: u32) -> Result<(f64, f64), Error> {
+        let fg = dataset.functional_groups(frame)?;
+        // (0028,9132) FrameVOILUTSequence item carries the per-frame window
+        if let Some(seq) = fg.try_get_sequence(Tag::new(0x0028, 0x9132)) {
+            if let Some(item) = seq.items().first() {
+                if let (Some(center), Some(width)) = (
+                    first_number(item, Tag::new(0x0028, 0x1050)),
+                    first_number(item, Tag::new(0x0028, 0x1051)),
+                ) {
+                    return Ok((center, width));
+                }
+            }
+        }
+        // some encoders leave the window directly in the flattened set
+        match (
+            first_number(&fg, Tag::new(0x0028, 0x1050)),
+            first_number(&fg, Tag::new(0x0028, 0x1051)),
+        ) {
+            (Some(center), Some(width)) => Ok((center, width)),
+            _ => Err(unsupported("no functional-group window for this frame")),
+        }
     }
 
     /// Applies the rescale/modality-LUT and inversion rules shared by the
@@ -683,7 +720,7 @@ pub fn render_grayscale_frame(dataset: &Dataset, frame: u32) -> Result<RawImage,
         return Err(unsupported("frame has zero width or height"));
     }
 
-    let options = GrayscaleRenderOptions::from_dataset(dataset)?;
+    let options = GrayscaleRenderOptions::from_dataset_frame(dataset, frame)?;
     let buffer = pixel.get_frame(frame)?;
     let raw = buffer.data();
     let raw: &[u8] = raw.as_ref();
@@ -1247,6 +1284,46 @@ mod tests {
         let o = GrayscaleRenderOptions::from_min_max(&ds, 0).unwrap();
         assert_eq!(o.window_center, 20.0);
         assert_eq!(o.window_width, 20.0);
+    }
+
+    /// Wraps one window pair per frame in a PerFrameFunctionalGroupsSequence,
+    /// each item holding a FrameVOILUTSequence (0028,9132) with WC/WW.
+    fn put_per_frame_windows(ds: &mut Dataset, windows: &[(f64, f64)]) {
+        let per = ds.insert_sequence(crate::model::dataset::PER_FRAME_FUNCTIONAL_GROUPS);
+        for &(center, width) in windows {
+            let mut fg = Dataset::new();
+            {
+                let vois = fg.insert_sequence(Tag::new(0x0028, 0x9132));
+                let mut item = Dataset::new();
+                item.insert_str(Tag::new(0x0028, 0x1050), Vr::Ds, format!("{center}"));
+                item.insert_str(Tag::new(0x0028, 0x1051), Vr::Ds, format!("{width}"));
+                vois.push(item);
+            }
+            per.push(fg);
+        }
+    }
+
+    #[test]
+    fn a_per_frame_functional_group_window_is_used() {
+        // No top-level WindowCenter/Width; each frame carries its own window.
+        let mut ds = gray_image(2, 2, 8, &[10, 20, 30, 40], None, None);
+        put_per_frame_windows(&mut ds, &[(100.0, 50.0), (200.0, 20.0)]);
+
+        let pair0 = GrayscaleRenderOptions::from_functional_window_level(&ds, 0).unwrap();
+        assert_eq!(pair0, (100.0, 50.0), "frame 0 window from its functional group");
+        let pair1 = GrayscaleRenderOptions::from_functional_window_level(&ds, 1).unwrap();
+        assert_eq!(pair1, (200.0, 20.0), "frame 1 window from its functional group");
+
+        // priority: from_dataset_frame picks the per-frame window over min/max
+        let o = GrayscaleRenderOptions::from_dataset_frame(&ds, 1).unwrap();
+        assert_eq!((o.window_center, o.window_width), (200.0, 20.0));
+    }
+
+    #[test]
+    fn functional_window_errors_when_absent() {
+        // no functional groups at all → error (caller falls back to min/max)
+        let ds = gray_image(2, 1, 8, &[10, 20], None, None);
+        assert!(GrayscaleRenderOptions::from_functional_window_level(&ds, 0).is_err());
     }
 
     #[test]
