@@ -1211,8 +1211,23 @@ fn render_rgb_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error> {
     if samples.len() < count * 3 {
         return Err(unsupported("frame is shorter than rows×cols×3 samples"));
     }
+    // Normalise stored samples to the low BitsStored bits, then scale to 8-bit
+    // (grayscale does the same; RGB must too for non-standard depth metadata such
+    // as low-aligned 12-bit-in-16 colour, which a bare `>>8` would darken).
+    let stored = match pixel.bits_stored() {
+        0 => bits,
+        s => s.min(bits),
+    };
+    let depth = BitDepth::new(bits, stored, pixel.high_bit(), false);
+    let down = stored.saturating_sub(8);
+    let up = 8u16.saturating_sub(stored);
     let to8 = |v: u16| -> u8 {
-        if bits == 16 { (v >> 8) as u8 } else { v as u8 }
+        let n = depth.normalize(v);
+        if stored >= 8 {
+            (n >> down) as u8
+        } else {
+            (n << up) as u8
+        }
     };
     let at = |index: usize, channel: usize| -> u16 {
         // planar configuration 1 stores channel planes sequentially
@@ -1946,6 +1961,17 @@ mod tests {
             px[0].abs_diff(128) <= 2 && px[1].abs_diff(128) <= 2 && px[2].abs_diff(128) <= 2,
             "partial-range grey expands to ~128: {px:?}"
         );
+    }
+
+    #[test]
+    fn rgb_low_aligned_stored_bits_are_normalised_before_scaling() {
+        // 16-bit RGB carrying 12 significant bits low-aligned (high bit 11):
+        // stored 4095 must render as 255, not (4095 >> 8) = 15.
+        let mut ds = color_image("RGB", 3, 16, &[4095, 4095, 4095], 0);
+        ds.insert_value(Tag::new(0x0028, 0x0101), 12u16); // BitsStored
+        ds.insert_value(Tag::new(0x0028, 0x0102), 11u16); // HighBit
+        let img = render_frame(&ds, 0).unwrap();
+        assert_eq!(&img.as_bytes()[0..4], &[255, 255, 255, 255], "low-aligned 12-bit RGB → white");
     }
 
     fn us_bytes(values: &[u16]) -> crate::model::buffer::SharedBuffer {
