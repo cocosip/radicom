@@ -316,6 +316,50 @@ impl GrayscaleRenderOptions {
         Ok(base)
     }
 
+    /// Options from the Smallest/LargestImagePixelValue tags `(0028,0106)`/
+    /// `(0028,0107)` (REND-04 `from_image_pixel_value_tags`, docs §4 priority 3).
+    /// Errors when either tag is absent.
+    pub fn from_image_pixel_value_tags(dataset: &Dataset) -> Result<Self, Error> {
+        let (smallest, largest) = match (
+            first_number(dataset, Tag::new(0x0028, 0x0106)),
+            first_number(dataset, Tag::new(0x0028, 0x0107)),
+        ) {
+            (Some(lo), Some(hi)) => (lo, hi),
+            _ => return Err(unsupported("no Smallest/LargestImagePixelValue tags")),
+        };
+        let mut base = GrayscaleRenderOptions::from_window_level(
+            (smallest + largest) / 2.0,
+            (largest - smallest).max(1.0),
+        );
+        base.apply_dataset_modality_and_invert(dataset);
+        Ok(base)
+    }
+
+    /// Options covering the full stored bit range (REND-04 `from_bit_range`,
+    /// docs §4): a window over `[0, 2^bitsStored-1]` (unsigned) or
+    /// `[-2^(bitsStored-1), 2^(bitsStored-1)-1]` (signed).
+    pub fn from_bit_range(dataset: &Dataset) -> Result<Self, Error> {
+        let mut owned = dataset.clone();
+        let pixel = PixelData::from_dataset(&mut owned)?;
+        let bits = match pixel.bits_stored() {
+            0 => pixel.bits_allocated()?,
+            b => b,
+        };
+        if bits == 0 || bits > 32 {
+            return Err(unsupported("stored bit depth is not renderable"));
+        }
+        let signed = pixel.pixel_representation() != 0;
+        let (min, max) = if signed {
+            let half = 1i64 << (bits - 1);
+            (-(half as f64), (half - 1) as f64)
+        } else {
+            (0.0, ((1i64 << bits) - 1) as f64)
+        };
+        let mut base = GrayscaleRenderOptions::from_window_level((min + max) / 2.0, (max - min).max(1.0));
+        base.apply_dataset_modality_and_invert(dataset);
+        Ok(base)
+    }
+
     /// A per-frame functional-group window (REND-04 priority 2, docs §4):
     /// flattens enhanced-multiframe functional groups for `frame` (DS-06) and
     /// reads the `(0028,9132)` FrameVOILUTSequence item's WindowCenter/Width,
@@ -1324,6 +1368,36 @@ mod tests {
         // no functional groups at all → error (caller falls back to min/max)
         let ds = gray_image(2, 1, 8, &[10, 20], None, None);
         assert!(GrayscaleRenderOptions::from_functional_window_level(&ds, 0).is_err());
+    }
+
+    #[test]
+    fn from_bit_range_covers_the_stored_range() {
+        // 8-bit unsigned: full range [0, 255] → centre 127.5, width 255.
+        let ds = gray_image(1, 1, 8, &[0], None, None);
+        let o = GrayscaleRenderOptions::from_bit_range(&ds).unwrap();
+        assert_eq!(o.window_center, 127.5);
+        assert_eq!(o.window_width, 255.0);
+
+        // 16-bit signed: [-32768, 32767] → centre -0.5, width 65535.
+        let mut ds = gray_image(1, 1, 16, &[0], None, None);
+        ds.insert_value(Tag::new(0x0028, 0x0103), 1u16); // PixelRepresentation signed
+        let o = GrayscaleRenderOptions::from_bit_range(&ds).unwrap();
+        assert_eq!(o.window_center, -0.5);
+        assert_eq!(o.window_width, 65535.0);
+    }
+
+    #[test]
+    fn from_image_pixel_value_tags_uses_smallest_and_largest() {
+        let mut ds = gray_image(1, 1, 16, &[0], None, None);
+        ds.insert_value(Tag::new(0x0028, 0x0106), 0u16); // SmallestImagePixelValue
+        ds.insert_value(Tag::new(0x0028, 0x0107), 1000u16); // LargestImagePixelValue
+        let o = GrayscaleRenderOptions::from_image_pixel_value_tags(&ds).unwrap();
+        assert_eq!(o.window_center, 500.0);
+        assert_eq!(o.window_width, 1000.0);
+
+        // absent tags → error
+        let bare = gray_image(1, 1, 8, &[0], None, None);
+        assert!(GrayscaleRenderOptions::from_image_pixel_value_tags(&bare).is_err());
     }
 
     #[test]
