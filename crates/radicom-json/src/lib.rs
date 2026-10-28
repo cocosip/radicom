@@ -113,6 +113,20 @@ pub fn dataset_to_json(dataset: &Dataset, options: &JsonOptions) -> Result<Strin
     }
 }
 
+/// Serializes a collection of datasets as a DICOM JSON array (§1.4).
+pub fn datasets_to_json(datasets: &[Dataset], options: &JsonOptions) -> Result<String> {
+    let values = datasets
+        .iter()
+        .map(|dataset| dataset_to_value(dataset, options))
+        .collect::<Result<Vec<_>>>()?;
+    let value = Value::Array(values);
+    if options.format_indented {
+        Ok(serde_json::to_string_pretty(&value)?)
+    } else {
+        Ok(serde_json::to_string(&value)?)
+    }
+}
+
 /// Serializes a dataset to a JSON value tree (§1.4).
 ///
 /// Group-length elements `(GGGG,0000)` are skipped, here and in every nested
@@ -387,6 +401,27 @@ pub fn json_to_dataset(json: &str, options: &JsonOptions) -> Result<Dataset> {
         dataset.validate()?;
     }
     Ok(dataset)
+}
+
+/// Deserializes a DICOM JSON array into a collection of datasets (§1.4).
+pub fn json_to_datasets(json: &str, options: &JsonOptions) -> Result<Vec<Dataset>> {
+    let value: Value = serde_json::from_str(json)?;
+    let Value::Array(values) = value else {
+        return Err(JsonError::Unsupported(
+            "a DICOM JSON dataset collection must be an array",
+        ));
+    };
+
+    values
+        .iter()
+        .map(|value| {
+            let dataset = value_to_dataset(value)?;
+            if options.validate_on_read {
+                dataset.validate()?;
+            }
+            Ok(dataset)
+        })
+        .collect()
 }
 
 /// Deserializes a dataset from a JSON value tree (§1.4).
@@ -966,5 +1001,94 @@ mod tests {
             dataset_to_json(&ds, &as_string).unwrap(),
             r#"{"00200013":{"Value":["0001"],"vr":"IS"}}"#
         );
+    }
+
+    #[test]
+    fn dataset_collections_round_trip_as_a_json_array() {
+        let mut second = sample();
+        second.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID-2");
+        let datasets = vec![sample(), second];
+
+        let json = datasets_to_json(&datasets, &JsonOptions::default()).unwrap();
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert!(value.is_array());
+        assert_eq!(value.as_array().unwrap().len(), 2);
+
+        let decoded = json_to_datasets(&json, &JsonOptions::default()).unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
+        assert_eq!(decoded[1].get_str(Tag::PATIENT_ID).unwrap(), "PID-2");
+    }
+
+    #[test]
+    fn empty_dataset_collection_is_an_empty_array() {
+        let json = datasets_to_json(&[], &JsonOptions::default()).unwrap();
+        assert_eq!(json, "[]");
+        assert!(
+            json_to_datasets(&json, &JsonOptions::default())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn dataset_collection_preserves_nested_sequences() {
+        let mut dataset = Dataset::new();
+        let mut item = Dataset::new();
+        item.insert_str(Tag::CODE_VALUE, Vr::Sh, "113100");
+        dataset.insert_sequence(Tag::CONTENT_SEQUENCE).push(item);
+
+        let json = datasets_to_json(&[dataset], &JsonOptions::default()).unwrap();
+        let decoded = json_to_datasets(&json, &JsonOptions::default()).unwrap();
+        assert_eq!(
+            decoded[0]
+                .get_sequence(Tag::CONTENT_SEQUENCE)
+                .unwrap()
+                .items()[0]
+                .get_str(Tag::CODE_VALUE)
+                .unwrap(),
+            "113100"
+        );
+    }
+
+    #[test]
+    fn dataset_collection_requires_a_json_array_root() {
+        for json in ["{}", "null", "1"] {
+            assert!(matches!(
+                json_to_datasets(json, &JsonOptions::default()),
+                Err(JsonError::Unsupported(
+                    "a DICOM JSON dataset collection must be an array"
+                ))
+            ));
+        }
+    }
+
+    #[test]
+    fn dataset_collection_propagates_entry_errors_and_validation() {
+        let malformed = r#"[{"00100020":{"Value":["PID-1"]}}]"#;
+        assert!(matches!(
+            json_to_datasets(malformed, &JsonOptions::default()),
+            Err(JsonError::MissingVr { .. })
+        ));
+
+        let invalid = r#"[{"00080060":{"vr":"CS","Value":["lower case"]}}]"#;
+        let options = JsonOptions {
+            validate_on_read: true,
+            ..Default::default()
+        };
+        assert!(matches!(
+            json_to_datasets(invalid, &options),
+            Err(JsonError::Dataset(_))
+        ));
+    }
+
+    #[test]
+    fn indented_dataset_collection_output_contains_newlines() {
+        let options = JsonOptions {
+            format_indented: true,
+            ..Default::default()
+        };
+        let json = datasets_to_json(&[sample()], &options).unwrap();
+        assert!(json.contains('\n'));
     }
 }
