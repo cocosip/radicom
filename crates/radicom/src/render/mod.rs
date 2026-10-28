@@ -602,6 +602,37 @@ impl RawImage {
             .collect()
     }
 
+    /// Returns a copy resized by `factor` (fo-dicom `DicomImage.Scale`): the
+    /// output dimensions become `round(width*factor) × round(height*factor)`,
+    /// bilinearly resampled per colour channel (REND-01/06). A non-positive or
+    /// unit factor, or an unchanged size, returns an unmodified clone.
+    pub fn scaled(&self, factor: f64) -> RawImage {
+        if !factor.is_finite() || factor <= 0.0 || factor == 1.0 {
+            return self.clone();
+        }
+        let out_w = ((self.width as f64 * factor).round() as u32).max(1);
+        let out_h = ((self.height as f64 * factor).round() as u32).max(1);
+        if out_w == self.width && out_h == self.height {
+            return self.clone();
+        }
+        let mut rgb = Vec::with_capacity((self.width * self.height * 3) as usize);
+        for p in self.bytes.chunks_exact(4) {
+            rgb.extend_from_slice(&[p[2], p[1], p[0]]); // B,G,R → R,G,B
+        }
+        let resampled = interpolation::bilinear_color24(
+            &rgb,
+            self.width as usize,
+            self.height as usize,
+            out_w as usize,
+            out_h as usize,
+        );
+        let mut out = Vec::with_capacity((out_w * out_h * 4) as usize);
+        for p in resampled.chunks_exact(3) {
+            out.extend_from_slice(&[p[2], p[1], p[0], 0xFF]); // R,G,B → B,G,R,A
+        }
+        RawImage::new(out_w, out_h, out)
+    }
+
     /// Encodes the image as a PNG (8-bit grayscale, no alpha) into `out`.
     ///
     /// Zero-dependency: uses flate2's zlib for the IDAT stream and computes the
@@ -1703,8 +1734,31 @@ mod tests {
     }
 
     #[test]
-    fn rgb_png_is_truecolour_with_three_channels() {
-        let ds = color_image("RGB", 3, 8, &[255, 0, 0, 0, 255, 0], 0);
+    fn scaling_resamples_the_rendered_image() {
+        // 2x2 BGRA: red, green / blue, white.
+        let img = RawImage::new(
+            2,
+            2,
+            vec![
+                0, 0, 255, 255, 0, 255, 0, 255, // row 0: red, green
+                255, 0, 0, 255, 255, 255, 255, 255, // row 1: blue, white
+            ],
+        );
+        let up = img.scaled(2.0);
+        assert_eq!((up.width(), up.height()), (4, 4), "2x2 scaled by 2 is 4x4");
+        assert_eq!(&up.as_bytes()[0..4], &[0, 0, 255, 255], "top-left red preserved");
+        let n = up.as_bytes().len();
+        assert_eq!(&up.as_bytes()[n - 4..], &[255, 255, 255, 255], "bottom-right white preserved");
+
+        let down = up.scaled(0.5);
+        assert_eq!((down.width(), down.height()), (2, 2), "4x4 scaled by 0.5 is 2x2");
+
+        assert_eq!(img.scaled(1.0).as_bytes(), img.as_bytes(), "unit factor is identity");
+        assert_eq!(img.scaled(0.0).as_bytes(), img.as_bytes(), "non-positive factor is identity");
+    }
+
+    #[test]
+    fn rgb_png_is_truecolour_with_three_channels() {        let ds = color_image("RGB", 3, 8, &[255, 0, 0, 0, 255, 0], 0);
         let image = render_frame(&ds, 0).unwrap();
         let png = image.to_png_rgb();
         assert_eq!(&png[12..16], b"IHDR");
