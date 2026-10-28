@@ -5,6 +5,7 @@
 //! MONOCHROME1 the descending one. Colour tables round-trip through the classic
 //! 768-byte R,G,B `.lut` layout (256 entries × 3 channels).
 
+use crate::error::{DataError, Error};
 use crate::pixel::Color32;
 
 /// A 256-entry colour lookup table (REND-06 `ColorTable`).
@@ -74,6 +75,23 @@ impl ColorTable {
         }
         out
     }
+
+    /// Loads a table from a 768-byte R,G,B `.lut` file (docs §6 `ColorTable`
+    /// load). Errors when the file is shorter than 768 bytes.
+    pub fn load(path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+        let bytes = std::fs::read(path)?;
+        Self::from_rgb768(&bytes).ok_or_else(|| {
+            Error::Data(DataError::Other {
+                message: "colour table file is shorter than 768 bytes".into(),
+            })
+        })
+    }
+
+    /// Saves the table as a 768-byte R,G,B `.lut` file (docs §6 `ColorTable` save).
+    pub fn save(&self, path: impl AsRef<std::path::Path>) -> Result<(), Error> {
+        std::fs::write(path, self.to_rgb768())?;
+        Ok(())
+    }
 }
 
 impl Default for ColorTable {
@@ -118,5 +136,22 @@ mod tests {
         assert_eq!(ColorTable::from_rgb768(&bytes), Some(t));
         // short slices are rejected
         assert!(ColorTable::from_rgb768(&bytes[..767]).is_none());
+    }
+
+    #[test]
+    fn save_and_load_a_lut_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("radicom_color_{}.lut", std::process::id()));
+        let table = ColorTable::monochrome1();
+        table.save(&path).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 768, "writes exactly 768 bytes");
+        assert_eq!(ColorTable::load(&path).unwrap(), table, "load round-trips the table");
+        std::fs::remove_file(&path).ok();
+
+        // a short file is rejected
+        let bad = dir.join(format!("radicom_color_bad_{}.lut", std::process::id()));
+        std::fs::write(&bad, [0u8; 10]).unwrap();
+        assert!(ColorTable::load(&bad).is_err());
+        std::fs::remove_file(&bad).ok();
     }
 }
