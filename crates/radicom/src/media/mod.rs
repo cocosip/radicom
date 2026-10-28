@@ -780,6 +780,37 @@ mod tests {
     }
 
     #[test]
+    fn record_offsets_are_absolute_positions_of_item_tags() {
+        // PS3.3 F.3.2.2: DICOMDIR record offsets are byte counts from the first
+        // byte of the file (including the preamble, DICM prefix and file meta).
+        let mut dir = DicomDirectory::new("MYFS");
+        dir.add_file(&instance("P1", "1.2.3", "1.2.3.4", CT, "1.2.3.4.5"), "IMG0001").unwrap();
+        let bytes = dir.to_bytes().unwrap();
+
+        // absolute positions of every item tag (FFFE,E000) in the serialized file
+        let item_positions: Vec<u32> = (0..bytes.len().saturating_sub(4))
+            .filter(|i| bytes[*i] == 0xFE && bytes[*i + 1] == 0xFF && bytes[*i + 2] == 0x00 && bytes[*i + 3] == 0xE0)
+            .map(|i| i as u32)
+            .collect();
+        assert_eq!(item_positions.len(), dir.records().len(), "one item tag per record");
+
+        // the stored first-root offset equals the absolute position of the first item tag
+        let first_root = dir.file().dataset.get::<u32>(tags::OFFSET_FIRST_ROOT).unwrap();
+        assert_eq!(first_root, item_positions[0], "first-root offset is absolute from file start");
+
+        // every next/child offset a record carries names a real item-tag position
+        for record in dir.records() {
+            for tag in [tags::OFFSET_NEXT, tags::OFFSET_LOWER] {
+                if let Ok(offset) = record.dataset.get::<u32>(tag) {
+                    if offset != 0 {
+                        assert!(item_positions.contains(&offset), "offset {offset} points at an item tag");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_second_instance_shares_the_chain() {
         let mut dir = DicomDirectory::new("MYFS");
         dir.add_file(&instance("P1", "1.2.3", "1.2.3.4", CT, "1.2.3.4.5"), "IMG0001").unwrap();
