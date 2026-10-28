@@ -597,71 +597,134 @@ where
     // A provider that reports its own progress owns (0000,1020): forwarding its
     // numbers is the only way to preserve the real remaining count while the
     // stream is consumed incrementally.
+    let mut remaining = 0u16;
     let mut terminated = false;
-    while let Some(event) = stream.next().await {
-        let event = match event {
-            Ok(event) => event,
-            Err(error) => crate::cget::CGetEvent::Response(crate::cget::CGetResponse::failure(
-                &request,
-                crate::dimse::status::PROCESSING_FAILURE,
-                error.to_string(),
-            )),
-        };
-        match event {
-            crate::cget::CGetEvent::Instance(file) => {
-                let state = match serving.send_reverse_store(&file).await {
-                    Ok(state) => state,
-                    // PS3.4 C.4.2: an instance that cannot be delivered is one
-                    // failed sub-operation, not a reason to drop the
-                    // association and every instance already sent (§2.10)
-                    Err(error) if is_fatal(&error) => return Err(error),
-                    Err(_) => StatusState::Failure,
-                };
-                summary.record(state);
-                saw_instance = true;
+    loop {
+        if let Some(unit) = serving.pending_units.pop_front() {
+            if unit.stream != Stream::Command {
+                return Err(NetworkError::protocol("unexpected dataset while C-GET is in flight"));
             }
-            crate::cget::CGetEvent::Response(response) => {
-                if response.is_pending() {
-                    provider_summary = Some(response.summary);
-                    let mut response = response;
-                    if saw_instance {
-                        response.summary = summary;
-                    }
+            let cancel = command_from_bytes(&unit.bytes)?;
+            if cancel.field == CommandField::CCancelRq {
+                if cancel.message_id_being_responded_to == Some(request.message_id)
+                    && unit.context_id == context_id
+                {
+                    let mut response = crate::cget::CGetResponse::failure(
+                        &request,
+                        crate::dimse::status::CANCEL,
+                        "C-GET cancelled",
+                    );
+                    response.remaining = remaining;
+                    response.summary = if saw_instance { summary } else { provider_summary.unwrap_or(summary) };
                     serving.send(context_id, &response.to_command()).await?;
-                } else {
-                    terminated = true;
-                    // Preserve provider failures/warnings even when they have
-                    // no sub-operation counters. Once instances have been
-                    // handed to the engine, its reverse-store outcomes are
-                    // authoritative for the terminal counters.
-                    let terminal = if saw_instance {
-                        if response.state() == crate::dimse::StatusState::Success {
-                            crate::cget::CGetResponse::completed(&request, summary)
-                        } else {
-                            let mut response = response;
-                            response.summary = summary;
-                            response
-                        }
-                    } else if response.state() == crate::dimse::StatusState::Success {
-                        let summary = if response.summary.total() > 0 {
-                            response.summary
-                        } else {
-                            provider_summary.unwrap_or(summary)
-                        };
-                        crate::cget::CGetResponse::completed(&request, summary)
-                    } else {
-                        let mut response = response;
-                        if response.summary.total() == 0 {
-                            response.summary = provider_summary.unwrap_or(summary);
-                        }
-                        response
-                    };
-                    serving.send(context_id, &terminal.to_command()).await?;
+                    return Ok(());
+                }
+                continue;
+            }
+            return Err(NetworkError::protocol("unexpected command while C-GET is in flight"));
+        }
+
+        tokio::select! {
+            biased;
+            pdu = read_pdu(serving.stream) => {
+                let Some(pdu) = pdu? else { return Ok(()) };
+                match pdu {
+                    Pdu::PData(pdata) => {
+                        let units = serving.assembler.push_pdata(&pdata)?;
+                        serving.pending_units.extend(units);
+                    }
+                    Pdu::Abort(abort) => {
+                        return Err(NetworkError::Abort { source_code: abort.source.code(), reason: abort.reason });
+                    }
+                    Pdu::ReleaseRq => {
+                        serving.send_pdu(&Pdu::ReleaseRp).await?;
+                        return Err(NetworkError::ClosedPrematurely { source: None });
+                    }
+                    _ => return Err(NetworkError::protocol("unexpected PDU while C-GET is in flight")),
                 }
             }
-        }
-        if terminated {
-            break;
+            event = stream.next() => {
+                let Some(event) = event else { break };
+                let event = match event {
+                    Ok(event) => event,
+                    Err(error) => crate::cget::CGetEvent::Response(crate::cget::CGetResponse::failure(
+                        &request,
+                        crate::dimse::status::PROCESSING_FAILURE,
+                        error.to_string(),
+                    )),
+                };
+                match event {
+                    crate::cget::CGetEvent::Instance(file) => {
+                        let (state, cancelled) = match serving
+                            .send_reverse_store(&file, context_id, request.message_id)
+                            .await
+                        {
+                            Ok(result) => result,
+                            // PS3.4 C.4.2: an instance that cannot be delivered is one
+                            // failed sub-operation, not a reason to drop the
+                            // association and every instance already sent (§2.10)
+                            Err(error) if is_fatal(&error) => return Err(error),
+                            Err(_) => (StatusState::Failure, false),
+                        };
+                        summary.record(state);
+                        saw_instance = true;
+                        if cancelled {
+                            let mut response = crate::cget::CGetResponse::failure(
+                                &request,
+                                crate::dimse::status::CANCEL,
+                                "C-GET cancelled",
+                            );
+                            response.remaining = remaining;
+                            response.summary = summary;
+                            serving.send(context_id, &response.to_command()).await?;
+                            return Ok(());
+                        }
+                    }
+                    crate::cget::CGetEvent::Response(response) => {
+                        if response.is_pending() {
+                            remaining = response.remaining;
+                            provider_summary = Some(response.summary);
+                            let mut response = response;
+                            if saw_instance {
+                                response.summary = summary;
+                            }
+                            serving.send(context_id, &response.to_command()).await?;
+                        } else {
+                            terminated = true;
+                            // Preserve provider failures/warnings even when they have
+                            // no sub-operation counters. Once instances have been
+                            // handed to the engine, its reverse-store outcomes are
+                            // authoritative for the terminal counters.
+                            let terminal = if saw_instance {
+                                if response.state() == crate::dimse::StatusState::Success {
+                                    crate::cget::CGetResponse::completed(&request, summary)
+                                } else {
+                                    let mut response = response;
+                                    response.summary = summary;
+                                    response
+                                }
+                            } else if response.state() == crate::dimse::StatusState::Success {
+                                let summary = if response.summary.total() > 0 {
+                                    response.summary
+                                } else {
+                                    provider_summary.unwrap_or(summary)
+                                };
+                                crate::cget::CGetResponse::completed(&request, summary)
+                            } else {
+                                let mut response = response;
+                                if response.summary.total() == 0 {
+                                    response.summary = provider_summary.unwrap_or(summary);
+                                }
+                                response
+                            };
+                            serving.send(context_id, &terminal.to_command()).await?;
+                        }
+                    }
+                }
+                if terminated {
+                    break;
+                }
+            }
         }
     }
     if !terminated {
@@ -1009,24 +1072,40 @@ where
     /// Only the reverse sub-operations of the running C-GET can arrive here:
     /// the association is single-threaded, so the SCU has nothing else in
     /// flight that this side must serve.
-    async fn await_store_response(&mut self, message_id: u16) -> Result<Command> {
+    async fn await_store_response(
+        &mut self,
+        message_id: u16,
+        operation_context_id: u8,
+        operation_message_id: u16,
+    ) -> Result<(Command, bool)> {
+        let mut cancelled = false;
         loop {
+            if let Some(unit) = self.pending_units.pop_front() {
+                if unit.stream != Stream::Command {
+                    continue;
+                }
+                let command = command_from_bytes(&unit.bytes)?;
+                if command.field == CommandField::CCancelRq
+                    && command.message_id_being_responded_to == Some(operation_message_id)
+                    && unit.context_id == operation_context_id
+                {
+                    cancelled = true;
+                    continue;
+                }
+                if command.field == CommandField::CStoreRsp
+                    && command.message_id_being_responded_to == Some(message_id)
+                {
+                    return Ok((command, cancelled));
+                }
+                continue;
+            }
             let Some(pdu) = read_pdu(self.stream).await? else {
                 return Err(NetworkError::ClosedPrematurely { source: None });
             };
             match pdu {
                 Pdu::PData(pdata) => {
-                    for unit in self.assembler.push_pdata(&pdata)? {
-                        if unit.stream != Stream::Command {
-                            continue;
-                        }
-                        let command = command_from_bytes(&unit.bytes)?;
-                        if command.field == CommandField::CStoreRsp
-                            && command.message_id_being_responded_to == Some(message_id)
-                        {
-                            return Ok(command);
-                        }
-                    }
+                    let units = self.assembler.push_pdata(&pdata)?;
+                    self.pending_units.extend(units);
                 }
                 Pdu::Abort(abort) => {
                     return Err(NetworkError::Abort { source_code: abort.source.code(), reason: abort.reason })
@@ -1035,7 +1114,7 @@ where
                     write_pdu(self.stream, &Pdu::ReleaseRp).await?;
                     return Err(NetworkError::ClosedPrematurely { source: None });
                 }
-                _ => {}
+                _ => return Err(NetworkError::protocol("unexpected PDU while waiting for reverse C-STORE")),
             }
         }
     }
@@ -1044,11 +1123,14 @@ where
     ///
     /// The SCU side must have registered a C-STORE handler, otherwise this is
     /// `ReverseStoreHandlerMissing` on the *caller*; the SCP just records the
-    /// returned status.
+    /// returned status. The boolean result reports whether C-CANCEL arrived
+    /// while this reverse sub-operation was completing.
     async fn send_reverse_store(
         &mut self,
         file: &radicom::io::file::DicomFile,
-    ) -> Result<StatusState> {
+        operation_context_id: u8,
+        operation_message_id: u16,
+    ) -> Result<(StatusState, bool)> {
         let dataset = &file.dataset;
         let sop_class = dataset
             .try_get_str(Tag::SOP_CLASS_UID)
@@ -1086,8 +1168,13 @@ where
             write_pdu(self.stream, &Pdu::PData(pdata)).await?;
         }
 
-        let response = self.await_store_response(message_id).await?;
-        Ok(crate::dimse::classify(response.status.unwrap_or(crate::dimse::status::PROCESSING_FAILURE)))
+        let (response, cancelled) = self
+            .await_store_response(message_id, operation_context_id, operation_message_id)
+            .await?;
+        Ok((
+            crate::dimse::classify(response.status.unwrap_or(crate::dimse::status::PROCESSING_FAILURE)),
+            cancelled,
+        ))
     }
 
     /// Message IDs for reverse sub-operations; the SCP side of a C-GET owns
@@ -3130,6 +3217,168 @@ mod tests {
         assert_eq!(responses[1].state(), crate::dimse::StatusState::Success);
         association.release().await.unwrap();
         handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn loopback_c_get_c_cancel_stops_an_in_flight_provider() {
+        struct CancelableGet;
+
+        #[async_trait::async_trait]
+        impl ServiceProvider for CancelableGet {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![sop_class::STUDY_ROOT_QR_GET.to_string()]
+            }
+
+            fn on_c_get<'a>(
+                &'a self,
+                request: &'a crate::cget::CGetRequest,
+            ) -> futures::stream::BoxStream<'a, Result<crate::cget::CGetEvent>> {
+                use futures::StreamExt;
+                let pending = crate::cget::CGetResponse::pending(
+                    request,
+                    6,
+                    crate::cmove::SubOperationSummary { completed: 2, failed: 1, warning: 3 },
+                );
+                Box::pin(
+                    futures::stream::once(async move { Ok(crate::cget::CGetEvent::Response(pending)) })
+                        .chain(futures::stream::pending()),
+                )
+            }
+        }
+
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(CancelableGet), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association =
+            Association::open(addr, "SCU", "SCP", vec![get_context()], ClientOptions::default())
+                .await
+                .unwrap();
+        let request = crate::cget::CGetRequest::study("1.2.3.4", 1);
+        let context_id = association.contexts().all()[0].id;
+        let syntax = transfer_syntax_of(&association.contexts().all()[0].transfer_syntax);
+        let command = bytes::Bytes::from(command_bytes(&request.to_command()).unwrap());
+        let identifier = bytes::Bytes::from(crate::message::encode_dataset(&request.identifier, &syntax).unwrap());
+        for pdata in association.splitter.split_message_bytes(context_id, command, Some(identifier)).unwrap() {
+            write_pdu(&mut association.stream, &Pdu::PData(pdata)).await.unwrap();
+        }
+
+        let pending = association.await_response(1, CommandField::CGetRsp).await.unwrap();
+        assert_eq!(pending.status, Some(crate::dimse::status::PENDING));
+        assert_eq!(pending.remaining_suboperations, Some(6));
+        association.send_c_cancel(context_id, 1).await.unwrap();
+        let cancelled = tokio::time::timeout(
+            Duration::from_secs(2),
+            association.await_response(1, CommandField::CGetRsp),
+        )
+        .await
+        .expect("C-CANCEL must stop the in-flight provider")
+        .unwrap();
+        assert_eq!(cancelled.status, Some(crate::dimse::status::CANCEL));
+        assert_eq!(cancelled.remaining_suboperations, Some(6));
+        assert_eq!(cancelled.completed_suboperations, Some(2));
+        assert_eq!(cancelled.failed_suboperations, Some(1));
+        assert_eq!(cancelled.warning_suboperations, Some(3));
+
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn loopback_c_get_c_cancel_during_reverse_store_preserves_progress() {
+        struct CancelableGet;
+
+        #[async_trait::async_trait]
+        impl ServiceProvider for CancelableGet {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![
+                    sop_class::STUDY_ROOT_QR_GET.to_string(),
+                    "1.2.840.10008.5.1.4.1.1.7".to_string(),
+                ]
+            }
+
+            fn on_c_get<'a>(
+                &'a self,
+                request: &'a crate::cget::CGetRequest,
+            ) -> futures::stream::BoxStream<'a, Result<crate::cget::CGetEvent>> {
+                use futures::StreamExt;
+                let instance = instance_file();
+                let pending = crate::cget::CGetResponse::pending(
+                    request,
+                    4,
+                    crate::cmove::SubOperationSummary { completed: 1, failed: 0, warning: 0 },
+                );
+                Box::pin(
+                    futures::stream::iter([
+                        Ok(crate::cget::CGetEvent::instance(instance)),
+                        Ok(crate::cget::CGetEvent::Response(pending)),
+                    ])
+                    .chain(futures::stream::pending()),
+                )
+            }
+        }
+
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(CancelableGet), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let contexts = vec![
+            get_context(),
+            PresentationContext::new(
+                3,
+                "1.2.840.10008.5.1.4.1.1.7",
+                vec!["1.2.840.10008.1.2".to_string()],
+            ),
+        ];
+        let mut association = Association::open(addr, "SCU", "SCP", contexts, ClientOptions::default())
+            .await
+            .unwrap();
+        let request = crate::cget::CGetRequest::study("1.2.3.4", 1);
+        let get_context_id = association.contexts().pick(&request.sop_class_uid, "").unwrap().id;
+        let syntax = transfer_syntax_of(&association.contexts().all()[0].transfer_syntax);
+        let command = bytes::Bytes::from(command_bytes(&request.to_command()).unwrap());
+        let identifier = bytes::Bytes::from(crate::message::encode_dataset(&request.identifier, &syntax).unwrap());
+        for pdata in association.splitter.split_message_bytes(get_context_id, command, Some(identifier)).unwrap() {
+            write_pdu(&mut association.stream, &Pdu::PData(pdata)).await.unwrap();
+        }
+
+        let mut assembler = PdvAssembler::new();
+        loop {
+            let Some(pdu) = association.read_request_pdu(1).await.unwrap() else {
+                panic!("association closed before reverse C-STORE request");
+            };
+            let Pdu::PData(pdata) = pdu else { continue };
+            for unit in assembler.push_pdata(&pdata).unwrap() {
+                if unit.stream == Stream::Command {
+                    let command = command_from_bytes(&unit.bytes).unwrap();
+                    if command.field == CommandField::CStoreRq {
+                        let store_context_id = unit.context_id;
+                        association.send_c_cancel(get_context_id, 1).await.unwrap();
+                        let response = Command::response(&command, crate::dimse::status::SUCCESS).unwrap();
+                        let response_bytes = bytes::Bytes::from(command_bytes(&response).unwrap());
+                        for pdata in association.splitter.split_bytes(store_context_id, true, response_bytes).unwrap() {
+                            write_pdu(&mut association.stream, &Pdu::PData(pdata)).await.unwrap();
+                        }
+                        let cancelled = tokio::time::timeout(
+                            Duration::from_secs(2),
+                            association.await_response(1, CommandField::CGetRsp),
+                        )
+                        .await
+                        .expect("C-CANCEL must stop reverse C-STORE")
+                        .unwrap();
+                        assert_eq!(cancelled.status, Some(crate::dimse::status::CANCEL));
+                        assert_eq!(cancelled.completed_suboperations, Some(1));
+                        association.release().await.unwrap();
+                        handle.await.unwrap().unwrap();
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     #[tokio::test]

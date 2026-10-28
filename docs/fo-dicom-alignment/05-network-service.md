@@ -16,9 +16,9 @@
 | **源码比对** | 逐行比对 radicom 与 fo-dicom 两侧，或顺着调用链推导，未构造运行时复现。 |
 | **grep 确认** | "缺失"类结论先用 grep 确认全仓无对应符号，再标注。 |
 
-**基线**：最近一次验证为 `radicom-network` 326 个单元测试通过，fuzz/golden/自互操作测试通过，workspace rustdoc 与 clippy 均无告警；需要真实 `RADICOM_PEER` 的外部对端测试仍显式 ignored。
+**基线**：最近一次验证为 `radicom-network` 328 个单元测试通过，fuzz/golden/自互操作测试通过，workspace rustdoc 与 clippy 均无告警；需要真实 `RADICOM_PEER` 的外部对端测试仍显式 ignored。
 
-**总体结论**：单连接、单请求的服务骨架（C-ECHO / C-STORE / C-FIND / C-GET / C-MOVE + 六个 DIMSE-N 方法）是完整可用的；C-FIND/C-MOVE/C-GET 已逐条消费 provider stream，C-FIND/C-MOVE 已能中断在途 provider，`max_clients` 与服务端 ACSE 超时也已接线。仍待处理的主要服务层缺口是 C-GET 的 C-CANCEL 中断、客户端跨 SOP 类上下文复用，以及默认 C-STORE sink 的落盘性能。协议错误、临时文件生命周期和 retrieve 计数已有回归覆盖。性能上服务端并发仍受 `radicom` 解析器全局读锁限制，服务层是暴露点而非病灶。
+**总体结论**：单连接、单请求的服务骨架（C-ECHO / C-STORE / C-FIND / C-GET / C-MOVE + 六个 DIMSE-N 方法）是完整可用的；C-FIND/C-MOVE/C-GET 已逐条消费 provider stream，三种查询/检索服务均能中断在途 provider，`max_clients` 与服务端 ACSE 超时也已接线。仍待处理的主要服务层缺口是公开 client 的并发取消 API、客户端跨 SOP 类上下文复用，以及默认 C-STORE sink 的落盘性能。协议错误、临时文件生命周期和 retrieve 计数已有回归覆盖。性能上服务端并发仍受 `radicom` 解析器全局读锁限制，服务层是暴露点而非病灶。
 
 本次评审共发现：
 
@@ -44,9 +44,9 @@
 | C-ECHO SCP | `DicomCEchoProvider` | 已实现 | `server.rs:333-337`、`services.rs:272-287` `VerificationProvider` | — |
 | C-STORE SCP | `DicomCStoreProvider` | 已实现 | `server.rs:672-702` | 默认 sink 生命周期已修复，落盘性能问题见 §3.1 |
 | C-FIND SCP | `DicomCFindProvider` | 部分实现 | `server.rs:757-850` | Pending 结果已逐条发送；同一 presentation context 和 message ID 的 C-CANCEL 可中断在途 provider；provider 本身没有取消回调 |
-| C-GET SCP | `DicomCGetProvider`（子操作在服务内发起） | 部分实现 | `server.rs:567-665` | provider 事件已逐条消费；Pending 的 `remaining` 由 provider 提供，见 §2.4 |
+| C-GET SCP | `DicomCGetProvider`（子操作在服务内发起） | 部分实现 | `server.rs:567-707` | provider 事件已逐条消费；Pending 的 `remaining` 由 provider 提供；同一 presentation context 和 message ID 的 C-CANCEL 可中断在途 provider |
 | C-MOVE SCP | `DicomCMoveProvider` | 部分实现 | `server.rs:669-808` | Pending/终止响应已逐条发送；同一 presentation context 和 message ID 的 C-CANCEL 可中断在途 provider；provider 本身没有取消回调 |
-| C-CANCEL 处理 | `DicomService.cs` 取消在途请求 | 部分实现 | `server.rs:338-347`、`server.rs:790-895` | 流式 C-FIND/C-MOVE 在途时会回送 `CANCEL` 终止响应；空闲分发器和 C-GET 仍只消费命令 |
+| C-CANCEL 处理 | `DicomService.cs` 取消在途请求 | 部分实现 | `server.rs:338-347`、`server.rs:590-895` | 流式 C-FIND/C-MOVE/C-GET 在途时会回送 `CANCEL` 终止响应；provider 本身没有取消回调 |
 | N-EVENT-REPORT SCP | `IDicomNEventReportRequestProvider` | 已实现 | `services.rs:240-243`、`server.rs:404` | 实现存在；**无任何测试**覆盖（见 §4） |
 | N-GET / N-SET SCP | `IDicomNServiceProvider` | 已实现 | `services.rs:245-258`、`server.rs:405-410` | 同上，无测试 |
 | N-ACTION / N-CREATE SCP | `IDicomNServiceProvider` | 已实现 | `services.rs:255-263`、`server.rs:411-416` | N-ACTION 有测试（`server.rs:2843`），N-CREATE 无 |
@@ -90,7 +90,7 @@
 另外两处属于真实缺口且无任何代码注释交代：
 
 - **N-CREATE / N-EVENT-REPORT 无测试**（`services.rs:240-263` 有实现，`server.rs:404` 有分发，测试里只有 N-ACTION/N-DELETE）。
-- **C-GET 的 C-CANCEL 尚不能中断 provider**：C-FIND/C-MOVE 已在流式处理路径中支持同 context/message ID 的取消，但 C-GET 仍会继续消费 provider stream。
+- **公开 client 的并发 C-CANCEL 仍受 API 借用模型限制**：底层 `Association` 已支持三种服务的取消；`DicomClient::send_*` 持有 `&mut self` 直到终止响应，无法同时调用 `cancel`。
 
 ---
 
@@ -527,11 +527,11 @@ if end - pos < n { ... }
 
 好消息：`store.rs:66` 用的是 `from_bytes`，所以当前 C-STORE 路径**尚未**吃到这 10–80 倍。但它同时意味着 §3.1 的落盘是一次纯粹的浪费——一旦有人"优化"成 `write_and_parse` 里改用 `DicomFile::open`（看起来更自然），接收吞吐会立刻塌到 1/50。这条应作为"不要改成 open"的显式警告保留。
 
-### 3.5 【中】C-GET 的 C-CANCEL 无法中断流式检索
+### 3.5 【已修复】三种流式查询/检索服务的 C-CANCEL
 
 位置：`server.rs:567-757`。
 
-C-FIND、C-MOVE 与 C-GET 现在都逐条消费 provider stream，首个 Pending 响应可在 provider 产生终端响应前到达 SCU。C-FIND/C-MOVE 的处理路径会同时读取入站 P-DATA，在同一 presentation context 和 message ID 收到 C-CANCEL 时回送 `CANCEL` 终止响应并丢弃 provider stream；C-GET 仍需同样的并行读取路径才能在 provider 运行期间中断。
+C-FIND、C-MOVE 与 C-GET 现在都逐条消费 provider stream，首个 Pending 响应可在 provider 产生终端响应前到达 SCU。三条处理路径都会同时读取入站 P-DATA，在同一 presentation context 和 message ID 收到 C-CANCEL 时回送 `CANCEL` 终止响应并丢弃 provider stream；C-GET 在反向 C-STORE 已发出时会先消费对应的 C-STORE-RSP，再结束原检索操作。`loopback_c_find_c_cancel_stops_an_in_flight_provider`、`loopback_c_move_c_cancel_stops_an_in_flight_provider`、`loopback_c_get_c_cancel_stops_an_in_flight_provider` 和 `loopback_c_get_c_cancel_during_reverse_store_preserves_progress` 覆盖这些路径。
 
 ### 3.6 【中】C-GET 每实例重新构造 `Transcoder` 并整体转码
 
@@ -582,7 +582,7 @@ C-GET 收到 500 张图就会深拷贝 500 个 dataset 进 `Vec`。虽然 `Dicom
 
 ## 4. 测试审查
 
-326 个单元测试全绿，但对服务层的关键行为覆盖仍有缺口，且至少有 4 个测试是**假绿**（断言与名字/意图不符，或在不该通过的条件下通过）。
+328 个单元测试全绿，但对服务层的关键行为覆盖仍有缺口，且至少有 4 个测试是**假绿**（断言与名字/意图不符，或在不该通过的条件下通过）。
 
 ### 4.1 【高】`a_c_cancel_keeps_the_association_healthy` 是假绿
 
@@ -642,7 +642,7 @@ async fn loopback_honours_a_small_peer_max_pdu() {   // 注释说 "a 64-byte max
 | 同 client 跨 SOP 类复用 | `client.rs:738` 的 `a_second_sop_class_gets_its_own_association` 已覆盖当前重开关联语义 |
 | C-FIND 的 C-CANCEL | `server.rs::loopback_c_find_c_cancel_stops_an_in_flight_provider` 已覆盖在途 provider 与同 P-DATA-TF 排队场景 |
 | C-MOVE 的 C-CANCEL | `server.rs::loopback_c_move_c_cancel_stops_an_in_flight_provider` 已覆盖在途 provider |
-| C-GET 的 C-CANCEL | 仍未覆盖；服务端仍会继续消费 provider stream |
+| C-GET 的 C-CANCEL | `server.rs::loopback_c_get_c_cancel_stops_an_in_flight_provider` 和 `loopback_c_get_c_cancel_during_reverse_store_preserves_progress` 已覆盖 provider 等待与反向 C-STORE 等待 |
 
 ### 4.8 【低】`tests/goldens.rs` 只覆盖 2 个 PDU
 
@@ -684,7 +684,7 @@ async fn loopback_honours_a_small_peer_max_pdu() {   // 注释说 "a 64-byte max
 | 10 | 解析器全局锁限制服务并发 | `tag_index.rs:27`、`dictionary.rs:233` | 中高 | 大（跨 crate，但值得） |
 | 11 | 文件式解析每元素 3 次 seek（勿切 `open`） | `byte_source.rs:66-77`、`file.rs:114` | 中 | 中（缓存长度+位置；**不要**加缓冲层） |
 
-原始评审中的前 5 项已有第 1、2、3、4、5 项修复证据；当前仍需处理的是 C-GET 的 C-CANCEL、公开 client 的并发取消 API、客户端 PC 复用、请求 watchdog 和默认 sink 的落盘性能。第 2 项的生命周期修复与第 8 项性能问题已经分开，不能用性能优化替代清理保证。
+原始评审中的前 5 项已有第 1、2、3、4、5 项修复证据；当前仍需处理的是公开 client 的并发取消 API、客户端 PC 复用、请求 watchdog 和默认 sink 的落盘性能。第 2 项的生命周期修复与第 8 项性能问题已经分开，不能用性能优化替代清理保证。
 
 第 1 项的严重性要说准：**当前默认配置下它是连接级**（panic 在 `tokio::spawn` 的连接 task 内被捕获，accept loop 存活、新客户端仍可连），所以不是开箱即用的 remote DoS；但触发载荷只有 64 字节、无需任何权限、且打掉的连接上所有在途请求静默丢失且不发 A-ABORT。一旦部署侧启用 `panic = "abort"`（服务端二进制的常见选择），它立刻变成进程级 DoS。因此修复优先级按"最高"排，而不按"当前影响面小"降级。
 
