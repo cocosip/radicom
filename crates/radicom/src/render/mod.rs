@@ -14,6 +14,7 @@ use crate::model::tag::Tag;
 use crate::pixel::overlay::OverlayData;
 use crate::pixel::PixelData;
 
+pub mod bit_depth;
 pub mod color_table;
 pub mod geometry;
 pub mod icon;
@@ -24,6 +25,7 @@ pub mod reconstruction;
 pub mod spatial;
 
 pub use color_table::ColorTable;
+pub use bit_depth::BitDepth;
 pub use pixel_converter::PixelDataConverter;
 pub use geometry::{
     can_draw_localizer, intersection_localizer, projection_localizer, FrameGeometry, FrameGeometryType,
@@ -354,12 +356,8 @@ impl GrayscaleRenderOptions {
             return Err(unsupported("stored bit depth is not renderable"));
         }
         let signed = pixel.pixel_representation() != 0;
-        let (min, max) = if signed {
-            let half = 1i64 << (bits - 1);
-            (-(half as f64), (half - 1) as f64)
-        } else {
-            (0.0, ((1i64 << bits) - 1) as f64)
-        };
+        let depth = BitDepth::new(pixel.bits_allocated()?, bits, pixel.high_bit(), signed);
+        let (min, max) = (depth.min_value() as f64, depth.max_value() as f64);
         let mut base = GrayscaleRenderOptions::from_window_level((min + max) / 2.0, (max - min).max(1.0));
         base.apply_dataset_modality_and_invert(dataset);
         Ok(base)
@@ -840,19 +838,10 @@ fn render_grayscale_with_options(
     let raw: &[u8] = raw.as_ref();
 
     let signed = pixel.pixel_representation() != 0;
-    // Normalise to the low `bits_stored` bits (docs §5): left-align on the high
-    // bit, then drop the sub-bit padding. `high_bit + 1 == bits_stored` (the
-    // common low-aligned case) leaves the value unchanged.
-    let bits_stored = pixel.bits_stored();
-    let high_bit = pixel.high_bit();
-    let normalize = |v: u16| -> u16 {
-        if bits_stored == 0 || bits_stored > bits || high_bit >= bits {
-            return v;
-        }
-        let up = bits - high_bit - 1;
-        let down = bits - bits_stored;
-        v.checked_shl(up as u32).unwrap_or(0).wrapping_shr(down as u32)
-    };
+    // Normalise to the low `bits_stored` bits (docs §5) via BitDepth: left-align
+    // on the high bit, then drop the sub-bit padding.
+    let depth = BitDepth::new(bits, pixel.bits_stored(), pixel.high_bit(), signed);
+    let normalize = |v: u16| -> u16 { depth.normalize(v) };
     let count = (width as usize) * (height as usize);
     let mut bytes = Vec::with_capacity(count * 4);
     for i in 0..count {
