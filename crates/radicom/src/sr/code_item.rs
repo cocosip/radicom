@@ -57,7 +57,9 @@ impl CodeItem {
     pub fn write_into(&self, dataset: &mut Dataset) {
         let (value_tag, value_vr) = value_slot(&self.value);
         dataset.insert_str(value_tag, value_vr, self.value.clone());
-        dataset.insert_str(Tag::CODING_SCHEME_DESIGNATOR, Vr::Sh, self.scheme.clone());
+        if !self.scheme.is_empty() {
+            dataset.insert_str(Tag::CODING_SCHEME_DESIGNATOR, Vr::Sh, self.scheme.clone());
+        }
         if let Some(meaning) = &self.meaning {
             if !meaning.is_empty() {
                 dataset.insert_str(Tag::CODE_MEANING, Vr::Lo, meaning.clone());
@@ -217,7 +219,7 @@ mod tests {
         code.write_into(&mut ds);
         assert_eq!(ds.try_get_str(URN_CODE_VALUE).as_deref(), Some("urn:oid:1.2.3"));
         assert_eq!(ds.try_get_str(CODE_MEANING).as_deref(), Some("Example meaning"));
-        assert_eq!(ds.try_get_str(CODING_SCHEME_DESIGNATOR).as_deref(), Some(""));
+        assert!(ds.try_get_str(CODING_SCHEME_DESIGNATOR).is_none());
         assert!(ds.try_get_str(CODING_SCHEME_VERSION).is_none());
     }
 
