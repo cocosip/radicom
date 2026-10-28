@@ -109,9 +109,15 @@ impl PduSplitter {
 
     /// Splits one message stream into PDUs (§5.3).
     ///
-    /// `data` is the complete message; the final PDV carries the `last` bit.
-    /// Each PDU is filled up to the peer's maximum, never beyond it.
+    /// Borrowed form: copies `data` into the PDV buffers. Callers that already
+    /// own the encoded bytes use [`Self::split_bytes`] to skip that copy.
     pub fn split(&self, context_id: u8, is_command: bool, data: &[u8]) -> Result<Vec<PData>> {
+        self.split_bytes(context_id, is_command, bytes::Bytes::copy_from_slice(data))
+    }
+
+    /// Splits an owned message into PDUs without copying its bytes: every PDV
+    /// is a `Bytes::slice` of `data` (§3.3).
+    pub fn split_bytes(&self, context_id: u8, is_command: bool, data: bytes::Bytes) -> Result<Vec<PData>> {
         let body_limit = self.max_pdu as usize;
         if body_limit <= 6 {
             return Err(NetworkError::protocol("maximum PDU length leaves no room for a PDV"));
@@ -143,7 +149,7 @@ impl PduSplitter {
                 context_id,
                 is_command,
                 is_last,
-                data: bytes::Bytes::copy_from_slice(&data[offset..end]),
+                data: data.slice(offset..end),
             });
             // the value is even-padded on the wire, which costs a byte
             used += 6 + len + len % 2;
@@ -167,9 +173,23 @@ impl PduSplitter {
         command: &[u8],
         dataset: Option<&[u8]>,
     ) -> Result<Vec<PData>> {
-        let mut pdus = self.split(context_id, true, command)?;
+        self.split_message_bytes(
+            context_id,
+            bytes::Bytes::copy_from_slice(command),
+            dataset.map(bytes::Bytes::copy_from_slice),
+        )
+    }
+
+    /// Owned-message variant of [`Self::split_message`] (no per-PDV copy).
+    pub fn split_message_bytes(
+        &self,
+        context_id: u8,
+        command: bytes::Bytes,
+        dataset: Option<bytes::Bytes>,
+    ) -> Result<Vec<PData>> {
+        let mut pdus = self.split_bytes(context_id, true, command)?;
         if let Some(dataset) = dataset {
-            pdus.extend(self.split(context_id, false, dataset)?);
+            pdus.extend(self.split_bytes(context_id, false, dataset)?);
         }
         Ok(pdus)
     }
@@ -329,6 +349,29 @@ mod tests {
         // only the very last PDV carries the last bit
         let last_flags: Vec<bool> = pdus.iter().flat_map(|p| p.pdvs.iter().map(|d| d.is_last)).collect();
         assert_eq!(last_flags, vec![false, false, true]);
+    }
+
+    #[test]
+    fn split_bytes_matches_split_without_copying() {
+        // §3.3: the owned-bytes path must produce byte-identical PDUs to the
+        // borrowed path; it only avoids the per-PDV copy.
+        let splitter = PduSplitter::new(24, 4);
+        let data: Vec<u8> = (0..80u8).collect();
+        let borrowed = splitter.split(7, true, &data).unwrap();
+        let owned = splitter.split_bytes(7, true, bytes::Bytes::from(data.clone())).unwrap();
+        assert_eq!(borrowed, owned);
+
+        let command = &data[..10];
+        let dataset = &data[10..];
+        let msg_borrowed = splitter.split_message(7, command, Some(dataset)).unwrap();
+        let msg_owned = splitter
+            .split_message_bytes(
+                7,
+                bytes::Bytes::copy_from_slice(command),
+                Some(bytes::Bytes::copy_from_slice(dataset)),
+            )
+            .unwrap();
+        assert_eq!(msg_borrowed, msg_owned);
     }
 
     #[test]

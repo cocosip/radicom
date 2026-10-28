@@ -826,12 +826,14 @@ where
         dataset: Option<&Dataset>,
         syntax: &Arc<radicom::model::transfer_syntax::TransferSyntax>,
     ) -> Result<()> {
-        let command_bytes = command_bytes(command)?;
+        let command_bytes = bytes::Bytes::from(command_bytes(command)?);
         let payload = match dataset {
-            Some(dataset) => Some(crate::message::encode_dataset(dataset, syntax)?),
+            Some(dataset) => Some(bytes::Bytes::from(crate::message::encode_dataset(dataset, syntax)?)),
             None => None,
         };
-        for pdata in self.splitter.split_message(context_id, &command_bytes, payload.as_deref())? {
+        // Owned bytes handed straight to the splitter: each PDV is a shared
+        // slice instead of a fresh copy (§3.3).
+        for pdata in self.splitter.split_message_bytes(context_id, command_bytes, payload)? {
             write_pdu(self.stream, &Pdu::PData(pdata)).await?;
         }
         Ok(())
@@ -922,8 +924,9 @@ where
             crate::message::encode_dataset(&transcoded, &target)?
         };
 
-        let command = crate::message::encode_command(&request.to_dataset())?;
-        for pdata in self.splitter.split_message(context_id, &command, Some(&payload))? {
+        let command = bytes::Bytes::from(crate::message::encode_command(&request.to_dataset())?);
+        let payload = bytes::Bytes::from(payload);
+        for pdata in self.splitter.split_message_bytes(context_id, command, Some(payload))? {
             write_pdu(self.stream, &Pdu::PData(pdata)).await?;
         }
 
@@ -982,8 +985,8 @@ async fn send_command<S>(
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
-    let bytes = command_bytes(command)?;
-    for pdata in splitter.split(context_id, true, &bytes)? {
+    let bytes = bytes::Bytes::from(command_bytes(command)?);
+    for pdata in splitter.split_bytes(context_id, true, bytes)? {
         write_pdu(stream, &Pdu::PData(pdata)).await?;
     }
     Ok(())
@@ -1289,8 +1292,8 @@ impl Association {
         };
 
         let command = request.to_command();
-        let bytes = command_bytes(&command)?;
-        for pdata in self.splitter.split(context_id, true, &bytes)? {
+        let bytes = bytes::Bytes::from(command_bytes(&command)?);
+        for pdata in self.splitter.split_bytes(context_id, true, bytes)? {
             write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
         }
 
@@ -1360,8 +1363,9 @@ impl Association {
             crate::message::encode_dataset(&transcoded, &target)?
         };
 
-        let command = crate::message::encode_command(&request.to_dataset())?;
-        for pdata in self.splitter.split_message(context_id, &command, Some(&payload))? {
+        let command = bytes::Bytes::from(crate::message::encode_command(&request.to_dataset())?);
+        let payload = bytes::Bytes::from(payload);
+        for pdata in self.splitter.split_message_bytes(context_id, command, Some(payload))? {
             write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
         }
 
@@ -1409,9 +1413,9 @@ impl Association {
             let syntax = transfer_syntax_of(&context.transfer_syntax);
             let message_id = request.message_id;
 
-            let command = command_bytes(&request.to_command())?;
-            let identifier = crate::message::encode_dataset(&request.identifier, &syntax)?;
-            for pdata in self.splitter.split_message(context_id, &command, Some(&identifier))? {
+            let command = bytes::Bytes::from(command_bytes(&request.to_command())?);
+            let identifier = bytes::Bytes::from(crate::message::encode_dataset(&request.identifier, &syntax)?);
+            for pdata in self.splitter.split_message_bytes(context_id, command, Some(identifier))? {
                 write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
             }
 
@@ -1502,9 +1506,9 @@ impl Association {
             let syntax = transfer_syntax_of(&context.transfer_syntax);
             let message_id = request.message_id;
 
-            let command = command_bytes(&request.to_command())?;
-            let identifier = crate::message::encode_dataset(&request.identifier, &syntax)?;
-            for pdata in self.splitter.split_message(context_id, &command, Some(&identifier))? {
+            let command = bytes::Bytes::from(command_bytes(&request.to_command())?);
+            let identifier = bytes::Bytes::from(crate::message::encode_dataset(&request.identifier, &syntax)?);
+            for pdata in self.splitter.split_message_bytes(context_id, command, Some(identifier))? {
                 write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
             }
 
@@ -1577,9 +1581,9 @@ impl Association {
             let syntax = transfer_syntax_of(&context.transfer_syntax);
             let message_id = request.message_id;
 
-            let command = command_bytes(&request.to_command())?;
-            let identifier = crate::message::encode_dataset(&request.identifier, &syntax)?;
-            for pdata in self.splitter.split_message(context_id, &command, Some(&identifier))? {
+            let command = bytes::Bytes::from(command_bytes(&request.to_command())?);
+            let identifier = bytes::Bytes::from(crate::message::encode_dataset(&request.identifier, &syntax)?);
+            for pdata in self.splitter.split_message_bytes(context_id, command, Some(identifier))? {
                 write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
             }
 
@@ -1605,10 +1609,11 @@ impl Association {
                                                 ) else {
                                                     continue;
                                                 };
-                                                for pdata in self
-                                                    .splitter
-                                                    .split(unit.context_id, true, &command_bytes(&response)?)?
-                                                {
+                                                for pdata in self.splitter.split_bytes(
+                                                    unit.context_id,
+                                                    true,
+                                                    bytes::Bytes::from(command_bytes(&response)?),
+                                                )? {
                                                     write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
                                                 }
                                             } else {
@@ -1645,8 +1650,8 @@ impl Association {
                                         Ok(response) => response,
                                         Err(error) => crate::store::failure_response(&request, &error),
                                     };
-                                    let bytes = command_bytes(&response.to_command())?;
-                                    for pdata in self.splitter.split(unit.context_id, true, &bytes)? {
+                                    let bytes = bytes::Bytes::from(command_bytes(&response.to_command())?);
+                                    for pdata in self.splitter.split_bytes(unit.context_id, true, bytes)? {
                                         write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
                                     }
                                 }
@@ -1712,8 +1717,8 @@ impl Association {
         let mut command = Command::request(CommandField::CCancelRq, message_id);
         // a C-CANCEL identifies the cancelled request in (0000,0120)
         command.message_id_being_responded_to = Some(message_id);
-        let bytes = command_bytes(&command)?;
-        for pdata in self.splitter.split_message(context_id, &bytes, None)? {
+        let bytes = bytes::Bytes::from(command_bytes(&command)?);
+        for pdata in self.splitter.split_message_bytes(context_id, bytes, None)? {
             write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
         }
         Ok(())
@@ -1742,12 +1747,12 @@ impl Association {
         let target = transfer_syntax_of(&context.transfer_syntax);
 
         let command = request.to_command();
-        let command_bytes = crate::message::encode_command(&command.to_dataset())?;
+        let command_bytes = bytes::Bytes::from(crate::message::encode_command(&command.to_dataset())?);
         let payload = match &request.dataset {
-            Some(dataset) => Some(crate::message::encode_dataset(dataset, &target)?),
+            Some(dataset) => Some(bytes::Bytes::from(crate::message::encode_dataset(dataset, &target)?)),
             None => None,
         };
-        for pdata in self.splitter.split_message(context_id, &command_bytes, payload.as_deref())? {
+        for pdata in self.splitter.split_message_bytes(context_id, command_bytes, payload)? {
             write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
         }
 
@@ -3446,6 +3451,99 @@ mod tests {
     }
 
     // -- service semantics: remaining counts, message IDs, sub-operations -----
+
+    /// Runs one malformed P-DATA frame against a live `serve_connection` over a
+    /// duplex pair: performs the ACSE handshake, sends the raw frame, then waits
+    /// (bounded) for the connection task. Returns its typed result; a panic in
+    /// the task surfaces as a failed `expect`, a hang as a timeout.
+    async fn drive_malformed_pdata(frame: Vec<u8>) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let handle = tokio::spawn(serve_connection(
+            server,
+            Arc::new(VerificationProvider),
+            ServerOptions::default(),
+        ));
+
+        let mut rq = Associate::new("SCP", "SCU");
+        rq.presentation_contexts.push(echo_context());
+        let request = crate::pdu::encode(&Pdu::AssociateRq(rq)).expect("encode RQ");
+        client.write_all(&request).await.expect("send A-ASSOCIATE-RQ");
+        match read_pdu(&mut client).await.expect("read AC") {
+            Some(Pdu::AssociateAc(_)) => {}
+            other => panic!("expected A-ASSOCIATE-AC, got {other:?}"),
+        }
+
+        client.write_all(&frame).await.ok();
+        drop(client); // EOF if the frame alone did not already end the exchange
+
+        match tokio::time::timeout(Duration::from_secs(2), handle).await {
+            Err(_) => panic!("server hung on malformed P-DATA"),
+            Ok(joined) => joined.expect("serve_connection must not panic"),
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_pdata_after_association_never_panics() {
+        /// Wraps a P-DATA body in a PDU frame with a correct length field.
+        fn pdata_frame(body: &[u8]) -> Vec<u8> {
+            let mut frame = vec![0x04, 0x00];
+            frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            frame.extend_from_slice(body);
+            frame
+        }
+
+        // Structurally invalid framing: each must come back as a typed error.
+        let invalid: Vec<(&str, Vec<u8>)> = vec![
+            ("declared PDU length over the cap", vec![0x04, 0x00, 0xFF, 0xFF, 0xFF, 0xFF]),
+            ("unknown PDU type", vec![0x09, 0x00, 0x00, 0x00, 0x00, 0x00]),
+            ("zero-length PDV", pdata_frame(&[0x00, 0x00, 0x00, 0x00])),
+            ("one-byte PDV", pdata_frame(&[0x00, 0x00, 0x00, 0x01, 0x01])),
+            ("PDV length past the body", pdata_frame(&[0x00, 0x00, 0x00, 0x10, 0x01, 0x03, 1, 2])),
+            ("truncated PDV value", pdata_frame(&[0x00, 0x00, 0x00, 0x06, 0x01, 0x03, 1, 2])),
+        ];
+        for (name, frame) in invalid {
+            let result = drive_malformed_pdata(frame).await;
+            assert!(result.is_err(), "case {name} must be a typed error, got {result:?}");
+        }
+
+        // Decodable but ill-behaved P-DATA: the guaranteed contract is no panic
+        // and no hang (Ok or a typed Err are both acceptable).
+        let echo = command_bytes(&Command::request(CommandField::CEchoRq, 1)).expect("encode echo");
+        let mut not_negotiated = Vec::new();
+        not_negotiated.extend_from_slice(&((echo.len() + 2) as u32).to_be_bytes());
+        not_negotiated.push(0xFF); // context id never negotiated
+        not_negotiated.push(0x03);
+        not_negotiated.extend_from_slice(&echo);
+        let _ = drive_malformed_pdata(pdata_frame(&not_negotiated)).await;
+
+        let mut command_then_stray_data = Vec::new();
+        command_then_stray_data.extend_from_slice(&((echo.len() + 2) as u32).to_be_bytes());
+        command_then_stray_data.push(1);
+        command_then_stray_data.push(0x03); // command + last
+        command_then_stray_data.extend_from_slice(&echo);
+        command_then_stray_data.extend_from_slice(&4u32.to_be_bytes());
+        command_then_stray_data.push(1);
+        command_then_stray_data.push(0x00); // data, never last
+        command_then_stray_data.extend_from_slice(&[0xAB, 0xCD]);
+        let _ = drive_malformed_pdata(pdata_frame(&command_then_stray_data)).await;
+
+        // Seeded PRNG fuzz over random P-DATA bodies: 200 iterations, no new
+        // dependency, bounded and deterministic.
+        let mut state = 0x5EED_1234u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..200 {
+            let len = (next() % 40) as usize;
+            let body: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+            let _ = drive_malformed_pdata(pdata_frame(&body)).await;
+        }
+    }
 
     /// The contexts a C-GET needs: the retrieve model plus the storage class.
     fn get_contexts() -> Vec<PresentationContext> {

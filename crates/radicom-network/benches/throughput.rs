@@ -71,10 +71,18 @@ async fn main() {
         per_store_bytes as f64 / (1024.0 * 1024.0)
     );
 
+    // Two rows: the in-memory sink and the shipped default (`SpoolToTemp`), so
+    // the reported numbers include the production default rather than only the
+    // fast non-default path (§4.9).
+    run_case("memory_sink", StoreSink::Memory, &file, per_store_bytes).await;
+    run_case("default_sink", StoreSink::default(), &file, per_store_bytes).await;
+}
+
+async fn run_case(label: &str, sink: StoreSink, file: &DicomFile, per_store_bytes: u64) {
     let server = DicomServer::bind(
         "127.0.0.1:0",
         Arc::new(StoreProvider),
-        ServerOptions { store_sink: StoreSink::Memory, ..Default::default() },
+        ServerOptions { store_sink: sink, ..Default::default() },
     )
     .await
     .expect("bind server");
@@ -83,12 +91,12 @@ async fn main() {
 
     let mut client = DicomClient::new("SCU", "SCP", addr.to_string());
     // warm up (also opens the association)
-    client.send_c_store(&file).await.expect("warmup store");
+    client.send_c_store(file).await.expect("warmup store");
 
     let iters = 50u32;
     let start = Instant::now();
     for _ in 0..iters {
-        let response = client.send_c_store(black_box(&file)).await.expect("store");
+        let response = client.send_c_store(black_box(file)).await.expect("store");
         black_box(response);
     }
     let elapsed = start.elapsed();
@@ -96,7 +104,7 @@ async fn main() {
     let total = per_store_bytes * iters as u64;
     let mb_per_s = (total as f64 / (1024.0 * 1024.0)) / elapsed.as_secs_f64();
     println!(
-        "network_throughput     {mb_per_s:>8.1} MiB/s   ({iters} stores, {:.1} MiB in {:.3}s)",
+        "network_throughput/{label:<16} {mb_per_s:>8.1} MiB/s   ({iters} stores, {:.1} MiB in {:.3}s)",
         total as f64 / (1024.0 * 1024.0),
         elapsed.as_secs_f64()
     );
