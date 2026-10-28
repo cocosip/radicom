@@ -118,6 +118,15 @@ pub fn charset_for_encoding(encoding: &'static Encoding) -> Option<&'static str>
 /// `first` is the encoding from SpecificCharacterSet; `pn` selects the PN
 /// reset positions.
 pub fn decode_multi_charset(bytes: &[u8], first: &'static Encoding, pn: bool) -> String {
+    // ISO 2022 Japanese: the multibyte (JIS X 0208) designators only decode
+    // correctly when their ESC prefixes reach the decoder (encoding_rs's
+    // ISO-2022-JP is stateful). Stripping the escapes and decoding the bare JIS
+    // bytes would yield ASCII garbage, so hand the whole run to the stateful
+    // decoder, which handles the ESC $\"B\"/$@/$(B/(J/(I switches itself.
+    if first.name() == "ISO-2022-JP" {
+        let (text, _, _) = first.decode(bytes);
+        return text.into_owned();
+    }
     fn flush(out: &mut String, bytes: &[u8], range: std::ops::Range<usize>, enc: &'static Encoding) {
         if range.start < range.end {
             let (text, _, _) = enc.decode(&bytes[range]);
@@ -314,6 +323,24 @@ fn escape_for_encoding(enc: &'static Encoding) -> Option<&'static [u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_iso2022jp_keeps_escape_switching() {
+        // JIS X 0208 "あ" as ESC $ B 0x24 0x22, then ESC ( B back to ASCII.
+        let base = charset_encoding("ISO 2022 IR 87");
+        let bytes = [0x1Bu8, 0x24, 0x42, 0x24, 0x22, 0x1B, 0x28, 0x42];
+        let out = decode_multi_charset(&bytes, base, false);
+        assert_eq!(out, "あ", "JIS X 0208 must decode to the Japanese char, not ASCII");
+    }
+
+    #[test]
+    fn iso2022jp_round_trips_mixed_text() {
+        let jp = charset_encoding("ISO 2022 IR 87");
+        let text = "patient 山田";
+        let bytes = encode_multi_charset(text, jp, &[], false);
+        let back = decode_multi_charset(&bytes, jp, false);
+        assert_eq!(back, text);
+    }
 
     #[test]
     fn term_matching_is_tolerant() {
