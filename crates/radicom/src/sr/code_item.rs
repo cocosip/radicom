@@ -1,39 +1,16 @@
 //! SR support types (SR-02; docs/01-architecture.md §12).
 //!
 //! `CodeItem` is the coded-entry triple that SR (and many other IODs) reuse.
-//! DICOM splits it across three tag pairs by value length: the "short" form
-//! (0018,0090../0100../0102..) for values ≤16 bytes, the "long" form
-//! (0008,0100../0102../0104..) otherwise, and a bare URN in the long code-value
-//! slot. This module writes the right pair for the value and reads either back.
+//! PS3.3 §8.8 gives it a single tag set: `CodingSchemeDesignator (0008,0102)`,
+//! `CodingSchemeVersion (0008,0103)` and `CodeMeaning (0008,0104)` are fixed,
+//! while the code *value* picks one of three slots — `CodeValue (0008,0100)`
+//! SH for values up to 16 bytes, `LongCodeValue (0008,0119)` UC for longer
+//! ones, and `URNCodeValue (0008,0120)` UR for a URN.
 
 use crate::error::{DataError, Error};
 use crate::model::dataset::Dataset;
 use crate::model::tag::Tag;
 use crate::model::vr::Vr;
-
-/// Tag layout for one code triple (§4.2).
-pub struct CodeTags {
-    pub value: Tag,
-    pub scheme: Tag,
-    pub meaning: Tag,
-    pub scheme_version: Tag,
-}
-
-/// Short form: `CodeValue` ≤ 16 bytes (`(0018,0090)` family).
-pub static SHORT: CodeTags = CodeTags {
-    value: Tag::DATA_COLLECTION_DIAMETER,
-    scheme: Tag::new(0x0018, 0x0100),
-    meaning: Tag::new(0x0018, 0x0102),
-    scheme_version: Tag::new(0x0018, 0x0104),
-};
-
-/// Long form: `CodeValue` > 16 bytes (`(0008,0100)` family).
-pub static LONG: CodeTags = CodeTags {
-    value: Tag::CODE_VALUE,
-    scheme: Tag::CODING_SCHEME_DESIGNATOR,
-    meaning: Tag::CODE_MEANING,
-    scheme_version: Tag::CONTEXT_GROUP_VERSION,
-};
 
 /// A coded entry: value + coding scheme (+ optional meaning/version) (§4.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,41 +36,38 @@ impl CodeItem {
         self
     }
 
-    /// Writes this code into `dataset`, choosing the short/long tag form by the
-    /// code value length and swapping to a URN form when the value is a URN
-    /// (§4.2).
+    /// Writes this code into `dataset`, choosing the value slot by the code
+    /// value's length and form (§4.2).
     pub fn write_into(&self, dataset: &mut Dataset) {
-        let tags = tags_for(&self.value);
-        dataset.insert_str(tags.value.clone(), Vr::Sh, self.value.clone());
-        dataset.insert_str(tags.scheme.clone(), Vr::Sh, self.scheme.clone());
+        let (value_tag, value_vr) = value_slot(&self.value);
+        dataset.insert_str(value_tag, value_vr, self.value.clone());
+        dataset.insert_str(Tag::CODING_SCHEME_DESIGNATOR, Vr::Sh, self.scheme.clone());
         if let Some(meaning) = &self.meaning {
             if !meaning.is_empty() {
-                dataset.insert_str(tags.meaning.clone(), Vr::Lo, meaning.clone());
+                dataset.insert_str(Tag::CODE_MEANING, Vr::Lo, meaning.clone());
             }
         }
         if let Some(version) = &self.scheme_version {
             if !version.is_empty() {
-                dataset.insert_str(tags.scheme_version.clone(), Vr::Sh, version.clone());
+                dataset.insert_str(Tag::CODING_SCHEME_VERSION, Vr::Sh, version.clone());
             }
         }
     }
 
-    /// Reads a code from the sequence item's first matching tag family.
+    /// Reads a code from the item's value slot (§4.2).
     pub fn read_from(dataset: &Dataset) -> Result<Self, Error> {
-        // try both families; the short one wins when both exist
-        for tags in [&SHORT, &LONG] {
-            if let Some(value) = dataset.try_get_str(&tags.value) {
-                return Ok(CodeItem {
-                    value: value.trim().to_string(),
-                    scheme: dataset.try_get_str(&tags.scheme).unwrap_or_default().trim().to_string(),
-                    meaning: dataset.try_get_str(&tags.meaning).map(|m| m.trim().to_string()),
-                    scheme_version: dataset
-                        .try_get_str(&tags.scheme_version)
-                        .map(|v| v.trim().to_string()),
-                });
-            }
-        }
-        Err(Error::Data(DataError::Other { message: "no coded entry found".into() }))
+        let value = [Tag::CODE_VALUE, Tag::LONG_CODE_VALUE, Tag::URN_CODE_VALUE]
+            .into_iter()
+            .find_map(|tag| dataset.try_get_str(&tag));
+        let Some(value) = value else {
+            return Err(Error::Data(DataError::Other { message: "no coded entry found".into() }));
+        };
+        Ok(CodeItem {
+            value: value.trim().to_string(),
+            scheme: dataset.try_get_str(&Tag::CODING_SCHEME_DESIGNATOR).unwrap_or_default().trim().to_string(),
+            meaning: dataset.try_get_str(&Tag::CODE_MEANING).map(|m| m.trim().to_string()),
+            scheme_version: dataset.try_get_str(&Tag::CODING_SCHEME_VERSION).map(|v| v.trim().to_string()),
+        })
     }
 
     /// Wraps the code in a fresh one-item sequence under `sequence_tag`.
@@ -106,52 +80,95 @@ impl CodeItem {
     }
 }
 
-/// True when the code value must use the long tag family (§4.2).
+/// The value slot for `value` (§4.2, PS3.3 §8.8).
 ///
-/// DICOM's threshold is 16 in *bytes*; a value longer than that cannot live in
-/// the `SH` short slot. A URN (`urn:` prefix or a scheme-qualified value) also
-/// forces the long form.
-fn needs_long(value: &str) -> bool {
-    value.len() > 16 || value.starts_with("urn:") || value.starts_with("URN:")
+/// A URN goes in `URNCodeValue` (UR); any other value longer than SH's 16
+/// bytes cannot live in `CodeValue` (SH) and uses `LongCodeValue` (UC).
+fn value_slot(value: &str) -> (Tag, Vr) {
+    if is_urn(value) {
+        (Tag::URN_CODE_VALUE, Vr::Ur)
+    } else if value.len() > 16 {
+        (Tag::LONG_CODE_VALUE, Vr::Uc)
+    } else {
+        (Tag::CODE_VALUE, Vr::Sh)
+    }
 }
 
-fn tags_for(value: &str) -> &'static CodeTags {
-    if needs_long(value) {
-        &LONG
-    } else {
-        &SHORT
-    }
+fn is_urn(value: &str) -> bool {
+    value.len() >= 4 && value.as_bytes()[..4].eq_ignore_ascii_case(b"urn:")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_short_code_writes_the_short_tag_family() {
-        let mut ds = Dataset::new();
-        CodeItem::new("T-A0100", "SRT").with_meaning("Chest").write_into(&mut ds);
-        assert_eq!(ds.try_get_str(&SHORT.value).as_deref(), Some("T-A0100"));
-        assert_eq!(ds.try_get_str(&SHORT.scheme).as_deref(), Some("SRT"));
-        assert_eq!(ds.try_get_str(&SHORT.meaning).as_deref(), Some("Chest"));
-        assert!(ds.try_get_str(&LONG.value).is_none(), "the long family must stay empty");
+    // PS3.3 §8.8 tag numbers, spelled out so the assertions do not reuse the
+    // implementation's own constants.
+    const CODE_VALUE: Tag = Tag::new(0x0008, 0x0100);
+    const CODING_SCHEME_DESIGNATOR: Tag = Tag::new(0x0008, 0x0102);
+    const CODING_SCHEME_VERSION: Tag = Tag::new(0x0008, 0x0103);
+    const CODE_MEANING: Tag = Tag::new(0x0008, 0x0104);
+    const CONTEXT_GROUP_VERSION: Tag = Tag::new(0x0008, 0x0106);
+    const LONG_CODE_VALUE: Tag = Tag::new(0x0008, 0x0119);
+    const URN_CODE_VALUE: Tag = Tag::new(0x0008, 0x0120);
+
+    fn vr_of(dataset: &Dataset, tag: Tag) -> Option<Vr> {
+        match dataset.item(&tag) {
+            Some(crate::model::item::DicomItem::Element(element)) => Some(element.vr()),
+            _ => None,
+        }
     }
 
     #[test]
-    fn a_long_code_writes_the_long_tag_family() {
+    fn a_short_code_writes_code_value_with_its_scheme_tags() {
         let mut ds = Dataset::new();
-        // 17 bytes forces the long form
+        CodeItem::new("T-A0100", "SRT")
+            .with_meaning("Chest")
+            .with_version("1")
+            .write_into(&mut ds);
+
+        assert_eq!(ds.try_get_str(CODE_VALUE).as_deref(), Some("T-A0100"));
+        assert_eq!(vr_of(&ds, CODE_VALUE), Some(Vr::Sh));
+        assert_eq!(ds.try_get_str(CODING_SCHEME_DESIGNATOR).as_deref(), Some("SRT"));
+        assert_eq!(vr_of(&ds, CODING_SCHEME_DESIGNATOR), Some(Vr::Sh));
+        assert_eq!(ds.try_get_str(CODE_MEANING).as_deref(), Some("Chest"));
+        assert_eq!(vr_of(&ds, CODE_MEANING), Some(Vr::Lo));
+        assert_eq!(ds.try_get_str(CODING_SCHEME_VERSION).as_deref(), Some("1"));
+        assert_eq!(vr_of(&ds, CODING_SCHEME_VERSION), Some(Vr::Sh));
+
+        assert!(ds.try_get_str(LONG_CODE_VALUE).is_none(), "a short value stays in CodeValue");
+        assert!(ds.try_get_str(URN_CODE_VALUE).is_none());
+        // (0008,0106) is ContextGroupVersion (DT), never a scheme version
+        assert!(ds.try_get_str(CONTEXT_GROUP_VERSION).is_none());
+    }
+
+    #[test]
+    fn a_value_longer_than_16_bytes_writes_long_code_value() {
+        let mut ds = Dataset::new();
+        // 17 bytes: one over the SH limit
         CodeItem::new("12345678901234567", "99DIN").write_into(&mut ds);
-        assert_eq!(ds.try_get_str(&LONG.value).as_deref(), Some("12345678901234567"));
-        assert!(ds.try_get_str(&SHORT.value).is_none());
+        assert_eq!(ds.try_get_str(LONG_CODE_VALUE).as_deref(), Some("12345678901234567"));
+        assert_eq!(vr_of(&ds, LONG_CODE_VALUE), Some(Vr::Uc));
+        assert!(ds.try_get_str(CODE_VALUE).is_none(), "SH cannot hold 17 bytes");
+        assert!(ds.try_get_str(URN_CODE_VALUE).is_none());
     }
 
     #[test]
-    fn a_urn_forces_the_long_family_even_when_short() {
+    fn a_urn_writes_urn_code_value() {
         let mut ds = Dataset::new();
         CodeItem::new("urn:oid:1.2.3", "DCM").write_into(&mut ds);
-        assert_eq!(ds.try_get_str(&LONG.value).as_deref(), Some("urn:oid:1.2.3"));
-        assert!(ds.try_get_str(&SHORT.value).is_none());
+        assert_eq!(ds.try_get_str(URN_CODE_VALUE).as_deref(), Some("urn:oid:1.2.3"));
+        assert_eq!(vr_of(&ds, URN_CODE_VALUE), Some(Vr::Ur));
+        assert!(ds.try_get_str(CODE_VALUE).is_none());
+        assert!(ds.try_get_str(LONG_CODE_VALUE).is_none());
+    }
+
+    #[test]
+    fn a_16_byte_value_still_fits_code_value() {
+        let mut ds = Dataset::new();
+        CodeItem::new("1234567890123456", "99DIN").write_into(&mut ds);
+        assert_eq!(ds.try_get_str(CODE_VALUE).as_deref(), Some("1234567890123456"));
+        assert!(ds.try_get_str(LONG_CODE_VALUE).is_none());
     }
 
     #[test]
@@ -161,6 +178,15 @@ mod tests {
         original.write_into(&mut ds);
         let parsed = CodeItem::read_from(&ds).unwrap();
         assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn long_and_urn_values_round_trip() {
+        for code in [CodeItem::new("12345678901234567", "99DIN"), CodeItem::new("urn:oid:1.2.3", "DCM")] {
+            let mut ds = Dataset::new();
+            code.write_into(&mut ds);
+            assert_eq!(CodeItem::read_from(&ds).unwrap(), code);
+        }
     }
 
     #[test]

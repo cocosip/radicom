@@ -35,12 +35,12 @@ pub mod tags {
     pub const MAGNIFICATION_TYPE: Tag = Tag::MAGNIFICATION_TYPE;
     /// (2010,0100) Border Density.
     pub const BORDER_DENSITY: Tag = Tag::BORDER_DENSITY;
-    /// (2010,0120) Empty Image Density.
-    pub const EMPTY_IMAGE_DENSITY: Tag = Tag::MIN_DENSITY;
+    /// (2010,0110) Empty Image Density.
+    pub const EMPTY_IMAGE_DENSITY: Tag = Tag::EMPTY_IMAGE_DENSITY;
     /// (2010,0140) Trim.
     pub const TRIM: Tag = Tag::TRIM;
-    /// (2010,0300) Medium Type (in FilmBox).
-    pub const REFERENCED_IMAGE_BOX_SEQUENCE: Tag = Tag::REFERENCED_FILM_SESSION_SEQUENCE;
+    /// (2010,0510) Referenced Image Box Sequence (in FilmBox).
+    pub const REFERENCED_IMAGE_BOX_SEQUENCE: Tag = Tag::REFERENCED_IMAGE_BOX_SEQUENCE;
     /// (2020,0010) Image Position.
     pub const IMAGE_POSITION: Tag = Tag::IMAGE_BOX_POSITION;
     /// (2020,0020) Polarity.
@@ -336,5 +336,36 @@ mod tests {
 
         image_box.push_image(Dataset::new());
         assert_eq!(image_box.image_count(), 1);
+    }
+
+    #[test]
+    fn every_print_tag_names_the_attribute_it_claims() {
+        // PS3.6 keyword looked up by tag: a constant with the wrong tag number
+        // resolves to a different attribute (this is how (2010,0120) MinDensity
+        // was mistaken for EmptyImageDensity).
+        let expected = [
+            (tags::NUMBER_OF_COPIES, "NumberOfCopies"),
+            (tags::PRINT_PRIORITY, "PrintPriority"),
+            (tags::MEDIUM_TYPE, "MediumType"),
+            (tags::FILM_DESTINATION, "FilmDestination"),
+            (tags::FILM_SESSION_LABEL, "FilmSessionLabel"),
+            (tags::IMAGE_DISPLAY_FORMAT, "ImageDisplayFormat"),
+            (tags::FILM_ORIENTATION, "FilmOrientation"),
+            (tags::FILM_SIZE_ID, "FilmSizeID"),
+            (tags::MAGNIFICATION_TYPE, "MagnificationType"),
+            (tags::BORDER_DENSITY, "BorderDensity"),
+            (tags::EMPTY_IMAGE_DENSITY, "EmptyImageDensity"),
+            (tags::TRIM, "Trim"),
+            (tags::REFERENCED_IMAGE_BOX_SEQUENCE, "ReferencedImageBoxSequence"),
+            (tags::IMAGE_POSITION, "ImageBoxPosition"),
+            (tags::POLARITY, "Polarity"),
+        ];
+        let dictionary = crate::default_dictionary();
+        for (tag, keyword) in expected {
+            assert_eq!(dictionary.entry(&tag).keyword, keyword, "{tag} is not {keyword}");
+        }
+        // the two tags the print module got wrong, spelled out
+        assert_eq!(tags::EMPTY_IMAGE_DENSITY, Tag::new(0x2010, 0x0110));
+        assert_eq!(tags::REFERENCED_IMAGE_BOX_SEQUENCE, Tag::new(0x2010, 0x0510));
     }
 }

@@ -12,11 +12,12 @@
 
 use crate::error::{Error, FileError};
 use crate::io::file::{DicomFile, FileFormat, ReadOptions};
-use crate::io::writer::WriteOptions;
+use crate::io::writer::{DicomWriter, WriteOptions};
 use crate::model::dataset::Dataset;
 use crate::model::tag::Tag;
 use crate::model::transfer_syntax::syntaxes;
 use crate::model::vr::Vr;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub mod icon;
@@ -428,32 +429,68 @@ impl DicomDirectory {
 
     /// Computes offsets, patches the links and rebuilds the sequence (§3.3).
     ///
-    /// PS3.3 F.2.2: every offset is an **absolute byte position in the file**,
-    /// so record positions are shifted by where the sequence payload begins.
-    /// Rather than predict the encoding, a first layout is written with
-    /// placeholder offsets and the real item positions are read back from the
-    /// serialized bytes; the links are then patched and the file is written
-    /// once more. Offset values are fixed-width, so the second write keeps the
-    /// measured positions valid.
+    /// PS3.3 F.2.2: every offset is an **absolute byte position in the file**.
+    /// The positions are measured from the layout that is being written (see
+    /// [`record_positions`](Self::record_positions)), so a first write with
+    /// placeholder offsets is enough to fix the sizes, and the second write only
+    /// fills the values in — offset values are fixed-width ULs.
     fn rebuild(&mut self) -> Result<(), Error> {
         let links: Vec<(Option<usize>, Option<usize>)> = (0..self.records.len())
             .map(|index| (self.next_sibling(index), self.children(index).first().copied()))
             .collect();
 
-        // placeholder offsets: same width as the final values, but the encoded
-        // sequence length can still differ (e.g. a zero offset vs a real one),
-        // so iterate until the measured positions stop moving
-        let mut positions: Vec<u32> = vec![0u32; self.records.len()];
-        loop {
-            self.write_layout(&links, &positions)?;
-            let probe_bytes = self.file.to_bytes(&WriteOptions::default())?;
-            let measured = item_offsets(&probe_bytes, self.records.len())
-                .ok_or_else(|| record_error("the record sequence was not written"))?;
-            if measured == positions {
-                return Ok(());
-            }
-            positions = measured;
+        let placeholders = vec![0u32; self.records.len()];
+        self.write_layout(&links, &placeholders)?;
+        let positions = self.record_positions()?;
+        self.write_layout(&links, &positions)
+    }
+
+    /// Absolute byte position of every record item in the file about to be
+    /// written (§3.3).
+    ///
+    /// The positions follow from the encoded layout — preamble, file meta, the
+    /// elements ahead of `(0004,1220)`, the sequence header, then one item per
+    /// record — rather than from scanning the serialized bytes. A scan cannot
+    /// tell a record item from an item nested inside a record: an
+    /// `IconImageSequence (0088,0200)` adds an item header and shifted every
+    /// offset by one record.
+    fn record_positions(&self) -> Result<Vec<u32>, Error> {
+        let options = WriteOptions::default();
+        let syntax = self.file.dataset.transfer_syntax();
+        if syntax.is_deflate() {
+            // PS3.10: the media storage directory is never compressed, and a
+            // deflated payload has no byte position to point at
+            return Err(record_error("a DICOMDIR cannot be deflated"));
         }
+        let writer = DicomWriter::new(options.clone());
+
+        // elements ordered ahead of the record sequence
+        let mut ahead = Dataset::new();
+        for item in self.file.dataset.items() {
+            if item.tag() < &tags::DIR_RECORD_SEQUENCE {
+                ahead.insert_or_update(item.clone());
+            }
+        }
+        // preamble (128) + "DICM" (4) + file meta, i.e. everything that is not
+        // dataset bytes
+        let file_len = self.file.to_bytes(&options)?.len() as u64;
+        let dataset_len = writer.dataset_length(&self.file.dataset, &syntax)?;
+        let before_sequence = file_len
+            .checked_sub(dataset_len)
+            .ok_or_else(|| record_error("the record sequence layout could not be measured"))?;
+        // an SQ header is tag(4) + VR(2) + reserved(2) + length(4) when explicit
+        let sequence_header = if syntax.is_explicit_vr() { 12 } else { 8 };
+        let mut cursor = before_sequence + writer.dataset_length(&ahead, &syntax)? + sequence_header;
+
+        // an item is an 8-byte header, the record dataset and — for the default
+        // undefined-length items — an 8-byte item delimiter
+        let item_delimiter = if options.explicit_length_sequence_items { 0 } else { 8 };
+        let mut positions = Vec::with_capacity(self.records.len());
+        for record in &self.records {
+            positions.push(cursor as u32);
+            cursor += 8 + writer.dataset_length(&record.dataset, &syntax)? + item_delimiter;
+        }
+        Ok(positions)
     }
 
     /// Writes the records, links and root offsets into the file dataset.
@@ -591,8 +628,7 @@ fn stitch(bytes: &[u8], dataset: &Dataset) -> (Vec<DirectoryRecord>, Vec<usize>)
 
     // positions of the record items in the file; fall back to item order when
     // the raw bytes cannot be scanned (e.g. round-tripped through a dataset)
-    let offsets = item_offsets(bytes, items.len())
-        .unwrap_or_else(|| (0..items.len()).map(|i| i as u32).collect());
+    let offsets = record_offsets(bytes, dataset, &items);
     let index_of = |offset: u32| offsets.iter().position(|o| *o == offset);
     let next_of = |index: usize| -> Option<usize> {
         items[index]
@@ -666,23 +702,46 @@ fn stitch(bytes: &[u8], dataset: &Dataset) -> (Vec<DirectoryRecord>, Vec<usize>)
     (records, roots)
 }
 
-/// Positions of every record item header (`FFFE,E000`) in `bytes`.
+/// Positions of the record items in `bytes`, in sequence order (§3.2).
 ///
-/// The record sequence is the last sequence in a DICOMDIR, so its items are
-/// the trailing item headers; `count` bounds the scan to the records.
-fn item_offsets(bytes: &[u8], count: usize) -> Option<Vec<u32>> {
-    let mut positions = Vec::with_capacity(count);
+/// A scan for item headers (`FFFE,E000`) also finds the items nested inside a
+/// record — an `IconImageSequence (0088,0200)` adds one per leaf — so the scan
+/// is narrowed to the positions the stored links actually name. When that does
+/// not identify every record (a dirty file with a broken chain), the trailing
+/// run of headers is used as a best effort; when the bytes carry no usable
+/// header at all (a dataset round-trip), item order is used.
+fn record_offsets(bytes: &[u8], dataset: &Dataset, items: &[Dataset]) -> Vec<u32> {
+    let mut scanned = Vec::new();
     for index in 0..bytes.len().saturating_sub(4) {
         if bytes[index] == 0xFE && bytes[index + 1] == 0xFF && bytes[index + 2] == 0x00 && bytes[index + 3] == 0xE0 {
-            positions.push(index as u32);
+            scanned.push(index as u32);
         }
     }
-    // a record dataset may itself contain items; the directory's own records
-    // are the ones this module wrote, so take the trailing run of `count`
-    if positions.len() < count {
-        return None;
+
+    let mut linked = HashSet::new();
+    for item in items {
+        for tag in [tags::OFFSET_NEXT, tags::OFFSET_LOWER] {
+            if let Ok(offset) = item.get::<u32>(tag) {
+                if offset != 0 {
+                    linked.insert(offset);
+                }
+            }
+        }
     }
-    Some(positions[positions.len() - count..].to_vec())
+    for tag in [tags::OFFSET_FIRST_ROOT, tags::OFFSET_LAST_ROOT] {
+        if let Ok(offset) = dataset.get::<u32>(tag) {
+            linked.insert(offset);
+        }
+    }
+
+    let named: Vec<u32> = scanned.iter().copied().filter(|position| linked.contains(position)).collect();
+    if named.len() == items.len() {
+        return named;
+    }
+    if scanned.len() >= items.len() {
+        return scanned[scanned.len() - items.len()..].to_vec();
+    }
+    (0..items.len()).map(|index| index as u32).collect()
 }
 
 #[cfg(test)]
@@ -951,6 +1010,111 @@ mod tests {
         let icon_sequence = leaf.dataset.try_get_sequence(Tag::ICON_IMAGE_SEQUENCE).unwrap();
         assert_eq!(icon_sequence.items().len(), 1, "the icon round-trips");
         let _ = std::fs::remove_file(path);
+    }
+
+    /// Byte position of every record item whose `DirectoryRecordType` is
+    /// `record_type`, in file order.
+    ///
+    /// Independent of the offsets under test: it finds the `(0004,1430)` CS
+    /// element in the raw bytes and walks back to the item header that owns it.
+    fn record_item_positions(bytes: &[u8], record_type: &str) -> Vec<u32> {
+        let mut value = record_type.as_bytes().to_vec();
+        if value.len() % 2 == 1 {
+            value.push(b' '); // CS values are padded to even length
+        }
+        let mut needle = vec![0x04, 0x00, 0x30, 0x14, b'C', b'S'];
+        needle.extend_from_slice(&(value.len() as u16).to_le_bytes());
+        needle.extend_from_slice(&value);
+
+        let mut positions = Vec::new();
+        let mut from = 0;
+        while let Some(offset) = bytes[from..].windows(needle.len()).position(|w| w == needle) {
+            let element = from + offset;
+            let header = (0..element)
+                .rev()
+                .find(|i| {
+                    bytes[*i] == 0xFE && bytes[*i + 1] == 0xFF && bytes[*i + 2] == 0x00 && bytes[*i + 3] == 0xE0
+                })
+                .expect("the record type element is inside an item");
+            positions.push(header as u32);
+            from = element + needle.len();
+        }
+        positions
+    }
+
+    #[test]
+    fn offsets_name_the_records_not_the_items_nested_in_them() {
+        use crate::media::icon::BasicIconGenerator;
+
+        // two 4-level chains; each leaf carries an IconImageSequence, so the
+        // file holds more item headers than records
+        let mut dir = DicomDirectory::new("MYFS");
+        dir.add_file_with_icon(&image_instance("P1", "1.2.3", "1.2.3.4", "1.2.3.4.5"), "IMG0001", &BasicIconGenerator)
+            .unwrap();
+        dir.add_file_with_icon(&image_instance("P2", "9.8.7", "9.8.7.6", "9.8.7.6.5"), "IMG0002", &BasicIconGenerator)
+            .unwrap();
+        let bytes = dir.to_bytes().unwrap();
+
+        let patients = record_item_positions(&bytes, "PATIENT");
+        let studies = record_item_positions(&bytes, "STUDY");
+        let series = record_item_positions(&bytes, "SERIES");
+        let images = record_item_positions(&bytes, "IMAGE");
+        assert_eq!((patients.len(), studies.len(), series.len(), images.len()), (2, 2, 2, 2));
+        let item_headers = bytes
+            .windows(4)
+            .filter(|w| w[0] == 0xFE && w[1] == 0xFF && w[2] == 0x00 && w[3] == 0xE0)
+            .count();
+        assert_eq!(item_headers, 8 + 2, "the two icons add one item header each");
+
+        // PS3.3 F.2.2: the root offsets name the first and last PATIENT record
+        let dataset = &dir.file().dataset;
+        assert_eq!(dataset.get::<u32>(tags::OFFSET_FIRST_ROOT).unwrap(), patients[0]);
+        assert_eq!(dataset.get::<u32>(tags::OFFSET_LAST_ROOT).unwrap(), patients[1]);
+
+        // and each level record points at its own child, not at a nested item
+        let records = dir.records();
+        assert_eq!(records[0].dataset.get::<u32>(tags::OFFSET_LOWER).unwrap(), studies[0]);
+        assert_eq!(records[1].dataset.get::<u32>(tags::OFFSET_LOWER).unwrap(), series[0]);
+        assert_eq!(records[2].dataset.get::<u32>(tags::OFFSET_LOWER).unwrap(), images[0]);
+        assert_eq!(
+            records[0].dataset.get::<u32>(tags::OFFSET_NEXT).unwrap(),
+            patients[1],
+            "the first patient links the second root"
+        );
+        assert!(records[3].dataset.get::<u32>(tags::OFFSET_LOWER).is_err(), "the leaf has no children");
+        assert!(records[3].dataset.get::<u32>(tags::OFFSET_NEXT).is_err(), "the leaf ends the chain");
+
+        // reopening maps the offsets back to the records: a full 8-record tree
+        let reopened = DicomDirectory::from_bytes(&bytes).unwrap();
+        assert_eq!(reopened.roots(), &[0, 4], "both PATIENT records are roots");
+        assert_eq!(
+            reopened.walk(),
+            vec![(0, 0), (1, 1), (2, 2), (3, 3), (4, 0), (5, 1), (6, 2), (7, 3)],
+            "each patient owns its own four-level chain"
+        );
+    }
+
+    #[test]
+    fn a_real_dicomdir_opens_with_the_whole_tree() {
+        // tests-data/media/DICOMDIR: 20 patients, one STUDY/SERIES/IMAGE each,
+        // written by another implementation, so the stored offsets are the only
+        // thing tying the records together.
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests-data/media/DICOMDIR");
+        let dir = DicomDirectory::open(&path).unwrap();
+
+        assert_eq!(dir.records().len(), 80, "four levels for twenty patients");
+        assert_eq!(dir.roots(), &(0..20).map(|i| i * 4).collect::<Vec<usize>>()[..], "one root per patient");
+        assert_eq!(dir.walk().len(), 80, "every record is reachable from a root");
+        for (index, depth) in dir.walk() {
+            assert_eq!(depth, index % 4, "records are laid out patient to image");
+            let expected = match index % 4 {
+                0 => RecordType::Patient,
+                1 => RecordType::Study,
+                2 => RecordType::Series,
+                _ => RecordType::Image,
+            };
+            assert_eq!(dir.records()[index].record_type(), expected, "record {index}");
+        }
     }
 
     #[test]

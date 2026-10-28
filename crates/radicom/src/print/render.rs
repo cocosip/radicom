@@ -25,7 +25,7 @@ impl Default for RenderScale {
     }
 }
 
-/// Empty-image density (2010,0120): BLACK, WHITE or an optical-density string.
+/// Empty-image density (2010,0110): BLACK, WHITE or an optical-density string.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EmptyDensity {
     Black,
@@ -184,7 +184,6 @@ mod tests {
     use crate::model::dataset::Dataset;
     use crate::model::tag::Tag;
     use crate::model::vr::Vr;
-    use crate::print::models::tags;
 
     fn grayscale_image(fill: u8) -> Dataset {
         let mut ds = Dataset::new();
@@ -210,18 +209,27 @@ mod tests {
     }
 
     /// Builds a FilmBox dataset directly with one image box holding `fill`.
+    ///
+    /// The tags are the PS3.6 numbers rather than `print::models::tags`, so a
+    /// wrong constant in the model cannot make this test agree with itself.
     fn film_with_one_box(polarity: &str, fill: u8) -> FilmBox {
+        let image_display_format = Tag::new(0x2010, 0x0010);
+        let film_size_id = Tag::new(0x2010, 0x0050);
+        let referenced_image_box_sequence = Tag::new(0x2010, 0x0510);
+        let image_box_position = Tag::new(0x2020, 0x0010);
+        let polarity_tag = Tag::new(0x2020, 0x0020);
+
         let mut boxed = Dataset::new();
-        boxed.insert_value(tags::IMAGE_POSITION, 1u16);
+        boxed.insert_value(image_box_position, 1u16);
         if !polarity.is_empty() {
-            boxed.insert_str(tags::POLARITY, Vr::Cs, polarity);
+            boxed.insert_str(polarity_tag, Vr::Cs, polarity);
         }
         boxed.insert_sequence(Tag::BASIC_GRAYSCALE_IMAGE_SEQUENCE).push(grayscale_image(fill));
 
         let mut film = Dataset::new();
-        film.insert_str(tags::IMAGE_DISPLAY_FORMAT, Vr::Cs, "STANDARD\\1,1");
-        film.insert_str(tags::FILM_SIZE_ID, Vr::Cs, "A4");
-        film.insert_sequence(tags::REFERENCED_IMAGE_BOX_SEQUENCE).push(boxed);
+        film.insert_str(image_display_format, Vr::Cs, "STANDARD\\1,1");
+        film.insert_str(film_size_id, Vr::Cs, "A4");
+        film.insert_sequence(referenced_image_box_sequence).push(boxed);
         FilmBox::from_dataset(film)
     }
 
