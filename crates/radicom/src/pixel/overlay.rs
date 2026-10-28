@@ -160,9 +160,13 @@ impl OverlayData {
         };
         let bits = ds.get_or(crate::pixel::BITS_ALLOCATED, 8u16);
         let bits_stored = ds.get_or(crate::pixel::BITS_STORED, bits);
-        // a bit position inside the stored value range is real pixel data,
-        // not an overlay (fo-dicom #110)
-        if bit_position < bits_stored {
+        // absent HighBit implies BitsStored - 1 (PS3.3 C.7.6.3.1.2)
+        let high_bit = ds.get_or(crate::pixel::HIGH_BIT, bits_stored.saturating_sub(1));
+        // fo-dicom DicomOverlayData.Load (#110): the bit position lies inside
+        // the stored pixel bits, so it is real pixel data, not an overlay.
+        // The test is expressed against HighBit, not BitsStored, so it is
+        // correct for high-aligned depth metadata too.
+        if bit_position <= high_bit && bit_position > high_bit.saturating_sub(bits_stored) {
             return Err(Error::Imaging(ImagingError(format!(
                 "overlay bit position {bit_position} lies inside the stored pixel bits"
             ))));
@@ -173,12 +177,24 @@ impl OverlayData {
             ))));
         }
 
+        // The overlay plane is carved out of the image frame starting at
+        // OverlayOrigin (1-based row\column), exactly like fo-dicom.
+        let image_columns = ds.get_or(crate::pixel::COLUMNS, 0u16) as usize;
+        let image_rows = ds.get_or(crate::pixel::ROWS, 0u16) as usize;
+        if image_columns == 0 || image_rows == 0 {
+            return Err(Error::Imaging(ImagingError("dataset has no image dimensions".into())));
+        }
+        let origin_tag = Tag::new(group, 0x0050);
+        let row = ds.get_at::<i16>(&origin_tag, 0).unwrap_or(0);
+        let column = ds.get_at::<i16>(&origin_tag, 1).unwrap_or(0);
+        let ox = (column as isize - 1).max(0) as usize;
+        let oy = (row as isize - 1).max(0) as usize;
+
         let raw = pixel.data();
         let unit = (bits / 8) as usize;
-        let needed = (rows * columns) as usize;
-        if raw.len() < needed * unit {
+        if raw.len() < image_columns * image_rows * unit {
             return Err(Error::Imaging(ImagingError(
-                "frame is shorter than the overlay shape".into(),
+                "frame is shorter than the image shape".into(),
             )));
         }
         // 1 bit per pixel, row-packed, LSB first (PS3.5 §8.1.2)
@@ -187,7 +203,11 @@ impl OverlayData {
         let mut o = 0usize;
         for y in 0..rows as usize {
             for x in 0..columns as usize {
-                let idx = (y * columns as usize + x) * unit;
+                let (ix, iy) = (ox + x, oy + y);
+                if ix >= image_columns || iy >= image_rows {
+                    continue; // outside the image: no overlay bit
+                }
+                let idx = (iy * image_columns + ix) * unit;
                 let value = if unit == 1 {
                     raw[idx] as u16
                 } else {

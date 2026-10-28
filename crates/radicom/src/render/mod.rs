@@ -480,10 +480,19 @@ impl GrayscaleRenderOptions {
             // width < 1 is treated as <= 1 to avoid a divide-by-zero (docs §3)
             VoiFunction::Linear => {
                 let w = self.window_width;
-                if w < 1.0 {
+                if w == 1.0 {
+                    // fo-dicom VOILinearLUT: a width of exactly one is a
+                    // threshold at the centre, not the general formula
+                    if value < self.window_center - 0.5 {
+                        0.0
+                    } else {
+                        255.0
+                    }
+                } else if w < 1.0 {
                     return self.map_rescaled_exact(value);
+                } else {
+                    ((value - (self.window_center - 0.5)) / (w - 1.0) + 0.5) * 255.0
                 }
-                ((value - (self.window_center - 0.5)) / (w - 1.0) + 0.5) * 255.0
             }
             VoiFunction::LinearExact => linear_exact(value, self.window_center, self.window_width),
             VoiFunction::Sigmoid => {
@@ -572,6 +581,10 @@ fn first_number(dataset: &Dataset, tag: Tag) -> Option<f64> {
 }
 
 /// Decodes one native 8/16-bit frame to signed-aware stored values (f64).
+///
+/// Raw samples are normalised through [`BitDepth`] first: high-aligned depth
+/// metadata (12 bits stored in 16 with HighBit 15) would otherwise feed the
+/// min/max and histogram windows values 16× too large.
 fn frame_stored_values(dataset: &Dataset, frame: u32) -> Result<Vec<f64>, Error> {
     let mut owned = dataset.clone();
     let pixel = PixelData::from_dataset(&mut owned)?;
@@ -579,21 +592,43 @@ fn frame_stored_values(dataset: &Dataset, frame: u32) -> Result<Vec<f64>, Error>
     if !matches!(bits, 8 | 16) || pixel.transfer_syntax().is_encapsulated() {
         return Err(unsupported("frame values need native 8/16-bit samples"));
     }
+    let stored = match pixel.bits_stored() {
+        0 => bits,
+        s => s.min(bits),
+    };
+    let signed = pixel.pixel_representation() != 0;
+    let depth = BitDepth::new(bits, stored, pixel.high_bit(), signed);
     let buffer = pixel.get_frame(frame)?;
     let raw = buffer.data();
     let raw: &[u8] = raw.as_ref();
-    let signed = pixel.pixel_representation() != 0;
+    let value = |v: u16| -> f64 {
+        let n = depth.normalize(v);
+        if signed {
+            signed_from_stored(n, stored)
+        } else {
+            n as f64
+        }
+    };
     if bits == 8 {
-        // 8-bit signed is uncommon; honour PixelRepresentation anyway
-        Ok(raw.iter().map(|b| if signed { (*b as i8) as f64 } else { *b as f64 }).collect())
+        Ok(raw.iter().map(|b| value(*b as u16)).collect())
     } else {
-        Ok(raw
-            .as_chunks::<2>().0.iter()
-            .map(|c| {
-                let v = u16::from_le_bytes([c[0], c[1]]);
-                if signed { (v as i16) as f64 } else { v as f64 }
-            })
-            .collect())
+        Ok(raw.as_chunks::<2>().0.iter().map(|c| value(u16::from_le_bytes([c[0], c[1]]))).collect())
+    }
+}
+
+/// Interprets a normalised `stored`-bit sample as a signed value.
+fn signed_from_stored(normalized: u16, stored: u16) -> f64 {
+    if stored == 0 {
+        return normalized as f64;
+    }
+    if stored >= 16 {
+        return (normalized as i16) as f64;
+    }
+    let sign = 1u16 << (stored - 1);
+    if normalized & sign != 0 {
+        (normalized as i32 - (1i32 << stored)) as f64
+    } else {
+        normalized as f64
     }
 }
 
@@ -840,11 +875,12 @@ impl RawImage {
                     continue; // clipped
                 }
                 let i = ((py as u32 * self.width + px as u32) * 4) as usize;
-                // BGRA (the render byte layout) — overlay sets the pixel to `color`
-                self.bytes[i] = color.b;
-                self.bytes[i + 1] = color.g;
-                self.bytes[i + 2] = color.r;
-                self.bytes[i + 3] = 0xFF;
+                // BGRA (the render byte layout) — OR-composite like fo-dicom's
+                // OverlayGraphic, so the underlying pixel's other bits survive
+                self.bytes[i] |= color.b;
+                self.bytes[i + 1] |= color.g;
+                self.bytes[i + 2] |= color.r;
+                self.bytes[i + 3] |= 0xFF;
             }
         }
         Ok(())
@@ -1011,9 +1047,15 @@ fn composite_overlays(
         if !overlay_covers_frame(&overlay, frame) {
             continue;
         }
-        if image.composite_overlay(&overlay, dataset, color).is_err() {
-            // a malformed overlay must not break the render (docs §10)
-            continue;
+        if let Err(error) = image.composite_overlay(&overlay, dataset, color) {
+            // a malformed overlay must not break the render (docs §10), but it
+            // must not vanish silently either: a blank image is not a diagnosis
+            tracing::warn!(
+                group = format_args!("{:#06X}", overlay.group),
+                frame,
+                %error,
+                "overlay skipped"
+            );
         }
     }
 }
@@ -1202,7 +1244,8 @@ fn overlay_covers_frame(overlay: &OverlayData, frame: u32) -> bool {
 
 /// Reads `count` native samples for a frame, honouring 8/16-bit depth.
 ///
-/// Returns `(samples, width, height, (samples_per_pixel, planar_configuration))`.
+/// Returns `(samples, width, height)`; samples are raw stored values, in the
+/// dataset's sample order (interleaved or planar as stored).
 fn read_frame_samples(
     pixel: &PixelData<'_>,
     frame: u32,
@@ -1287,6 +1330,14 @@ fn render_palette_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error
     // PS3.3 C.7.6.3.1.5: input value v maps to entry (v - first_mapped), and
     // values outside the table clamp to the first/last entry.
     let first_mapped = pixel.palette_first_mapped().unwrap_or(0);
+    // Palette indices are stored values: high-aligned depth metadata must be
+    // normalised before the lookup, exactly like the RGB and grayscale paths.
+    let bits = pixel.bits_allocated()?;
+    let stored = match pixel.bits_stored() {
+        0 => bits,
+        s => s.min(bits),
+    };
+    let depth = BitDepth::new(bits, stored, pixel.high_bit(), false);
     let (samples, width, height) = read_frame_samples(&pixel, frame)?;
     let count = (width as usize) * (height as usize);
     if samples.len() < count {
@@ -1294,7 +1345,8 @@ fn render_palette_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error
     }
     let black = crate::pixel::Color32::new(0, 0, 0);
     let mut bytes = Vec::with_capacity(count * 4);
-    for &index in &samples[..count] {
+    for &raw in &samples[..count] {
+        let index = depth.normalize(raw);
         let entry = index as i32 - first_mapped;
         let color = if entry < 0 {
             palette.first().copied().unwrap_or(black)
@@ -1338,13 +1390,29 @@ fn render_ybr_frame(
     let raw: &[u8] = raw.as_ref();
 
     // Read a sample at byte level, honouring 8/16-bit little-endian storage.
-    // 16-bit samples are scaled down to the 8-bit 0–255 range the YCbCr→RGB
-    // matrix works in (PS3.3 defines YBR sample values in 0–255).
+    // The stored depth is normalised exactly like the RGB path: PS3.3 defines
+    // YBR sample values in 0–255, so high-aligned 12-in-16 (or 10-in-16) data
+    // must be shifted down rather than having its high byte taken.
+    let stored = match pixel.bits_stored() {
+        0 => bits,
+        s => s.min(bits),
+    };
+    let depth = BitDepth::new(bits, stored, pixel.high_bit(), false);
+    let down = stored.saturating_sub(8);
+    let up = 8u16.saturating_sub(stored);
+    let to8 = |v: u16| -> f64 {
+        let n = depth.normalize(v);
+        if stored >= 8 {
+            (n >> down) as f64
+        } else {
+            (n << up) as f64
+        }
+    };
     let read = |byte_index: usize| -> f64 {
         if bits == 8 {
-            raw[byte_index] as f64
+            to8(raw[byte_index] as u16)
         } else {
-            (u16::from_le_bytes([raw[byte_index], raw[byte_index + 1]]) >> 8) as f64
+            to8(u16::from_le_bytes([raw[byte_index], raw[byte_index + 1]]))
         }
     };
     let unit = if bits == 8 { 1usize } else { 2usize };
@@ -2237,7 +2305,8 @@ mod tests {
         // custom colour paints the overlay pixel green (BGRA [0,255,0,255])
         img.set_show_overlays(true);
         img.set_overlay_color(crate::pixel::Color32::new(0, 255, 0));
-        assert_eq!(&img.render().unwrap().as_bytes()[0..4], &[0, 255, 0, 255]);
+        // OR-composited: green 255 over grey 128 keeps the red/blue channels
+        assert_eq!(&img.render().unwrap().as_bytes()[0..4], &[128, 255, 128, 255]);
     }
 
     #[test]
@@ -2375,13 +2444,13 @@ mod tests {
         let ds = image_with_embedded_overlay(&[(0, 0), (2, 1)]);
         let image = render_frame_with_overlays(&ds, 0, DEFAULT_OVERLAY_COLOR).unwrap();
         let b = image.as_bytes();
-        // pixel (0,0) → index 0: magenta (r=255,g=0,b=255) in BGRA
-        assert_eq!(&b[0..4], &[255, 0, 255, 255], "overlay pixel is magenta");
+        // pixel (0,0) → index 0: magenta OR grey 128 → BGRA [255,128,255,255]
+        assert_eq!(&b[0..4], &[255, 128, 255, 255], "overlay pixel is OR-composited magenta");
         // pixel (1,0) has no overlay bit → stays grey (128)
         assert_eq!(b[4], 128, "non-overlay pixel keeps its grey value");
         // pixel (2,1) is overlay: row 1, col 2 → index (1*4+2)
         let i = (4 + 2) * 4; // row 1, col 2
-        assert_eq!(&b[i..i + 4], &[255, 0, 255, 255], "second overlay pixel is magenta");
+        assert_eq!(&b[i..i + 4], &[255, 128, 255, 255], "second overlay pixel is magenta");
     }
 
     #[test]
@@ -2403,6 +2472,117 @@ mod tests {
         let image = render_frame(&file.dataset, 0).expect("frame renders");
         assert_eq!((image.width(), image.height()), (256, 256));
         assert_eq!(image.as_bytes().len(), 256 * 256 * 4, "BGRA bytes for the whole frame");
-        assert!(image.as_bytes().chunks_exact(4).any(|px| px[0] != 0), "not a blank image");
+        assert!(image.as_bytes().as_chunks::<4>().0.iter().any(|px| px[0] != 0), "not a blank image");
+    }
+
+    #[test]
+    fn ybr_normalises_bits_stored_for_low_aligned_16_bit_data() {
+        // 1x1 YBR_FULL, 12 bits stored in 16 (low aligned): 2048 = 128 << 4
+        let mut ds = color_image("YBR_FULL", 3, 16, &[2048, 2048, 2048], 0);
+        ds.insert_value(Tag::BITS_STORED, 12u16);
+        ds.insert_value(Tag::HIGH_BIT, 11u16);
+        let image = render_frame(&ds, 0).unwrap();
+        assert_eq!(&image.as_bytes()[0..4], &[128, 128, 128, 255], "neutral YCbCr is mid grey");
+    }
+
+    #[test]
+    fn palette_indices_are_normalised_for_high_aligned_depth() {
+        // 12 bits stored, left-aligned in 16: index 3 arrives as 0x3000
+        let mut ds = color_image("PALETTE COLOR", 1, 16, &[0x3000], 0);
+        ds.insert_value(Tag::BITS_STORED, 12u16);
+        ds.insert_value(Tag::HIGH_BIT, 15u16);
+        for (desc_tag, data_tag, vals) in [
+            (0x1101u16, 0x1201u16, [0u8, 0, 0, 200]),
+            (0x1102, 0x1202, [0u8, 0, 0, 100]),
+            (0x1103, 0x1203, [0u8, 0, 0, 50]),
+        ] {
+            ds.insert_or_update(crate::model::item::DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(Tag::new(0x0028, desc_tag), Vr::Us, us_bytes(&[4, 0, 8])),
+            ));
+            ds.insert_or_update(crate::model::item::DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(
+                    Tag::new(0x0028, data_tag),
+                    Vr::Ow,
+                    std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vals.to_vec()))
+                        as crate::model::buffer::SharedBuffer,
+                ),
+            ));
+        }
+        let image = render_frame(&ds, 0).unwrap();
+        assert_eq!(&image.as_bytes()[0..4], &[50, 100, 200, 255], "0x3000 >> 4 is entry 3");
+    }
+
+    #[test]
+    fn a_high_aligned_frame_renders_its_own_min_max_window() {
+        // 16/12/15: raw 0x0100 and 0x0F00 are stored values 16 and 240; a
+        // window derived from the raw bit patterns would render both black.
+        let mut ds = gray_image(2, 1, 16, &[0x0100, 0x0F00], None, None);
+        ds.insert_value(Tag::BITS_STORED, 12u16);
+        ds.insert_value(Tag::HIGH_BIT, 15u16);
+        let image = render_frame(&ds, 0).unwrap();
+        assert_eq!(image.as_bytes()[0], 0, "minimum is black");
+        assert_eq!(image.as_bytes()[4], 255, "maximum is white");
+    }
+
+    #[test]
+    fn a_window_width_of_one_is_a_threshold() {
+        let ds = gray_image(1, 1, 8, &[0], Some(40.0), Some(1.0));
+        let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
+        assert_eq!(o.map(39.0), 0, "below the centre is black");
+        assert_eq!(o.map(39.5), 255, "at the centre maps to white (fo-dicom)");
+        assert_eq!(o.map(40.0), 255, "above the centre is white");
+    }
+
+    #[test]
+    fn an_embedded_overlay_is_carved_out_at_its_origin() {
+        // 4x4 image; 2x2 overlay with OverlayOrigin row 2 \ column 2, so its
+        // bits come from image pixels (1,1) and (2,2)
+        let mut ds = gray_image(4, 4, 16, &[128; 16], None, None);
+        ds.insert_value(Tag::BITS_STORED, 8u16);
+        ds.insert_value(Tag::HIGH_BIT, 7u16);
+        ds.insert_value(Tag::new(0x6000, 0x0010), 2u16); // overlay rows
+        ds.insert_value(Tag::new(0x6000, 0x0011), 2u16); // overlay columns
+        ds.insert_str(Tag::new(0x6000, 0x0040), Vr::Cs, "G");
+        ds.insert_value(Tag::new(0x6000, 0x0100), 1u16);
+        ds.insert_value(Tag::new(0x6000, 0x0102), 8u16);
+        let mut origin = Vec::new();
+        origin.extend_from_slice(&2i16.to_le_bytes()); // row
+        origin.extend_from_slice(&2i16.to_le_bytes()); // column
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::new(0x6000, 0x0050),
+                Vr::Ss,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(origin)),
+            ),
+        ));
+        let mut pixels = Vec::new();
+        for y in 0..4u16 {
+            for x in 0..4u16 {
+                let mut v = 128u16;
+                if (x, y) == (1, 1) || (x, y) == (2, 2) {
+                    v |= 1 << 8;
+                }
+                pixels.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::PIXEL_DATA,
+                Vr::Ow,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(pixels)),
+            ),
+        ));
+        let overlays = crate::pixel::overlay::OverlayData::from_dataset(&ds);
+        let data = overlays[0].load(&ds).unwrap();
+        assert_eq!(data.data().as_ref(), &[0x01, 0x02], "bits at (1,1) and (2,2) of the image");
+    }
+
+    #[test]
+    fn a_non_right_angle_rotation_is_ignored() {
+        let image = RawImage::new(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 255]);
+        let mut transform = SpatialTransform::new();
+        transform.rotate(45);
+        let rotated = transform.apply_to(&image);
+        assert_eq!(rotated.as_bytes(), image.as_bytes(), "45° is not a right angle");
     }
 }

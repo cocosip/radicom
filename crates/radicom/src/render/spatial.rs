@@ -54,24 +54,30 @@ impl SpatialTransform {
         let (width, height) = (image.width(), image.height());
         let mut pixels = pad_rgb(image);
 
-        // rotation first (fo-dicom order)
+        // rotation first (fo-dicom order). Only right angles are meaningful:
+        // fo-dicom's GetRotateFlipType matches 90/180/270 and treats anything
+        // else as no rotation, so a 45° request is ignored (with a warning)
+        // rather than silently rendered as 90°.
         let angle = ((self.rotation % 360) + 360) % 360;
+        if !matches!(angle, 0 | 90 | 180 | 270) {
+            tracing::warn!(rotation = angle, "only 90/180/270 degree rotations are applied");
+        }
         let (width, height) = match angle {
-            0 => (width, height),
-            a if a <= 90 => {
+            90 => {
                 let rotated = rotate_90(&pixels, width, height);
                 pixels = rotated;
                 (height, width)
             }
-            a if a <= 180 => {
+            180 => {
                 pixels = rotate_180(&pixels, width, height);
                 (width, height)
             }
-            _ => {
+            270 => {
                 let rotated = rotate_270(&pixels, width, height);
                 pixels = rotated;
                 (height, width)
             }
+            _ => (width, height),
         };
 
         // then flips
