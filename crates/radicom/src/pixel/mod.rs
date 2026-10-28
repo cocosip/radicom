@@ -437,10 +437,21 @@ impl<'a> PixelData<'a> {
         )
     }
 
+    /// The first input value mapped by the palette LUTs (PS3.3 C.7.6.3.1.5),
+    /// read from the red descriptor. A PALETTE COLOR input value `v` maps to
+    /// entry `v - first` (all three channels share the descriptor's first value).
+    pub fn palette_first_mapped(&self) -> Option<i32> {
+        let descriptor = self.dataset.item(&RED_DESCRIPTOR)?.as_element_buffer()?;
+        let desc = descriptor.data();
+        if desc.len() < 6 {
+            return None;
+        }
+        Some(u16::from_le_bytes([desc[2], desc[3]]) as i32)
+    }
+
     /// One LUT channel: descriptor-driven 8-bit expansion.
     ///
-    /// The LUT Descriptor (PS3.3 C.7.6.3.1.5) is three US values:
-    /// `[0]` number of entries (0 ⇒ 65536), `[1]` first mapped pixel value,
+    /// The LUT Descriptor (PS3.3 C.7.6.3.1.5) is three US values:    /// `[0]` number of entries (0 ⇒ 65536), `[1]` first mapped pixel value,
     /// `[2]` bits per entry. Each US is little-endian, so the byte layout is
     /// entries@0..2, first@2..4, bits@4..6 — a 6-byte descriptor.
     fn read_lut(&self, descriptor_tag: Tag, data_tag: Tag) -> Option<Vec<u8>> {

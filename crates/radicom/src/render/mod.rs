@@ -938,14 +938,23 @@ fn render_palette_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error
         return Err(unsupported("PALETTE COLOR expects 1 sample per pixel"));
     }
     let palette = pixel.palette_color_lut().ok_or_else(|| unsupported("PALETTE COLOR but no palette LUT"))?;
+    // PS3.3 C.7.6.3.1.5: input value v maps to entry (v - first_mapped), and
+    // values outside the table clamp to the first/last entry.
+    let first_mapped = pixel.palette_first_mapped().unwrap_or(0);
     let (samples, width, height) = read_frame_samples(&pixel, frame)?;
     let count = (width as usize) * (height as usize);
     if samples.len() < count {
         return Err(unsupported("frame is shorter than rows×cols samples"));
     }
+    let black = crate::pixel::Color32::new(0, 0, 0);
     let mut bytes = Vec::with_capacity(count * 4);
     for &index in &samples[..count] {
-        let color = palette.get(index as usize).copied().unwrap_or(crate::pixel::Color32::new(0, 0, 0));
+        let entry = index as i32 - first_mapped;
+        let color = if entry < 0 {
+            palette.first().copied().unwrap_or(black)
+        } else {
+            palette.get(entry as usize).copied().or_else(|| palette.last().copied()).unwrap_or(black)
+        };
         bytes.extend_from_slice(&[color.b, color.g, color.r, 0xFF]);
     }
     Ok(RawImage::new(width, height, bytes))
@@ -1661,6 +1670,36 @@ mod tests {
         let b = image.as_bytes();
         assert_eq!(&b[0..4], &[0, 0, 255, 255], "index 0 is red");
         assert_eq!(&b[4..8], &[255, 0, 0, 255], "index 1 is blue");
+    }
+
+    #[test]
+    fn a_palette_frame_honours_the_first_mapped_value() {
+        // 2 entries, first mapped 10: stored value v maps to entry (v - 10),
+        // out-of-range values clamp to the first/last entry (PS3.3 C.7.6.3.1.5).
+        let mut ds = color_image("PALETTE COLOR", 1, 8, &[10, 11, 5, 200], 0);
+        for (desc_tag, data_tag, vals) in [
+            (0x1101u16, 0x1201u16, [255u8, 0]), // red: entry0=red, entry1=black
+            (0x1102, 0x1202, [0u8, 0]),         // green
+            (0x1103, 0x1203, [0u8, 255]),       // blue: entry0=black, entry1=blue
+        ] {
+            ds.insert_or_update(crate::model::item::DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(Tag::new(0x0028, desc_tag), Vr::Us, us_bytes(&[2, 10, 8])),
+            ));
+            ds.insert_or_update(crate::model::item::DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(
+                    Tag::new(0x0028, data_tag),
+                    Vr::Ow,
+                    std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vals.to_vec())) as crate::model::buffer::SharedBuffer,
+                ),
+            ));
+        }
+        let image = render_frame(&ds, 0).unwrap();
+        let b = image.as_bytes();
+        let px = |i: usize| &b[i * 4..i * 4 + 4];
+        assert_eq!(px(0), &[0, 0, 255, 255], "value 10 → entry 0 red");
+        assert_eq!(px(1), &[255, 0, 0, 255], "value 11 → entry 1 blue");
+        assert_eq!(px(2), &[0, 0, 255, 255], "value 5 (< first) clamps to entry 0 red");
+        assert_eq!(px(3), &[255, 0, 0, 255], "value 200 (> last) clamps to entry 1 blue");
     }
 
     #[test]
