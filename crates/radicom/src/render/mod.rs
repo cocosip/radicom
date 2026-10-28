@@ -1732,6 +1732,19 @@ mod tests {
     }
 
     #[test]
+    fn per_frame_functional_window_renders_each_frame_differently() {
+        // Two frames with the SAME stored value (100) but each carrying its own
+        // window: only a per-frame end-to-end render can honour that (§190).
+        let mut ds = gray_image(1, 1, 8, &[100, 100], None, None);
+        ds.insert_str(Tag::new(0x0028, 0x0008), Vr::Is, "2"); // NumberOfFrames
+        put_per_frame_windows(&mut ds, &[(100.0, 2.0), (0.0, 400.0)]);
+        let f0 = render_frame(&ds, 0).unwrap();
+        let f1 = render_frame(&ds, 1).unwrap();
+        assert_eq!(f0.as_bytes()[0], 255, "frame 0 tight window → white");
+        assert_eq!(f1.as_bytes()[0], 192, "frame 1 wide window → mid grey");
+    }
+
+    #[test]
     fn functional_window_errors_when_absent() {
         // no functional groups at all → error (caller falls back to min/max)
         let ds = gray_image(2, 1, 8, &[10, 20], None, None);
