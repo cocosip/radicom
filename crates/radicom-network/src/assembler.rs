@@ -16,14 +16,15 @@ pub enum Stream {
 
 /// Reassembles PDVs into complete message units (§5.2).
 ///
-/// A unit is complete when a PDV with the `last` bit arrives. Command and
-/// dataset streams are kept apart, keyed by presentation context.
+/// A unit is complete when a PDV with the `last` bit arrives. Buffers are keyed
+/// by `(presentation context, stream)`: two requests may interleave their PDVs
+/// (an asynchronous operation window above 1 is negotiable, and a C-GET SCP
+/// talks on two contexts at once), so one command and one dataset buffer per
+/// connection would splice unrelated messages together (§2.11).
 #[derive(Debug, Clone, Default)]
 pub struct PdvAssembler {
-    command: Vec<u8>,
-    data: Vec<u8>,
-    command_context: Option<u8>,
-    data_context: Option<u8>,
+    /// Half-assembled message per `(context id, stream)`.
+    buffers: std::collections::HashMap<(u8, Stream), Vec<u8>>,
 }
 
 /// A completed message unit.
@@ -53,41 +54,31 @@ impl PdvAssembler {
     /// Feeds one PDV, returning a unit when this PDV completes one.
     pub fn push_pdv(&mut self, pdv: &Pdv) -> Result<Option<MessageUnit>> {
         let stream = if pdv.is_command { Stream::Command } else { Stream::Data };
-        let (buffer, context) = match stream {
-            Stream::Command => (&mut self.command, &mut self.command_context),
-            Stream::Data => (&mut self.data, &mut self.data_context),
-        };
-
-        // a PDV that switches context mid-unit is a protocol violation
-        match context {
-            Some(existing) if *existing != pdv.context_id => {
-                return Err(NetworkError::protocol("PDV changed presentation context mid-message"));
-            }
-            Some(_) => {}
-            None => *context = Some(pdv.context_id),
-        }
-
+        let key = (pdv.context_id, stream);
+        let buffer = self.buffers.entry(key).or_default();
         buffer.extend_from_slice(&pdv.data);
         if !pdv.is_last {
             return Ok(None);
         }
 
-        let bytes = std::mem::take(buffer);
-        let context_id = context.take().unwrap_or(pdv.context_id);
-        Ok(Some(MessageUnit { context_id, stream, bytes }))
+        // the message is complete: drop the buffer so idle contexts cost nothing
+        let bytes = self.buffers.remove(&key).unwrap_or_default();
+        Ok(Some(MessageUnit { context_id: pdv.context_id, stream, bytes }))
     }
 
-    /// Bytes buffered for a stream that has not completed yet.
+    /// Bytes buffered for a stream that has not completed yet, over all
+    /// presentation contexts.
     pub fn pending_len(&self, stream: Stream) -> usize {
-        match stream {
-            Stream::Command => self.command.len(),
-            Stream::Data => self.data.len(),
-        }
+        self.buffers
+            .iter()
+            .filter(|((_, buffered), _)| *buffered == stream)
+            .map(|(_, bytes)| bytes.len())
+            .sum()
     }
 
     /// True when nothing is half-assembled.
     pub fn is_idle(&self) -> bool {
-        self.command.is_empty() && self.data.is_empty()
+        self.buffers.values().all(|bytes| bytes.is_empty())
     }
 }
 
@@ -273,13 +264,54 @@ mod tests {
     }
 
     #[test]
-    fn context_switch_mid_message_is_a_violation() {
+    fn interleaved_contexts_do_not_corrupt_each_other() {
+        // §2.11: two messages on two presentation contexts may interleave PDV
+        // by PDV; each must reassemble from its own buffer, not from a shared
+        // one that splices the two together.
         let mut assembler = PdvAssembler::new();
-        assembler.push_pdata(&PData { pdvs: vec![pdv(1, true, false, &[1])] }).unwrap();
-        match assembler.push_pdata(&PData { pdvs: vec![pdv(3, true, true, &[2])] }) {
-            Err(NetworkError::Protocol(message)) => assert!(message.contains("presentation context"), "got {message}"),
-            other => panic!("expected Protocol error, got {other:?}"),
-        }
+        assert!(assembler
+            .push_pdata(&PData { pdvs: vec![pdv(1, true, false, &[0x10, 0x11])] })
+            .unwrap()
+            .is_empty());
+        assert!(assembler
+            .push_pdata(&PData { pdvs: vec![pdv(3, true, false, &[0x30, 0x31])] })
+            .unwrap()
+            .is_empty());
+        assert_eq!(assembler.pending_len(Stream::Command), 4, "both contexts hold a fragment");
+
+        // context 3 finishes first
+        let units = assembler.push_pdata(&PData { pdvs: vec![pdv(3, true, true, &[0x32])] }).unwrap();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].context_id, 3);
+        assert_eq!(units[0].bytes, vec![0x30, 0x31, 0x32], "context 3 keeps its own bytes");
+
+        let units = assembler.push_pdata(&PData { pdvs: vec![pdv(1, true, true, &[0x12])] }).unwrap();
+        assert_eq!(units[0].context_id, 1);
+        assert_eq!(units[0].bytes, vec![0x10, 0x11, 0x12], "context 1 keeps its own bytes");
+        assert!(assembler.is_idle());
+    }
+
+    #[test]
+    fn interleaved_command_and_dataset_streams_across_contexts() {
+        // a C-GET SCP sends a command on the retrieve context while a dataset
+        // is still arriving on the storage context
+        let mut assembler = PdvAssembler::new();
+        assert!(assembler
+            .push_pdata(&PData { pdvs: vec![pdv(1, false, false, &[0x01, 0x02])] })
+            .unwrap()
+            .is_empty());
+        let units = assembler
+            .push_pdata(&PData {
+                pdvs: vec![pdv(3, true, true, &[0xAA]), pdv(1, false, true, &[0x03])],
+            })
+            .unwrap();
+        assert_eq!(units.len(), 2);
+        assert_eq!((units[0].context_id, units[0].stream, units[0].bytes.clone()), (3, Stream::Command, vec![0xAA]));
+        assert_eq!(
+            (units[1].context_id, units[1].stream, units[1].bytes.clone()),
+            (1, Stream::Data, vec![0x01, 0x02, 0x03]),
+            "the dataset on context 1 is not touched by the command on context 3"
+        );
     }
 
     #[test]

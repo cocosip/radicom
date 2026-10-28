@@ -64,11 +64,21 @@ pub async fn write_pdu<W: AsyncWrite + Unpin>(writer: &mut W, pdu: &Pdu) -> Resu
 }
 
 /// Applies [`TcpOptions`] to a connected stream.
+///
+/// Socket buffer sizing is advisory — the kernel may round the value up or cap
+/// it — so a refused request is not fatal. It is at least *attempted*: the
+/// fields would otherwise be a promise the transport never keeps (§2.12).
 pub fn apply_options(stream: &tokio::net::TcpStream, options: &TcpOptions) -> Result<()> {
     stream.set_nodelay(options.nodelay).map_err(NetworkError::Io)?;
-    // buffer sizing is advisory: platforms may refuse it, which is not fatal
-    let _ = options.send_buffer_size;
-    let _ = options.receive_buffer_size;
+    // tokio exposes no SO_SNDBUF/SO_RCVBUF setter, so go through socket2 on the
+    // same file descriptor/socket handle
+    let socket = socket2::SockRef::from(stream);
+    if let Some(size) = options.send_buffer_size {
+        let _ = socket.set_send_buffer_size(size as usize);
+    }
+    if let Some(size) = options.receive_buffer_size {
+        let _ = socket.set_recv_buffer_size(size as usize);
+    }
     Ok(())
 }
 
@@ -194,6 +204,37 @@ mod tests {
         assert!(options.nodelay);
         assert!(options.send_buffer_size.is_none());
         assert!(options.receive_buffer_size.is_none());
+    }
+
+    #[tokio::test]
+    async fn socket_buffer_sizes_reach_the_socket() {
+        // §2.12: the options used to be dropped on the floor. Read the values
+        // back from the descriptor itself: shrink by a factor the kernel cannot
+        // round back up to the default, so an ignored request is visible.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move { listener.accept().await.unwrap().0 });
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let _peer = accept.await.unwrap();
+
+        let socket = socket2::SockRef::from(&stream);
+        let default_send = socket.send_buffer_size().unwrap();
+        let default_recv = socket.recv_buffer_size().unwrap();
+        let options = TcpOptions {
+            nodelay: true,
+            send_buffer_size: Some((default_send / 4) as u32),
+            receive_buffer_size: Some((default_recv / 4) as u32),
+        };
+        apply_options(&stream, &options).unwrap();
+
+        assert!(
+            socket.send_buffer_size().unwrap() < default_send,
+            "SO_SNDBUF is still the OS default of {default_send}"
+        );
+        assert!(
+            socket.recv_buffer_size().unwrap() < default_recv,
+            "SO_RCVBUF is still the OS default of {default_recv}"
+        );
     }
 
     #[test]

@@ -494,6 +494,7 @@ dependencies = [
  "radicom",
  "rcgen",
  "rustls-pemfile",
+ "socket2",
  "thiserror",
  "tokio",
  "tokio-rustls",

@@ -35,6 +35,8 @@ pub struct ServerOptions {
     pub max_pdu_length: u32,
     /// How long to wait for the peer's A-ASSOCIATE-RQ.
     pub association_timeout: Duration,
+    /// Socket options applied to every accepted connection (§2.12).
+    pub tcp: TcpOptions,
     /// Where incoming C-STORE instances are put before the provider sees them.
     pub store_sink: crate::store::StoreSink,
     /// Answers SOP Class Extended Negotiation requests (§4.3).
@@ -84,6 +86,7 @@ impl Default for ServerOptions {
             max_clients: 0,
             max_pdu_length: 16384,
             association_timeout: Duration::from_secs(10),
+            tcp: TcpOptions::default(),
             store_sink: crate::store::StoreSink::default(),
             extended_negotiation: crate::extended::ExtendedNegotiationPolicy::decline_all(),
             user_identity: UserIdentityPolicy::default(),
@@ -135,6 +138,8 @@ impl<P: ServiceProvider + 'static> DicomServer<P> {
                 Ok(pair) => pair,
                 Err(e) => return Err(NetworkError::Io(e)),
             };
+            // advisory: a refused buffer size must not drop the connection
+            let _ = crate::transport::apply_options(&stream, &options.tcp);
             let permit = match &slots {
                 Some(slots) => Some(
                     slots
@@ -166,6 +171,7 @@ impl<P: ServiceProvider + 'static> DicomServer<P> {
     /// Serves exactly one connection, then returns (test and single-shot use).
     pub async fn accept_one(&self) -> Result<()> {
         let (stream, _peer) = self.listener.accept().await.map_err(NetworkError::Io)?;
+        crate::transport::apply_options(&stream, &self.options.tcp)?;
         #[cfg(feature = "tls")]
         if let Some(tls) = self.options.tls.clone() {
             let stream = tls.accept(stream).await?;
@@ -256,7 +262,7 @@ where
     };
     let splitter = PduSplitter::new(peer_max_pdu, 16);
     // a command awaiting its dataset (§5.2)
-    let mut awaiting_dataset: Option<(u8, Command)> = None;
+    let mut awaiting_dataset: std::collections::HashMap<u8, Command> = std::collections::HashMap::new();
 
     let mut serving = Serving {
         stream: &mut stream,
@@ -297,16 +303,18 @@ where
                                         | CommandField::NActionRq
                                 );
                             if expects_dataset {
-                                // the dataset arrives in later PDVs
-                                awaiting_dataset = Some((unit.context_id, command));
+                                // the dataset arrives in later PDVs; keyed by
+                                // context so a second request cannot displace it
+                                awaiting_dataset.insert(unit.context_id, command);
                             } else {
                                 handle_command(&mut serving, unit.context_id, command).await?;
                             }
                         }
                         Stream::Data => {
-                            let Some((context_id, command)) = awaiting_dataset.take() else {
+                            let Some(command) = awaiting_dataset.remove(&unit.context_id) else {
                                 return Err(NetworkError::protocol("dataset PDV without a command"));
                             };
+                            let context_id = unit.context_id;
                             let syntax = accepted
                                 .find_abstract(command.affected_sop_class_uid.as_deref().unwrap_or_default())
                                 .map(|c| transfer_syntax_of(&c.transfer_syntax))
@@ -973,6 +981,8 @@ where
 pub struct ClientOptions {
     pub max_pdu_length: u32,
     pub association_timeout: Duration,
+    /// Socket options applied to the connected stream (§2.12).
+    pub tcp: TcpOptions,
     /// How long a graceful release waits for the peer's A-RELEASE-RP before
     /// the association is reported as timed out (§9.3.6).
     pub release_timeout: Duration,
@@ -992,6 +1002,7 @@ impl Default for ClientOptions {
             max_pdu_length: 16384,
             association_timeout: Duration::from_secs(5),
             release_timeout: Duration::from_secs(10),
+            tcp: TcpOptions::default(),
             user_identity: None,
             extended_negotiations: Vec::new(),
             #[cfg(feature = "tls")]
@@ -1109,7 +1120,7 @@ impl Association {
         }
 
         let tcp = TcpStream::connect(addr).await.map_err(NetworkError::Io)?;
-        crate::transport::apply_options(&tcp, &TcpOptions::default())?;
+        crate::transport::apply_options(&tcp, &options.tcp)?;
 
         #[cfg(feature = "tls")]
         let mut stream = match &options.tls {
