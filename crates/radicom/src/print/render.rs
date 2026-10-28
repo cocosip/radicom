@@ -67,14 +67,28 @@ impl FilmBox {
         let mut canvas = Canvas::filled(canvas_w, canvas_h, empty_density.background());
 
         if self.trim() {
-            canvas.draw_border(Color32::new(0, 0, 0));
+            // Trim box border ≈ 2 mm (fo-dicom ImageBox BORDER = 100*2/25.4 in
+            // 1/100 inch), scaled to the rasterisation, so it is a real band and
+            // not a 1-px hairline.
+            let border_px = ((2.0 * scale.pixels_per_mm).round() as i64).max(1);
+            canvas.draw_border(Color32::new(0, 0, 0), border_px);
         }
 
         // Parse/validate once: a malformed shape or truncated LUT fails the render.
         let presentation_lut = self.presentation_lut()?;
         let cells = self.layout(margins);
         let boxes = self.image_boxes();
-        for (cell, image_box) in cells.iter().zip(boxes.iter()) {
+        for (index, cell) in cells.iter().enumerate() {
+            // PS3.3 C.11.1: ImageBoxPosition selects the cell (1-based). Fall back
+            // to list order when a box omits the attribute.
+            let position = (index + 1) as u16;
+            let image_box = match boxes.iter().find(|b| b.position() == Some(position)) {
+                Some(b) => b,
+                None => match boxes.get(index) {
+                    Some(b) => b,
+                    None => continue,
+                },
+            };
             let Some(source) = image_box.images().first() else {
                 continue;
             };
@@ -143,15 +157,21 @@ impl Canvas {
         self.bytes[i + 3] = 0xFF;
     }
 
-    fn draw_border(&mut self, color: Color32) {
+    fn draw_border(&mut self, color: Color32, thickness: i64) {
         let (w, h) = (self.width as i64, self.height as i64);
-        for x in 0..w {
-            self.set(x, 0, color);
-            self.set(x, h - 1, color);
-        }
-        for y in 0..h {
-            self.set(0, y, color);
-            self.set(w - 1, y, color);
+        for t in 0..thickness {
+            let (x0, y0, x1, y1) = (t, t, w - 1 - t, h - 1 - t);
+            if x1 < x0 || y1 < y0 {
+                break;
+            }
+            for x in x0..=x1 {
+                self.set(x, y0, color);
+                self.set(x, y1, color);
+            }
+            for y in y0..=y1 {
+                self.set(x0, y, color);
+                self.set(x1, y, color);
+            }
         }
     }
 
@@ -271,27 +291,83 @@ mod tests {
         FilmBox::from_dataset(film)
     }
 
+    /// The grey channel of pixel (x, y) in a rendered BGRA image.
+    fn grey_at(image: &RawImage, x: u32, y: u32) -> u8 {
+        image.as_bytes()[((y * image.width() + x) * 4) as usize]
+    }
+
     #[test]
     fn rendering_produces_a_canvas_of_the_film_size() {
         let film = film_with_one_box("", 128);
         let image = film.render_to_image(10.0, RenderScale { pixels_per_mm: 1.0 }, EmptyDensity::Black).unwrap();
         assert_eq!(image.width(), 210); // A4 width mm at 1 px/mm
         assert_eq!(image.height(), 297);
+        // the 4x4 grey-128 patch is scaled into the central cell: the canvas
+        // centre must carry the source grey, not the black background.
+        assert_eq!(grey_at(&image, 105, 148), 128, "the cell content is actually blitted");
     }
 
     #[test]
     fn the_background_uses_the_empty_density() {
         let film = film_with_one_box("", 128);
         let white = film.render_to_image(10.0, RenderScale { pixels_per_mm: 1.0 }, EmptyDensity::White).unwrap();
-        assert_eq!(&white.as_bytes()[0..3], &[255, 255, 255], "corner is white background");
+        // every corner is the white background
+        for (x, y) in [(0, 0), (209, 0), (0, 296), (209, 296)] {
+            assert_eq!(grey_at(&white, x, y), 255, "corner ({x},{y}) is white background");
+        }
+        // and the drawn cell differs from the background, so the test cannot
+        // pass with background-only output.
+        assert_eq!(grey_at(&white, 105, 148), 128, "the cell is drawn over the background");
     }
 
     #[test]
     fn trim_draws_a_border() {
         let mut film = film_with_one_box("", 128);
         film.set_trim(true);
-        let image = film.render_to_image(10.0, RenderScale { pixels_per_mm: 1.0 }, EmptyDensity::White).unwrap();
-        assert_eq!(&image.as_bytes()[0..3], &[0, 0, 0], "trim border is drawn over the background");
+        // 2 px/mm → a 2 mm trim border is 4 px wide (fo-dicom BORDER 100*2/25.4).
+        let image = film.render_to_image(10.0, RenderScale { pixels_per_mm: 2.0 }, EmptyDensity::White).unwrap();
+        for i in 0..4 {
+            assert_eq!(grey_at(&image, 100, i), 0, "top border is 4 px thick (row {i})");
+            assert_eq!(grey_at(&image, i, 100), 0, "left border is 4 px thick (column {i})");
+        }
+        assert_eq!(grey_at(&image, 100, 4), 255, "past the 4 px border is background (not a 1 px hairline)");
+        assert_eq!(grey_at(&image, 140, 148), 128, "the cell is drawn inside the border");
+    }
+
+    /// Builds a FilmBox with two boxes in reverse list order (position 2 then 1),
+    /// position 2 black and position 1 white.
+    fn film_with_two_boxes_reversed() -> FilmBox {
+        let image_display_format = Tag::new(0x2010, 0x0010);
+        let film_size_id = Tag::new(0x2010, 0x0050);
+        let referenced_image_box_sequence = Tag::new(0x2010, 0x0510);
+        let image_box_position = Tag::new(0x2020, 0x0010);
+        let build = |position: u16, fill: u8| {
+            let mut boxed = Dataset::new();
+            boxed.insert_value(image_box_position.clone(), position);
+            boxed.insert_sequence(Tag::BASIC_GRAYSCALE_IMAGE_SEQUENCE).push(grayscale_image(fill));
+            boxed
+        };
+        let mut film = Dataset::new();
+        film.insert_str(image_display_format, Vr::Cs, "STANDARD\\1,2");
+        film.insert_str(film_size_id, Vr::Cs, "A4");
+        let seq = film.insert_sequence(referenced_image_box_sequence);
+        seq.push(build(2, 0));
+        seq.push(build(1, 255));
+        FilmBox::from_dataset(film)
+    }
+
+    #[test]
+    fn image_box_position_selects_the_cell() {
+        let film = film_with_two_boxes_reversed();
+        let cells = film.layout(10.0);
+        let image = film.render_to_image(10.0, RenderScale { pixels_per_mm: 2.0 }, EmptyDensity::Black).unwrap();
+        let centre = |cell: &LayoutCell| {
+            let cx = ((cell.x + cell.width / 2.0) * 2.0) as u32;
+            let cy = ((cell.y + cell.height / 2.0) * 2.0) as u32;
+            grey_at(&image, cx, cy)
+        };
+        assert_eq!(centre(&cells[0]), 255, "position 1 (white) lands in the first cell, despite list order");
+        assert_eq!(centre(&cells[1]), 0, "position 2 (black) lands in the second cell");
     }
 
     #[test]

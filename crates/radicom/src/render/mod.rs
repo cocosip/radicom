@@ -7,6 +7,12 @@
 //! (BGRA32, REND-07 default backend) → PNG bytes (zlib via the existing flate2,
 //! so no new dependency). Colour/palette pipelines, overlays, spatial
 //! transforms and the optional `image` crate backend are later REND work.
+//!
+//! fo-dicom's three-tier `CacheType` (None/PixelData/LookupTables/Display) is a
+//! deliberate non-goal here (docs/fo-dicom-alignment/02-pixel-render.md §1). A
+//! render is per-frame and short-lived, `DicomImage` already parses the LUTs and
+//! geometry once into `Arc`s and reuses them across frames, and the caller owns
+//! the returned `RawImage`. A cache would add eviction/state for no measured win.
 
 use std::sync::Arc;
 
@@ -1905,6 +1911,32 @@ mod tests {
         seq.push(item);
     }
 
+    /// Inserts a VOI LUT item with an explicit descriptor `entries`/`bits` and
+    /// explicit data VR, so malformed/SS tables can be exercised precisely.
+    fn put_voi_lut_raw(ds: &mut Dataset, entries: u16, first: i16, bits: u16, data_vr: Vr, data: &[u8]) {
+        let seq = ds.insert_sequence(Tag::VOILUT_SEQUENCE);
+        let mut item = Dataset::new();
+        let mut desc = Vec::new();
+        desc.extend_from_slice(&entries.to_le_bytes());
+        desc.extend_from_slice(&(first as u16).to_le_bytes());
+        desc.extend_from_slice(&bits.to_le_bytes());
+        item.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::LUT_DESCRIPTOR,
+                Vr::Us,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(desc)),
+            ),
+        ));
+        item.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::LUT_DATA,
+                data_vr,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(data.to_vec())),
+            ),
+        ));
+        seq.push(item);
+    }
+
     #[test]
     fn a_16_bit_voi_lut_is_recalibrated_to_its_own_output_range() {
         // fo-dicom re-windows the LUT through VOILinearLUT(first, last), so a
@@ -1946,6 +1978,45 @@ mod tests {
         let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
         assert_eq!(o.map(50.0), 255, "above range clamps to the last entry");
         assert_eq!(o.map(0.0), 0, "below range clamps to the first entry");
+    }
+
+    #[test]
+    fn a_voi_lut_length_mismatch_is_rejected_and_falls_back_to_the_window() {
+        // Descriptor claims 4 entries but only 2 data bytes are present: the LUT
+        // is unusable, so options fall back to the WindowCenter/Width tags.
+        let mut ds = gray_image(1, 1, 8, &[100], Some(128.0), Some(256.0));
+        put_voi_lut_raw(&mut ds, 4, 0, 16, Vr::Ow, &[0, 0, 255]);
+        let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
+        assert!(o.voi_lut.is_none() && !o.use_voi_lut, "a truncated LUT is not applied");
+        assert_eq!((o.window_center, o.window_width), (128.0, 256.0), "falls back to the window tags");
+    }
+
+    #[test]
+    fn a_voi_lut_with_ss_data_keeps_negative_entries() {
+        // SS data (not US/OW) with negative entries; first mapped -1, 3 entries.
+        // -1 → -1000 (black), 0 → 0 (mid), 1 → 1000 (white). If the bytes were
+        // read unsigned they would be 64536 and never map correctly.
+        let mut data = Vec::new();
+        for v in [-1000i16, 0, 1000] {
+            data.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut ds = gray_image(1, 1, 8, &[0], None, None);
+        put_voi_lut_raw(&mut ds, 3, -1, 16, Vr::Ss, &data);
+        let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
+        assert_eq!(o.map(-1.0), 0, "first SS entry is black");
+        assert_eq!(o.map(0.0), 128, "middle SS entry (0) is mid grey");
+        assert_eq!(o.map(1.0), 255, "last SS entry is white");
+    }
+
+    #[test]
+    fn a_voi_lut_descriptor_first_mapped_is_signed_ss() {
+        // (0028,3002) first-mapped is SS: -1 must select entry 0, not clamp an
+        // unsigned 65535. Data [0, 255], first = -1: -1→0 (black), 0→255 (white).
+        let mut ds = gray_image(2, 1, 8, &[255, 255], None, None);
+        put_voi_lut(&mut ds, -1, &[0, 255]);
+        let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
+        assert_eq!(o.map(-1.0), 0, "-1 selects the first entry");
+        assert_eq!(o.map(0.0), 255, "0 selects the last entry (signed first-mapped)");
     }
 
     #[test]
@@ -2084,17 +2155,18 @@ mod tests {
 
     #[test]
     fn a_sixteen_bit_frame_renders_to_a_bgra_image() {
-        // 2x2 frame, stored values spanning the window
+        // 2x2 frame, stored values spanning the window centre 511 / width 1024.
+        // LINEAR maps them to (v-(511-0.5))/(1024-1)+0.5)*255 rounded:
+        // 0→0, 255→64, 512→128, 1023→255. A monotonic stub (identity, v>>8)
+        // cannot produce this exact gradient.
         let samples = [0u16, 255, 512, 1023];
         let ds = gray_image(2, 2, 16, &samples, Some(511.0), Some(1024.0));
         let image = render_grayscale_frame(&ds, 0).unwrap();
-        assert_eq!(image.width(), 2);
-        assert_eq!(image.height(), 2);
+        assert_eq!((image.width(), image.height()), (2, 2));
         assert_eq!(image.as_bytes().len(), 2 * 2 * 4);
-        // the 4th pixel (largest) should be among the brightest
-        let pixels = image.pixels();
-        let lum = |p: u32| (p & 0xFF) as u8;
-        assert!(lum(pixels[3]) >= lum(pixels[0]), "brighter stored value renders brighter");
+        assert_eq!(greys(&image), vec![0, 64, 128, 255], "each stored value maps to its documented grey");
+        // BGRA layout: grey in B/G/R, opaque alpha
+        assert_eq!(&image.as_bytes()[4..8], &[64, 64, 64, 0xFF]);
     }
 
     /// Builds a 1-bit MONOCHROME2 frame from packed bytes (8 pixels per byte).
@@ -2268,6 +2340,18 @@ mod tests {
         let o = GrayscaleRenderOptions::from_min_max(&ds, 0).unwrap();
         assert_eq!(o.window_center, 32771.0);
         assert_eq!(o.window_width, 65528.0);
+    }
+
+    #[test]
+    fn high_bit_normalisation_drives_the_derived_min_max_window() {
+        // 16/12/15: raw 0x0100 and 0x0F00 are stored values 16 and 240 (shift
+        // right 4). The min/max derivation must see the normalised values, so
+        // centre (16+240)/2=128 and width 224 — not the raw 256..3840 range.
+        let mut ds = gray_image(2, 1, 16, &[0x0100, 0x0F00], None, None);
+        ds.insert_value(Tag::BITS_STORED, 12u16);
+        ds.insert_value(Tag::HIGH_BIT, 15u16);
+        let o = GrayscaleRenderOptions::from_min_max(&ds, 0).unwrap();
+        assert_eq!((o.window_center, o.window_width), (128.0, 224.0), "window is derived from normalised samples");
     }
 
     /// Wraps one window pair per frame in a PerFrameFunctionalGroupsSequence,
@@ -2985,13 +3069,114 @@ mod tests {
     }
 
     #[test]
-    fn an_overlay_origin_outside_the_image_is_clipped_not_panicking() {
+    fn overlay_packing_is_lsb_first_end_to_end() {
+        // Standalone plane byte 0b0000_0010 sets only bit 1 → pixel (1,0) must be
+        // painted. An MSB-first reader would place it at column 6 (clipped here),
+        // leaving (1,0) grey.
         let mut ds = image_with_embedded_overlay(&[]);
-        // push the overlay origin far outside the 4x4 image
-        ds.insert_value(Tag::new(0x6000, 0x0050), 100i16);
-        ds.insert_value(Tag::new(0x6000, 0x0051), 100i16);
+        let mut plane = vec![0u8; 4];
+        plane[0] = 0b0000_0010;
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::new(0x6000, 0x3000),
+                Vr::Ob,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(plane)),
+            ),
+        ));
         let image = render_frame_with_overlays(&ds, 0, DEFAULT_OVERLAY_COLOR).unwrap();
-        assert_eq!(image.width(), 4); // rendered without panic
+        let b = image.as_bytes();
+        assert_eq!(&b[4..8], &[255, 128, 255, 255], "bit 1 is the second pixel (LSB first)");
+        assert_eq!(b[0], 128, "bit 0 was not set");
+    }
+
+    /// A two-frame 4x4 grey image with a standalone overlay whose
+    /// ImageFrameOrigin is 2 (1-based) and NumberOfFrames is 1, so the plane
+    /// covers frame 1 only.
+    fn two_frame_gray_with_standalone_overlay() -> Dataset {
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16);
+        ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
+        ds.insert_value(Tag::ROWS, 4u16);
+        ds.insert_value(Tag::COLUMNS, 4u16);
+        ds.insert_str(Tag::NUMBER_OF_FRAMES, Vr::Is, "2");
+        ds.insert_value(Tag::BITS_ALLOCATED, 8u16);
+        ds.insert_value(Tag::BITS_STORED, 8u16);
+        ds.insert_value(Tag::HIGH_BIT, 7u16);
+        ds.insert_value(Tag::PIXEL_REPRESENTATION, 0u16);
+        ds.insert_str(Tag::WINDOW_CENTER, Vr::Ds, "128");
+        ds.insert_str(Tag::WINDOW_WIDTH, Vr::Ds, "256");
+        ds.insert_value(Tag::new(0x6000, 0x0010), 4u16);
+        ds.insert_value(Tag::new(0x6000, 0x0011), 4u16);
+        ds.insert_str(Tag::new(0x6000, 0x0040), Vr::Cs, "G");
+        ds.insert_value(Tag::new(0x6000, 0x0100), 1u16);
+        ds.insert_value(Tag::new(0x6000, 0x0102), 0u16);
+        ds.insert_value(Tag::new(0x6000, 0x0051), 2u16); // ImageFrameOrigin = 2
+        ds.insert_str(Tag::new(0x6000, 0x0015), Vr::Is, "1"); // NumberOfFrames = 1
+        let mut origin = Vec::new();
+        origin.extend_from_slice(&1i16.to_le_bytes());
+        origin.extend_from_slice(&1i16.to_le_bytes());
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(Tag::new(0x6000, 0x0050), Vr::Ss, std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(origin))),
+        ));
+        let mut plane = vec![0u8; 4];
+        plane[0] = 0b0000_0001; // (0,0)
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(Tag::new(0x6000, 0x3000), Vr::Ob, std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(plane))),
+        ));
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(Tag::PIXEL_DATA, Vr::Ob, std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![128u8; 32]))),
+        ));
+        ds.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        ds
+    }
+
+    #[test]
+    fn image_frame_origin_selects_the_frame_the_overlay_covers() {
+        let ds = two_frame_gray_with_standalone_overlay();
+        let frame0 = render_frame_with_overlays(&ds, 0, DEFAULT_OVERLAY_COLOR).unwrap();
+        assert_eq!(frame0.as_bytes()[0], 128, "frame 0 is not covered by an overlay whose origin is frame 2");
+        let frame1 = render_frame_with_overlays(&ds, 1, DEFAULT_OVERLAY_COLOR).unwrap();
+        assert_eq!(&frame1.as_bytes()[0..4], &[255, 128, 255, 255], "frame 1 is covered and composited");
+    }
+
+    #[test]
+    fn an_overlay_origin_outside_the_image_is_clipped_not_panicking() {
+        // A standalone 4x4 overlay plane with bits at (0,0) and (2,1), and its
+        // Origin moved to row 3 \ column 3 (1-based) so the plane starts at
+        // (2,2). (0,0)→(2,2) is inside and must be drawn; (2,1)→(4,3) falls past
+        // the 4-wide edge and must be clipped, not panic. A renderer that never
+        // blits overlays leaves (2,2) grey.
+        let mut ds = image_with_embedded_overlay(&[]);
+        let mut plane = vec![0u8; 4]; // one byte per row of a 4-wide plane
+        plane[0] = 0b0000_0001; // (0,0) is the least-significant bit
+        plane[1] = 0b0000_0100; // row 1, column 2
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::new(0x6000, 0x3000),
+                Vr::Ob,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(plane)),
+            ),
+        ));
+        let mut origin = Vec::new();
+        origin.extend_from_slice(&3i16.to_le_bytes()); // row
+        origin.extend_from_slice(&3i16.to_le_bytes()); // column
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::new(0x6000, 0x0050),
+                Vr::Ss,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(origin)),
+            ),
+        ));
+        let image = render_frame_with_overlays(&ds, 0, DEFAULT_OVERLAY_COLOR).unwrap();
+        assert_eq!((image.width(), image.height()), (4, 4), "rendered without panic");
+        let at = |x: usize, y: usize| {
+            let b = image.as_bytes();
+            let i = (y * 4 + x) * 4;
+            [b[i], b[i + 1], b[i + 2], b[i + 3]]
+        };
+        assert_eq!(at(2, 2), [255, 128, 255, 255], "the in-image overlay bit is composited at (2,2)");
+        assert_eq!(at(3, 2)[0], 128, "the clipped bit never draws at (3,2)");
+        assert_eq!(at(0, 0)[0], 128, "the plane did not stay at its default origin");
     }
 
     #[test]

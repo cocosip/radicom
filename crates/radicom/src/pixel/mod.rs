@@ -924,6 +924,15 @@ mod tests {
         assert_eq!((pd.width(), pd.height()), (0, 0));
         assert!(pd.uncompressed_frame_size().is_err(), "zero dimensions are an error");
         assert!(pd.get_frame(0).is_err(), "no silent empty frame");
+
+        // a lone Columns or Rows is equally broken (width known, height 0)
+        let mut half = Dataset::new();
+        half.insert_value(COLUMNS, 4u32);
+        half.insert_value(BITS_ALLOCATED, 16u16);
+        half.insert_str(PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
+        let hp = PixelData::from_dataset(&mut half).unwrap();
+        assert_eq!((hp.width(), hp.height()), (4, 0));
+        assert!(hp.uncompressed_frame_size().is_err(), "a missing height is an error, not Ok(0)");
     }
 
     #[test]

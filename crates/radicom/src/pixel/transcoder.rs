@@ -94,6 +94,17 @@ impl Transcoder {
             }
         };
 
+        // Lossy bookkeeping: the encoded (or decoded) target frames plus the
+        // source's uncompressed first-frame size, captured before `frames` moves.
+        let encoded_bytes = frames.first().map(|f| f.data().len() as u64).unwrap_or(0);
+        let original_bytes = {
+            let mut owned = ds.clone();
+            PixelData::from_dataset(&mut owned)
+                .ok()
+                .and_then(|p| p.uncompressed_frame_size().ok())
+                .unwrap_or(0)
+        };
+
         out.remove(PIXEL_DATA);
         out.remove(Tag::NUMBER_OF_FRAMES);
         {
@@ -103,6 +114,12 @@ impl Transcoder {
             }
         }
         self.finish(&mut out)?;
+        // (0028,2110) marks the output lossy when the target syntax compresses
+        // with loss (PS3.3 C.7.6.4; fo-dicom Transcoder write-lossy bookkeeping).
+        if self.to.is_lossy() {
+            let method = self.to.lossy_compression_method().unwrap_or("UNKNOWN");
+            Self::mark_lossy(&mut out, method, original_bytes, encoded_bytes);
+        }
         Ok(out)
     }
 
@@ -582,6 +599,28 @@ mod tests {
         let mut ds = dataset(8, 2, 2);
         Transcoder::mark_lossy(&mut ds, "X", 100, 0);
         assert_eq!(ds.get_str(LOSSY_IMAGE_COMPRESSION_RATIO).unwrap(), "0.000", "no division by zero");
+    }
+
+    #[test]
+    fn transcoding_to_a_lossy_syntax_marks_the_output() {
+        // §4.4: verify the flag on the transcoded dataset, not just that a
+        // helper exists. JPEG Baseline is ISO_10918_1 lossy.
+        let _guard = crate::pixel::codec::lock_registry();
+        set_codec_registry(Arc::new(MockRegistry { syntaxes: vec![&syntaxes::JPEG_PROCESS_1] }));
+        let ds = with_pixels(8, 2, 2, &[&[1, 2, 3, 4]]);
+        let tr = Transcoder::new(
+            syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+            syntaxes::JPEG_PROCESS_1.clone(),
+            None,
+            None,
+        );
+        let out = tr.transcode_dataset(&ds).unwrap();
+        assert_eq!(out.get_str(LOSSY_IMAGE_COMPRESSION).unwrap(), "01", "output flagged lossy");
+        assert_eq!(out.get_str(LOSSY_IMAGE_COMPRESSION_METHOD).unwrap(), "ISO_10918_1");
+        // 4 source bytes → 4 encoded bytes (the mock XOR keeps length): ratio 1.000
+        assert_eq!(out.get_str(LOSSY_IMAGE_COMPRESSION_RATIO).unwrap(), "1.000");
+        assert!(ds.get_str(LOSSY_IMAGE_COMPRESSION).is_err(), "the source is not mutated");
+        crate::pixel::codec::reset_codec_registry();
     }
 
     #[test]
