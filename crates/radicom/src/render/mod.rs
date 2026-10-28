@@ -1419,6 +1419,20 @@ mod tests {
     }
 
     #[test]
+    fn monochrome1_renders_inverted_relative_to_monochrome2() {
+        // Same pixels + window, differing PI: MONOCHROME1 must invert (docs §184).
+        let m2 = gray_image(1, 2, 8, &[0, 255], Some(127.5), Some(255.0));
+        let mut m1 = m2.clone();
+        m1.insert_str(Tag::new(0x0028, 0x0004), Vr::Cs, "MONOCHROME1");
+        let a = render_frame(&m2, 0).unwrap();
+        let b = render_frame(&m1, 0).unwrap();
+        assert_eq!(a.as_bytes()[0], 0, "MONOCHROME2: value 0 → black");
+        assert_eq!(b.as_bytes()[0], 255, "MONOCHROME1: value 0 → white (inverted)");
+        assert_eq!(a.as_bytes()[4], 255, "MONOCHROME2: value 255 → white");
+        assert_eq!(b.as_bytes()[4], 0, "MONOCHROME1: value 255 → black (inverted)");
+    }
+
+    #[test]
     fn voilinear_maps_window_endpoints_to_black_and_white() {
         // C.11.2.1.3.1: center 40, width 400 → the full 0..255 range spans ~ -160..240
         let o = GrayscaleRenderOptions::from_window_level(40.0, 400.0);
