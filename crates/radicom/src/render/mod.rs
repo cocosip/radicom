@@ -200,7 +200,14 @@ impl GrayscaleRenderOptions {
         let (window_center, window_width) = if voi_lut.is_some() {
             (0.0, 0.0)
         } else {
-            resolve_window(dataset)?
+            // Priority 1/3 (tags), else 4 (decode frame 0 and use min/max).
+            match resolve_window(dataset) {
+                Ok(pair) => pair,
+                Err(_) => {
+                    let mm = Self::from_min_max(dataset, 0)?;
+                    (mm.window_center, mm.window_width)
+                }
+            }
         };
 
         // LINEAR with width < 1 switches to LINEAR_EXACT (fo-dicom #1905)
@@ -247,34 +254,15 @@ impl GrayscaleRenderOptions {
     /// frame samples to build the histogram; the modality rescale and PI inversion
     /// follow the same rules as `from_dataset`.
     pub fn from_histogram(dataset: &Dataset, frame: u32, percent: i32) -> Result<Self, Error> {
-        let mut owned = dataset.clone();
-        let pixel = PixelData::from_dataset(&mut owned)?;
-        let bits = pixel.bits_allocated()?;
-        if !matches!(bits, 8 | 16) || pixel.transfer_syntax().is_encapsulated() {
-            return Err(unsupported("histogram window needs native 8/16-bit samples"));
-        }
-        let buffer = pixel.get_frame(frame)?;
-        let raw = buffer.data();
-        let raw: &[u8] = raw.as_ref();
-        let signed = pixel.pixel_representation() != 0;
-
-        // One pass to find the value range, then a histogram over [min, max].
-        let mut values: Vec<i32> = Vec::with_capacity(raw.len() / if bits == 8 { 1 } else { 2 });
-        if bits == 8 {
-            values.extend(raw.iter().map(|b| *b as i32));
-        } else {
-            for c in raw.chunks_exact(2) {
-                let v = u16::from_le_bytes([c[0], c[1]]);
-                values.push(if signed { (v as i16) as i32 } else { v as i32 });
-            }
-        }
-        let (min, max) = match (values.iter().min(), values.iter().max()) {
-            (Some(&lo), Some(&hi)) => (lo, hi),
+        let values = frame_stored_values(dataset, frame)
+            .map_err(|_| unsupported("histogram window needs native 8/16-bit samples"))?;
+        let (min, max) = match (values.iter().copied().reduce(f64::min), values.iter().copied().reduce(f64::max)) {
+            (Some(lo), Some(hi)) => (lo.round() as i32, hi.round() as i32),
             _ => return Err(unsupported("frame has no samples for a histogram")),
         };
         let mut histogram = Histogram::new(min, max);
         for &v in &values {
-            histogram.add(v);
+            histogram.add(v.round() as i32);
         }
         histogram.apply_window_percent(percent.clamp(1, 100));
 
@@ -285,36 +273,72 @@ impl GrayscaleRenderOptions {
 
         // Same modality/invert rules as from_dataset, but the window is explicit.
         let mut base = GrayscaleRenderOptions::from_window_level(center, width);
-        base.rescale_slope = dataset
+        base.apply_dataset_modality_and_invert(dataset);
+        Ok(base)
+    }
+
+    /// Options whose window is the frame's min/max of non-padding pixels
+    /// (REND-04 `from_min_max`, docs §4 priority 4). `PixelPaddingValue` pixels are
+    /// filtered; values are mapped through the modality LUT first.
+    pub fn from_min_max(dataset: &Dataset, frame: u32) -> Result<Self, Error> {
+        let mut base = GrayscaleRenderOptions::from_window_level(0.0, 1.0);
+        base.apply_dataset_modality_and_invert(dataset);
+
+        let mut values = frame_stored_values(dataset, frame)?;
+        // filter padding pixels (both the signed and unsigned readings of the tag)
+        if let Some(pad) = first_number(dataset, Tag::new(0x0028, 0x0120)) {
+            values.retain(|&v| v != pad);
+        }
+        let (min, max) = match (values.iter().copied().reduce(f64::min), values.iter().copied().reduce(f64::max)) {
+            (Some(lo), Some(hi)) => (lo, hi),
+            _ => return Err(unsupported("frame has no non-padding samples")),
+        };
+        // map through the modality LUT when present (docs: values mapped first)
+        let (min, max) = match &base.modality_lut {
+            Some(lut) => (lut.map(min), lut.map(max)),
+            None => (
+                min * base.rescale_slope + base.rescale_intercept,
+                max * base.rescale_slope + base.rescale_intercept,
+            ),
+        };
+        base.window_center = (min + max) / 2.0;
+        base.window_width = (max - min).max(1.0);
+        Ok(base)
+    }
+
+    /// Applies the rescale/modality-LUT and inversion rules shared by the
+    /// dataset-driven factories (docs §4).
+    fn apply_dataset_modality_and_invert(&mut self, dataset: &Dataset) {
+        self.rescale_slope = dataset
             .try_get::<String>(Tag::new(0x0028, 0x1053))
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(1.0);
-        base.rescale_intercept = dataset
+        self.rescale_intercept = dataset
             .try_get::<String>(Tag::new(0x0028, 0x1052))
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(0.0);
         if !is_xa_xrf(dataset) {
-            base.modality_lut = dataset
+            self.modality_lut = dataset
                 .try_get_sequence(Tag::new(0x0028, 0x3000))
                 .and_then(|seq| seq.items().first())
                 .and_then(ModalityLut::from_item);
-            if base.modality_lut.is_some() {
-                base.rescale_slope = 1.0;
-                base.rescale_intercept = 0.0;
+            if self.modality_lut.is_some() {
+                self.rescale_slope = 1.0;
+                self.rescale_intercept = 0.0;
             }
         }
-        base.invert = dataset
+        self.invert = dataset
             .try_get_str(Tag::new(0x0028, 0x0004))
             .map(|pi| pi.trim() == "MONOCHROME1")
             .unwrap_or(false);
-        Ok(base)
     }
 
     /// Options from an explicit window (REND-04 `from_window_level`).
     pub fn from_window_level(center: f64, width: f64) -> Self {
         GrayscaleRenderOptions {
             rescale_slope: 1.0,
-            rescale_intercept: 0.0,            voi_lut_function: VoiFunction::Linear,
+            rescale_intercept: 0.0,
+            voi_lut_function: VoiFunction::Linear,
             window_center: center,
             window_width: width,
             invert: false,
@@ -422,6 +446,32 @@ fn resolve_window(dataset: &Dataset) -> Result<(f64, f64), Error> {
 fn first_number(dataset: &Dataset, tag: Tag) -> Option<f64> {
     let text = dataset.try_get_str(tag)?;
     text.split('\\').next()?.trim().parse::<f64>().ok()
+}
+
+/// Decodes one native 8/16-bit frame to signed-aware stored values (f64).
+fn frame_stored_values(dataset: &Dataset, frame: u32) -> Result<Vec<f64>, Error> {
+    let mut owned = dataset.clone();
+    let pixel = PixelData::from_dataset(&mut owned)?;
+    let bits = pixel.bits_allocated()?;
+    if !matches!(bits, 8 | 16) || pixel.transfer_syntax().is_encapsulated() {
+        return Err(unsupported("frame values need native 8/16-bit samples"));
+    }
+    let buffer = pixel.get_frame(frame)?;
+    let raw = buffer.data();
+    let raw: &[u8] = raw.as_ref();
+    let signed = pixel.pixel_representation() != 0;
+    if bits == 8 {
+        // 8-bit signed is uncommon; honour PixelRepresentation anyway
+        Ok(raw.iter().map(|b| if signed { (*b as i8) as f64 } else { *b as f64 }).collect())
+    } else {
+        Ok(raw
+            .chunks_exact(2)
+            .map(|c| {
+                let v = u16::from_le_bytes([c[0], c[1]]);
+                if signed { (v as i16) as f64 } else { v as f64 }
+            })
+            .collect())
+    }
 }
 
 /// A rendered frame: 8-bit grayscale expanded to a BGRA32 buffer (REND-07
@@ -1180,9 +1230,23 @@ mod tests {
     }
 
     #[test]
-    fn a_dataset_without_a_window_errors_rather_than_guessing() {
-        let ds = gray_image(1, 1, 16, &[100], None, None);
-        assert!(GrayscaleRenderOptions::from_dataset(&ds).is_err());
+    fn a_dataset_without_a_window_falls_back_to_pixel_min_max() {
+        // No WindowCenter/Width and no Smallest/Largest tags: priority 4 decodes
+        // frame 0 and derives the window from the non-padding min/max (10..30).
+        let ds = gray_image(3, 1, 8, &[10, 20, 30], None, None);
+        let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
+        assert_eq!(o.window_center, 20.0);
+        assert_eq!(o.window_width, 20.0);
+    }
+
+    #[test]
+    fn from_min_max_filters_the_pixel_padding_value() {
+        // Padding value 200 must be excluded, leaving 10..30 → centre 20, width 20.
+        let mut ds = gray_image(4, 1, 8, &[10, 20, 30, 200], None, None);
+        ds.insert_value(Tag::new(0x0028, 0x0120), 200u16);
+        let o = GrayscaleRenderOptions::from_min_max(&ds, 0).unwrap();
+        assert_eq!(o.window_center, 20.0);
+        assert_eq!(o.window_width, 20.0);
     }
 
     #[test]
