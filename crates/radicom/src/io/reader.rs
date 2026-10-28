@@ -197,8 +197,8 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
     }
 
     fn read_tag(&mut self, at: u64) -> Result<(u16, u16), Error> {
-        let group = self.source.read_u16().map_err(|e| io_err(e, at))?;
-        let element = self.source.read_u16().map_err(|e| io_err(e, at))?;
+        let group = self.source.read_u16().map_err(|e| io_err_need(e, at, 2))?;
+        let element = self.source.read_u16().map_err(|e| io_err_need(e, at + 2, 2))?;
         Ok((group, element))
     }
 
@@ -249,13 +249,13 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                 self.source.goto(pos).map_err(|e| io_err(e, pos))?;
                 return Ok(self.explicit_vr);
             }
-            let g = self.source.read_u16().map_err(|e| io_err(e, pos))?;
-            let e = self.source.read_u16().map_err(|e| io_err(e, pos))?;
+            let g = self.source.read_u16().map_err(|e| io_err_need(e, pos, 2))?;
+            let e = self.source.read_u16().map_err(|e| io_err_need(e, pos + 2, 2))?;
             if (g, e) != (0xFFFE, 0xE000) {
                 self.source.goto(pos).map_err(|e| io_err(e, pos))?;
                 return Ok(self.explicit_vr);
             }
-            let len = self.source.read_u32().map_err(|e| io_err(e, pos))?;
+            let len = self.source.read_u32().map_err(|e| io_err_need(e, pos + 4, 4))?;
             if len > 0 {
                 break;
             }
@@ -283,7 +283,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
             return Ok(false);
         }
         let mut tag = [0u8; 4];
-        self.source.read_exact(&mut tag).map_err(|e| io_err(e, pos))?;
+        self.source.read_exact(&mut tag).map_err(|e| io_err_need(e, pos, 4))?;
         self.source.goto(pos).map_err(|e| io_err(e, pos))?;
         // item/delimiter tags follow the transfer syntax byte order
         let item = (tag[0] == 0xFF && tag[1] == 0xFE && tag[2] == 0xE0 && tag[3] == 0x00)
@@ -353,7 +353,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         if self.explicit_vr {
             let pos = self.position()?;
             let mut code = [0u8; 2];
-            self.source.read_exact(&mut code).map_err(|e| io_err(e, at))?;
+            self.source.read_exact(&mut code).map_err(|e| io_err_need(e, at, 2))?;
             match Vr::try_parse(&code) {
                 Some(vr) => return Ok((vr, true)),
                 None => {
@@ -373,13 +373,13 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
     /// Length field per VR/syntax (§3.3).
     fn parse_length(&mut self, vr: Vr, explicit: bool, at: u64) -> Result<u32, Error> {
         if explicit && vr.is_16bit_length() {
-            let v = self.source.read_u16().map_err(|e| io_err(e, at))?;
+            let v = self.source.read_u16().map_err(|e| io_err_need(e, at, 2))?;
             Ok(v as u32)
         } else {
             if explicit {
-                self.source.read_u16().map_err(|e| io_err(e, at))?; // reserved
+                self.source.read_u16().map_err(|e| io_err_need(e, at, 2))?; // reserved
             }
-            self.source.read_u32().map_err(|e| io_err(e, at))
+            self.source.read_u32().map_err(|e| io_err_need(e, at, 4))
         }
     }
 
@@ -420,7 +420,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         let (group, element) = self.read_tag(tag_pos)?;
 
         if group == 0xFFFE {
-            let length = self.source.read_u32().map_err(|e| io_err(e, tag_pos))?;
+            let length = self.source.read_u32().map_err(|e| io_err_need(e, tag_pos + 4, 4))?;
             let defined = (length != 0xFFFF_FFFF).then_some(length);
             return Ok(match element {
                 0xE00D => match mode {
@@ -558,7 +558,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
             let (g, e) = self.read_tag(pos)?;
             match (g, e) {
                 (0xFFFE, 0xE000) => {
-                    let length = self.source.read_u32().map_err(|e| io_err(e, pos))?;
+                    let length = self.source.read_u32().map_err(|e| io_err_need(e, pos + 4, 4))?;
                     if length == 0xFFFF_FFFF {
                         return Err(Error::Reader(ReaderError::Invalid {
                             message: "fragment with undefined length".into(),
@@ -587,7 +587,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                     // the delimiter is tag(4) + length(4); consuming only the
                     // tag leaves the length in the stream and desynchronizes
                     // every following element
-                    let _ = self.source.read_u32().map_err(|e| io_err(e, pos))?;
+                    let _ = self.source.read_u32().map_err(|e| io_err_need(e, pos + 4, 4))?;
                     debug_assert_eq!(self.position()?, pos + 8);
                     break;
                 }
@@ -610,8 +610,14 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
 }
 
 fn io_err(e: std::io::Error, position: u64) -> Error {
+    io_err_need(e, position, 0)
+}
+
+/// Like [`io_err`], but records how many bytes the read expected. `read_exact`
+/// cannot report that from `io::Error`, so the call site supplies it.
+fn io_err_need(e: std::io::Error, position: u64, needed: u64) -> Error {
     match e.kind() {
-        std::io::ErrorKind::UnexpectedEof => Error::Reader(ReaderError::Eof { position, needed: 0 }),
+        std::io::ErrorKind::UnexpectedEof => Error::Reader(ReaderError::Eof { position, needed }),
         _ => Error::Reader(ReaderError::Other(e.to_string())),
     }
 }
@@ -715,8 +721,9 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                 Step::Orphan { raw, pos, defined } => {
                     // T5: an item tag at dataset level with no SQ header is an
                     // anonymous undefined-length sequence; its first item was
-                    // already consumed by `step`
-                    let unknown = Tag::UNKNOWN;
+                    // already consumed by `step`. PS3.5 §7.5 gives it the item
+                    // tag as identity (fo-dicom DicomTag.Item).
+                    let unknown = Tag::ITEM;
                     observer.on_begin_sequence(&self.ctx(pos), &unknown, None)?;
                     self.enter()?;
                     let end = self.parse_item(observer, pos, defined)?;

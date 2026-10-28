@@ -5,8 +5,7 @@
 
 use crate::error::{Error, TagRef, ValidationFailure};
 use crate::model::element::DicomElement;
-use crate::model::person_name::{parse_ds, parse_is};
-use crate::model::dicom_datetime::{parse_da, parse_dt, parse_tm};
+use crate::model::dicom_datetime::{parse_dt, parse_tm};
 use crate::model::vr::Vr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -47,13 +46,105 @@ pub fn should_validate(dataset_flag: bool) -> bool {
     dataset_flag && validation_enabled()
 }
 
-fn fail(_vr: Vr, _content: &str, reason: impl Into<String>) -> String {
-    reason.into()
+fn fail(vr: Vr, content: &str, reason: impl Into<String>) -> String {
+    // include the VR and a bounded prefix of the value: "not a valid DA value"
+    // alone does not tell a caller which element or what was in it
+    let shown: String = content.chars().take(32).collect();
+    let ellipsis = if content.chars().count() > 32 { "…" } else { "" };
+    format!("{vr:?} \"{shown}{ellipsis}\": {}", reason.into())
+}
+
+/// DA per PS3.3 C.3.1 / fo-dicom `ValidateDA`: one or two `YYYYMMDD`
+/// components joined by a single `-`, trailing spaces tolerated, month ≤ 12,
+/// day ≤ 31. Partial dates (`YYYY`, `YYYYMM`) and `.`/`/` separators are not
+/// conformant, even though the tolerant date parser accepts them.
+fn validate_da(content: &str) -> Result<(), String> {
+    let mut parts = content.split('-');
+    let first = parts.next().unwrap_or("");
+    let second = parts.next();
+    if parts.next().is_some() {
+        return Err("more than one range separator".into());
+    }
+    for part in std::iter::once(first).chain(second) {
+        let trimmed = part.trim_end_matches(' ');
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.len() != 8 || !trimmed.bytes().all(|b| b.is_ascii_digit()) {
+            return Err("expected YYYYMMDD".into());
+        }
+        let month: u32 = trimmed[4..6].parse().map_err(|_| "bad month")?;
+        let day: u32 = trimmed[6..8].parse().map_err(|_| "bad day")?;
+        if month > 12 {
+            return Err("month exceeds 12".into());
+        }
+        if day > 31 {
+            return Err("day exceeds 31".into());
+        }
+    }
+    Ok(())
+}
+
+/// DS per PS3.3 C.3.4 / fo-dicom `DecimalStringRegex`:
+/// `[+-]?((\d+(\.\d*)?)|(\.\d+))([eE][-+]?\d+)?`.
+fn validate_ds(content: &str) -> Result<(), String> {
+    let s = content.trim();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+        i += 1;
+    }
+    let before = count_digits(bytes, &mut i);
+    let mut after = 0;
+    if i < bytes.len() && bytes[i] == b'.' {
+        i += 1;
+        after = count_digits(bytes, &mut i);
+    }
+    if before == 0 && after == 0 {
+        return Err("no digits".into());
+    }
+    if i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
+        i += 1;
+        if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+            i += 1;
+        }
+        if count_digits(bytes, &mut i) == 0 {
+            return Err("empty exponent".into());
+        }
+    }
+    if i != bytes.len() {
+        return Err("trailing characters".into());
+    }
+    Ok(())
+}
+
+fn count_digits(bytes: &[u8], i: &mut usize) -> usize {
+    let start = *i;
+    while *i < bytes.len() && bytes[*i].is_ascii_digit() {
+        *i += 1;
+    }
+    *i - start
+}
+
+/// IS per PS3.3 C.3.5 / fo-dicom `ValidateIS`: optional sign, digits only,
+/// at most 12 bytes, fits a 32-bit integer.
+fn validate_is(content: &str) -> Result<(), String> {
+    if content.len() > 12 {
+        return Err("length exceeds 12".into());
+    }
+    let s = content.trim();
+    let body = s.strip_prefix(['+', '-']).unwrap_or(s);
+    if body.is_empty() || !body.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("expected [+-]?digits".into());
+    }
+    if s.parse::<i32>().is_err() {
+        return Err("does not fit a 32-bit integer".into());
+    }
+    Ok(())
 }
 
 /// Validates one `\`-separated value per its VR rules (VAL-01).
 pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
-    let empty_ok = true;
     if content.is_empty() {
         return Ok(()); // empty values always validate
     }
@@ -102,14 +193,12 @@ pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
             }
             Ok(())
         }
-        Vr::Da => parse_da(content)
-            .map(|_| ())
-            .map_err(|_| fail(vr, content, "not a valid DA value or range")),
+        Vr::Da => validate_da(content).map_err(|reason| fail(vr, content, reason)),
         Vr::Ds => {
             if content.len() > 16 {
                 return Err(fail(vr, content, "length exceeds 16"));
             }
-            parse_ds(content).map(|_| ()).map_err(|_| fail(vr, content, "not a decimal string"))
+            validate_ds(content).map_err(|reason| fail(vr, content, reason))
         }
         Vr::Dt => {
             if crate::model::dicom_datetime::has_invalid_dt_offset(content) {
@@ -119,9 +208,7 @@ pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
                 .map(|_| ())
                 .map_err(|_| fail(vr, content, "not a valid DT value or range"))
         }
-        Vr::Is => parse_is(content)
-            .map(|_| ())
-            .map_err(|_| fail(vr, content, "not an integer string")),
+        Vr::Is => validate_is(content).map_err(|reason| fail(vr, content, reason)),
         Vr::Lo => {
             if content.len() > 64 {
                 return Err(fail(vr, content, "length exceeds 64"));
@@ -190,10 +277,7 @@ pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
             Ok(())
         }
         // VRs without string validators: AE-family rules cover the rest
-        _ => {
-            let _ = empty_ok;
-            Ok(())
-        }
+        _ => Ok(()),
     }
 }
 
@@ -311,6 +395,38 @@ mod tests {
         assert!(validate_single(Vr::Ds, "abc").is_err());
         assert!(validate_single(Vr::Is, "+42").is_ok());
         assert!(validate_single(Vr::Is, "4 2").is_err());
+    }
+
+    #[test]
+    fn da_requires_full_yyyymmdd() {
+        assert!(validate_single(Vr::Da, "20240305").is_ok());
+        assert!(validate_single(Vr::Da, "20240305-20241231").is_ok(), "range");
+        assert!(validate_single(Vr::Da, "2024").is_err(), "partial date is not conformant");
+        assert!(validate_single(Vr::Da, "202403").is_err(), "partial date is not conformant");
+        assert!(validate_single(Vr::Da, "2024.03.05").is_err(), "dots are not conformant");
+        assert!(validate_single(Vr::Da, "2024/03/05").is_err(), "slashes are not conformant");
+    }
+
+    #[test]
+    fn is_rejects_a_fraction_and_overflow() {
+        assert!(validate_single(Vr::Is, "-42").is_ok());
+        assert!(validate_single(Vr::Is, "3.0").is_err(), "an IS has no fraction");
+        assert!(validate_single(Vr::Is, "999999999999").is_err(), "over 32-bit");
+    }
+
+    #[test]
+    fn ds_rejects_a_comma_decimal_separator() {
+        assert!(validate_single(Vr::Ds, "1.5").is_ok());
+        assert!(validate_single(Vr::Ds, "1,5").is_err(), "DICOM uses '.'");
+        assert!(validate_single(Vr::Ds, ".").is_err(), "no digits");
+        assert!(validate_single(Vr::Ds, "1e").is_err(), "empty exponent");
+    }
+
+    #[test]
+    fn a_failure_names_the_vr_and_the_value() {
+        let message = validate_single(Vr::Is, "3.0").unwrap_err();
+        assert!(message.contains("Is"), "VR in message: {message}");
+        assert!(message.contains("3.0"), "value in message: {message}");
     }
 
     #[test]

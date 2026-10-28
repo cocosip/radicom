@@ -67,12 +67,21 @@ pub struct DicomFragmentSequence {
     vr: Vr, // OB or OW
     offset_table: Vec<u32>,
     fragments: Vec<SharedBuffer>,
+    /// Running byte offset of the next fragment's item tag, maintained
+    /// incrementally so `push_fragment` stays O(1) per fragment.
+    next_offset: u64,
 }
 
 impl DicomFragmentSequence {
     pub fn new(tag: Tag, vr: Vr) -> Self {
         debug_assert!(matches!(vr, Vr::Ob | Vr::Ow), "fragments are OB/OW only");
-        DicomFragmentSequence { tag, vr, offset_table: Vec::new(), fragments: Vec::new() }
+        DicomFragmentSequence {
+            tag,
+            vr,
+            offset_table: Vec::new(),
+            fragments: Vec::new(),
+            next_offset: 0,
+        }
     }
 
     pub fn tag(&self) -> &Tag {
@@ -100,17 +109,26 @@ impl DicomFragmentSequence {
     /// A computed offset beyond `u32::MAX` clears the table (readers then
     /// fall back to the fragment-count == frame-count mapping, spec 06 §1.4).
     pub fn push_fragment(&mut self, fragment: SharedBuffer) {
-        let start: u64 = self.fragments.iter().map(|f| 8 + f.size() + f.size() % 2).sum();
-        if start <= u32::MAX as u64 {
-            self.offset_table.push(start as u32);
+        if self.next_offset <= u32::MAX as u64 {
+            self.offset_table.push(self.next_offset as u32);
         } else {
             self.offset_table.clear();
         }
+        self.next_offset += 8 + fragment.size() + fragment.size() % 2;
+        self.fragments.push(fragment);
+    }
+
+    /// Appends a fragment without touching the offset table. The parser uses
+    /// this: the wire carries its own basic offset table, which
+    /// [`set_offset_table`](Self::set_offset_table) installs afterwards.
+    pub fn push_fragment_raw(&mut self, fragment: SharedBuffer) {
         self.fragments.push(fragment);
     }
 
     pub fn set_offset_table(&mut self, table: Vec<u32>) {
         self.offset_table = table;
+        // re-sync the incremental counter with whatever was installed
+        self.next_offset = self.fragments.iter().map(|f| 8 + f.size() + f.size() % 2).sum();
     }
 
 

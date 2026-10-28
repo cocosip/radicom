@@ -219,6 +219,11 @@ impl Dataset {
     }
 
     /// Inserts or replaces (fo-dicom AddOrUpdate semantics).
+    ///
+    /// A private tag whose creator slot cannot be resolved is dropped
+    /// silently. The parser binds creators before inserting, so this only
+    /// affects values written by hand; use [`insert`](Self::insert) when an
+    /// unresolved private tag must be an error.
     pub fn insert_or_update(&mut self, item: impl Into<DicomItem>) -> &mut Self {
         let item: DicomItem = item.into();
         if let Some(t) = self.resolve_private_write(item.tag().clone(), false) {

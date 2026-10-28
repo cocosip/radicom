@@ -164,7 +164,8 @@ impl ParseObserver for DatasetBuilder {
 
     fn on_fragment(&mut self, _ctx: &ParseContext, buffer: SharedBuffer) -> Result<(), Error> {
         if let Some(f) = self.fragment_stack.last_mut() {
-            f.push_fragment(buffer);
+            // the wire's own offset table replaces any computed one
+            f.push_fragment_raw(buffer);
         }
         Ok(())
     }
@@ -438,7 +439,8 @@ mod tests {
         bytes.extend_from_slice(&sequence_delimiter());
 
         let ds = parse(&bytes, &le());
-        let seq = ds.get_sequence(Tag::UNKNOWN).expect("T5: orphan item becomes SQ");
+        let seq = ds.get_sequence(Tag::ITEM).expect("T5: orphan item becomes SQ");
+        assert_eq!(seq.tag(), &Tag::new(0xFFFE, 0xE000), "PS3.5 §7.5 item identity");
         assert_eq!(seq.len(), 1);
         assert_eq!(seq.items()[0].get_str(Tag::REFERENCED_SOP_CLASS_UID).unwrap(), "1.2.3");
     }
