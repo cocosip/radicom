@@ -104,16 +104,23 @@ impl Anonymizer {
             let tag_text = format!("{:04X},{:04X}", tag.group(), tag.element());
             let action = self.profile.action_for(&tag_text, self.option);
 
-            // recurse into sequences unless the tag is explicitly kept
+            // sequences: a Remove action deletes the whole sequence; otherwise
+            // recurse into the children (Keep leaves the sequence and its
+            // children untouched). Without the Remove case an SQ tag marked X
+            // would survive as an empty/kept shell.
             if let DicomItem::Sequence(sequence) = item {
-                if action != Some(Action::Keep) {
-                    let mut new_items: Vec<Dataset> = sequence.items().to_vec();
-                    for child in &mut new_items {
-                        self.walk(child, replaced)?;
+                match action {
+                    Some(Action::Remove) => to_remove.push(tag.clone()),
+                    Some(Action::Keep) => {}
+                    _ => {
+                        let mut new_items: Vec<Dataset> = sequence.items().to_vec();
+                        for child in &mut new_items {
+                            self.walk(child, replaced)?;
+                        }
+                        *dataset
+                            .insert_sequence(tag.clone())
+                            .items_mut() = new_items;
                     }
-                    *dataset
-                        .insert_sequence(tag.clone())
-                        .items_mut() = new_items;
                 }
                 continue;
             }
@@ -287,14 +294,35 @@ mod tests {
     }
 
     #[test]
-    fn sequence_children_are_anonymized_recursively() {
+    fn a_sequence_marked_remove_under_the_basic_profile_is_deleted() {
+        // (0008,1110) ReferencedStudySequence is X/Z under the basic profile, so
+        // the basic option removes the whole sequence (not just its children).
         let mut ds = Dataset::new();
-        // (0008,1110) ReferencedStudySequence (not X under the basic profile)
         let mut child = Dataset::new();
         child.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Nested^Name");
         ds.insert_sequence(Tag::new(0x0008, 0x1110)).push(child);
 
         Anonymizer::basic().anonymize_in_place(&mut ds).unwrap();
+        assert!(
+            ds.try_get_sequence(Tag::new(0x0008, 0x1110)).is_none(),
+            "ReferencedStudySequence is X under the basic profile and must be removed"
+        );
+    }
+
+    #[test]
+    fn sequence_children_are_anonymized_recursively() {
+        // A sequence the profile keeps-but-processes (D/C/U/Z) is recursed into;
+        // its children are anonymized. (K would leave the whole subtree untouched.)
+        let csv = "0008,1110;D\n0010,0010;Z\n";
+        let profile = SecurityProfile::parse(csv).unwrap();
+        let anon = Anonymizer::with_profile(profile, AnonOption::BasicProfile);
+
+        let mut ds = Dataset::new();
+        let mut child = Dataset::new();
+        child.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Nested^Name");
+        ds.insert_sequence(Tag::new(0x0008, 0x1110)).push(child);
+
+        anon.anonymize_in_place(&mut ds).unwrap();
         let sequence = ds.try_get_sequence(Tag::new(0x0008, 0x1110)).unwrap();
         assert_eq!(
             sequence.items()[0].try_get_str(Tag::new(0x0010, 0x0010)).as_deref(),
@@ -335,6 +363,47 @@ mod tests {
         let b = ds.try_get_str(Tag::new(0x0008, 0x1155)).unwrap();
         assert_eq!(a, b, "the same UID must map consistently even across different tags");
         assert_ne!(a, "1.2.3.4");
+    }
+
+    #[test]
+    fn a_sequence_marked_remove_is_deleted_whole() {
+        // custom profile: ReferencedStudySequence (0008,1110) = X under the
+        // basic option. The whole sequence must be removed, not kept as a shell.
+        let csv = "0008,1110;X\n";
+        let profile = SecurityProfile::parse(csv).unwrap();
+        let anon = Anonymizer::with_profile(profile, AnonOption::BasicProfile);
+
+        let mut ds = Dataset::new();
+        let mut child = Dataset::new();
+        child.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Nested^Name");
+        ds.insert_sequence(Tag::new(0x0008, 0x1110)).push(child);
+
+        anon.anonymize_in_place(&mut ds).unwrap();
+        assert!(
+            ds.try_get_sequence(Tag::new(0x0008, 0x1110)).is_none(),
+            "an SQ marked X must be removed entirely"
+        );
+    }
+
+    #[test]
+    fn a_sequence_marked_dummy_still_recurses_into_children() {
+        // Z/D/C/U on an SQ keep the sequence but process its children.
+        let csv = "0008,1110;D\n0010,0020;Z\n";
+        let profile = SecurityProfile::parse(csv).unwrap();
+        let anon = Anonymizer::with_profile(profile, AnonOption::BasicProfile);
+
+        let mut ds = Dataset::new();
+        let mut child = Dataset::new();
+        child.insert_str(Tag::new(0x0010, 0x0020), Vr::Lo, "PII"); // PatientID: Z under basic
+        ds.insert_sequence(Tag::new(0x0008, 0x1110)).push(child);
+
+        anon.anonymize_in_place(&mut ds).unwrap();
+        let seq = ds.try_get_sequence(Tag::new(0x0008, 0x1110)).expect("sequence is kept");
+        assert_eq!(
+            seq.items()[0].try_get_str(Tag::new(0x0010, 0x0020)).as_deref(),
+            Some(""),
+            "the child PatientID is still anonymized"
+        );
     }
 
     #[test]
