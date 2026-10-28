@@ -953,6 +953,12 @@ fn render_ybr_frame(
 ) -> Result<RawImage, Error> {
     let mut owned = dataset.clone();
     let pixel = PixelData::from_dataset(&mut owned)?;
+    // PS3.3 / docs §5: YBR_FULL / YBR_FULL_422 / YBR_PARTIAL_422 are defined only
+    // for interleaved samples (planar configuration 0). A planar configuration of
+    // 1 here is malformed data, not an alternative layout to guess at.
+    if pixel.planar_configuration() == 1 {
+        return Err(unsupported("YBR frames must be interleaved (planar configuration 0)"));
+    }
     if pixel.transfer_syntax().is_encapsulated() {
         return Err(unsupported("compressed YBR frames need the codec layer"));
     }
@@ -1529,6 +1535,16 @@ mod tests {
         ));
         ds.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
         ds
+    }
+
+    #[test]
+    fn a_planar_ybr_full_422_frame_is_rejected() {
+        // PS3.3 / docs §5: YBR_FULL_422 is planar-configuration 0; planar 1 is an
+        // error, not a different byte layout to guess at.
+        let mut ds = ybr422_image("YBR_FULL_422", 2, &[76, 76, 85, 255]);
+        ds.insert_value(Tag::new(0x0028, 0x0006), 1u16); // PlanarConfiguration = 1
+        let err = render_frame(&ds, 0).unwrap_err();
+        assert!(format!("{err}").to_lowercase().contains("planar"), "expected a planar error, got: {err}");
     }
 
     #[test]
