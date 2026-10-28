@@ -691,4 +691,47 @@ mod tests {
         let rows: u16 = ds.get(Tag::new(0x0028, 0x0010)).unwrap();
         assert_eq!(rows, 512, "US value is byte-swapped on read");
     }
+
+    #[test]
+    fn deeply_nested_sequences_hit_the_depth_cap_not_a_stack_overflow() {
+        // 300 nested undefined-length SQ/items: the reader must stop at max_depth
+        // (256) with TooDeep rather than recursing to a stack overflow.
+        let levels = 300u32;
+        let mut bytes = Vec::new();
+        for _ in 0..levels {
+            // SQ (0008,1111), undefined length, then an undefined-length item
+            bytes.extend_from_slice(&0x0008u16.to_le_bytes());
+            bytes.extend_from_slice(&0x1111u16.to_le_bytes());
+            bytes.extend_from_slice(b"SQ");
+            bytes.extend_from_slice(&[0, 0]);
+            bytes.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+            bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+            bytes.extend_from_slice(&0xE000u16.to_le_bytes());
+            bytes.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        }
+        bytes.extend_from_slice(&el_header(0x0010, 0x0010, "PN", b"X "));
+        for _ in 0..levels {
+            bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+            bytes.extend_from_slice(&0xE00Du16.to_le_bytes());
+            bytes.extend_from_slice(&0u32.to_le_bytes());
+            bytes.extend_from_slice(&sequence_delimiter());
+        }
+        match parse_dataset_bytes(&bytes, &le()) {
+            Err(Error::Reader(ReaderError::TooDeep { .. })) => {}
+            other => panic!("expected TooDeep, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn declared_length_beyond_the_file_errors_without_allocating() {
+        // OB element claiming ~2 GB with no value bytes: must fail cleanly (Eof),
+        // never attempt a 2 GB allocation.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x7FE0u16.to_le_bytes());
+        bytes.extend_from_slice(&0x0010u16.to_le_bytes());
+        bytes.extend_from_slice(b"OB");
+        bytes.extend_from_slice(&[0, 0]);
+        bytes.extend_from_slice(&0x7FFF_FFFFu32.to_le_bytes());
+        assert!(parse_dataset_bytes(&bytes, &le()).is_err(), "over-declared length must error");
+    }
 }
