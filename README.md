@@ -487,6 +487,16 @@ Tag, UID and private dictionary tables are generated from the pinned fo-dicom di
 cargo xtask generate
 ```
 
+`cargo xtask` is a local alias: `.cargo/` is gitignored (it holds machine
+specific settings), so add it to your own `.cargo/config.toml`:
+
+```toml
+[alias]
+xtask = "run -p xtask --"
+```
+
+Without the alias the task still runs as `cargo run -p xtask -- generate`.
+
 To move to a newer dictionary baseline, replace both XML files, run the generator, and commit the XML plus all regenerated outputs together.
 
 ## Relationship to fo-dicom
