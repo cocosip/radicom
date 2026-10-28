@@ -6,7 +6,7 @@
 //! Larger service behaviour (streaming C-FIND/C-MOVE, C-GET sub-operations) builds on
 //! these same primitives in M6.
 
-use crate::assembler::{PduSplitter, PdvAssembler, Stream};
+use crate::assembler::{MessageUnit, PduSplitter, PdvAssembler, Stream};
 use crate::association::{AcceptedContexts, NegotiationPolicy};
 use crate::dimse::{Command, CommandField, StatusState};
 use crate::error::{AbortSource, NetworkError, RejectResult, RejectSource, Result};
@@ -18,6 +18,7 @@ use crate::transport::{read_pdu, write_pdu, TcpOptions};
 use radicom::model::dataset::Dataset;
 use radicom::model::tag::Tag;
 use radicom::model::transfer_syntax::syntaxes;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -348,6 +349,7 @@ where
         provider: &provider,
         options: &options,
         assembler: PdvAssembler::new(),
+        pending_units: VecDeque::new(),
         accepted: &accepted,
         reverse_message_id: 1,
     };
@@ -359,7 +361,9 @@ where
         };
         match pdu {
             Pdu::PData(pdata) => {
-                for unit in serving.assembler.push_pdata(&pdata)? {
+                let units = serving.assembler.push_pdata(&pdata)?;
+                serving.pending_units.extend(units);
+                while let Some(unit) = serving.pending_units.pop_front() {
                     match unit.stream {
                         Stream::Command => {
                             let command = command_from_bytes(&unit.bytes)?;
@@ -457,12 +461,10 @@ where
             }
         }
         CommandField::CCancelRq => {
-            // §7.6 / SRV-08: acknowledge the cancel for the request named in
-            // (0000,0120). Providers here answer a query before the loop reads
-            // the next PDU (buffered per query), so there is no in-flight
-            // stream to interrupt; the loop simply consumes the command so the
-            // association stays healthy. Full mid-stream cancellation needs the
-            // streaming C-FIND path.
+            // §7.6 / SRV-08: streaming C-FIND handles its own cancel while
+            // waiting for provider output. A cancel received by the idle
+            // dispatcher has no matching in-flight operation, so consume it
+            // and keep the association healthy.
             let _cancelled = command.message_id_being_responded_to;
             Ok(())
         }
@@ -777,23 +779,69 @@ where
     let mut stream = provider.on_c_find(&request);
     let mut matches = 0u16;
     let mut terminated = false;
-    while let Some(response) = stream.next().await {
-        let response = match response {
-            Ok(response) => response,
-            Err(error) => crate::cfind::CFindResponse::failure(
-                &request,
-                crate::dimse::status::PROCESSING_FAILURE,
-                error.to_string(),
-            ),
-        };
-        let identifier = response.identifier.clone();
-        if !response.is_pending() {
-            matches = response.completed;
-            terminated = true;
+    loop {
+        if let Some(unit) = serving.pending_units.pop_front() {
+            if unit.stream != Stream::Command {
+                return Err(NetworkError::protocol("unexpected dataset while C-FIND is in flight"));
+            }
+            let cancel = command_from_bytes(&unit.bytes)?;
+            if cancel.field == CommandField::CCancelRq {
+                if cancel.message_id_being_responded_to == Some(request.message_id)
+                    && unit.context_id == context_id
+                {
+                    let response = crate::cfind::CFindResponse::failure(
+                        &request,
+                        crate::dimse::status::CANCEL,
+                        "C-FIND cancelled",
+                    );
+                    serving.send(context_id, &response.to_command()).await?;
+                    return Ok(());
+                }
+                continue;
+            }
+            return Err(NetworkError::protocol("unexpected command while C-FIND is in flight"));
         }
-        serving.send_with_dataset(context_id, &response.to_command(), identifier.as_ref(), syntax).await?;
-        if terminated {
-            break;
+        tokio::select! {
+            biased;
+            // A cancel already waiting on the socket wins a simultaneous
+            // provider response, preserving the wire order seen by the SCP.
+            pdu = read_pdu(serving.stream) => {
+                let Some(pdu) = pdu? else { return Ok(()) };
+                match pdu {
+                    Pdu::PData(pdata) => {
+                        let units = serving.assembler.push_pdata(&pdata)?;
+                        serving.pending_units.extend(units);
+                    }
+                    Pdu::Abort(abort) => {
+                        return Err(NetworkError::Abort { source_code: abort.source.code(), reason: abort.reason });
+                    }
+                    Pdu::ReleaseRq => {
+                        serving.send_pdu(&Pdu::ReleaseRp).await?;
+                        return Err(NetworkError::ClosedPrematurely { source: None });
+                    }
+                    _ => return Err(NetworkError::protocol("unexpected PDU while C-FIND is in flight")),
+                }
+            }
+            response = stream.next() => {
+                let Some(response) = response else { break };
+                let response = match response {
+                    Ok(response) => response,
+                    Err(error) => crate::cfind::CFindResponse::failure(
+                        &request,
+                        crate::dimse::status::PROCESSING_FAILURE,
+                        error.to_string(),
+                    ),
+                };
+                let identifier = response.identifier.clone();
+                if !response.is_pending() {
+                    matches = response.completed;
+                    terminated = true;
+                }
+                serving.send_with_dataset(context_id, &response.to_command(), identifier.as_ref(), syntax).await?;
+                if terminated {
+                    break;
+                }
+            }
         }
     }
     if !terminated {
@@ -856,6 +904,8 @@ struct Serving<'a, P: ServiceProvider, S> {
     /// Owned so a nested sub-operation can read the reverse C-STORE responses
     /// of its own C-GET (§7.4).
     assembler: PdvAssembler,
+    /// Completed units that arrived in the same P-DATA-TF as a dispatched request.
+    pending_units: VecDeque<MessageUnit>,
     accepted: &'a AcceptedContexts,
     /// The next message ID for reverse sub-operations (§7.4).
     reverse_message_id: u16,
@@ -1784,9 +1834,9 @@ impl Association {
     /// `(0000,0120) MessageIDBeingRespondedTo`, matching fo-dicom's
     /// `CCancelRequest = 0x0FFF`. It is sent on `context_id` (a proposed
     /// presentation context id). Note the SCP collects a query's matches before
-    /// answering (buffered per query), so a cancel prevents *further* results
-    /// rather than aborting one already computed; full mid-stream interruption
-    /// needs the streaming C-FIND path.
+    /// The streaming C-FIND handler returns a terminal `CANCEL` response when
+    /// this command names its in-flight request; other services currently
+    /// consume C-CANCEL without interrupting their provider stream.
     pub async fn send_c_cancel(&mut self, context_id: u8, message_id: u16) -> Result<()> {
         let mut command = Command::request(CommandField::CCancelRq, message_id);
         // a C-CANCEL identifies the cancelled request in (0000,0120)
@@ -2526,6 +2576,87 @@ mod tests {
         assert_eq!(responses.len(), 2);
         assert!(responses[0].is_pending());
         assert_eq!(responses[1].status, crate::dimse::status::SUCCESS);
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn loopback_c_find_c_cancel_stops_an_in_flight_provider() {
+        struct CancelableFind;
+
+        #[async_trait::async_trait]
+        impl ServiceProvider for CancelableFind {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![sop_class::STUDY_ROOT_QR_FIND.to_string()]
+            }
+
+            fn on_c_find<'a>(
+                &'a self,
+                request: &'a crate::cfind::CFindRequest,
+            ) -> futures::stream::BoxStream<'a, Result<crate::cfind::CFindResponse>> {
+                use futures::StreamExt;
+                let mut item = Dataset::new();
+                item.insert_str(Tag::STUDY_INSTANCE_UID, Vr::Ui, "1.2.3");
+                let pending = crate::cfind::CFindResponse::pending(request, item);
+                Box::pin(futures::stream::once(async move { Ok(pending) }).chain(futures::stream::pending()))
+            }
+        }
+
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(CancelableFind), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association =
+            Association::open(addr, "SCU", "SCP", vec![find_context()], ClientOptions::default())
+                .await
+                .unwrap();
+        let request = crate::cfind::CFindRequest::study_query(1);
+        let context_id = association.contexts().all()[0].id;
+        let syntax = transfer_syntax_of(&association.contexts().all()[0].transfer_syntax);
+        let command = bytes::Bytes::from(command_bytes(&request.to_command()).unwrap());
+        let identifier = bytes::Bytes::from(crate::message::encode_dataset(&request.identifier, &syntax).unwrap());
+        for pdata in association.splitter.split_bytes(context_id, true, command).unwrap() {
+            write_pdu(&mut association.stream, &Pdu::PData(pdata)).await.unwrap();
+        }
+
+        // Keep the Identifier and C-CANCEL in one P-DATA-TF. The assembler
+        // returns both completed units together, so this covers the queued
+        // unit hand-off between the outer dispatcher and handle_c_find.
+        let mut cancel = Command::request(CommandField::CCancelRq, 1);
+        cancel.message_id_being_responded_to = Some(1);
+        let cancel_bytes = bytes::Bytes::from(command_bytes(&cancel).unwrap());
+        write_pdu(
+            &mut association.stream,
+            &Pdu::PData(crate::pdu::PData {
+                pdvs: vec![
+                    crate::pdu::Pdv {
+                        context_id,
+                        is_command: false,
+                        is_last: true,
+                        data: identifier,
+                    },
+                    crate::pdu::Pdv {
+                        context_id,
+                        is_command: true,
+                        is_last: true,
+                        data: cancel_bytes,
+                    },
+                ],
+            }),
+        )
+        .await
+        .unwrap();
+        let cancelled = tokio::time::timeout(
+            Duration::from_secs(2),
+            association.await_response(1, CommandField::CFindRsp),
+        )
+        .await
+        .expect("C-CANCEL must stop the in-flight provider")
+        .unwrap();
+        assert_eq!(cancelled.status, Some(crate::dimse::status::CANCEL));
+
         association.release().await.unwrap();
         handle.await.unwrap().unwrap();
     }

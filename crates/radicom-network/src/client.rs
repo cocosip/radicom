@@ -385,8 +385,8 @@ impl DicomClient {
     /// context is a protocol error at the SCP (§2.18). Returns `Ok(false)` when
     /// no association is open or the ID is not a request this client sent.
     /// As with fo-dicom, cancel is only meaningful while the request is still
-    /// producing responses; here the SCP buffers a query's matches, so a cancel
-    /// suppresses *further* results.
+    /// producing responses; the SCP's streaming C-FIND path returns a terminal
+    /// `CANCEL` response and drops the provider stream.
     pub async fn cancel(&mut self, message_id: u16) -> Result<bool> {
         let Some(association) = self.association.as_mut() else {
             return Ok(false);
