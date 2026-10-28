@@ -130,7 +130,18 @@ impl Anonymizer {
                 Action::Keep => {}
                 Action::Remove => to_remove.push(tag.clone()),
                 Action::ZeroLength => self.blank(dataset, item, false)?,
-                Action::Dummy | Action::Clean | Action::Uid => {
+                Action::Dummy => {
+                    // UID → new UID; numeric strings (DS/IS) → "0"; other typed
+                    // values via blank() (dates → MinValue, binary → zero dummy,
+                    // generic strings → "ANONYMOUS") so D never writes an
+                    // invalid value such as "ANONYMOUS" into a DS/IS element.
+                    if item.vr() == Vr::Ui {
+                        self.replace_uid(dataset, item, replaced)?;
+                    } else {
+                        self.blank(dataset, item, true)?;
+                    }
+                }
+                Action::Clean | Action::Uid => {
                     if item.vr() == Vr::Ui {
                         self.replace_uid(dataset, item, replaced)?;
                     } else if item.vr().is_string() {
@@ -202,7 +213,14 @@ impl Anonymizer {
         }
 
         if vr.is_string() {
-            dataset.insert_str(tag, vr, "");
+            if !non_zero {
+                dataset.insert_str(tag, vr, "");
+            } else if matches!(vr, Vr::Ds | Vr::Is) {
+                // numeric-string VRs need a legal decimal/integer dummy, not words
+                dataset.insert_str(tag, vr, "0");
+            } else {
+                dataset.insert_str(tag, vr, "ANONYMOUS");
+            }
             return Ok(());
         }
 
@@ -291,6 +309,21 @@ mod tests {
             .unwrap();
         assert_eq!(ds.try_get_str(Tag::new(0x0010, 0x0010)).as_deref(), Some("Alias^Name"));
         assert_eq!(ds.try_get_str(Tag::new(0x0010, 0x0020)).as_deref(), Some("PAT-42"));
+    }
+
+    #[test]
+    fn a_ds_is_dummied_with_a_numeric_value_not_anonymous() {
+        // SpacingBetweenSlices (0018,0088) is DS. D must produce a legal decimal
+        // string ("0"), never "ANONYMOUS" which would be an invalid DS value.
+        let csv = "0018,0088;D\n";
+        let profile = SecurityProfile::parse(csv).unwrap();
+        let anon = Anonymizer::with_profile(profile, AnonOption::BasicProfile);
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::new(0x0018, 0x0088), Vr::Ds, "12.5");
+        anon.anonymize_in_place(&mut ds).unwrap();
+        let v = ds.try_get_str(Tag::new(0x0018, 0x0088)).unwrap_or_default();
+        assert_ne!(v, "ANONYMOUS", "a DS dummy must be numeric, not the word ANONYMOUS");
+        assert!(v.trim().parse::<f64>().is_ok(), "DS dummy must parse as a number, got {v:?}");
     }
 
     #[test]
