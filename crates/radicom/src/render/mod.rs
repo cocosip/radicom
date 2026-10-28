@@ -1548,6 +1548,20 @@ mod tests {
     }
 
     #[test]
+    fn a_ybr_full_422_frame_with_odd_width_pads_the_last_group() {
+        // width 3 → ceil(3/2)=2 groups = 8 stored bytes; the last group's Y2 is
+        // padding. All three pixels are pure red (Y=76, Cb=85, Cr=255).
+        let ds = ybr422_image("YBR_FULL_422", 3, &[76, 76, 85, 255, 76, 0, 85, 255]);
+        let image = render_frame(&ds, 0).unwrap();
+        assert_eq!(image.width(), 3);
+        let b = image.as_bytes();
+        for p in 0..3 {
+            let px = &b[p * 4..p * 4 + 4];
+            assert!(px[2] > 240 && px[1] < 16 && px[0] < 16, "pixel {p} red-ish: {px:?}");
+        }
+    }
+
+    #[test]
     fn a_ybr_full_422_frame_expands_shared_chroma() {
         // 2 pixels share one CbCr pair: Y1=76, Y2=76, Cb=85, Cr=255 → both red
         let ds = ybr422_image("YBR_FULL_422", 2, &[76, 76, 85, 255]);
