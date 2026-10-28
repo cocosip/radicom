@@ -340,19 +340,17 @@ fn read_grayscale(dataset: &Dataset) -> Result<Vec<f64>, Error> {
     let bytes = bytes.as_ref();
     let bits = pixel.bits_allocated()?;
     let signed = pixel.pixel_representation() == 1;
+    let depth = crate::render::bit_depth::BitDepth::new(bits, pixel.bits_stored(), pixel.high_bit(), signed);
 
-    let raw: Vec<f64> = match (bits, signed) {
-        (8, false) => bytes.iter().take(slots).map(|&b| b as f64).collect(),
-        (8, true) => bytes.iter().take(slots).map(|&b| (b as i8) as f64).collect(),
-        (16, false) => bytes
+    // Normalise away any high-bit padding and sign-extend, so non-standard depth
+    // metadata (e.g. 12-bit-in-16) stacks comparably — the same rule the render
+    // path uses. Standard low-aligned data is unchanged.
+    let raw: Vec<f64> = match bits {
+        8 => bytes.iter().take(slots).map(|&b| normalise_sample(b as u16, &depth)).collect(),
+        16 => bytes
             .chunks_exact(2)
             .take(slots)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]) as f64)
-            .collect(),
-        (16, true) => bytes
-            .chunks_exact(2)
-            .take(slots)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]) as f64)
+            .map(|c| normalise_sample(u16::from_le_bytes([c[0], c[1]]), &depth))
             .collect(),
         _ => return Err(invalid("MPR supports 8- or 16-bit native MONOCHROME data")),
     };
@@ -367,6 +365,19 @@ fn read_grayscale(dataset: &Dataset) -> Result<Vec<f64>, Error> {
         .and_then(|s| s.trim().parse::<f64>().ok())
         .unwrap_or(0.0);
     Ok(raw.into_iter().map(|v| v * slope + intercept).collect())
+}
+
+/// Normalises one stored sample to a signed/unsigned f64 value, dropping high-bit
+/// padding (via [`BitDepth`]) and sign-extending signed data from its stored width.
+fn normalise_sample(value: u16, depth: &crate::render::bit_depth::BitDepth) -> f64 {
+    let n = depth.normalize(value);
+    if depth.signed {
+        let bits = if depth.stored == 0 || depth.stored >= 16 { 16 } else { depth.stored };
+        let shift = 16 - bits;
+        (((n << shift) as i16) >> shift) as f64
+    } else {
+        n as f64
+    }
 }
 
 fn dot(a: &Vector3, b: &Vector3) -> f64 {
@@ -623,6 +634,27 @@ mod tests {
         );
         let v = cut.pixels()[0];
         assert!((40.0..=60.0).contains(&v), "mid-slice value is ~50, got {v}");
+    }
+
+    #[test]
+    fn mpr_normalises_twelve_bit_in_sixteen_slices() {
+        // Sixteen-bit storage carrying 12 significant bits left-aligned (high bit
+        // 15): stored 0xFFF0 must normalise to 4095, not be read as 65520.
+        let mut s0 = axial_slice(0.0, 0xFFF0);
+        s0.insert_value(Tag::new(0x0028, 0x0101), 12u16); // BitsStored (high bit stays 15)
+        let mut s1 = axial_slice(1.0, 0xFFF0);
+        s1.insert_value(Tag::new(0x0028, 0x0101), 12u16);
+        let volume = VolumeData::from_datasets(&[s0, s1]).unwrap();
+        let cut = volume.get_cut(
+            Point3::new(0.5, 0.5, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+            1,
+            1,
+            1.0,
+        );
+        let v = cut.pixels()[0];
+        assert!((v - 4095.0).abs() < 1.0, "12-bit-in-16 normalised to 4095, got {v}");
     }
 
     #[test]
