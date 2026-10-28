@@ -101,6 +101,28 @@ impl FilmSession {
         self.dataset.insert_str(tags::PRINT_PRIORITY, Vr::Cs, priority);
         self
     }
+
+    pub fn priority(&self) -> Option<String> {
+        self.dataset.try_get_str(tags::PRINT_PRIORITY)
+    }
+
+    pub fn set_medium_type(&mut self, medium: impl Into<String>) -> &mut Self {
+        self.dataset.insert_str(tags::MEDIUM_TYPE, Vr::Cs, medium);
+        self
+    }
+
+    pub fn medium_type(&self) -> Option<String> {
+        self.dataset.try_get_str(tags::MEDIUM_TYPE)
+    }
+
+    pub fn set_destination(&mut self, destination: impl Into<String>) -> &mut Self {
+        self.dataset.insert_str(tags::FILM_DESTINATION, Vr::Cs, destination);
+        self
+    }
+
+    pub fn destination(&self) -> Option<String> {
+        self.dataset.try_get_str(tags::FILM_DESTINATION)
+    }
 }
 
 impl Default for FilmSession {
@@ -291,9 +313,17 @@ mod tests {
     #[test]
     fn a_film_session_carries_its_attributes() {
         let mut session = FilmSession::new();
-        session.set_copies(2).set_label("FS-1");
+        session
+            .set_copies(2)
+            .set_label("FS-1")
+            .set_priority("HIGH")
+            .set_medium_type("PAPER")
+            .set_destination("PROCESSOR");
         assert_eq!(session.copies(), Some(2));
         assert_eq!(session.label().as_deref(), Some("FS-1"));
+        assert_eq!(session.priority().as_deref(), Some("HIGH"));
+        assert_eq!(session.medium_type().as_deref(), Some("PAPER"));
+        assert_eq!(session.destination().as_deref(), Some("PROCESSOR"));
     }
 
     #[test]

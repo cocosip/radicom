@@ -94,7 +94,7 @@
 
 | fo-dicom 能力 | 状态 | radicom 对应符号 | 证据/行为差异 |
 |---|---|---|---|
-| `FilmSession`（copies/priority/label/medium/destination） | 🟡 | `print/models.rs:52-101` | `MEDIUM_TYPE`/`FILM_DESTINATION` 常量已定义（:23,:25）但**从未暴露读写方法** |
+| `FilmSession`（copies/priority/label/medium/destination） | ✅ | `print/models.rs:52-124` | 五项属性均提供读写方法 |
 | `FilmBox`（display format / film size / trim） | ✅ | `print/models.rs:105-204` | |
 | `ImageDisplayFormat` STANDARD/ROW/COL/SLIDE/SUPERSLIDE/CUSTOM | 🟡 | `print/layout.rs:81-134` | 解析齐全；CUSTOM 的布局返回空（:126-162），SLIDE/SUPERSLIDE 恒 1 格 |
 | `ImageBox`（position/polarity/magnification/smoothing/min-max density/requested size） | 🟡 | `print/models.rs:214-258` | 只有 position 与 polarity；`MagnificationType`/`SmoothingType`/`MinDensity`/`MaxDensity`/`RequestedImageSize` 全缺 |
