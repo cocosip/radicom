@@ -7,6 +7,13 @@ DCMTK、dcm4che、真实 PACS）做互操作验证。
 > C-ECHO/STORE/FIND/MOVE/GET、扩展协商、User Identity、小 PDU 分片、C-CANCEL 等），
 > 因此**不需要外部对端即可自测**。下面的工具用于**跨实现**互通的额外验收。
 
+## 0. 离线自测（默认就运行）
+
+`crates/radicom-network/tests/interop.rs` 里的 `self_interop_*` 用例**不需要外部对端**：
+在本机 `127.0.0.1` 起一个 `DicomServer`，用 `DicomClient` 走真实 TCP 打过去，验证
+C-ECHO 与 **真实文件跨 TCP 的 C-STORE→SCP→读回语义相等**（组长度归一化后逐一比对，
+传输语法保持）。`cargo test --workspace --all-features` 即会跑它们。
+
 ## 1. 联调工具：`peer_interop` 示例
 
 位置：`crates/radicom-network/examples/peer_interop.rs`
