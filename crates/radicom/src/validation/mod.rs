@@ -297,6 +297,10 @@ mod tests {
         assert!(validate_single(Vr::Tm, "240000").is_err());
         assert!(validate_single(Vr::Dt, "20240305103015+0530").is_ok());
         assert!(validate_single(Vr::Dt, "20240305103015-1500").is_err(), "offset hour 15");
+        // PS3.3 §6.2: negative offsets cap at 12h, positive at 14h.
+        assert!(validate_single(Vr::Dt, "20240305103015-1300").is_err(), "negative offset hour 13");
+        assert!(validate_single(Vr::Dt, "20240305103015-1200").is_ok(), "negative offset hour 12");
+        assert!(validate_single(Vr::Dt, "20240305103015+1400").is_ok(), "positive offset hour 14");
     }
 
     #[test]
