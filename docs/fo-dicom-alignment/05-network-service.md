@@ -18,7 +18,7 @@
 
 **基线**：最近一次验证为 `radicom-network` 328 个单元测试通过，fuzz/golden/自互操作测试通过，workspace rustdoc 与 clippy 均无告警；需要真实 `RADICOM_PEER` 的外部对端测试仍显式 ignored。
 
-**总体结论**：单连接、单请求的服务骨架（C-ECHO / C-STORE / C-FIND / C-GET / C-MOVE + 六个 DIMSE-N 方法）是完整可用的；C-FIND/C-MOVE/C-GET 已逐条消费 provider stream，三种查询/检索服务均能中断在途 provider，`max_clients` 与服务端 ACSE 超时也已接线。仍待处理的主要服务层缺口是公开 client 的并发取消 API、客户端跨 SOP 类上下文复用，以及默认 C-STORE sink 的落盘性能。协议错误、临时文件生命周期和 retrieve 计数已有回归覆盖。性能上服务端并发仍受 `radicom` 解析器全局读锁限制，服务层是暴露点而非病灶。
+**总体结论**：单连接、单请求的服务骨架（C-ECHO / C-STORE / C-FIND / C-GET / C-MOVE + 六个 DIMSE-N 方法）是完整可用的；C-FIND/C-MOVE/C-GET 已逐条消费 provider stream，三种查询/检索服务均能中断在途 provider，`max_clients`、called-AE 过滤与服务端 ACSE 超时也已接线。当前主要服务层缺口是公开 client 的并发取消 API、请求队列语义，以及默认 C-STORE sink 的落盘性能。协议错误、临时文件生命周期、跨 SOP 类重协商和 retrieve 计数已有回归覆盖。性能上服务端并发仍受 `radicom` 解析器全局读锁限制，服务层是暴露点而非病灶。
 
 本次评审共发现：
 
@@ -47,16 +47,16 @@
 | C-GET SCP | `DicomCGetProvider`（子操作在服务内发起） | 部分实现 | `server.rs:567-707` | provider 事件已逐条消费；Pending 的 `remaining` 由 provider 提供；同一 presentation context 和 message ID 的 C-CANCEL 可中断在途 provider |
 | C-MOVE SCP | `DicomCMoveProvider` | 部分实现 | `server.rs:669-808` | Pending/终止响应已逐条发送；同一 presentation context 和 message ID 的 C-CANCEL 可中断在途 provider；provider 本身没有取消回调 |
 | C-CANCEL 处理 | `DicomService.cs` 取消在途请求 | 部分实现 | `server.rs:338-347`、`server.rs:590-895` | 流式 C-FIND/C-MOVE/C-GET 在途时会回送 `CANCEL` 终止响应；provider 本身没有取消回调 |
-| N-EVENT-REPORT SCP | `IDicomNEventReportRequestProvider` | 已实现 | `services.rs:240-243`、`server.rs:404` | 实现存在；**无任何测试**覆盖（见 §4） |
-| N-GET / N-SET SCP | `IDicomNServiceProvider` | 已实现 | `services.rs:245-258`、`server.rs:405-410` | 同上，无测试 |
-| N-ACTION / N-CREATE SCP | `IDicomNServiceProvider` | 已实现 | `services.rs:255-263`、`server.rs:411-416` | N-ACTION 有测试（`server.rs:2843`），N-CREATE 无 |
+| N-EVENT-REPORT SCP | `IDicomNEventReportRequestProvider` | 已实现 | `services.rs:240-243`、`server.rs:404` | `server.rs` 有 N-service 回环覆盖 |
+| N-GET / N-SET SCP | `IDicomNServiceProvider` | 已实现 | `services.rs:245-258`、`server.rs:405-410` | `server.rs` 有 N-service 回环覆盖 |
+| N-ACTION / N-CREATE SCP | `IDicomNServiceProvider` | 已实现 | `services.rs:255-263`、`server.rs:411-416` | N-ACTION/N-CREATE 均有回环覆盖 |
 | N-DELETE SCP | `IDicomNServiceProvider` | 已实现 | `server.rs:419-421` | 有测试（`server.rs:2883`） |
 | 每服务可插拔 provider | `IDicomC*Provider` 全套接口 | 部分实现 | `services.rs:184-268` `ServiceProvider` | 是**单一 trait**聚合所有服务，不是 fo-dicom 的每服务接口；一个 provider 必须实现全部服务（默认实现为"不支持"）。可插拔粒度更粗，但可用 |
 | 服务注册表 `(port, ip)` | `DicomServerRegistry` / `IDicomServerRegistry`（`DicomServerRegistry.cs:12-40`） | **已实现** | `registry.rs` `DicomServerRegistry`；`server.rs:146` 绑定时登记、释放时自动注销 | 进程内可查询地址占用；操作系统仍负责最终 bind 校验 |
 | `max_clients` 限流 | `DicomServer.cs:185-188` `SemaphoreSlim(MaxClientsAllowed)`、`:279-289` 等待配额 | **已实现** | `server.rs:179-210` 使用可选 `Semaphore` 门控 accept loop；`max_clients=0` 保持不限流；`max_clients_bounds_concurrent_associations` 覆盖满槽位与释放 |
-| 已连接客户端数 | `DicomServer.cs:201-204` `GetNumberOfConnectedClients` | 缺失 | 无 | `hosting.rs:10-14` 文档自认未提供 |
+| 已连接客户端数 | `DicomServer.cs:201-204` `GetNumberOfConnectedClients` | **已实现** | `hosting.rs:188-194`、`server.rs:166-168` | `ConnectedClients` 原子计数跟踪 live connection task；有启动/释放回归测试 |
 | 服务端 A-ASSOCIATE-RQ 读超时 | `DicomService.cs` ACSE 阶段超时 | **已实现** | `server.rs:269-281` 用 `ServerOptions.association_timeout` 包裹首个 PDU 读取，超时发送 Provider A-ABORT；`an_association_that_never_sends_a_request_times_out` 覆盖 |
-| AE title 过滤 | `DicomServer.cs` called-AE 匹配 | 缺失 | `hosting.rs:75-87` 校验了 AE title 但从不参与协商 | `hosting.rs:13-14` 文档自认 |
+| AE title 过滤 | `DicomServer.cs` called-AE 匹配 | **已实现** | `hosting.rs:58-62`、`server.rs:282-290` | hosted 配置把 AE title 传给 `ServerOptions`，A-ASSOCIATE-RQ 不匹配时返回 Permanent Reject |
 | 协议违规时发 A-ABORT | `DicomService.cs:1716-1717` `SendAbortAsync` | **已实现** | `server.rs:235-253` `serve_connection` 在协议错误返回前发送 Provider A-ABORT；响应型 command 保留 User-source A-ABORT | 未知 PDU 等协议错误会先收到 reason 0 的 Provider A-ABORT；回归测试覆盖 |
 | 指标钩子 | `INetworkMetricsCollector`（`DataSent/DataReceived/ConnectionEstablished/ConnectionClosed`） | 已实现（超集） | `observability.rs:26-33` | radicom 多了 association 开合两个钩子，属于超集，不是缺陷 |
 
@@ -65,7 +65,7 @@
 | 能力 | fo-dicom 参照 | 状态 | radicom 符号（file:line） | 说明 |
 | --- | --- | --- | --- | --- |
 | C-ECHO / C-STORE / C-FIND / C-GET / C-MOVE SCU | `DicomClient` + `DicomC*Request` | 已实现 | `client.rs:211/227/248/279/261` | 每个方法自带 `PresentationContext::new(1, ...)`，PC id 恒为 1 |
-| 请求队列 + 一次协商全部 PC | `DicomClient.AddRequestAsync` + `DicomClient.cs:637` `SendRequestAsync` | **缺失** | `client.rs:149-155` `ensure_association` 只在 `association.is_none()` 时协商 | 实测：同一 client 先 C-ECHO 再 C-STORE，第二次报 `SOP class ... is not supported by the association`；见 §2.6 |
+| 请求队列 + 一次协商全部 PC | `DicomClient.AddRequestAsync` + `DicomClient.cs:637` `SendRequestAsync` | 部分实现 | `client.rs:172-184` `ensure_association` | 同步 API 没有 fo-dicom 式请求队列，但会检查当前 association 是否覆盖本次 SOP class，不足时释放并重开；见 §2.6 |
 | 每请求响应最多 N 次超时监控 | `DicomService.cs:1516` `WarningRequestTimedOut` + `CheckForTimeouts` | **已实现** | `server.rs` `ClientOptions::request_timeout`；`Association` 所有 DIMSE 响应等待均有超时 | 超时返回 `NetworkError::RequestTimedOut`，高层 client 发出事件并中止关联 |
 | 请求级 watchdog / PendingTable | `_pending` + `Options.RequestTimeout` | **部分实现** | `engine.rs` `PendingTable` 仍负责 ID 与在途请求；超时由关联响应等待直接监控 | 当前是单请求等待超时，尚未实现独立的多请求 watchdog 扫描 |
 | 关联事件 `StateChanged` | `DicomClient.cs:215-221`（6 个事件） | **已实现** | `client.rs:56` `ClientEvent::StateChanged`；接受、释放和中止路径发出 `Open`/`Closing`/`Closed` | 与既有离散事件并存，统一报告关联生命周期状态；回归测试覆盖 |
@@ -73,7 +73,7 @@
 | 取消模式 `DicomClientCancellationMode` | `DicomClient.cs:175` `{ImmediatelyReleaseAssociation, ImmediatelyAbortAssociation}` | **缺失** | grep `CancellationMode` 无命中；只有 `client.rs:323` `release` / `client.rs:328` `abort` 两个方法 | 调用方自己组合，库层面无统一取消语义 |
 | 监听式 linger（队列空等 N ms） | `AssociationLingerTimeoutInMs` 默认 50 | 部分实现 | `client.rs:33`、`client.rs:206-208`、`client.rs:138-143` | 只在"配额用尽"时 sleep，队列语义不存在（同步 API 无队列），见 §2.7 |
 | 每关联请求配额 | `MaximumNumberOfRequestsPerAssociation` | 已实现 | `client.rs:30`、`client.rs:129-131` | 语义一致 |
-| 关联请求重试上限 | `MaximumNumberOfConsecutiveTimedOutAssociationRequests`（默认 3） | 部分实现 | `client.rs:35`、`client.rs:187-191` | `.max(1)` 使 0 也重试一次；且对**任何**非 Reject 错误重试，见 §2.8 |
+| 关联请求重试上限 | `MaximumNumberOfConsecutiveTimedOutAssociationRequests`（默认 3） | **已实现** | `client.rs:187-229` | 仅超时/可重试 IO 重试；0 表示不重试，拒绝/TLS/协议错误立即返回；见 §2.8 |
 | C-CANCEL SCU | `DicomCCancelRequest` | 部分实现 | `client.rs:314-320` | 已记录最近一次请求实际使用的 presentation context；公开 client 仍无法在阻塞式 `send_c_find` 期间并发调用 `cancel` |
 | 反向 C-STORE 处理器（C-GET 收图） | `IDicomCStoreProvider` on SCU | 已实现 | `server.rs:1005-1007`、`server.rs:1161-1171` | — |
 | Expert/Advanced 层 | `Client/Advanced/*` | 部分实现 | `expert.rs:33-40` `Connection`、`expert.rs:206-221` `send` | 声称流式实际全缓冲，`RELEASE_TIMEOUT` 声明未用，见 §1.3 |
@@ -87,9 +87,8 @@
 | role selection 默认不协商 | `association.rs:263-275` `accept_roles: false` | 默认拒绝 SCU/SCP 角色选择 | 有意取舍；但意味着 SCP 不能作为 SCU 反向发请求，C-GET 只能走同关联反向 C-STORE |
 | `expert.rs` 的 `RELEASE_TIMEOUT` | `expert.rs:233` | 常量声明 10s | **死代码**：全仓无引用（grep 确认）。不是"有意不实现"，是遗漏 |
 
-另外两处属于真实缺口且无任何代码注释交代：
+仍属于真实缺口且无代码层取舍说明的是：
 
-- **N-CREATE / N-EVENT-REPORT 无测试**（`services.rs:240-263` 有实现，`server.rs:404` 有分发，测试里只有 N-ACTION/N-DELETE）。
 - **公开 client 的并发 C-CANCEL 仍受 API 借用模型限制**：底层 `Association` 已支持三种服务的取消；`DicomClient::send_*` 持有 `&mut self` 直到终止响应，无法同时调用 `cancel`。
 
 ---
@@ -201,101 +200,29 @@ while let Some(event) = stream.next().await {
 
 旧实现会让静默连接永久占用 task 和 fd。当前 `server.rs:269-281` 在 ACSE 首个 `read_pdu` 外包裹 `ServerOptions.association_timeout`，超时后发送 Provider A-ABORT 并返回 `AssociationRequestTimedOut`。`an_association_that_never_sends_a_request_times_out` 覆盖静默 TCP 连接、A-ABORT source/reason 和错误类型。
 
-### 2.6 【中】`DicomClient` 只在首个请求协商 PC，跨 SOP 类复用直接失败
+### 2.6 【已修复】`DicomClient` 会为缺少的 SOP context 重建关联
 
-位置：`client.rs:149-155`。
-
-```rust
-async fn ensure_association(&mut self, contexts: Vec<PresentationContext>) -> Result<&mut Association> {
-    self.retire_if_spent().await;
-    if self.association.is_none() {
-        self.open_association(contexts).await?;      // 只在空关联时协商
-    }
-    Ok(self.association.as_mut().expect("open_association sets it"))
-}
-```
-
-关联一旦建好，后续请求传进来的 `contexts` 被**完全忽略**。而每个 `send_c_*` 都自己造 `PresentationContext::new(1, ...)`（`client.rs:213/234/249/262/287`）。
-
-实测：
-
-```
-echo   -> Ok("ok")
-store  -> Err("SOP class 1.2.840.10008.5.1.4.1.1.7 is not supported by the association")
-echo2  -> Ok("ok")
-```
-
-同一 client、同一关联，C-ECHO 之后 C-STORE 必失败。C-GET 更严重——它需要为每个 storage SOP class 追加 PC（`client.rs:292-300`），所以"C-ECHO 然后 C-GET"直接失败：
-
-```
-B: echo first -> Ok("ok")
-B: C-GET after echo -> Err("SOP class 1.2.840.10008.5.1.4.1.2.2.3 is not supported by the association")
-```
-
-`release` 后重建关联可以绕过，但调用方必须知道这个隐式约定，且 API 无任何提示。正确行为：`ensure_association` 应比较已有协商结果与本次所需 PC，不足则先 release 再重开（这正是 fo-dicom `DicomClient` 收集全部请求后统一协商的动机）。
+`ensure_association` 现在用 `covers` 检查当前协商结果；已有关联缺少本次请求的抽象语法时先释放，再用新的 presentation context 集合重开。`a_second_sop_class_gets_its_own_association` 覆盖 C-ECHO 后 C-STORE 的路径。
 
 ### 2.7 【中】`linger` 不实现队列语义，只按配额睡眠
 
 `client.rs:133-143` 的注释诚实说明了这点，但仍要记为偏差：fo-dicom 的 `Linger` 是"发送队列排空后再等 50ms，看有没有新请求"。这里 `retire_if_spent` 只在 `quota_spent()` 为真时 sleep，等于给配额耗尽加了个延迟释放，与"等待更多工作"无关。`client.rs:10` 的状态机注释（`→ SEND (drain) → LINGER`）与实现不符。
 
-### 2.8 【中】关联重试对任意错误重试，且 `max(1)` 吞掉 0 配置
+### 2.8 【已修复】关联重试只针对可重试传输错误
 
-位置：`client.rs:187-191`。
+`open_association` 现在只重试关联超时、`TimedOut` 和 `WouldBlock` IO；拒绝、TLS 错误和协议错误立即返回。`max_consecutive_timeout_retries = 0` 表示不重试，相关回归测试覆盖。
 
-```rust
-Err(other) => {
-    if attempt >= self.options.max_consecutive_timeout_retries.max(1) {
-        return Err(other);
-    }
-}
-```
+### 2.9 【已修复】消息 ID 回绕会跳过在途请求
 
-两个问题：`max_consecutive_timeout_retries = 0` 本意"不重试"却仍重试一次；且该分支捕获**所有**非 Reject 错误（IO、TLS 握手失败、`ReverseStoreHandlerMissing`、协议错误），对着一个明确不可达的地址做 3 次完整 TCP 超时。正确行为：只对 `AssociationRequestTimedOut` / 连接超时重试，其余立即上抛；0 表示不重试。
+实际发送路径使用 `Association` 内的 `engine::PendingTable` 分配 ID。分配器从 `u16::MAX` 回到 1，并跳过仍在途的 ID；`message_ids_wrap_around` 和在途跳过测试覆盖回绕边界。
 
-### 2.9 【中】`allocate_message_id` 回绕时不跳过在途 ID
+### 2.10 【已修复】C-GET 将非致命实例错误计为失败并继续
 
-位置：`server.rs:1708-1712`。
+`is_fatal` 只把 IO、Abort 和过早关闭视为连接级错误；缺少 SOP/UID、转码或单实例传输错误会记录 Failed Sub-operation，继续处理后续实例并发送终止响应。
 
-```rust
-fn allocate_message_id(&mut self) -> u16 {
-    let id = self.next_message_id;
-    self.next_message_id = if self.next_message_id == u16::MAX { 1 } else { self.next_message_id + 1 };
-    id
-}
-```
+### 2.11 【已修复】PDV assembler 按 context 与 command/data 流隔离
 
-`engine.rs:72-95` 的 `PendingTable::allocate_message_id` 明确跳过在途 ID 并有测试（`engine.rs:328` 从 `u16::MAX` 起测），但**真正的发送路径用的是这个退化版本**。65535 次请求后回绕，在同一条长关联上（`max_requests_per_association = None` 是默认值，`client.rs:44`）可能把在途请求的 ID 分配给新请求，`await_response`（`server.rs:1557-1586`）按 ID 匹配就会取错响应。fo-dicom 的 `_pending` 字典是分配时的唯一真相。修法：复用 `engine::PendingTable`（同时也把 §1.2 的死模块接线了）。
-
-### 2.10 【中】C-GET 中非 `SopClassNotSupported` 错误直接中止整个检索
-
-位置：`server.rs:484-490`。
-
-```rust
-let state = match serving.send_reverse_store(&file).await {
-    Ok(state) => state,
-    Err(NetworkError::SopClassNotSupported { .. }) => StatusState::Failure,  // 记一次失败
-    Err(other) => return Err(other),                                          // 整个关联挂掉
-};
-```
-
-反向 C-STORE 期间任何其它错误（实例缺 SOP Instance UID、网络抖动、转码失败 —— 后者见 `server.rs:826-832`）都会让**已经成功送出的 N 个实例的关联**被丢弃，SCU 连终端 `CGetResponse` 都收不到。PS3.4 要求 C-GET 把单实例失败记为 Failed Sub-operation 并继续，直到全部完成。正确行为：除真正的协议/IO 致命错误外，一律 `summary.record(Failure)` 并继续。
-
-### 2.11 【中】`PdvAssembler` 每条连接只有一组命令/数据缓冲，不支持命令交错
-
-位置：`assembler.rs:22-27`、`assembler.rs:54-78`。
-
-```rust
-pub struct PdvAssembler {
-    command: Vec<u8>,
-    data: Vec<u8>,
-    command_context: Option<u8>,
-    data_context: Option<u8>,
-}
-```
-
-一个 SCU 若在等响应的同时发第二个请求（异步操作窗口 > 1，`pdu.rs:178/409` 支持协商该值），两条命令的 PDV 会拼进同一个 `command` 缓冲。`server.rs:274` 的 `awaiting_dataset` 是**单槽** `Option`，同样只能挂一个待数据集命令。后果是命令集被拼接解析失败（`command_from_bytes` 报错，连接断）或取到错误 field。当前 `radicom` 自己的 client 是严格"发一收一"，所以自测全绿（见 §4.5），但这是个**只在异种 SCU 下暴露**的互操作缺陷。
-
-对照 `DicomService.cs:59/61` 同样是 queue 结构，但 fo-dicom 用 `_msgQueue` 显式排多条消息，并按 message 边界组装；radicom 是"两个流各一个 Vec"。
+`PdvAssembler` 现在按 `(context_id, Stream)` 保存独立缓冲，交错 presentation context 或 command/data PDV 不会互相拼接；服务端待数据集命令也按 context 排队。assembler 与服务回环测试覆盖交错输入。
 
 ### 2.12 【中】`SubOperationSummary::record` 把 Cancel 归入 failed，且 Warning 独立成桶
 
@@ -582,6 +509,8 @@ C-GET 收到 500 张图就会深拷贝 500 个 dataset 进 `Vec`。虽然 `Dicom
 
 ## 4. 测试审查
 
+本节保留首次走查时的测试缺口快照；已修复的跨 SOP 类重协商、请求级超时、PDV 交错、C-FIND/C-MOVE/C-GET 流式取消和 N-service 回环条目仅用于追溯，当前状态以 §1、§2 和源码为准。
+
 328 个单元测试全绿，但对服务层的关键行为覆盖仍有缺口，且至少有 4 个测试是**假绿**（断言与名字/意图不符，或在不该通过的条件下通过）。
 
 ### 4.1 【高】`a_c_cancel_keeps_the_association_healthy` 是假绿
@@ -607,11 +536,13 @@ let Ok(peer) = std::env::var("RADICOM_PEER") else {
 
 未设环境变量时直接 `return`，测试报告 `ok`。这在 CI 里等价于"互操作永远通过"。同时它还带 `?optional` 语义（名称里的 `and_optional_c_store`），即使连上真对端也可以选择不测 C-STORE。真正需要的是 `#[ignore]`（显式忽略，报告为 ignored 而非 passed）或独立的 interop job。
 
-### 4.4 【中】`watchdog_reports_expired_requests` 测的是未接线代码
+### 4.4 【历史快照】`watchdog_reports_expired_requests` 曾被误判为未接线代码
 
 位置：`engine.rs:375-390`。
 
-`PendingTable::expired` 逻辑本身没错，但整个 `engine` 模块除自身测试外**没有任何生产调用点**（`lib.rs:40` 只 re-export）。对这个测试可以给出的最强评价是"同义反复"：它证明了一个没人用的类型能正常工作。要么接线（§2.9），要么删掉模块和测试——现状会让读者误以为库有请求超时。
+首次走查时 `PendingTable` 只有模块测试，容易被误判为未接线；当前 `Association` 用它分配
+在途 Message ID，并由 `request_timeout` 包裹响应等待。`PendingTable::expired` 仍不是独立的
+多请求 watchdog 扫描，§1.2 的“部分实现”描述保留这一真实边界。
 
 ### 4.5 【中】`loopback_honours_a_small_peer_max_pdu` 只断言 C-ECHO 成功
 

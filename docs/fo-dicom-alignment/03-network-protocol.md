@@ -4,7 +4,7 @@
 
 参照实现：fo-dicom `FO-DICOM.Core/Network/`（`PDU.cs`、`DicomService.cs`、`DicomStatus.cs`、`DicomPresentationContext.cs`、`DicomMessage.cs`、`DicomServiceApplicationInfo.cs`、`DicomUserIdentityNegotiation.cs`、`Tls/*.cs` 等），以及 DICOM PS3.8（Upper Layer Protocol）、PS3.7（DIMSE）、PS3.4（Service Class）。
 
-方法：逐行阅读上述 Rust 源码，与 fo-dicom C# 的写/读两侧逐字段比对；只在读完实际代码并确认调用点可达后给出结论。repo 内 `docs/*.md` 的自评不作为依据。本文只做评审，未修改任何代码。
+方法：逐行阅读上述 Rust 源码，与 fo-dicom C# 的写/读两侧逐字段比对；只在读完实际代码并确认调用点可达后给出结论。repo 内 `docs/*.md` 的自评不作为依据。本文件同时保留原始发现和后续修复状态。
 
 ### 证据强度
 
@@ -15,19 +15,19 @@
 | **字节验证** | 已用按 PS3.8/PS3.7 手工构造的标准字节喂给 `pdu::decode`，以及取 `pdu::encode` 的输出做逐字节比对，真实复现了错误行为。强证据。 |
 | **源码比对** | 逐字段比对 radicom 与 fo-dicom 两侧读写代码，未构造字节。结论正确性依赖比对本身。 |
 
-按标准生成字节的生成器与探针放在系统临时目录（未进入仓库）：`<tmp>/oracle/mkconformant.py` 生成 fixture，`<tmp>/oracle/confcheck/` 验证解码，`<tmp>/oracle/confform/` 验证编码。§2.1–§2.5 各条附了关键字节与复现输出，可直接用作回归测试的 golden 数据。
+按标准生成字节的生成器与探针放在系统临时目录（未进入仓库）：`<tmp>/oracle/mkconformant.py` 生成 fixture，`<tmp>/oracle/confcheck/` 验证解码，`<tmp>/oracle/confform/` 验证编码。原始 §2.1–§2.5 条目附有关键字节与复现输出，当前回归证据以源码测试为准。
 
-**基线**：workspace 构建通过、`clippy` 无告警、`radicom-network` 248 个测试通过（由 Lead 统一验证，本轮未重复全量验证）。
+**历史基线**：workspace 构建通过、`clippy` 无告警、`radicom-network` 248 个测试通过（由 Lead 统一验证）。测试审查章节保留这次历史快照，当前状态以源码和本轮结构检查为准。
 
-**总体结论**：传输/分帧骨架、DIMSE 命令字编码、错误类型设计质量较好；但 A-ASSOCIATE 的**四个用户信息/表现上下文子项的线格布局全部与 PS3.8/PS3.7 不一致**，且这些偏差被"自己编码、自己解码"的往返测试完全掩盖——编码器与解码器共享同一个错误假设，所以自往返永远通过。这四项均已用标准字节验证，属于会直接导致与 fo-dicom / DCMTK 无法互通的**高危缺陷**。
+**当前结论**：A-ASSOCIATE 的 presentation context、Role Selection、SOP Class Extended Negotiation 和 User Identity 线格已按 PS3.8/PS3.7 修复并有字节级回归。当前协议层仍有有界 Max-PDU、异步操作窗口未接入引擎、状态码按 service class 的描述表缺失等差异；这些差异见 §1 和 §2。
 
-**重要的共性**：这四类 bug 无法被任何"自往返"测试发现，只能靠外部互通测试或标准派生 golden 字节捕获。因此 §4.4 建议的 golden fixture 不是锦上添花，而是这四项修复后唯一能防回归的手段。
+**历史共性**：原始四类线格问题无法被"自往返"测试发现，只能靠外部互通测试或标准派生 golden 字节捕获；当前 `pdu.rs` 已加入对应的手工字节回归。
 
 本次评审共发现：
 
 | 级别 | 数量 | 证据强度 | 说明 |
 | --- | --- | --- | --- |
-| 高 | 6 | §2.1–§2.4 字节验证；§2.5 字节验证（通告值往返 + 强制上限矛盾） | 线格不兼容或造成错误语义，对接第三方必然出问题 |
+| 高 | 6（历史） | 原始 §2.1–§2.5 字节验证 | 原始评审发现；四类线格问题已修复，Max-PDU 保留有界设计 |
 | 中 | 8 | 源码比对 | 边界/健壮性/规范偏差 |
 | 低 | 7 | 源码比对 | 命名、效率、可维护性 |
 
@@ -43,26 +43,26 @@
 | --- | --- | --- | --- | --- |
 | 7 种 PDU 类型 | `PDU.cs:RawPduType` | 已实现 | `pdu.rs:262` `decode` / `pdu.rs:563` `encode` | 0x01–0x07 全覆盖 |
 | 6 字节 PDU 头（type/reserved/len BE） | `PDU.cs:RawPDU.CommonFieldsLength` | 已实现 | `transport.rs:12` `HEADER_LEN`、`transport.rs:35` `read_pdu` | 读 1 字节再读 5 字节，可正确处理 EOF |
-| A-ASSOCIATE-RQ 编解码 | `PDU.cs:547` | 部分实现 | `pdu.rs:615` `encode_associate`、`pdu.rs:319` `decode_associate` | 用户信息子项布局有误（0x54/0x56/0x58 三项均已字节验证），见 §2.2–§2.4 |
-| A-ASSOCIATE-AC 编解码 | `PDU.cs:915` | 部分实现 | 同上（`is_rq=false`） | **presentation context result 字节位置错误（已字节验证）**，见 §2.1 |
+| A-ASSOCIATE-RQ 编解码 | `PDU.cs:547` | **已实现** | `pdu.rs:678` `encode_associate`、`pdu.rs:329` `decode_associate` | 0x54/0x56/0x58 按 PS3.8 线格编码，手工 wire fixture 覆盖 |
+| A-ASSOCIATE-AC 编解码 | `PDU.cs:915` | **已实现** | 同上（`is_rq=false`） | presentation context result 位于 item body 偏移 2，字节级回归覆盖 |
 | A-ASSOCIATE-RJ 编解码 | `PDU.cs:AAssociateRJ` | 已实现 | `pdu.rs:514` `decode_associate_rj`、`pdu.rs:567` | 4 字节体，符合 §9.3.4 |
 | P-DATA-TF 编解码 | `PDU.cs:1569` `PDataTF` | 已实现 | `pdu.rs:524` `decode_pdata`、`pdu.rs:716` `encode_pdata` | PDV 位定义、偶长填充均正确 |
 | A-RELEASE-RQ/RP | `PDU.cs` | 已实现 | `pdu.rs:569` | — |
 | A-ABORT | `PDU.cs` | 已实现 | `pdu.rs:552` `decode_abort`、`pdu.rs:570` | source 语义见 §2.9 |
-| 16 位 item 长度回填 | `PDU.cs` `MarkLength16` / `WriteLength16` + `Stack<long>` | 有意不实现 | `pdu.rs:585` `push_item` | Rust 侧直接算好长度后整体写出，无需回填；但**缺少 u16 溢出保护**，见 §2.6 |
+| 16 位 item 长度回填 | `PDU.cs` `MarkLength16` / `WriteLength16` + `Stack<long>` | 有意不实现 | `pdu.rs:645` `push_item` | Rust 侧直接算好长度后整体写出，无需回填；长度超出 u16 会返回协议错误，见 §2.6 |
 
 ### 1.2 用户信息子项（User Information，item 0x50）
 
 | 子项 | fo-dicom 参照 | 状态 | radicom 符号（file:line） | 说明 |
 | --- | --- | --- | --- | --- |
-| 0x51 Max-PDU-Length | `PDU.cs:596-600` | 部分实现 | `pdu.rs:396` 解码 / `pdu.rs:648` 编码 | 值解析正确，但硬上限 65535 与之矛盾，见 §2.5 |
+| 0x51 Max-PDU-Length | `PDU.cs:596-600` | **部分实现（有界）** | `pdu.rs:396` 解码 / `pdu.rs:648` 编码 | 对外通告值钳到 `MAX_PDU_SIZE=65535`；不能表达 fo-dicom 的 >64 KiB / unlimited 能力，见 §2.5 |
 | 0x52 Implementation Class UID | `PDU.cs:602-607` | 已实现 | `pdu.rs:401` / `pdu.rs:649` | — |
 | 0x53 Asynchronous Operations Window | `PDU.cs:609-617`（仅在非 (1,1) 时发送） | 部分实现 | `pdu.rs:407` / `pdu.rs:655-662` | 编解码正确、默认省略也正确；但**协商结果从不被引擎使用**，无并发窗口控制 |
-| 0x54 SCP/SCU Role Selection | `PDU.cs:619-634` | **部分实现（线格错误，已字节验证）** | `pdu.rs:415-423` 解码 / `pdu.rs:663-670` 编码 | 字段顺序整体颠倒，UID 被静默平移，见 §2.2 |
+| 0x54 SCP/SCU Role Selection | `PDU.cs:619-634` | **已实现** | `pdu.rs:445-466` 解码 / `pdu.rs:732-744` 编码 | `[uid_len][uid][scu][scp]` 线格和手工字节测试均正确 |
 | 0x55 Implementation Version Name | `PDU.cs:636-641` | 已实现 | `pdu.rs:404` / `pdu.rs:652` | — |
-| 0x56 SOP Class Extended Negotiation | `PDU.cs:643-654` | **部分实现（线格错误，已字节验证）** | `pdu.rs:424` / `pdu.rs:671-682` | application information 格式错误，字段被静默丢弃，见 §2.3 |
+| 0x56 SOP Class Extended Negotiation | `PDU.cs:643-654` | **已实现** | `pdu.rs:480-538` / `pdu.rs:752-762` | application information 使用扁平字段数组，RQ/AC 方向有回归覆盖 |
 | 0x57 SOP Class Common Extended Negotiation | `PDU.cs:656-677` | 已实现 | `pdu.rs:432` / `pdu.rs:683-694` | 仅 RQ，符合 §9.3.2.3 |
-| 0x58 User Identity Negotiation (RQ) | `PDU.cs:679-694` | **部分实现（线格错误，已字节验证）** | `pdu.rs:438-451` / `pdu.rs:695-706` | 字段顺序错误，三个 payload 字段全部丢失，见 §2.4 |
+| 0x58 User Identity Negotiation (RQ) | `PDU.cs:679-694` | **已实现** | `pdu.rs:490-517` / `pdu.rs:780-793` | type/positive/length/payload 顺序按 PS3.8 编解码，字节级回归覆盖 |
 | 0x59 User Identity Negotiation (AC) | `PDU.cs:1017-1024` | 部分实现 | `pdu.rs:452` / `pdu.rs:707-711` | 应答体是不透明 `Vec<u8>`，无长度/类型校验 |
 | 未知子项按长度跳过 | `PDU.cs:1164` `SkipBytes` | 已实现 | `pdu.rs:455`、`pdu.rs:345` | — |
 
@@ -74,8 +74,8 @@
 | 重复 context 去重 | `DicomPresentationContextCollection`（按 abstract+roles+TS 集合） | 已实现 | `association.rs:125` `is_duplicate_of` | TS 集合排序后比较，角色按 SOP class 排序比较，语义正确 |
 | 抽象语法优先于传输语法判定 | `DicomService` 协商逻辑 | 已实现 | `association.rs:292` `negotiate_one` | 不支持抽象语法 → 3（RejectAbstractSyntaxNotSupported） |
 | 传输语法接受顺序（Offered / Preferred） | fo-dicom 无同名开关，按 propose 顺序取首个匹配 | 已实现（超出参照） | `association.rs:304` `SyntaxPriority` | 提供两种策略，默认应与 fo-dicom 对齐（取 offered 顺序） |
-| 结果码 0–4 | `DicomPresentationContext.cs:DicomPresentationContextResult` | 部分实现 | `association.rs:49` `result_code` | `Proposed → 0` 与 fo-dicom `Proposed = 255` 不等价，见 §2.10 |
-| 角色选择授予策略 | `PDU.cs` + `DicomPresentationContext.UserRole/ProviderRole` | 已实现 | `association.rs:576` 测试覆盖、`association.rs:341` | 策略正确，但写上线时线格错误（§2.2） |
+| 结果码 0–4 | `DicomPresentationContext.cs:DicomPresentationContextResult` | **已实现** | `association.rs:49` `result_code` | `Proposed` 返回 `None`，AC 编码不会把未协商 context 当成 Accept，见 §2.10 |
+| 角色选择授予策略 | `PDU.cs` + `DicomPresentationContext.UserRole/ProviderRole` | 已实现 | `association.rs:576` 测试覆盖、`association.rs:341` | 策略和 0x54 wire layout 均已覆盖 |
 | 已接受 context 的路由选择 | `DicomService` `_assoc.PresentationContexts.FirstOrDefault` | 已实现 | `association.rs:357` `AcceptedContexts::pick` | 精确 TS 优先，回退首个（`association.rs:622-663` 有覆盖） |
 
 ### 1.4 DIMSE 命令集
@@ -87,10 +87,10 @@
 | 命令集恒为 Implicit VR LE | `DicomService` 命令编码路径 | 已实现 | `message.rs:16` `encode_command` | 显式固定 `IMPLICIT_VR_LITTLE_ENDIAN` |
 | (0000,0000) 组长度重算 | `DicomMessage` 编码 | 已实现 | `dimse.rs:300-306` | 用 writer 算长度再减 12，有测试 `dimse.rs:580` |
 | (0000,0800) Command Data Set Type | `DicomMessage.cs:127`（`0x0202` / `0x0101`） | 已实现 | `dimse.rs:44` `NO_DATA_SET`、`dimse.rs:257-262` | 用 `0x0001` 表示"有数据集"，PS3.7 允许（≠0101H 即可），但与 fo-dicom 的 `0x0202` 不同 |
-| 优先级元素 | `DicomPriority.cs` | **部分实现（取值错误）** | `dimse.rs:49` `Priority` | 数值映射与默认值均错误，见 §2.7 |
+| 优先级元素 | `DicomPriority.cs` | **已实现** | `dimse.rs:49-75` `Priority` | `Medium=0`、`High=1`、`Low=2`，缺失/未知值回落 Medium |
 | 状态码分类 | `DicomStatus.cs:Lookup`（mask + 通配 `Bxxx`/`Cxxx`/`A7xx`） | 部分实现 | `dimse.rs:444` `classify` / `dimse.rs:470` `exact_state` | 有按类归并，但**无通配字符串表、无 `AddKnownDicomStatuses` 式可扩展注册** |
 | 状态码常量表 | `DicomStatus.cs:311-515` | 部分实现 | `dimse.rs:483-508` `status` | 常量被别名合并，语义丢失，见 §2.8 |
-| 状态码 → 名称/描述 | `DicomStatus.Description`、`DicomStatus.ToString` | 缺失 | — | grep 确认无任何 code→文本映射 |
+| 状态码 → 名称/描述 | `DicomStatus.Description`、`DicomStatus.ToString` | 部分实现 | `dimse.rs:504` `status_description`、`Status::description` | 提供通用描述；仍未按 service class 暴露完整 fo-dicom 描述表 |
 | 离线命令集解析容错 | `DicomMessage` 从 Dataset 构造 | 已实现 | `dimse.rs:311` `from_dataset` | 缺字段用 `get_or` 兜底 |
 
 ### 1.5 N-Service（DIMSE-N）
@@ -99,8 +99,8 @@
 | --- | --- | --- | --- | --- |
 | 6 个 N 请求/响应字段 | `DicomCommandField.cs` | 已实现 | `nservice.rs:18` `N_REQUEST_FIELDS` | — |
 | N-CREATE / N-EVENT-REPORT 用 Affected* | `DicomMessage.cs:74-76`、`DicomNCreateRequest.cs:45` | 已实现 | `nservice.rs:57-58` | — |
-| N-GET / N-SET / N-ACTION / N-DELETE 用 Requested* | `DicomMessage.cs:64-68`、`DicomNGetRequest.cs:45`、`DicomNSetRequest.cs:24`、`DicomNActionRequest.cs:51`、`DicomNDeleteRequest.cs:24` | **缺失** | `nservice.rs:33-34`、`nservice.rs:57-58`、`nservice.rs:124-125` | 六个服务全部只用 `affected_*`，`requested_*` 从不赋值，见 §2.11 |
-| N-GET 的 Attribute Identifier List (0000,1005) | `DicomNGetRequest.cs` + `DicomTag.AttributeIdentifierList` | **缺失** | `nservice.rs:30-38` | 结构体无该字段；`dimse.rs:34` 只定义了 tag 常量，全 crate 无使用者 |
+| N-GET / N-SET / N-ACTION / N-DELETE 用 Requested* | `DicomMessage.cs:64-68`、`DicomNGetRequest.cs:45`、`DicomNSetRequest.cs:24`、`DicomNActionRequest.cs:51`、`DicomNDeleteRequest.cs:24` | **已实现** | `nservice.rs:31` `uses_requested_uids`、`:73-84` | 请求按 field 写入 `(0000,0003)/(0000,1001)`；N-CREATE/N-EVENT-REPORT 仍用 Affected* |
+| N-GET 的 Attribute Identifier List (0000,1005) | `DicomNGetRequest.cs` + `DicomTag.AttributeIdentifierList` | **已实现** | `nservice.rs:54-56`、`dimse.rs:34` | 请求支持 AT 列表，编码/解析和标准 tag 有回归测试 |
 | N-SET 的 Modification List | PS3.7 §10.1.2 | **缺失** | — | grep 确认无实现（注意：ModificationList 实际走 Dataset，不强制） |
 | N 响应回显 Affected SOP Instance UID | `DicomNGetResponse.cs` 等 | 已实现 | `nservice.rs:110-111`、`nservice.rs:124-125` | — |
 | N 响应回显 Event/Action Type ID | `DicomNEventReportResponse.cs`、`DicomNActionResponse.cs` | 已实现 | `nservice.rs:112-113`、`nservice.rs:126-127` | — |
@@ -111,12 +111,12 @@
 | 能力 | fo-dicom 参照 | 状态 | radicom 符号（file:line） | 说明 |
 | --- | --- | --- | --- | --- |
 | TCP_NODELAY | `NetworkStreamCreationOptions` | 已实现 | `transport.rs:68` `apply_options` | 默认开启 |
-| SO_SNDBUF / SO_RCVBUF | `NetworkStreamCreationOptions.Send/ReceiveBufferSize` | **缺失（字段存在但被丢弃）** | `transport.rs:20-22`、`transport.rs:70-71` | 两个字段被 `let _ = ...` 直接丢弃，见 §2.12 |
+| SO_SNDBUF / SO_RCVBUF | `NetworkStreamCreationOptions.Send/ReceiveBufferSize` | **已实现** | `transport.rs:79-88` | 通过 `socket2::SockRef` 尝试设置，平台拒绝时保持连接可用；有 socket 级回归测试 |
 | TLS 服务端 / 客户端握手 | `Tls/DefaultTlsAcceptor.cs`、`Tls/DefaultTlsInitiator.cs` | 已实现 | `tls.rs:89` `accept` / `tls.rs:96` `connect` | 基于 tokio-rustls |
-| 显式最低协议版本 | `SslProtocols.Tls12 \| Tls13`（fo-dicom 在 `SslClientAuthenticationOptions` 显式指定） | 部分实现 | `tls.rs:54-57` | 未显式声明，靠 rustls 默认下限（当前为 TLS1.2）；见 §2.13 |
-| 双向认证（mTLS） | `DefaultTlsAcceptor.RequireMutualAuthentication` | **缺失** | `tls.rs:54` `with_no_client_auth()` | 服务端硬编码不要求客户端证书 |
+| 显式最低协议版本 | `SslProtocols.Tls12 \| Tls13`（fo-dicom 在 `SslClientAuthenticationOptions` 显式指定） | **已实现** | `tls.rs:25-39`、`:93-96` | `TlsVersion` 显式选择 TLS 1.2 或 TLS 1.3-only |
+| 双向认证（mTLS） | `DefaultTlsAcceptor.RequireMutualAuthentication` | **已实现** | `tls.rs:51-59`、`:105-121` | 配置 `client_ca_file` 后启用客户端证书校验；客户端证书/私钥也有配对校验 |
 | 证书校验开关 | `DefaultTlsInitiator.IgnoreSslPolicyErrors` | 已实现 | `tls.rs:71-79` `accept_any` | 语义等价，注释已标明 "testing only" |
-| SNI / 证书名指定 | `TargetHost` | 部分实现 | `tls.rs:84-86` `server_name` | 默认回落到字符串 `"localhost"`，见 §2.14 |
+| SNI / 证书名指定 | `TargetHost` | **已实现** | `tls.rs:146-168` | 显式 `server_name` 优先；未配置时使用已连接 peer IP，不再硬编码 `localhost` |
 | 证书格式支持 | PKCS#12 + 密码 / Windows 证书库 | 部分实现 | `tls.rs:114` `load_certs`、`tls.rs:125` `load_key` | 仅 PEM（PKCS#8 / PKCS#1）；PKCS#12 与系统证书库缺失 |
 | 三类超时（ACSE / DIMSE / Socket） | `DicomTimeout.cs` | **缺失** | `error.rs:102-105` | 只有 `AssociationRequestTimedOut` / `RequestTimedOut` 两种错误变体，无 Socket 级超时概念，无 `DicomTimeout` 三态枚举 |
 | 平台抽象层 `INetworkManager` | `NetworkManager.cs`（Listener/Stream/IsSocketException/MachineName/TryGetNetworkIdentifier） | **缺失** | `transport.rs:79`、`print_sop.rs:91` | 无统一抽象；机器标识在两处各写了一份（`transport.rs:79` 按主机名 FNV 哈希，`print_sop.rs:76` 按 MAC 拼接），语义互相矛盾 |
@@ -137,317 +137,58 @@
 
 ## 2. 正确性缺陷
 
-### 2.1 【高｜字节验证】A-ASSOCIATE-AC 的 presentation context result 字节位置错误
+### 2.1 【已修复】A-ASSOCIATE presentation context 的 wire layout
 
-**位置**：`pdu.rs:365-366`（解码）、`pdu.rs:626-629`（编码）
+`decode_presentation_context` 和 `encode_associate` 统一使用
+`ID(1) + Reserved(1) + Result/Reason(1) + Reserved(1)`。AC 的结果字节位于
+item body 偏移 2，RQ 的该字节保持为 0；`presentation_context_encoder_writes_id_reserved_result_reserved`
+和手工构造的 AC fixture 覆盖两个方向。
 
-```rust
-// pdu.rs:365-366 解码
-let id = value[0];
-let result = value[1];        // ← 应为 value[2]
+### 2.2 【已修复】Role Selection 子项（0x54）线格
 
-// pdu.rs:626-629 编码
-body.push(pc.id);
-body.push(if is_rq { 0 } else { pc.result });   // ← 结果写到了偏移 1
-body.extend_from_slice(&[0, 0]);                // ← 偏移 2/3 恒为 0
-```
+角色选择按 PS3.8 D.3.3.4 编解码为
+`SOP-class-UID-length + SOP-class-UID + SCU-role + SCP-role`。解码会校验 UID
+和角色字段不越界，`role_selection_is_uid_length_then_uid_then_roles` 同时验证
+标准输入和输出字节。
 
-**为什么错**：PS3.8 §9.3.3.2 规定 A-ASSOCIATE-AC 的 Presentation Context Item 体为 `ID(1) + Reserved(1) + Result/Reason(1) + Reserved(1)`。fo-dicom 写侧（`PDU.cs:936-939`）与读侧（`PDU.cs:1073-1076`）都是 `id, reserved, result, reserved`；radicom 把 result 放在偏移 1、把 reserved 放在偏移 2，两者互换。
+### 2.3 【已修复】SOP Class Extended Negotiation（0x56）
 
-注意编码侧有**两处**相互独立的问题，虽然长度都正确（4 字节）：
-- 位置错：`pc.result` 写到了偏移 1；
-- 偏移 2 被无条件写成 `0x00`。
+Service Class Application Information 现在是按字段号补齐的扁平字节数组，不再使用
+自定义的 field/length/value 三元组。`fields_are_flat_and_gaps_are_zero_filled`、
+`extended_negotiation_is_a_flat_field_array` 和 RQ/AC 方向测试固定了这一格式。
 
-二者叠加使"偏移 2 永远是 0"，这正是下面方向 2 后果特别严重的原因。
+### 2.4 【已修复】User Identity Negotiation（0x58）
 
-**实际后果（双向，均为高危）**：
-1. **收方向**：收到 fo-dicom / DCMTK 的 AC 时，radicom 读 `value[1]`（对端的 reserved，恒为 0）当 result，于是**所有** presentation context 都被判为 Accept（`result == 0`），包括对端明确拒绝的。`association.rs:229` `is_accepted()` 随之返回 true，引擎会在对端已拒绝的 context 上发送数据。
-2. **发方向（更严重）**：radicom 写出的 AC 中偏移 1 = result、偏移 2 = 0。**任何合规对端读偏移 2，得到的永远是 0 = Accept**。所以 radicom 打算拒绝的 context，在对端眼里全部是"已接受"——拒绝被静默降级为接受，且 radicom 侧毫无感知。
+User Identity 按 PS3.8 D.3.3.7 编解码为
+`type + positive + primary-length + primary + secondary-length + secondary`，
+并对两个 payload 长度做边界校验；`user_identity_is_type_positive_then_length_prefixed_fields`
+覆盖标准线格。
 
-**复现证据（字节验证）**：
+### 2.5 【设计限制】Max-PDU 能力被限定为 65535
 
-按 PS3.8 §9.3.3 手工构造 176 字节 AC：context 1 = ACCEPT(0)，context 3 = REJECT(3)，喂给 `pdu::decode`：
+P-DATA-TF 的长度字段本身是 32 位，但当前接收路径的实现上限仍为
+`MAX_PDU_SIZE = 65535`。`clamp_max_pdu_length` 会把 RQ/AC 通告值钳到这个上限，
+因此实现不会再向对端承诺一个自己拒绝的值；配置值 0 也会转换为 65535。
 
-```
-context id=1 result=0 accepted=true
-context id=3 result=0 accepted=true      <-- 错，标准字节在偏移 2 写的是 3
-```
-
-再用 `pdu::encode` 重新编码并 dump presentation context item 体：
-
-```
-id=1 bytes=[01, 00, 00, 00]
-id=3 bytes=[03, 00, 00, 00]     <-- 偏移 1 = result 3，偏移 2 = 0
-```
-
-对同一结构单独验证发方向（context 3，`pc.result = 3`）：
-
-```
-#1 AC ctx id=3 -> item[1]=0x03 item[2]=0x00
-   合规对端读 item[2]=0x00 作为 Result -> ACCEPT（错，本意是 REJECT 3）
-```
-
-golden fixture（176 字节，可直接做回归测试）：
-
-```
-0200000000AA0001000043414C4C45442020202020202020202043414C4C494E47202020202020202020000000000000000000000000000000000000000000000000000000000000000010000016312E322E3834302E31303030382E332E312E312E31002100001C0100000040000014312E322E3834302E31303030382E312E322E31002100001C0300030040000014312E322E3834302E31303030382E312E322E3100500000085100000400020000
-```
-
-**正确行为**：编解码统一为 `id, reserved, result, reserved`（4 字节，偏移 0/1/2/3）。RQ 方向 radicom 现状 `id,0,0,0` 恰好符合该布局，所以**一处统一的布局定义即可同时修好两个方向**，不需要分支。
-
-**为什么测试没抓到**：`pdu.rs:802` `associate_ac_carries_results_and_one_syntax` 与 `pdu.rs:884` `associate_ac_omits_abstract_syntax_and_carries_one_syntax` 都走 `round_trip()`（编码→解码），共享同一个错误假设，必然一致。没有任何测试断言 AC 的 result 在**字节偏移 2**。
+这与 fo-dicom 默认可协商的 256 KiB 以及 unlimited 语义仍有差异，属于当前有界设计
+的兼容性限制。若要完全对齐，需要把 transport、分片和内存上限一起改为按协商值工作，
+而不能只放宽单个常量。
 
 ---
 
-### 2.2 【高｜字节验证】Role Selection 子项（0x54）线格与 PS3.8 相反
+### 2.6 【已修复】`push_item` 的 u16 长度溢出
 
-**位置**：`pdu.rs:663-670`（编码）、`pdu.rs:415-423`（解码）
+**位置**：`pdu.rs:645-657`
 
-```rust
-// 编码 pdu.rs:664-669
-let mut value = Vec::with_capacity(4 + role.sop_class.len());
-value.extend_from_slice(&[0, 0]);          // 注释写 "reserved u16"，实际占的应是 UID 长度
-value.push(u8::from(role.scu_role));
-value.push(u8::from(role.scp_role));
-value.extend_from_slice(role.sop_class.as_bytes());   // UID 放到最后
-
-// 解码 pdu.rs:417-421
-sop_class: decode_string(&raw[4..]),      // 跳过前 4 字节再取 UID
-scu_role: raw[2] != 0,
-scp_role: raw[3] != 0,
-```
-
-**为什么错**：PS3.8 §9.3.2.3 / D.3.3.4 规定该子项体为 `SOP-class-UID-length(2, BE) + SOP-class-UID + SCU-role(1) + SCP-role(1)`。UID 长度在开头，角色字节在**尾部**。fo-dicom 写侧（`PDU.cs:626-631`）与读侧（`PDU.cs:1127-1130`）都是 `MarkLength16(UID-Length) + UID + SCU + SCP`。
-
-radicom 把开头 2 字节写成 `0x00 0x00`，角色紧随其后，UID 放在最后——整个子项体的字段顺序完全颠倒。
-
-**实际后果**：失败模式比"UID 长度读成 0"更隐蔽——**UID 被静默平移后仍然"解析成功"**，且角色值读自错误的字节。
-
-**复现证据（字节验证）**。按 PS3.8 D.3.3.4 构造标准子项：`uid_len(2 BE) + UID + scu(1) + scp(1)`，UID = `1.2.840.10008.5.1.4.1.1.7`，`scu=1, scp=0`，喂给 `pdu::decode`：
-
-```
-ROLE sop="2.840.10008.5.1.4.1.1.7\u{1}" scu=true scp=true
-```
-
-三点观察：
-- **UID 被平移 2 字节**：丢了开头的 `1.`，尾部多了 `\u{1}`（把 SCP 角色字节当作 UID 文本的一部分）；
-- **`scp` 读错**：我发送的是 `scp=0`，radicom 报 `scp=true`；
-- **解析"成功"**：没有报错，调用方完全无法察觉。
-
-这个平移后的 UID 不会匹配任何已注册的 SOP class，所以角色协商失败是**静默的**——`association.rs:341` 的 `can_scu` 找不到匹配，反向 C-STORE 请求直接落空。
-
-radicom 自己编码的字节（`confform` 输出，`scu=1, scp=0`）：
-
-```
-54 00 00 1E                                  item 0x54, length 30
-00 00                                        <-- PS3.8 此处应为 UID 长度 0x001A
-01 00                                        <-- 角色字节，对端会当成 UID 的前两个字节
-31 2E 32 2E ... 2E 37 00                     UID 在最后，对端按 uid_len=0 读到空串
-```
-
-即对端解析出的 UID 长度为 0、UID 为空串，角色字节取自它以为的 UID 区。
-
-**正确行为**：编码 `[uid_len_be16][uid][scu][scp]`；解码先 `u16_at(raw, 0)` 得 UID 长度 L，UID 取 `raw[2..2+L]`，SCU 取 `raw[2+L]`，SCP 取 `raw[3+L]`（子项值的偶长填充落在角色字节之后，不影响偏移）。
-
-**为什么测试没抓到**：`pdu.rs:922` `user_information_sub_items_round_trip`、`association.rs:679` `user_information_carries_identity_and_roles`、`extended.rs:400` `role_selections_survive_the_answer` 全部是自编码自解码或纯内存断言。实测自往返输出：
-
-```
-#2 self round-trip: sop="1.2.840.10008.5.1.4.1.1.7" scu=true scp=false
-```
-
-字段全对——因为编码器与解码器共享同一个错误布局。无一处校验 0x54 的字节顺序。
+`push_item` 现在使用 `u16::try_from(value.len() + pad)`，单个 A-ASSOCIATE item 超过 65535 字节会返回 `NetworkError::Protocol`，不会截断长度字段。`encode_associate` 的所有 item 调用都传播这个错误；`pdu.rs` 的超长 item 回归覆盖该边界。
 
 ---
 
-### 2.3 【高｜字节验证】SOP Class Extended Negotiation（0x56）的 application information 格式错误
-
-**位置**：`pdu.rs:671-682`（编码）、`pdu.rs:477-492` `decode_app_info`（解码）
-
-```rust
-// 编码 pdu.rs:676-680：每个字段写成 field(1) + length(2) + value
-for (field, bytes) in info {
-    value.push(*field);
-    value.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
-    value.extend_from_slice(bytes);
-}
-```
-
-**为什么错**：PS3.7 §D.3.3.5 与 fo-dicom 实现中，SOP Class Extended Negotiation 子项的 Service Class Application Information 是一段**扁平字节数组**，下标即字段号（1-based），每个字段恰好 1 字节，**没有逐字段长度前缀**。证据：`DicomServiceApplicationInfo.cs:36-45` 构造函数 `for (byte i = 1; i <= rawApplicationInfo.Length; i++) _fields.Add(i, rawApplicationInfo[i - 1])`；`GetValues()` 返回 `_fields.Values.ToArray()`（`DicomServiceApplicationInfo.cs:215`）；`PDU.cs:652` / `PDU.cs:1013` 直接 write 该数组。
-
-radicom 写的是 `(field, len, value)` 三元组流。以 Storage 的 3 个字段为例：radicom 发 12 字节，fo-dicom 只发 3 字节。对端会把 radicom 的第一个字段号当"第 1 个字段的值"、把长度高字节当"第 2 个字段的值"…… 全部错位。
-
-**实际后果**：整个扩展协商**被静默丢弃**——SOP class 还在，字段全空。
-
-**复现证据（字节验证）**。按 PS3.7 构造标准 0x56 子项：`uid_len(2) + UID + [00,01,04]`（扁平 3 字节），喂给 `pdu::decode`：
-
-```
-EXT sop="1.2.840.10008.5.1.4.1.1.7" fields=[]
-```
-
-SOP class 正确解析，但 application information 为空——因为扁平字节 `[00,01,04]` 永远无法构成一个合法的 `(field, len, value)` 三元组（解码器要求至少 3 字节且长度自洽）。
-
-radicom 自己编码的字节（`confform` 输出，字段 1/2/3 = 1/1/0）：
-
-```
-56 00 00 28                                  item 0x56, length 40
-00 19                                        uid_len = 25
-31 2E 32 2E ... 2E 37                        UID
-01 00 01 01                                  <-- 三元组：(field=1, len=1, value=1)
-02 00 01 01                                  <--           (field=2, len=1, value=1)
-03 00 01 00                                  <--           (field=3, len=1, value=0)
-```
-
-合规对端读这 12 字节为扁平数组，得到 `field1=01, field2=00, field3=01, field4=01, field5=02, ...` —— 6 个字段全是垃圾值，而真实只有 3 个字段。
-
-**正确行为**：编解码都应是扁平 `Vec<u8>`，第 i 个字节 = 字段 i 的值；写入时按字段号升序补齐空洞（fo-dicom `FillInTheGaps`，`DicomServiceApplicationInfo.cs:139`）。
-
-**为什么测试没抓到**：`pdu.rs:964` `extended_negotiation_lands_on_the_side_matching_the_pdu` 只用 `round_trip`；`extended.rs:284` `app_info_keeps_field_order_and_replaces_in_place` 甚至把"按插入序、允许变长"这个错误模型当成规格断言下来：
-
-```rust
-let info = AppInfo::new().with_field(3, vec![1]).with_field(1, vec![2]).with_field(3, vec![9]);
-assert_eq!(info.fields, vec![(3, vec![9]), (1, vec![2])], "order of first insertion, last value wins");
-```
-
-> 附带缺陷：`extended.rs:36-39` 用 `Vec<(u8, Vec<u8>)>` 保存字段，保留插入顺序且允许多字节值；fo-dicom 用 `SortedDictionary<byte, byte>` + 空洞填充。即使线格修正，内存模型仍需改为定长/有序语义。
-
----
-
-### 2.4 【高｜字节验证】User Identity Negotiation（0x58）字段顺序错误
-
-**位置**：`pdu.rs:695-705`（编码）、`pdu.rs:438-451`（解码）
-
-```rust
-// 编码 pdu.rs:697-703
-value.push(identity.identity_type);
-value.extend_from_slice(&(identity.primary.len() as u16).to_be_bytes());
-value.extend_from_slice(&(identity.secondary.len() as u16).to_be_bytes());  // ← 两个长度都放前面
-value.extend_from_slice(&identity.primary);
-value.extend_from_slice(&identity.secondary);
-value.push(u8::from(identity.positive_response_requested));                 // ← 标志放在最后
-```
-
-**为什么错**：PS3.8 §D.3.3.7 规定顺序为
-`User-identity-type(1) + Positive-response-requested(1) + Primary-field-length(2) + Primary-field + Secondary-field-length(2) + Secondary-field`。
-
-fo-dicom 读侧逐字段印证（`PDU.cs:837-842`）：`ReadByte(type)`、`ReadByte(positiveResponseRequested)`、`ReadUInt16(primaryLen)`、`ReadString(primary)`、`ReadUInt16(secondaryLen)`、`ReadString(secondary)`。fo-dicom 写侧（`PDU.cs:685-692`）顺序一致。
-
-radicom 把 `positive_response_requested` 挪到末尾，并让两个长度字段相邻。
-
-**实际后果**：**三个 payload 字段全部丢失**（不只是错位）。
-
-**复现证据（字节验证）**。按 PS3.8 D.3.3.7 构造标准子项：`type=2, positive=1, primary="USER1", secondary="PASS1"`，喂给 `pdu::decode`：
-
-```
-IDENT type=2 primary="" secondary="" pos=false
-```
-
-type 正确（它是第 1 字节，恰好没被移动），但 primary、secondary、positive 三者全空/全假——解码器按自己的（错误）顺序去读，把标准字节的 `positive` 字节当作 primary 长度高字节，随后偏移全错，`raw.get(...)` 系列调用全部落到越界范围并静默返回 `unwrap_or_default()`（空 `Vec`）。
-
-radicom 自己编码的字节（`confform` 输出，`type=2, primary="alice", secondary="secret", pos=1`）：
-
-```
-58 00 00 12                     item 0x58, length 18
-02                              type = 2
-00 05                           <-- 本应是 positive(1字节)+primary_len(2字节)，radicom 在此放 primary 长度高字节
-00 06                           <-- 本应是 primary 的首字节，radicom 在此放 secondary 长度
-61 6C 69 63 65                  "alice"（本应紧跟自己的长度字段之后）
-73 65 63 72 65 74               "secret"
-01                              <-- positive 标志，被挪到最末尾
-00                              偶长填充
-```
-
-合规对端读这段：`type=2`，`positive = 0x00`（错，本意 1），`primary_len = 0x0005`，`primary = "alice"` 恰好凑对…… 但 `secondary_len` 从 `"secret"` 区读取，长度与内容错位，最终 secondary 变成垃圾或越界。**这不是"字段错位但仍可用"，而是对端会解析出错误的口令长度**，认证必然失败且可能读越界。
-
-**正确行为**：`type(1) + positive(1) + primary_len(2) + primary + secondary_len(2) + secondary`。
-
-**为什么测试没抓到**：`pdu.rs:939` 构造 `UserIdentity` 后只做 `round_trip` 并断言各字段回读相等；`pdu.rs:1107` `user_identity_validation_rules` 只测 `validate()` 的类型/口令约束，不碰线格。自往返之所以通过，是因为编码器与解码器对"两个长度在前、标志在后"这一错误布局达成了一致。
-
----
-
-### 2.5 【高｜字节验证：通告值往返 + 强制上限矛盾】`MAX_PDU_SIZE = 65535` 硬上限使 >64 KiB 的 max-PDU 协商必然失败
-
-**位置**：`pdu.rs:10` `MAX_PDU_SIZE`、`pdu.rs:268`、`transport.rs:46-48`
-
-```rust
-pub const MAX_PDU_SIZE: u32 = 65535;
-// transport.rs:46
-if length > MAX_PDU_SIZE {
-    return Err(NetworkError::protocol("PDU length exceeds 65535"));
-}
-```
-
-**为什么错**：65535 是 **A-ASSOCIATE item length 为 u16** 带来的限制，只约束 A-ASSOCIATE 本身。P-DATA-TF 的 PDU 长度字段是 u32（PS3.8 §9.3.5），其上限由协商出的 Max-PDU-Length 决定。fo-dicom 的默认值是 262144（`DicomServiceOptions.cs:74`：`public uint MaxPDULength { get; set; } = 262144; // 256 Kb`），且 max-PDU = 0 表示不限。
-
-radicom 的 `engine.rs:30` 与 `server.rs:85` 把默认 `max_pdu_length` 设为 16384 并在 RQ 中通告该值，同时该值是可配置的 `u32`。一旦用户把它设为 131072：
-1. radicom 向对端通告 Max-PDU-Length = 131072；
-2. 对端据此合法地发送长度 131072 的 P-DATA-TF；
-3. radicom 的 `transport.rs:46` 直接以 Protocol 错误断链。
-
-即"自报能力后拒绝履行"。
-
-**复现证据（字节验证）**：通告值本身能被正确解码，这让矛盾特别容易漏掉。
-
-- 用含 `max_pdu = 131072` 的标准 AC 喂 `pdu::decode`，`max_pdu_length=131072` 正确读出（大端解析无误）；
-- 再构造一个长度 131072 的 P-DATA-TF 帧（这正是对端履行该通告时会发出的帧）：
-
-```
-#5 P-DATA-TF of 131072 bytes (advertised max_pdu honored): REJECTED
-   -> Protocol("PDU length exceeds 65535")
-```
-
-所以缺陷不在解析，而在"通告的能力"与"强制的上限"互相矛盾：值被如实转发出去，履行时却被自己的常量拒绝。
-
-**正确行为**：读侧上限应取 `min(自报的 max_pdu_length, 某个实现上限)`，而不是常量 65535；0 应解释为"不限"（fo-dicom `DicomService.cs:1813` 注释 `if the requested max pdu size is 0, then we use the configured default MaxSize`）。若确实要保留 65535 的实现上限，则必须在 RQ 里把通告值钳到 65535，使自报值与实际可接收值一致——**最低成本的临时修法是钳制通告值，这也是唯一不需要改 enforce 逻辑的选项**。
-
-**为什么测试没抓到**：`transport.rs:147` `oversized_pdu_is_a_protocol_error` 把 0x00010000 当"非法"来断言，等于把这个 bug 固化成了期望行为；`server.rs:2764` `loopback_honours_a_small_peer_max_pdu` 只测 64 字节的小值方向。没有任何测试验证"通告 131072 → 接收 131072"。`pdu.rs:1123` `max_pdu_length_is_big_endian` 只验证编码方向的大端序，不验证强制上限。
-
----
-
-### 2.6 【中】`push_item` 无 u16 长度溢出保护，超长 A-ASSOCIATE 会静默写出错误长度
-
-**位置**：`pdu.rs:585-594`
-
-```rust
-fn push_item(out: &mut Vec<u8>, item_type: u8, value: &[u8]) {
-    let pad = value.len() & 1;
-    out.push(item_type);
-    out.push(0);
-    out.extend_from_slice(&((value.len() + pad) as u16).to_be_bytes());  // ← 截断，无检查
-```
-
-**为什么错**：`value.len() + pad` 超过 65535 时 `as u16` 静默回绕，写出与真实内容不符的 item 长度，产生结构损坏的 PDU。`encode()` 的 PDU 总长同样用 `body.len() as u32`（`pdu.rs:575`），无上界检查。
-
-**可达性**：单个 item 超 64 KiB 需要极长的 UID，但 **A-ASSOCIATE 整体超 65535 很容易**——每个 presentation context 约 60–100 字节，约 700 个 context 即可越界；`ContextIdAllocator` 上限是 128 个（`association.rs:91`），加上 user information 里的 role selection / extended negotiation 子项各占几十字节，128 个 context 配角色选择时整体长度可逼近甚至超过 65535。
-
-**正确行为**：`push_item` 在 `value.len() + pad > u16::MAX` 时返回错误；`encode_associate` 在总长超限时返回 `Protocol` 错误。fo-dicom 的做法是分配 `ushort.MaxValue` 的缓冲并在越界时抛异常（`PDU.cs:536-538`）。
-
-**为什么测试没抓到**：`pdu.rs:840` `associate_item_values_are_even_length_on_the_wire` 只验证偶数长度，不验证长度正确性；无任何"超长关联"用例。
-
----
-
-### 2.7 【中】`Priority` 数值映射与默认值均不符合 PS3.7 / fo-dicom
+### 2.7 【已修复】`Priority` 数值映射与默认值
 
 **位置**：`dimse.rs:47-73`、`dimse.rs:327`
 
-```rust
-pub enum Priority { Low, #[default] High, Medium }
-Priority::Low => 0, Priority::High => 1, Priority::Medium => 2,
-// from_dataset 缺省：Priority::from_code(ds.get_or(tag::PRIORITY, 1u16))
-```
-
-**为什么错**：PS3.7 Table E.1-1 与 `DicomPriority.cs` 定义为 `Low = 0x0002, Medium = 0x0000, High = 0x0001`；DIMSE 未指定优先级时语义为 MEDIUM。
-
-radicom 的映射是 `Low=0, High=1, Medium=2`：
-- `Low` 发出 0，对端读作 MEDIUM；
-- `Medium` 发出 2，对端读作 LOW；
-- `High` 恰好正确（1），但默认值也是 High；
-- `from_dataset` 缺省取 1 → High，而规范缺省是 Medium。
-
-即三种优先级里两种映射错误，且缺省行为把"未指定"变成"最高优先级"。
-
-**正确行为**：`Low=2, Medium=0, High=1`；`#[default]` 为 `Medium`；缺省读取码 `0`。
-
-**为什么测试没抓到（且被反向固化）**：`dimse.rs:554-565` `priority_uses_the_standard_numeric_order` 断言 `Low==0 / High==1 / Medium==2`，注释还写着"the standard order is low(0) < high(1) < medium(2)"——这是一个把错误当作标准断言的 false-green 测试。
+当前实现按 PS3.7 使用 `Medium=0`、`High=1`、`Low=2`，并将缺失/未知值解析为 `Medium`。`dimse.rs` 的数值和默认值测试直接断言标准编码。
 
 ---
 
@@ -473,178 +214,52 @@ pub const REFUSED_OUT_OF_RESOURCES: u16 = 0xA700;
 
 ---
 
-### 2.9 【中】`AbortSource::Unknown = 1` 把保留值当有效来源
+### 2.9 【已修复】`AbortSource` 拒绝保留值
 
-**位置**：`error.rs:65-93`，注释见 `error.rs:70`（`/// 1 — reserved / unknown, treated as provider.`）
+`AbortSource::from_code` 现在只接受标准的 source `0`（User）和 `2`（Provider）；保留值 `1` 及其它值返回 `None`，并由解码路径报告协议错误。`error.rs` 的回归测试覆盖该边界。
 
-**为什么有问题**：PS3.8 §9.3.8 定义 A-ABORT source 为 `0 = user, 2 = provider`，`1` 是保留值。radicom 把 `1` 映射成具名变体 `Unknown` 并在 `from_code` 中接受，于是收到 source=1 的畸形 PDU 也被当作合法解析通过，而注释声称"treated as provider"在代码里并无任何对应处理（`code()` 仍回写 1）。
+### 2.10 【已修复】`ContextState::Proposed` 不再伪装成 Accept
 
-**正确行为**：`from_code(1)` 返回 `None`（走 `Protocol` 错误）或映射到明确的 `Reserved` 变体且不当成 provider；回写时不应产生 source=1。
+`ContextState::result_code` 现在返回 `Option<u8>`，`Proposed` 返回 `None`。AC wire 转换遇到未协商状态时使用拒绝码，避免把 proposed context 编码成接受；关联协商测试覆盖该行为。
 
-**测试**：`error.rs:152` `abort_codes_round_trip` 只做 `from_code(code())` 自往返，等于把"1 是合法值"固化。
+### 2.11 【已修复】N-service 请求使用 Requested* 字段
 
----
+`nservice.rs::uses_requested_uids` 按 PS3.7 §10.1 区分四个 Requested* 服务与 N-CREATE/N-EVENT-REPORT 的 Affected* 服务；N-GET 的 Attribute Identifier List 也已接入 `Command`。`nservice.rs` 现有 wire-level 测试逐项断言这些 tag。
 
-### 2.10 【中】`ContextState::Proposed` 的 `result_code()` 返回 0（Accept）
+### 2.12 【已修复】TCP socket buffer 选项实际生效
 
-**位置**：`association.rs:49-59`
+`transport::apply_options` 通过 `socket2::SockRef` 尝试设置 `SO_SNDBUF`/`SO_RCVBUF`；内核拒绝调优时保持连接可用。`socket_buffer_sizes_reach_the_socket` 读取 socket 选项验证了非默认配置确实生效。
 
-```rust
-ContextState::RejectTransferSyntaxesNotSupported => 4,
-// a proposed context never appears on the wire as an AC result
-ContextState::Proposed => 0,
-```
+### 2.13 【已修复】TLS 最低版本与 mTLS 配置
 
-**为什么有问题**：fo-dicom 显式区分 `Proposed = 255`（`DicomPresentationContext.cs`），正因为"尚未协商"与"已接受"是两种不同状态。radicom 让 `Proposed.result_code() == 0`，任何走 `result_code()` 的路径（例如拼装 AC 时误用了未协商状态的 context）都会写出"接受"，且类型系统无法区分。
+`TlsVersion` 显式选择 TLS 1.2（同时允许 TLS 1.3）或 TLS 1.3-only；服务端设置 `client_ca_file` 后使用 `WebPkiClientVerifier` 强制校验客户端证书。对应 TLS 回归覆盖版本下限、客户端证书和握手失败路径。
 
-**正确行为**：`result_code()` 对 `Proposed` 返回 `None`（改为 `Option<u8>`）或让该状态在编码路径上不可达（例如 AC 编码只接受已协商类型）。
+### 2.14 【已修复】TLS 默认证书名跟随连接目标
 
----
+`TlsOptions::connect` 在未显式设置 `server_name` 时使用已连接 socket 的 peer IP；显式名称仍优先。代码和测试不再把 `localhost` 当默认校验名。
 
-### 2.11 【中】N-GET / N-SET / N-ACTION / N-DELETE 请求发的是 Affected* 而不是 Requested*
+### 2.15 【已修复】AE title 按字节截断并保持 UTF-8 边界
 
-**位置**：`nservice.rs:33-34`（结构体无 `requested_*` 字段）、`nservice.rs:57-58`（`to_command` 只赋 affected）、`nservice.rs:124-125`（响应同样）
+`into_ae` 现在最多保留 16 个字节，并回退到最近的字符边界；`encode_ae` 再补齐到 16 字节。多字节标题回归测试验证不会产生破碎 UTF-8。
 
-**为什么错**：PS3.7 §10.1 规定这四个服务的请求命令必须携带 `(0000,0003) Requested SOP Class UID` 与 `(0000,1001) Requested SOP Instance UID`；只有 N-CREATE 与 N-EVENT-REPORT 用 `(0000,0002) Affected SOP Class UID` / `(0000,1000) Affected SOP Instance UID`。fo-dicom 的判定逻辑集中在 `DicomMessage.cs:60-95`（switch on `Type`），各请求类分别印证：`DicomNGetRequest.cs:45`、`DicomNSetRequest.cs:24`、`DicomNActionRequest.cs:51`、`DicomNDeleteRequest.cs:24` 全部读写 `RequestedSOPInstanceUID`。
+### 2.16 【已修复】响应命令不再写入 Message ID
 
-`dimse.rs:196-221` 的 `Command` 结构本来**已经有** `requested_sop_class_uid` / `requested_sop_instance_uid` 字段，`dimse.rs:242-244` 与 `dimse.rs:269-271` 也会正确编码这两个 tag——但 `NServiceRequest` 从不设置它们，只设 `affected_*`。
+`CommandField::writes_message_id` 只对请求（排除 C-CANCEL）返回 true，`Command::to_dataset` 因此仅在请求中写入 `(0000,0110)`；响应只带 Message ID Being Responded To。
 
-**实际后果**：radicom 发出的 N-GET/N-SET/N-ACTION/N-DELETE 请求在 fo-dicom 服务端会被判为缺少必需属性，返回 `0x0122`（SOP class not supported）或直接命令集解析失败；反之收到的合法 N 请求也读不到 SOP Instance UID（`from_command` 只读 `affected_*`），MPPS / Storage Commitment / UPS 等所有 DIMSE-N 服务的实例定位全部失效。
+### 2.17 【已修复】扩展协商字段越界会报告协议错误
 
-**正确行为**：`to_command` / `from_command` 按 `field` 分流——`NGetRq|NSetRq|NActionRq|NDeleteRq` 用 `requested_*`，`NCreateRq|NEventReportRq` 用 `affected_*`；响应侧统一回显 `affected_sop_instance_uid`（PS3.7 §10.1 规定响应带 Affected）。
-
-**为什么测试没抓到**：`nservice.rs:160` `a_request_command_round_trips_through_its_dataset` 用 N-ACTION 但只设 `affected_*`，然后自己读自己；`nservice.rs:195` 同理。全文件无一处按 PS3.7 表校验 tag 选择。
-
----
-
-### 2.12 【中】`apply_options` 静默丢弃 `send_buffer_size` / `receive_buffer_size`
-
-**位置**：`transport.rs:67-73`
-
-```rust
-stream.set_nodelay(options.nodelay).map_err(NetworkError::Io)?;
-// buffer sizing is advisory: platforms may refuse it, which is not fatal
-let _ = options.send_buffer_size;
-let _ = options.receive_buffer_size;
-Ok(())
-```
-
-**为什么错**：`TcpOptions` 公开声明了这两个字段（`transport.rs:20-22`），默认 `None`，但设置后完全无效——这不是"平台拒绝时忽略"，而是**从不尝试**。调用方以为调优生效，实际没有。fo-dicom 通过 `NetworkStreamCreationOptions.SendBufferSize/ReceiveBufferSize` 真正设置 socket 选项。
-
-**正确行为**：调用 `socket2` 或 tokio 的 `set_recv_buffer_size` / `set_send_buffer_size`（tokio `TcpStream` 未直接暴露时可用 `AsRawSocket` + `socket2`），失败时按注释所说降级而非报错。
-
-**为什么测试没抓到**：`transport.rs:167` `tcp_options_default_to_nodelay` 只断言默认值是 `None`——恰好让"字段被丢弃"这件事看起来正常。没有任何测试设置非 `None` 值再观察行为。
-
----
-
-### 2.13 【中】TLS 未显式声明最低协议版本，且服务端不支持 mTLS
-
-**位置**：`tls.rs:54-57`、`tls.rs:70-79`
-
-```rust
-let config = ServerConfig::builder()
-    .with_no_client_auth()          // ← 恒定，无法配置客户端证书
-    .with_single_cert(chain, key)
-```
-
-**为什么有问题**：
-1. **协议版本**：fo-dicom 在 `DefaultTlsAcceptor` / `DefaultTlsInitiator` 中都显式设定 `SslProtocols.Tls12 | SslProtocols.Tls13`。radicom 依赖 rustls 的编译期默认下限（当前版本为 TLS1.2），行为随依赖升级而变，且代码里没有可审计的声明。医疗场景通常要求"最低 TLS1.2"可被明确验证。
-2. **mTLS**：fo-dicom `DefaultTlsAcceptor.RequireMutualAuthentication`（默认 false，但可开启）。radicom 硬编码 `with_no_client_auth()`，`TlsOptions` 里也没有对应字段，**无法**启用客户端证书校验。
-
-**正确行为**：用 `ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])` 显式声明下限；为 `TlsOptions` 增加 `client_ca_file` / `require_client_auth`，非空时改用 `with_client_cert_verifier(...)`。
-
----
-
-### 2.14 【中】客户端证书名默认 `"localhost"`，与连接目标无关
-
-**位置**：`tls.rs:84-86`
-
-```rust
-pub fn server_name(&self) -> String {
-    self.server_name.clone().unwrap_or_else(|| "localhost".to_string())
-}
-```
-
-**为什么有问题**：TLS 证书校验的 SNI 与主机名必须匹配**实际连接的目标**。`TlsOptions::connect` 只接收已建立的 `TcpStream`（`tls.rs:96-105`），拿不到目标地址，于是未显式设置 `server_name` 时一律用 `"localhost"`。连接 `pacs.hospital.example` 时会用 `localhost` 去比对证书，结果：真实证书必然校验失败（可用性事故），而任何签给 `localhost` 的证书都会被接受（安全隐患）。
-
-**正确行为**：`connect` 应接收目标主机名（或 `ServerName`）参数并强制要求；确需默认值时，应从 `TcpStream::peer_addr()` 反查（仅 IP 可用时用 `ServerName::IpAddress`），而不是硬编码 `localhost`。
-
-**为什么测试没抓到**：`tls.rs:305` `server_name_defaults_to_localhost` 把这个默认值当作规格断言；`tls.rs:223` `tls_loopback_c_echo_succeeds` 恰好也是 `localhost`，两者互相印证了一个在真实部署里必然出问题的行为。
-
----
-
-### 2.15 【低】AE title 截断按 `char` 而非字节，且无字符集校验
-
-**位置**：`pdu.rs:305-317`
-
-```rust
-fn into_ae(value: impl Into<String>) -> String {
-    value.chars().take(16).collect()          // 16 个 char，可能是 48 字节
-}
-fn encode_ae(value: &str) -> [u8; 16] {
-    for (i, b) in value.as_bytes().iter().take(16).enumerate() { out[i] = *b; }  // 按字节截断
-}
-```
-
-**为什么有问题**：`into_ae` 保留 16 个**字符**，`encode_ae` 按 16 **字节**截断。非 ASCII AE title（例如中文）会得到 16 字符的字符串，写出时被截断到 16 字节，且可能在 UTF-8 字符中间切断。PS3.8 §9.3.2 规定 AE title 为 16 字节、字符集受限（不允许反斜杠、控制字符；`Associate::new` 未做任何校验）。
-
-**正确行为**：以字节为单位截断到 16，并校验字符集（可打印 ASCII 除 `\`）；超长时返回错误而非静默截断（fo-dicom 是静默 `Substring` + `PadRight`，但至少是字节等价且不跨字符集破坏）。
-
-**测试**：`pdu.rs:823` `ae_titles_are_padded_and_trimmed` 用纯 ASCII `"A-VERY-LONG-AE-TITLE"`，掩盖了 char/byte 不一致。
-
----
-
-### 2.16 【低】响应命令集仍写入 `(0000,0110) Message ID`
-
-**位置**：`dimse.rs:245`（`to_dataset` 无条件写 MESSAGE_ID）、`nservice.rs:121`
-
-```rust
-insert_us(&mut ds, tag::MESSAGE_ID, self.message_id);   // 无 Option 判断
-// nservice.rs:121
-let mut command = Command::request(self.field, 0);      // 响应以 message_id = 0 起步
-```
-
-**为什么有问题**：PS3.7 Table E.1-1 中 Message ID `(0000,0110)` 只出现在**请求**里；响应只带 Message ID Being Responded To `(0000,0120)`。fo-dicom `DicomResponse` 只设 `RequestMessageID`（`DicomResponse.cs:40`、`DicomResponse.cs:47-51`）。radicom 的响应会额外发出 `(0000,0110) = 0`。
-
-对端通常忽略该冗余字段，故定为低。但严格校验的实现可能告警。
-
-**正确行为**：`Message::message_id` 改为 `Option<u16>`，或 `to_dataset` 仅在 `field.is_request()` 时写 MESSAGE_ID。
-
----
-
-### 2.17 【低】`decode_app_info` / `decode_common_extended` 遇越界静默 `break`
-
-**位置**：`pdu.rs:485-487`、`pdu.rs:505-507`
-
-```rust
-if start + len > raw.len() { break; }     // 静默丢弃剩余内容
-```
-
-**为什么有问题**：长度越界说明对端发来畸形数据，应当报 `Protocol` 错误（与 `item_header` 的行为一致，`pdu.rs:603-605` 就返回错误）。这里静默 `break` 让解析"成功"返回部分字段，把协议违规降级成数据丢失，排查困难。
+扩展协商 UID、Common Extended 的 service/related SOP class UID，以及 User Identity
+的两个 payload 长度现在都经过边界校验；越界统一返回 `NetworkError::Protocol`，不会
+静默丢弃剩余字段。`a_common_extended_length_that_overruns_the_item_is_an_error`
+覆盖 malformed item 的回归路径。
 
 **正确行为**：与 `item_header` 对齐，返回 `NetworkError::protocol("app info field runs past the item")`。
 
 ---
 
-### 2.18 【低】`extended.rs:245-250` `apply_answer` 无条件清空 `common_extended`
+### 2.18 【已修复】扩展协商答案不再清空无关字段
 
-**位置**：`extended.rs:245-250`
-
-```rust
-pub fn apply_answer(user_information: &mut UserInformation, policy: &ExtendedNegotiationPolicy) {
-    let answered = policy.answer(&user_information.extended_negotiations);
-    user_information.extended_negotiations = answered;
-    user_information.common_extended = None;   // 无条件
-}
-```
-
-**为什么有问题**：注释说"common extended negotiation is RQ-only (PS3.7), so the AC never echoes it"。但本函数接收的是 `&mut UserInformation`，调用方无法从签名看出它**只能**用在 AC 方向。若被误用于 RQ（例如构造转发场景或复用一个 UserInformation），会静默丢掉本应发送的 0x57 子项。
-
-**正确行为**：拆成显式的 `apply_answer_to_ac(...)`，或在文档/类型上约束方向；至少不应在"应用答案"这个动作里顺手改无关字段。
-
-**测试**：`extended.rs:375` `common_extended_is_rq_only` 断言的正是这个行为，等于把它固化为规格。
-
----
+`extended::apply_answer` 现在只替换 SOP Class Extended Negotiation（0x56），保留 RQ-only 的 Common Extended Negotiation（0x57）。测试 `apply_answer_touches_only_the_extended_items` 固定了这一边界。
 
 ## 3. 性能问题
 
@@ -735,37 +350,41 @@ pub fn sub_sop_classes(meta: &str) -> Option<Vec<&'static str>> {
 
 ## 4. 测试审查
 
+本节保留首次走查时的测试缺口快照，便于追溯为什么这些问题曾经漏过；其中列出的
+A-ASSOCIATE 线格、Priority、TLS 默认名、AbortSource、N-service、buffer、AE title、
+Message ID 和 Common Extended 条目已经修复，当前实现与回归证据以 §2 和源码为准。
+
 统计：`radicom-network` 共 248 个测试通过。以下仅针对在范围内的文件，按"是否会放过真实缺陷"分类。
 
 ### 4.1 False-green：断言了错误行为
 
 | 测试 | 位置 | 问题 |
 | --- | --- | --- |
-| `priority_uses_the_standard_numeric_order` | `dimse.rs:554` | 断言 `Low==0 / High==1 / Medium==2` 并把注释写成"the standard order"，而 PS3.7/fo-dicom 是 `Low=2 / Medium=0 / High=1`。把 §2.7 的错误固化为规格。 |
-| `server_name_defaults_to_localhost` | `tls.rs:305` | 断言证书校验名默认 `"localhost"`，固化 §2.14 的可用性/安全双重问题。 |
-| `oversized_pdu_is_a_protocol_error` | `transport.rs:147` | 把"长度 0x00010000 必须报错"当期望，固化 §2.5 的 65535 硬上限。 |
-| `tcp_options_default_to_nodelay` | `transport.rs:167` | 只断言 buffer size 默认为 `None`；因 §2.12 中该字段被丢弃，任何断言都无从触发，恰好为缺陷提供了"测试通过"的掩护。 |
-| `app_info_keeps_field_order_and_replaces_in_place` | `extended.rs:284` | 断言"按插入序、末次值胜出"的 `Vec` 模型，而 fo-dicom 是 `SortedDictionary` + 空洞填充；固化 §2.3 的内存模型偏差。 |
-| `common_extended_is_rq_only` | `extended.rs:375` | 断言 `apply_answer` 无条件清空 `common_extended`，固化 §2.18 的隐式副作用。 |
-| `abort_codes_round_trip` | `error.rs:152` | 用 `from_code(code())` 自往返验证 `Unknown=1` 合法，固化 §2.9。 |
+| `priority_uses_the_standard_numeric_order`（历史） | `dimse.rs:554` | 曾断言错误的优先级顺序；当前实现和测试已改为 `Medium=0 / High=1 / Low=2`。 |
+| `server_name_defaults_to_localhost`（历史） | `tls.rs:305` | 曾把 `localhost` 固化为默认证书名；当前默认值跟随 peer IP。 |
+| `oversized_pdu_is_a_protocol_error` | `transport.rs:147` | 当前 65535 是明确的实现上限；还应配合测试通告值被 `clamp_max_pdu_length` 钳制，不能把该限制误写成 DICOM 的协议上限。 |
+| `tcp_options_default_to_nodelay`（历史） | `transport.rs:167` | 曾只检查默认值而漏测配置生效；当前 socket option 回归直接读取内核值。 |
+| `app_info_keeps_field_order_and_replaces_in_place`（历史） | `extended.rs:284` | 曾断言错误的可变长 `Vec` 模型；当前 `fields_are_flat_and_gaps_are_zero_filled` 固定扁平字段语义。 |
+| `common_extended_is_rq_only`（历史） | `extended.rs:375` | 曾断言 `apply_answer` 清空 `common_extended`；当前实现保留 RQ-only 字段。 |
+| `abort_codes_round_trip`（历史） | `error.rs:152` | 曾把保留 source 值 1 视为合法；当前解码拒绝该值。 |
 
-### 4.2 同义反复：自编码→自解码，无法发现线格错误
+### 4.2 【历史快照】同义反复：自编码→自解码，无法发现线格错误
 
-这一组是 §2.1–§2.4 四个高危缺陷能存活至今的**根本原因**：测试只验证"radicom 能读懂 radicom"，对"是否与 PS3.8 一致"零覆盖。
+这一组解释了原始 §2.1–§2.4 四个高危缺陷为什么曾经存活：测试只验证"radicom 能读懂 radicom"，对"是否与 PS3.8 一致"零覆盖。当前 `pdu.rs` 已补充标准字节断言。
 
 | 测试 | 位置 | 被掩盖的缺陷 |
 | --- | --- | --- |
-| `associate_ac_carries_results_and_one_syntax` | `pdu.rs:802` | §2.1 result 偏移（无字节级断言） |
-| `associate_ac_omits_abstract_syntax_and_carries_one_syntax` | `pdu.rs:884` | §2.1 同上 |
-| `associate_rq_round_trips` | `pdu.rs:776` | §2.2/§2.3/§2.4 全部（断言字段回读相等，不看字节） |
-| `user_information_sub_items_round_trip` | `pdu.rs:922` | §2.2 角色布局、§2.3 app info、§2.4 user identity |
-| `extended_negotiation_lands_on_the_side_matching_the_pdu` | `pdu.rs:964` | §2.3 app info 三元组格式 |
-| `user_information_carries_identity_and_roles` | `association.rs:679` | §2.2 / §2.4 |
-| `role_selections_survive_the_answer` | `extended.rs:400` | §2.2 |
-| `every_proposed_context_gets_an_answer` | `association.rs:550` | §2.1（只查状态机，不查字节） |
-| `context_state_codes_round_trip` | `association.rs:606` | §2.10 `Proposed → 0` |
-| `a_request_command_round_trips_through_its_dataset` | `nservice.rs:160` | §2.11 N-ACTION 用 Affected* |
-| `a_response_command_round_trips` | `nservice.rs:195` | §2.11 |
+| `associate_ac_carries_results_and_one_syntax` | `pdu.rs:802` | 历史：§2.1 只做自往返，现由 wire-layout fixture 补足 |
+| `associate_ac_omits_abstract_syntax_and_carries_one_syntax` | `pdu.rs:884` | 历史：§2.1 同上 |
+| `associate_rq_round_trips` | `pdu.rs:776` | 历史：§2.2/§2.3/§2.4 只断言字段回读 |
+| `user_information_sub_items_round_trip` | `pdu.rs:922` | 历史：当前已有角色、扩展协商和 identity 字节测试 |
+| `extended_negotiation_lands_on_the_side_matching_the_pdu` | `pdu.rs:964` | 历史：当前 flat application-info fixture 覆盖 |
+| `user_information_carries_identity_and_roles` | `association.rs:679` | 历史：当前由 pdu wire fixture 补充 |
+| `role_selections_survive_the_answer` | `extended.rs:400` | 历史：当前由 pdu wire fixture 补充 |
+| `every_proposed_context_gets_an_answer` | `association.rs:550` | 历史：状态机测试仍保留，字节位置另有覆盖 |
+| `context_state_codes_round_trip` | `association.rs:606` | 历史：当前 `Proposed -> None` 有专门断言 |
+| `a_request_command_round_trips_through_its_dataset` | `nservice.rs:160` | 历史：当前 N-service tag 有 wire-level 断言 |
+| `a_response_command_round_trips` | `nservice.rs:195` | 历史：当前响应 Message ID 规则有专门断言 |
 | `network_identifier_is_a_valid_uid_shape` | `transport.rs:175` | 条件断言：`network_identifier()` 返回 `None` 时测试**什么都不检查**即通过；且不覆盖 `print_sop` 那条真正推荐的路径 |
 
 ### 4.3 覆盖良好、值得保留的测试
@@ -782,22 +401,22 @@ pub fn sub_sop_classes(meta: &str) -> Option<Vec<&'static str>> {
 
 ### 4.4 缺失的覆盖（按风险排序）
 
-1. **A-ASSOCIATE 的字节级 golden test（最高优先）**：这是唯一能捕获 §2.1–§2.4 的手段，因为自往返测试对它们**原理上无效**。建议直接用 §2.1 那条 176 字节 AC fixture 作为起点，再补一条含 role selection + user identity + extended negotiation 的 RQ fixture（§2.2/§2.3/§2.4 的字节见各条）。断言点：
+1. **A-ASSOCIATE 的字节级 golden test（已补齐）**：历史上这是唯一能捕获 §2.1–§2.4 的手段，因为自往返测试对它们**原理上无效**。当前 `pdu.rs` 已补充 AC result、role selection、extended negotiation 和 user identity 的标准字节断言。
    - AC：`pc_item[2] == result`（偏移 2，不是偏移 1）；
    - role：`item[0..2]` 是 UID 长度、UID 从偏移 2 开始、两个角色字节在 `2+len` 与 `3+len`；
    - ext neg：application information 长度 == 字段数（扁平），不是三元组；
    - user identity：`item[1]` 是 positive 标志，`item[2..4]` 是 primary 长度。
-2. **max-PDU > 65535 的读路径**：构造长度 131072 的 P-DATA-TF，验证 `read_pdu` 不报错（当前 §2.5）。这条能直接锁住"通告值 vs 强制上限"的不一致。
-3. **N-Service tag 选择**：按 PS3.7 §10.1 表逐一断言四个服务用 `(0000,0003)/(0000,1001)`、两个服务用 `(0000,0002)/(0000,1000)`（当前 §2.11）。
-4. **`apply_options` 的生效验证**：设置非 `None` 的 buffer size 后确认 `SO_SNDBUF` 实际改变（当前 §2.12）。
-5. **`push_item` 超长路径**：构造单个 item > 65535 与整体 A-ASSOCIATE > 65535，断言返回错误（当前 §2.6）。
-6. **AE title 非 ASCII**：中文/多字节输入下断言恰好 16 字节且不跨字符边界（当前 §2.15）。
+2. **Max-PDU 有界策略**：验证配置值 0 和 >65535 的通告值都被 `clamp_max_pdu_length` 限制到 65535，并保持 transport 对超上限 PDU 的拒绝；若要完全对齐 fo-dicom，再单独设计协商值驱动的读侧上限。
+3. **N-Service tag 选择（已补齐）**：按 PS3.7 §10.1 表逐一断言四个服务用 `(0000,0003)/(0000,1001)`、两个服务用 `(0000,0002)/(0000,1000)`（当前 §2.11）。
+4. **`apply_options` 的生效验证（已补齐）**：设置非 `None` 的 buffer size 后确认 `SO_SNDBUF` 实际改变（当前 §2.12）。
+5. **`push_item` 超长路径（已补齐）**：构造单个 item > 65535 与整体 A-ASSOCIATE > 65535，断言返回错误（当前 §2.6）。
+6. **AE title 非 ASCII（已补齐）**：中文/多字节输入下断言恰好 16 字节且不跨字符边界（当前 §2.15）。
 7. **PDV 的 context id 合法性**：`decode_pdata` 不校验 `context_id` 为奇数且 1..=255，应加负向用例。
 8. **分片边界的精确性**：`message.rs:118` `message_splitting_puts_the_command_first` 只断言 PDU 数量与位标志，未验证每个 PDU 的总长 ≤ max_pdu（含 6 字节头）。
 
-### 4.5 一条方法论结论
+### 4.5 一条方法论结论（含历史背景）
 
-§2.1–§2.4 四类缺陷的共同特征是：**编码器与解码器共享同一个错误假设，因此自往返测试 100% 通过**。这四项目前全部是"测试全绿但协议不兼容"。
+§2.1–§2.4 四类缺陷的共同特征是：**编码器与解码器共享同一个错误假设，因此自往返测试 100% 通过**。这是原始评审结论；当前实现已用标准字节测试覆盖。
 
 由此得出的可推广结论：协议层的正确性不能由自往返测试保证，必须由**外部派生的 golden 字节**（标准条文或第三方实现的输出）保证。建议把 §4.4-1 作为协议层的准入条件——凡是新增/修改 A-ASSOCIATE 子项的改动，都必须同步更新 golden fixture。
 
@@ -805,15 +424,15 @@ pub fn sub_sop_classes(meta: &str) -> Option<Vec<&'static str>> {
 
 ## 附：建议修复顺序
 
-1. **§2.1 / §2.2 / §2.3 / §2.4** —— 四处线格错误（均已字节验证），改动都局限在 `pdu.rs` 的 encode/decode 对内，一晚可改完。配 §4.4-1 的 golden test 即可长期防回归。这是当前与任何第三方 PACS 互通的最大阻塞：**这四项不修，radicom 无法与 fo-dicom / DCMTK 建立一条功能完整的关联**。
-2. **§2.5** —— max-PDU 通告与强制上限自相矛盾。最低成本修法是钳制通告值；根治是让读侧上限取协商值。
+1. **§2.1 / §2.2 / §2.3 / §2.4** —— 原始四处线格错误已修复，后续改动必须保留标准字节回归。
+2. **§2.5** —— 当前仍是有界 Max-PDU 设计；完全对齐需要让读侧上限取协商值。
 3. **§2.11** —— N-Service 全系列不可用的根因，改动局限在 `nservice.rs`。
 4. **§2.7** —— 一行常量修正，影响所有 DIMSE 请求的优先级语义。
 5. **§2.12 / §2.13 / §2.14** —— 部署可信度与安全性。
 6. §3.1 / §3.2 —— 吞吐优化，改动局部且可独立验证。
 7. 其余中/低项按需。
 
-> 关于 §2.1–§2.5 的修复验证方式：不要用"改完自往返通过"作为完成标准——那正是当初漏掉这四个 bug 的原因。完成标准应当是 §4.4-1/§4.4-2 的 golden fixture 通过。
+> 关于 §2.1–§2.5 的修复验证方式：不要用"改完自往返通过"作为完成标准——那正是当初漏掉线格问题的原因。当前四类线格已有标准字节 fixture；Max-PDU 则按有界策略验证。
 
 ---
 
