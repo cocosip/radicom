@@ -1051,6 +1051,9 @@ impl Association {
         user.user_identity = options.user_identity.clone();
         request.user_information = user;
 
+        // the AC does not repeat the abstract syntax; keep the RQ around so we
+        // can recover it by presentation-context id (§9.3.3)
+        let requested_contexts = request.presentation_contexts.clone();
         write_pdu(&mut stream, &Pdu::AssociateRq(request)).await?;
 
         let response = tokio::time::timeout(options.association_timeout, read_pdu(&mut stream))
@@ -1064,12 +1067,26 @@ impl Association {
                 let negotiated = accept
                     .presentation_contexts
                     .iter()
-                    .map(|pc| crate::association::NegotiatedContext {
-                        id: pc.id,
-                        abstract_syntax: pc.abstract_syntax.clone(),
-                        transfer_syntax: pc.transfer_syntaxes.first().cloned().unwrap_or_default(),
-                        state: crate::association::ContextState::from_result_code(pc.result),
-                        roles: Vec::new(),
+                    .map(|pc| {
+                        // an A-ASSOCIATE-AC omits the abstract syntax (it is
+                        // implied by the presentation-context id), so recover it
+                        // from the request we just sent
+                        let abstract_syntax = if pc.abstract_syntax.is_empty() {
+                            requested_contexts
+                                .iter()
+                                .find(|rq| rq.id == pc.id)
+                                .map(|rq| rq.abstract_syntax.clone())
+                                .unwrap_or_default()
+                        } else {
+                            pc.abstract_syntax.clone()
+                        };
+                        crate::association::NegotiatedContext {
+                            id: pc.id,
+                            abstract_syntax,
+                            transfer_syntax: pc.transfer_syntaxes.first().cloned().unwrap_or_default(),
+                            state: crate::association::ContextState::from_result_code(pc.result),
+                            roles: Vec::new(),
+                        }
                     })
                     .collect();
                 // the peer's advertised maximum caps what we may send (§5.3);
@@ -1953,7 +1970,7 @@ mod tests {
 
     fn store_context() -> PresentationContext {
         PresentationContext::new(
-            1,
+            3,
             "1.2.840.10008.5.1.4.1.1.7",
             vec!["1.2.840.10008.1.2".to_string(), "1.2.840.10008.1.2.1".to_string()],
         )

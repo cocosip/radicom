@@ -1,16 +1,19 @@
 //! External-peer interop smoke tool (联调).
 //!
 //! Runs against a real DICOM peer (e.g. a fo-dicom C-STORE SCP or a Q/R SCP):
-//! a C-ECHO always, plus optional C-STORE of a file and optional C-FIND.
+//! an optional C-ECHO, plus optional C-STORE of a file and optional C-FIND.
 //!
 //! Usage:
 //!   cargo run -p radicom-network --example peer_interop -- \
 //!     --peer 127.0.0.1:11112 --calling RADICOM --called DCM4CHE \
-//!     [--store tests-data\explicit-le\GH178.dcm] \
+//!     [--no-echo] \
+//!     [--store tests-data\explicit-le\GH487.dcm] \
 //!     [--find STUDY --patient-name "Doe*" --study-uid 1.2.3]
 //!
 //! Levels for --find: PATIENT | STUDY | SERIES | IMAGE. Filters are optional.
-//! The process exits non-zero when C-ECHO or C-STORE returns a failure status.
+//! Each phase uses its own association, so a peer that rejects Verification
+//! (some C-STORE-only SCPs do) does not poison the later C-STORE / C-FIND.
+//! The process exits non-zero when a *requested* operation fails.
 
 use radicom::io::file::DicomFile;
 use radicom::model::tag::Tag;
@@ -23,6 +26,10 @@ fn arg(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
 }
 
+fn client(calling: &str, called: &str, peer: &str) -> DicomClient {
+    DicomClient::new(calling.to_string(), called.to_string(), peer.to_string())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -31,28 +38,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let called = arg(&args, "--called").unwrap_or_else(|| "ANY-SCP".into());
     println!("peer={peer} calling={calling} called={called}");
 
-    let mut client = DicomClient::new(calling.clone(), called.clone(), peer.clone());
+    let no_echo = args.iter().any(|a| a == "--no-echo");
+    let store = arg(&args, "--store").or_else(|| std::env::var("RADICOM_STORE_FILE").ok());
+    let find = arg(&args, "--find").or_else(|| std::env::var("RADICOM_FIND_LEVEL").ok());
+    let has_real_op = store.is_some() || find.is_some();
+    let mut failed = false;
 
-    // 1) C-ECHO (Verification)
-    let echo = client.send_c_echo(sop_class::VERIFICATION).await?;
-    println!("C-ECHO status=0x{:04X} {}", echo.status, ok(echo.status));
-    let mut failed = echo.status != 0;
+    // 1) C-ECHO (Verification). Not every SCP supports it, so it is only fatal
+    //    when it is the sole requested operation.
+    if !no_echo {
+        let mut echo_client = client(&calling, &called, &peer);
+        match echo_client.send_c_echo(sop_class::VERIFICATION).await {
+            Ok(echo) => {
+                println!("C-ECHO status=0x{:04X} {}", echo.status, ok(echo.status));
+                failed |= echo.status != 0;
+            }
+            Err(e) if has_real_op => println!("C-ECHO unsupported by peer (ignored): {e}"),
+            Err(e) => return Err(e.into()),
+        }
+        echo_client.release().await;
+    }
 
-    // 2) optional C-STORE
-    if let Some(path) = arg(&args, "--store").or_else(|| std::env::var("RADICOM_STORE_FILE").ok()) {
+    // 2) optional C-STORE (own association).
+    if let Some(path) = store {
         let file = DicomFile::open(&path)?;
         let sop = file
             .dataset
             .try_get_str(Tag::new(0x0008, 0x0016))
             .unwrap_or_default();
         println!("C-STORE {path} (SOP {sop})");
-        let resp = client.send_c_store(&file).await?;
+        let mut store_client = client(&calling, &called, &peer);
+        let resp = store_client.send_c_store(&file).await?;
         println!("C-STORE status=0x{:04X} {}", resp.status, ok(resp.status));
         failed |= resp.status != 0;
+        store_client.release().await;
     }
 
-    // 3) optional C-FIND
-    if let Some(level_text) = arg(&args, "--find").or_else(|| std::env::var("RADICOM_FIND_LEVEL").ok()) {
+    // 3) optional C-FIND (own association).
+    if let Some(level_text) = find {
         let level = QueryRetrieveLevel::parse(&level_text)
             .ok_or("bad --find level (PATIENT|STUDY|SERIES|IMAGE)")?;
         let mut request = CFindRequest::new(level, QueryRoot::Study, 1);
@@ -68,7 +91,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(v) = arg(&args, "--accession") {
             request = request.with_key(0x0008, 0x0050, Vr::Sh, v);
         }
-        let responses = client.send_c_find(&request).await?;
+        let mut find_client = client(&calling, &called, &peer);
+        let responses = find_client.send_c_find(&request).await?;
         let matches: Vec<_> = responses.iter().filter(|r| r.is_pending()).collect();
         println!("C-FIND level={level_text} matches={}", matches.len());
         for response in matches {
@@ -80,9 +104,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let final_status = responses.last().map(|r| r.status).unwrap_or(0xFFFF);
         println!("C-FIND final status=0x{final_status:04X}");
+        failed |= final_status != 0x0000;
+        find_client.release().await;
     }
 
-    client.release().await;
     if failed {
         std::process::exit(1);
     }

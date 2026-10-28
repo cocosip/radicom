@@ -329,18 +329,12 @@ fn decode_associate(body: &[u8], is_rq: bool) -> Result<Associate> {
     let mut presentation_contexts = Vec::new();
     let mut user_information = UserInformation::default();
 
-    while offset < body.len() {
-        let item_type = body[offset];
-        let len = u32_at(body, offset + 1)? as usize;
-        let start = offset + 5;
-        let end = start.checked_add(len).ok_or(NetworkError::protocol("item length overflow"))?;
-        if end > body.len() {
-            return Err(NetworkError::protocol("item runs past the PDU"));
-        }
+    while offset + 4 <= body.len() {
+        let (item_type, start, end) = item_header(body, offset)?;
         let value = &body[start..end];
         match item_type {
             item::APPLICATION_CONTEXT => {
-                application_context = String::from_utf8_lossy(value).to_string();
+                application_context = decode_string(value);
             }
             item::PRESENTATION_CONTEXT_RQ | item::PRESENTATION_CONTEXT_AC => {
                 presentation_contexts.push(decode_presentation_context(value)?);
@@ -374,15 +368,9 @@ fn decode_presentation_context(value: &[u8]) -> Result<PresentationContext> {
     let mut transfer_syntaxes = Vec::new();
 
     let mut offset = 4usize;
-    while offset < value.len() {
-        let item_type = value[offset];
-        let len = u32_at(value, offset + 1)? as usize;
-        let start = offset + 5;
-        let end = start.checked_add(len).ok_or(NetworkError::protocol("item length overflow"))?;
-        if end > value.len() {
-            return Err(NetworkError::protocol("presentation context item runs past its parent"));
-        }
-        let uid = String::from_utf8_lossy(&value[start..end]).to_string();
+    while offset + 4 <= value.len() {
+        let (item_type, start, end) = item_header(value, offset)?;
+        let uid = decode_string(&value[start..end]);
         match item_type {
             item::ABSTRACT_SYNTAX => abstract_syntax = uid,
             item::TRANSFER_SYNTAX => transfer_syntaxes.push(uid),
@@ -401,24 +389,20 @@ fn decode_presentation_context(value: &[u8]) -> Result<PresentationContext> {
 fn decode_user_information(value: &[u8], is_rq: bool) -> Result<UserInformation> {
     let mut out = UserInformation::default();
     let mut offset = 0usize;
-    while offset + 5 <= value.len() {
-        let item_type = value[offset];
-        let len = u32_at(value, offset + 1)? as usize;
-        let start = offset + 5;
-        let end = start.checked_add(len).ok_or(NetworkError::protocol("item length overflow"))?;
-        if end > value.len() {
-            return Err(NetworkError::protocol("user information item runs past its parent"));
-        }
+    while offset + 4 <= value.len() {
+        let (item_type, start, end) = item_header(value, offset)?;
         let raw = &value[start..end];
         match item_type {
             item::MAX_PDU_LENGTH => {
-                out.max_pdu_length = u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]);
+                if raw.len() >= 4 {
+                    out.max_pdu_length = u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]);
+                }
             }
             item::IMPLEMENTATION_CLASS_UID => {
-                out.implementation_class_uid = Some(String::from_utf8_lossy(raw).to_string());
+                out.implementation_class_uid = Some(decode_string(raw));
             }
             item::IMPLEMENTATION_VERSION_NAME => {
-                out.implementation_version_name = Some(String::from_utf8_lossy(raw).to_string());
+                out.implementation_version_name = Some(decode_string(raw));
             }
             item::ASYNC_OPERATIONS => {
                 if raw.len() >= 4 {
@@ -431,7 +415,7 @@ fn decode_user_information(value: &[u8], is_rq: bool) -> Result<UserInformation>
             item::ROLE_SELECTION => {
                 if raw.len() >= 4 {
                     out.role_selections.push(RoleSelection {
-                        sop_class: String::from_utf8_lossy(&raw[4..]).to_string(),
+                        sop_class: decode_string(&raw[4..]),
                         scu_role: raw[2] != 0,
                         scp_role: raw[3] != 0,
                     });
@@ -528,12 +512,13 @@ fn decode_common_extended(raw: &[u8]) -> Result<CommonExtended> {
 }
 
 fn decode_associate_rj(body: &[u8]) -> Result<AssociateRj> {
-    if body.len() < 3 {
+    // reserved(1) result(1) source(1) reason(1)
+    if body.len() < 4 {
         return Err(NetworkError::protocol("A-ASSOCIATE-RJ body is truncated"));
     }
-    let result = RejectResult::from_code(body[0]).ok_or(NetworkError::protocol("unknown reject result"))?;
-    let source = RejectSource::from_code(body[1]).ok_or(NetworkError::protocol("unknown reject source"))?;
-    Ok(AssociateRj { result, source, reason: body[2] })
+    let result = RejectResult::from_code(body[1]).ok_or(NetworkError::protocol("unknown reject result"))?;
+    let source = RejectSource::from_code(body[2]).ok_or(NetworkError::protocol("unknown reject source"))?;
+    Ok(AssociateRj { result, source, reason: body[3] })
 }
 
 fn decode_pdata(body: &[u8]) -> Result<PData> {
@@ -579,7 +564,7 @@ pub fn encode(pdu: &Pdu) -> Vec<u8> {
     let body = match pdu {
         Pdu::AssociateRq(a) => encode_associate(a, true),
         Pdu::AssociateAc(a) => encode_associate(a, false),
-        Pdu::AssociateRj(rj) => vec![rj.result.code(), rj.source.code(), rj.reason],
+        Pdu::AssociateRj(rj) => vec![0, rj.result.code(), rj.source.code(), rj.reason],
         Pdu::PData(p) => encode_pdata(p),
         Pdu::ReleaseRq | Pdu::ReleaseRp => vec![0, 0, 0, 0],
         Pdu::Abort(a) => vec![0, 0, a.source.code(), a.reason],
@@ -592,11 +577,39 @@ pub fn encode(pdu: &Pdu) -> Vec<u8> {
     out
 }
 
-/// `type(1) length(4) value`, the item framing used inside A-ASSOCIATE.
+/// `type(1) reserved(1) length(2) value`, the item framing used inside A-ASSOCIATE
+/// (PS3.8 §9.3.2: items carry a 16-bit Item-length, unlike P-DATA PDVs whose
+/// length is 32-bit). Every item value must have even length; an odd value is
+/// padded with a single trailing 0x00 — strict peers (fo-dicom, DCMTK, ...)
+/// reject an A-ASSOCIATE whose item header or value length is wrong.
 fn push_item(out: &mut Vec<u8>, item_type: u8, value: &[u8]) {
+    let pad = value.len() & 1;
     out.push(item_type);
-    out.extend_from_slice(&(value.len() as u32).to_be_bytes());
+    out.push(0); // reserved
+    out.extend_from_slice(&((value.len() + pad) as u16).to_be_bytes());
     out.extend_from_slice(value);
+    if pad == 1 {
+        out.push(0x00);
+    }
+}
+
+/// Reads a DICOM UL item header at `at`: type(1) reserved(1) length(2).
+/// Returns `(item_type, value_start, value_end)`.
+fn item_header(buf: &[u8], at: usize) -> Result<(u8, usize, usize)> {
+    let hdr = buf.get(at..at + 4).ok_or(NetworkError::protocol("truncated item header"))?;
+    let len = u16::from_be_bytes([hdr[2], hdr[3]]) as usize;
+    let start = at + 4;
+    let end = start.checked_add(len).ok_or(NetworkError::protocol("item length overflow"))?;
+    if end > buf.len() {
+        return Err(NetworkError::protocol("item runs past its parent"));
+    }
+    Ok((hdr[0], start, end))
+}
+
+/// Decodes a UID / string item value, trimming the even-length pad a peer may
+/// have appended (a single trailing 0x00, or spaces some senders use).
+fn decode_string(raw: &[u8]) -> String {
+    String::from_utf8_lossy(raw).trim_end_matches(['\0', ' ']).to_string()
 }
 
 fn encode_associate(a: &Associate, is_rq: bool) -> Vec<u8> {
@@ -614,8 +627,14 @@ fn encode_associate(a: &Associate, is_rq: bool) -> Vec<u8> {
         body.push(pc.id);
         body.push(if is_rq { 0 } else { pc.result });
         body.extend_from_slice(&[0, 0]);
-        push_item(&mut body, item::ABSTRACT_SYNTAX, pc.abstract_syntax.as_bytes());
-        for syntax in &pc.transfer_syntaxes {
+        if is_rq {
+            push_item(&mut body, item::ABSTRACT_SYNTAX, pc.abstract_syntax.as_bytes());
+            for syntax in &pc.transfer_syntaxes {
+                push_item(&mut body, item::TRANSFER_SYNTAX, syntax.as_bytes());
+            }
+        } else if let Some(syntax) = pc.transfer_syntaxes.first() {
+            // an A-ASSOCIATE-AC carries exactly one accepted transfer syntax and
+            // never repeats the abstract syntax (§9.3.3)
             push_item(&mut body, item::TRANSFER_SYNTAX, syntax.as_bytes());
         }
         push_item(
@@ -818,6 +837,88 @@ mod tests {
     }
 
     #[test]
+    fn associate_item_values_are_even_length_on_the_wire() {
+        // Odd-length UIDs (application context 21 bytes, Verification abstract
+        // syntax 17, Explicit-VR-LE transfer syntax 19) must be padded to even
+        // length everywhere (PS3.8 §9.3). Strict peers (fo-dicom/DCMTK) reject
+        // an A-ASSOCIATE whose item values are odd.
+        fn assert_items_even(buf: &[u8], depth: usize) {
+            let mut offset = 0usize;
+            while offset + 4 <= buf.len() {
+                let item_type = buf[offset];
+                let len = u16::from_be_bytes([buf[offset + 2], buf[offset + 3]]) as usize;
+                assert_eq!(len % 2, 0, "item 0x{item_type:02X} at depth {depth} has odd value length {len}");
+                let val = &buf[offset + 4..offset + 4 + len];
+                match item_type {
+                    item::PRESENTATION_CONTEXT_RQ | item::PRESENTATION_CONTEXT_AC => assert_items_even(&val[4..], depth + 1),
+                    item::USER_INFORMATION => assert_items_even(val, depth + 1),
+                    _ => {}
+                }
+                offset += 4 + len;
+            }
+            // any remaining bytes must be even-length padding zeros
+            assert!(buf[offset..].iter().all(|&b| b == 0), "non-pad trailing bytes at depth {depth}");
+        }
+
+        let mut assoc = Associate::new("NETGATE", "NETPUSH"); // both 7 chars (odd)
+        assoc.presentation_contexts.push(PresentationContext::new(
+            1,
+            "1.2.840.10008.1.1",
+            vec!["1.2.840.10008.1.2.1".to_string()],
+        ));
+        let bytes = encode(&Pdu::AssociateRq(assoc));
+        assert_items_even(&bytes[6 + 68..], 0); // skip the 6-byte PDU header + 68-byte fixed part
+
+        // decode round-trips the padded UIDs without a trailing NUL
+        match decode(&bytes).unwrap() {
+            Pdu::AssociateRq(back) => {
+                assert_eq!(back.application_context, APPLICATION_CONTEXT);
+                assert_eq!(back.presentation_contexts[0].abstract_syntax, "1.2.840.10008.1.1");
+                assert_eq!(back.presentation_contexts[0].transfer_syntaxes[0], "1.2.840.10008.1.2.1");
+            }
+            other => panic!("expected AssociateRq, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn associate_ac_omits_abstract_syntax_and_carries_one_syntax() {
+        let mut ac = Associate::new("SCU", "SCP");
+        let mut pc = PresentationContext::new(
+            1,
+            "1.2.840.10008.5.1.4.1.1.7",
+            vec!["1.2.840.10008.1.2".into(), "1.2.840.10008.1.2.1".into()],
+        );
+        pc.result = 0;
+        ac.presentation_contexts.push(pc);
+        let bytes = encode(&Pdu::AssociateAc(ac));
+        // §9.3.3: an AC context answers with the result and exactly one accepted
+        // transfer syntax; it never repeats the abstract syntax.
+        match decode(&bytes).unwrap() {
+            Pdu::AssociateAc(back) => {
+                let p = &back.presentation_contexts[0];
+                assert_eq!(p.id, 1);
+                assert_eq!(p.result, 0);
+                assert!(p.abstract_syntax.is_empty(), "AC omits the abstract syntax");
+                assert_eq!(p.transfer_syntaxes, vec!["1.2.840.10008.1.2".to_string()]);
+            }
+            other => panic!("expected AssociateAc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn associate_rj_body_is_reserved_result_source_reason() {
+        let rj = AssociateRj {
+            result: crate::error::RejectResult::Permanent,
+            source: crate::error::RejectSource::User,
+            reason: 3,
+        };
+        let bytes = encode(&Pdu::AssociateRj(rj.clone()));
+        // header(6) + reserved(00) result(01) source(01) reason(03)
+        assert_eq!(&bytes[6..10], &[0x00, 0x01, 0x01, 0x03]);
+        assert!(matches!(decode(&bytes).unwrap(), Pdu::AssociateRj(back) if back == rj));
+    }
+
+    #[test]
     fn user_information_sub_items_round_trip() {
         let mut assoc = Associate::new("SCP", "SCU");
         assoc.user_information.async_operations = Some(AsyncOperations { invoked: 4, performed: 2 });
@@ -937,29 +1038,25 @@ mod tests {
         let mut assoc = Associate::new("SCP", "SCU");
         assoc.presentation_contexts.push(PresentationContext::new(1, "1.2.840.10008.1.1", vec!["1.2.840.10008.1.2".into()]));
         let mut bytes = encode(&Pdu::AssociateRq(assoc));
-        // insert the unknown item just before the user information item
-        let ui_marker = {
-            let mut found = None;
-            for i in 68..bytes.len() {
-                if bytes[i] == 0x50 && bytes.get(i + 1..i + 5) == Some(&[0, 0, 0, 0]) {
-                    found = Some(i);
-                    break;
-                }
+        // locate the user-information item (type 0x50) by walking top-level
+        // items — each header is type(1) reserved(1) length(2) — from the end of
+        // the 6-byte PDU header + 68-byte fixed part.
+        let mut insert_at = None;
+        let mut offset = 6 + 68;
+        while offset + 4 <= bytes.len() {
+            let t = bytes[offset];
+            let len = u16::from_be_bytes([bytes[offset + 2], bytes[offset + 3]]) as usize;
+            if t == 0x50 {
+                insert_at = Some(offset);
+                break;
             }
-            // fall back to a linear scan on the length field
-            found.or_else(|| {
-                (68..bytes.len()).find(|&i| {
-                    bytes[i] == 0x50 && {
-                        let len = u32::from_be_bytes([bytes[i + 1], bytes[i + 2], bytes[i + 3], bytes[i + 4]]);
-                        len > 0
-                    }
-                })
-            })
-        };
-        let insert_at = ui_marker.expect("user information item present");
-        let mut unknown = vec![0x99];
-        unknown.extend_from_slice(&5u32.to_be_bytes());
-        unknown.extend_from_slice(b"junk!");
+            offset += 4 + len;
+        }
+        let insert_at = insert_at.expect("user information item present");
+        // unknown item: type 0x99, reserved 0, 16-bit length of an even value
+        let mut unknown = vec![0x99, 0x00];
+        unknown.extend_from_slice(&6u16.to_be_bytes());
+        unknown.extend_from_slice(b"junk!!");
         bytes.splice(insert_at..insert_at, unknown);
         // fix the PDU length
         let new_len = (bytes.len() - 6) as u32;
@@ -1028,9 +1125,10 @@ mod tests {
         assoc.user_information.max_pdu_length = 0x0001_0203;
         let bytes = encode(&Pdu::AssociateRq(assoc));
         let mut found = false;
-        for i in 0..bytes.len().saturating_sub(5) {
-            if bytes[i] == 0x51 && bytes.get(i + 1..i + 5) == Some(&[0, 0, 0, 4]) {
-                assert_eq!(&bytes[i + 5..i + 9], &[0x00, 0x01, 0x02, 0x03]);
+        for i in 0..bytes.len().saturating_sub(7) {
+            // item header is type(1) reserved(1) length(2); max-PDU item is 0x51 length 4
+            if bytes[i] == 0x51 && bytes[i + 1] == 0 && bytes[i + 2..i + 4] == [0x00, 0x04] {
+                assert_eq!(&bytes[i + 4..i + 8], &[0x00, 0x01, 0x02, 0x03]);
                 found = true;
                 break;
             }
