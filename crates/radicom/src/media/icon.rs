@@ -63,12 +63,28 @@ fn build_icon(dataset: &mut Dataset) -> Result<Option<Dataset>, Error> {
     let raw = frame.data();
     let raw: &[u8] = raw.as_ref();
 
-    // decode samples to 16-bit values (still in the source range)
+    // normalise high-bit padding so a 12-bit-in-16 source is not read at 16x
+    // magnitude (same rule as the render path; a small local copy because `render`
+    // is an optional feature and `media` is always compiled)
+    let high_bit = pixel.high_bit();
+    let stored = match pixel.bits_stored() {
+        0 => bits,
+        s => s.min(bits),
+    };
+    let normalise = |v: u16| -> u16 {
+        if stored == 0 || stored > bits || high_bit >= bits {
+            return v;
+        }
+        let up = bits - high_bit - 1;
+        let down = bits - stored;
+        v.checked_shl(up as u32).unwrap_or(0).wrapping_shr(down as u32)
+    };
+    // decode samples to 16-bit values in the low `stored` bits
     let samples: Vec<u16> = if bits == 8 {
-        raw.iter().map(|b| *b as u16).collect()
+        raw.iter().map(|&b| normalise(b as u16)).collect()
     } else {
         raw.chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .map(|c| normalise(u16::from_le_bytes([c[0], c[1]])))
             .collect()
     };
     let expected = (width as usize) * (height as usize);
@@ -77,7 +93,10 @@ fn build_icon(dataset: &mut Dataset) -> Result<Option<Dataset>, Error> {
     }
 
     let (icon_w, icon_h) = icon_dimensions(width, height);
-    let icon_pixels = downsample(&samples, width, height, icon_w, icon_h);
+    // scale the full stored range (max 255 for 8-bit, 65535 for 16-bit) to 8-bit;
+    // clamping (the old behaviour) left every 16-bit source above 255 pure white.
+    let scale = 255.0 / ((1u32 << stored) - 1).max(1) as f64;
+    let icon_pixels = downsample(&samples, width, height, icon_w, icon_h, scale);
 
     Ok(Some(icon_dataset(width, height, icon_w, icon_h, bits, &icon_pixels)))
 }
@@ -105,7 +124,7 @@ fn icon_dimensions(width: u32, height: u32) -> (u32, u32) {
 }
 
 /// Box-averages the source into the target size (§3.4, a simple downscale).
-fn downsample(samples: &[u16], width: u32, height: u32, target_w: u32, target_h: u32) -> Vec<u8> {
+fn downsample(samples: &[u16], width: u32, height: u32, target_w: u32, target_h: u32, scale: f64) -> Vec<u8> {
     let mut out = Vec::with_capacity((target_w * target_h) as usize);
     for ty in 0..target_h {
         let y0 = (ty as u64 * height as u64 / target_h as u64) as u32;
@@ -121,10 +140,9 @@ fn downsample(samples: &[u16], width: u32, height: u32, target_w: u32, target_h:
                     count += 1;
                 }
             }
-            let average = (sum / count.max(1)) as u32;
-            // the source range may exceed 8 bits; clamp into 0..=255 keeps the
-            // 8-bit icon valid without a window (a modest, documented limit)
-            out.push(average.min(255) as u8);
+            let average = sum as f64 / count.max(1) as f64;
+            // scale the stored value range to 8-bit (16-bit sources must not clip)
+            out.push((average * scale).round().clamp(0.0, 255.0) as u8);
         }
     }
     out
@@ -235,9 +253,21 @@ mod tests {
         let mut ds = source(16, 16, 1, 16, |_, _| 1000);
         let icon = BasicIconGenerator.generate(&mut ds).unwrap().unwrap();
         assert_eq!(icon.try_get_str(Tag::new(0x0028, 0x0100)).as_deref(), Some("8"));
-        // the pixel data length equals the icon size
         let element = icon.get_element(Tag::new(0x7FE0, 0x0010)).unwrap();
         assert_eq!(element.value().as_buffer().unwrap().size(), 16 * 16);
+        // 1000 of 65535 scales to ~4, NOT clipped to 255 (the old white-icon bug)
+        let bytes = element.value().as_buffer().unwrap().data();
+        assert_eq!(bytes[0], 4, "16-bit value scales to 8-bit, not clipped white");
+    }
+
+    #[test]
+    fn a_twelve_bit_in_sixteen_source_is_normalised_not_clipped() {
+        // 16-bit storage, 12 significant bits left-aligned: stored 0x8000 == 2048.
+        let mut ds = source(8, 8, 1, 16, |_, _| 0x8000);
+        ds.insert_value(Tag::new(0x0028, 0x0101), 12u16); // BitsStored; HighBit stays 15
+        let icon = BasicIconGenerator.generate(&mut ds).unwrap().unwrap();
+        let bytes = icon.get_element(Tag::new(0x7FE0, 0x0010)).unwrap().value().as_buffer().unwrap().data();
+        assert_eq!(bytes[0], 128, "2048 of 4095 → ~128, not clipped");
     }
 
     #[test]
