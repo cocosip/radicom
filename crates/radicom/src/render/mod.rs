@@ -1309,11 +1309,13 @@ fn render_ybr_frame(
     let raw: &[u8] = raw.as_ref();
 
     // Read a sample at byte level, honouring 8/16-bit little-endian storage.
-    let read = |byte_index: usize| -> u16 {
+    // 16-bit samples are scaled down to the 8-bit 0–255 range the YCbCr→RGB
+    // matrix works in (PS3.3 defines YBR sample values in 0–255).
+    let read = |byte_index: usize| -> f64 {
         if bits == 8 {
-            raw[byte_index] as u16
+            raw[byte_index] as f64
         } else {
-            u16::from_le_bytes([raw[byte_index], raw[byte_index + 1]])
+            (u16::from_le_bytes([raw[byte_index], raw[byte_index + 1]]) >> 8) as f64
         }
     };
     let unit = if bits == 8 { 1usize } else { 2usize };
@@ -1353,9 +1355,9 @@ fn render_ybr_frame(
             for col in 0..width as usize {
                 let group = col / 2;
                 let base = row_start + group * 4 * unit;
-                let y = read(base + (col % 2) * unit) as f64;
-                let cb = read(base + 2 * unit) as f64;
-                let cr = read(base + 3 * unit) as f64;
+                let y = read(base + (col % 2) * unit);
+                let cb = read(base + 2 * unit);
+                let cr = read(base + 3 * unit);
                 let (r, g, b) = to_rgb(y, cb, cr);
                 bytes.extend_from_slice(&[b, g, r, 0xFF]);
             }
@@ -1367,9 +1369,9 @@ fn render_ybr_frame(
         }
         for i in 0..count {
             let base = i * 3 * unit;
-            let y = read(base) as f64;
-            let cb = read(base + unit) as f64;
-            let cr = read(base + 2 * unit) as f64;
+            let y = read(base);
+            let cb = read(base + unit);
+            let cr = read(base + 2 * unit);
             let (r, g, b) = to_rgb(y, cb, cr);
             bytes.extend_from_slice(&[b, g, r, 0xFF]);
         }
@@ -1986,6 +1988,19 @@ mod tests {
         ds.insert_value(Tag::new(0x0028, 0x0102), 11u16); // HighBit
         let img = render_frame(&ds, 0).unwrap();
         assert_eq!(&img.as_bytes()[0..4], &[255, 255, 255, 255], "low-aligned 12-bit RGB → white");
+    }
+
+    #[test]
+    fn sixteen_bit_ybr_full_is_scaled_to_the_eight_bit_range() {
+        // y=cb=cr=128<<8 as 16-bit samples must decode to neutral ~grey (128); a
+        // missing 16→8 scale treats them as 0..65535 magnitudes and clamps to magenta.
+        let ds = color_image("YBR_FULL", 3, 16, &[128 << 8, 128 << 8, 128 << 8], 0);
+        let img = render_frame(&ds, 0).unwrap();
+        let px = &img.as_bytes()[0..4];
+        assert!(
+            px[0].abs_diff(128) <= 1 && px[1].abs_diff(128) <= 1 && px[2].abs_diff(128) <= 1,
+            "16-bit neutral YBR → ~grey: {px:?}"
+        );
     }
 
     fn us_bytes(values: &[u16]) -> crate::model::buffer::SharedBuffer {
