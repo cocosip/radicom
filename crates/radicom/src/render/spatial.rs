@@ -46,9 +46,10 @@ impl SpatialTransform {
         self.scale != 1.0 || self.rotation != 0 || self.pan != Point2::ORIGIN
     }
 
-    /// Rotate + flip a [`RawImage`] into a new image (fo-dicom `Rotate` then
-    /// `Flip`). Scale and pan are not pixel-geometric here and are left to the
-    /// caller; only rotation-by-90° and flips reshape the buffer.
+    /// Rotate, flip and pan a [`RawImage`] into a new image (fo-dicom `Rotate`
+    /// then `Flip`, then pan). Scale is not pixel-geometric here and is left to
+    /// the caller; rotation-by-90°, flips and integer pan reshape/translate the
+    /// buffer (exposed pan areas are filled black).
     pub fn apply_to(&self, image: &RawImage) -> RawImage {
         let (width, height) = (image.width(), image.height());
         let mut pixels = pad_rgb(image);
@@ -79,6 +80,23 @@ impl SpatialTransform {
         }
         if self.flip_y {
             pixels = flip_vertical(&pixels, width, height);
+        }
+
+        // then pan: integer pixel translation, exposed area filled black
+        let dx = self.pan.x.round() as i32;
+        let dy = self.pan.y.round() as i32;
+        if dx != 0 || dy != 0 {
+            let (w, h) = (width as i32, height as i32);
+            let mut moved = vec![0u32; pixels.len()];
+            for y in 0..h {
+                for x in 0..w {
+                    let (sx, sy) = (x - dx, y - dy);
+                    if sx >= 0 && sx < w && sy >= 0 && sy < h {
+                        moved[(y * w + x) as usize] = pixels[(sy * w + sx) as usize];
+                    }
+                }
+            }
+            pixels = moved;
         }
 
         to_raw_image(&pixels, width, height)
@@ -277,5 +295,27 @@ mod tests {
         // a flip alone is not counted (matching fo-dicom)
         t.flip_x = true;
         assert!(!t.is_transformed());
+    }
+
+    #[test]
+    fn pan_translates_right_and_fills_exposed_area_black() {
+        let img = image(2, 1, &[red(), green()]);
+        let mut t = SpatialTransform::new();
+        t.pan = Point2 { x: 1.0, y: 0.0 };
+        assert!(t.is_transformed());
+        let out = t.apply_to(&img);
+        assert_eq!((out.width(), out.height()), (2, 1), "pan preserves dimensions");
+        assert_eq!(pixel(&out, 0, 0), 0, "left edge exposed → black");
+        assert_eq!(pixel(&out, 1, 0), red(), "content shifted right");
+    }
+
+    #[test]
+    fn pan_down_shifts_rows() {
+        let img = image(1, 2, &[red(), green()]);
+        let mut t = SpatialTransform::new();
+        t.pan = Point2 { x: 0.0, y: 1.0 };
+        let out = t.apply_to(&img);
+        assert_eq!(pixel(&out, 0, 0), 0, "top row exposed → black");
+        assert_eq!(pixel(&out, 0, 1), red(), "content shifted down");
     }
 }
