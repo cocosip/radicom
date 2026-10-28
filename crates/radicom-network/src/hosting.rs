@@ -59,6 +59,7 @@ impl HostedServerConfig {
     /// The `ServerOptions` this config maps onto.
     fn server_options(&self) -> ServerOptions {
         ServerOptions {
+            called_ae_title: Some(self.ae_title.clone()),
             max_clients: self.max_clients,
             store_sink: match &self.store_sink {
                 Some(dir) => StoreSink::SpoolToDir(dir.clone()),
@@ -204,6 +205,9 @@ impl<P: ServiceProvider + 'static> Drop for HostedDicomServer<P> {
 mod tests {
     use super::*;
     use crate::association::sop_class;
+    use crate::error::NetworkError;
+    use crate::pdu::PresentationContext;
+    use crate::server::{Association, ClientOptions};
     use crate::services::{CEchoRequest, CEchoResponse};
 
     struct EchoOnly;
@@ -255,6 +259,25 @@ mod tests {
         let server = HostedDicomServer::new(config, EchoOnly);
         assert!(server.start().await.is_err(), "over-long AE title is rejected");
         assert!(!server.health().listening);
+    }
+
+    #[tokio::test]
+    async fn a_called_ae_title_that_does_not_match_is_rejected() {
+        let server = HostedDicomServer::new(HostedServerConfig::default(), EchoOnly);
+        server.start().await.unwrap();
+        let bound = server.local_addr().unwrap();
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], bound.port()));
+        let result = Association::open(
+            addr,
+            "SCU",
+            "OTHER-SCP",
+            vec![PresentationContext::new(1, sop_class::VERIFICATION, vec!["1.2.840.10008.1.2".into()])],
+            ClientOptions::default(),
+        )
+        .await;
+
+        assert!(matches!(result, Err(NetworkError::Reject { .. })), "unexpected association result: {result:?}");
+        server.stop().await.unwrap();
     }
 
     #[tokio::test]

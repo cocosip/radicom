@@ -29,6 +29,8 @@ pub const IMPLEMENTATION_VERSION_NAME: &str = "RADICOM_0_1";
 /// Server options (§8).
 #[derive(Debug, Clone)]
 pub struct ServerOptions {
+    /// Called AE title accepted by the SCP; `None` accepts any title.
+    pub called_ae_title: Option<String>,
     /// 0 = unlimited.
     pub max_clients: usize,
     /// Peer maximum PDU length advertised in the association accept.
@@ -83,6 +85,7 @@ impl UserIdentityPolicy {
 impl Default for ServerOptions {
     fn default() -> Self {
         ServerOptions {
+            called_ae_title: None,
             max_clients: 0,
             max_pdu_length: 16384,
             association_timeout: Duration::from_secs(10),
@@ -210,6 +213,14 @@ where
             return Err(NetworkError::AssociationRequestTimedOut { attempts: 1 });
         }
     };
+
+    if let Some(expected) = options.called_ae_title.as_deref() {
+        if request.called_ae != expected {
+            let reject = AssociateRj { result: RejectResult::Permanent, source: RejectSource::User, reason: 7 };
+            write_pdu(&mut stream, &Pdu::AssociateRj(reject)).await?;
+            return Ok(());
+        }
+    }
 
     let policy = NegotiationPolicy::new(provider.supported_sop_classes());
     let mut negotiated = policy.negotiate(&request.presentation_contexts);
