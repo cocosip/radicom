@@ -39,6 +39,16 @@ pub mod tags {
     pub const CONCEPT_CODE_SEQUENCE: Tag = Tag::new(0x0040, 0xA168);
     /// (0040,A300) MeasuredValueSequence.
     pub const MEASURED_VALUE_SEQUENCE: Tag = Tag::new(0x0040, 0xA300);
+    /// (0040,A30A) NumericValue (DS), inside a MeasuredValueSequence item.
+    pub const NUMERIC_VALUE: Tag = Tag::new(0x0040, 0xA30A);
+    /// (0040,08EA) MeasurementUnitsCodeSequence.
+    pub const MEASUREMENT_UNITS_CODE_SEQUENCE: Tag = Tag::new(0x0040, 0x08EA);
+    /// (0008,1199) ReferencedSOPSequence.
+    pub const REFERENCED_SOP_SEQUENCE: Tag = Tag::new(0x0008, 0x1199);
+    /// (0008,1150) ReferencedSOPClassUID.
+    pub const REFERENCED_SOP_CLASS_UID: Tag = Tag::new(0x0008, 0x1150);
+    /// (0008,1155) ReferencedSOPInstanceUID.
+    pub const REFERENCED_SOP_INSTANCE_UID: Tag = Tag::new(0x0008, 0x1155);
     /// (0040,A730) also the sequence a container's children live in.
     pub const CONTINUITY_OF_CONTENT: Tag = Tag::new(0x0040, 0xA050);
 }
@@ -145,6 +155,75 @@ impl Relationship {
     }
 }
 
+/// A NUM measured value: a numeric value plus its measurement units (§4.2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeasuredValue {
+    pub value: f64,
+    pub units: CodeItem,
+}
+
+impl MeasuredValue {
+    pub fn new(value: f64, units: CodeItem) -> Self {
+        MeasuredValue { value, units }
+    }
+
+    /// Writes NumericValue (DS) and MeasurementUnitsCodeSequence into `dataset`
+    /// (the item of a MeasuredValueSequence).
+    pub fn write_into(&self, dataset: &mut Dataset) {
+        dataset.insert_str(tags::NUMERIC_VALUE, Vr::Ds, format!("{}", self.value));
+        let mut units = Dataset::new();
+        self.units.write_into(&mut units);
+        dataset.insert_sequence(tags::MEASUREMENT_UNITS_CODE_SEQUENCE).push(units);
+    }
+
+    /// Reads a measured value from a MeasuredValueSequence item (§4.2).
+    pub fn read_from(dataset: &Dataset) -> Result<Self, Error> {
+        let text = dataset
+            .try_get_str(tags::NUMERIC_VALUE)
+            .ok_or_else(|| Error::Data(DataError::Other { message: "measured value lacks NumericValue".into() }))?;
+        let value = text.trim().parse::<f64>().map_err(|_| {
+            Error::Data(DataError::Other { message: format!("numeric value `{text}` is not a number") })
+        })?;
+        let units = dataset
+            .try_get_sequence(tags::MEASUREMENT_UNITS_CODE_SEQUENCE)
+            .and_then(|sequence| sequence.items().first())
+            .and_then(|item| CodeItem::read_from(item).ok())
+            .ok_or_else(|| Error::Data(DataError::Other { message: "measured value lacks units".into() }))?;
+        Ok(MeasuredValue { value, units })
+    }
+}
+
+/// A reference to a SOP instance (COMPOSITE / IMAGE content items, §4.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferencedSop {
+    pub class_uid: String,
+    pub instance_uid: String,
+}
+
+impl ReferencedSop {
+    pub fn new(class_uid: impl Into<String>, instance_uid: impl Into<String>) -> Self {
+        ReferencedSop { class_uid: class_uid.into(), instance_uid: instance_uid.into() }
+    }
+
+    /// Writes ReferencedSOPClassUID / ReferencedSOPInstanceUID into `dataset`
+    /// (an item of a ReferencedSOPSequence).
+    pub fn write_into(&self, dataset: &mut Dataset) {
+        dataset.insert_str(tags::REFERENCED_SOP_CLASS_UID, Vr::Ui, self.class_uid.as_str());
+        dataset.insert_str(tags::REFERENCED_SOP_INSTANCE_UID, Vr::Ui, self.instance_uid.as_str());
+    }
+
+    /// Reads a reference from a ReferencedSOPSequence item (§4.2).
+    pub fn read_from(dataset: &Dataset) -> Result<Self, Error> {
+        let class_uid = dataset
+            .try_get_str(tags::REFERENCED_SOP_CLASS_UID)
+            .ok_or_else(|| Error::Data(DataError::Other { message: "reference lacks ReferencedSOPClassUID".into() }))?;
+        let instance_uid = dataset
+            .try_get_str(tags::REFERENCED_SOP_INSTANCE_UID)
+            .ok_or_else(|| Error::Data(DataError::Other { message: "reference lacks ReferencedSOPInstanceUID".into() }))?;
+        Ok(ReferencedSop { class_uid: class_uid.trim().to_string(), instance_uid: instance_uid.trim().to_string() })
+    }
+}
+
 /// One content item: the tagged dataset plus its typed value (§4.1).
 #[derive(Debug, Clone)]
 pub struct ContentItem {
@@ -212,6 +291,32 @@ impl ContentItem {
         item
     }
 
+    /// A NUM value: one MeasuredValueSequence item (§4.1).
+    pub fn num(concept_name: CodeItem, relationship: Relationship, measured: MeasuredValue) -> Self {
+        let mut item = Self::base(concept_name, ValueType::Num, Some(relationship));
+        let mut measured_item = Dataset::new();
+        measured.write_into(&mut measured_item);
+        item.dataset.insert_sequence(tags::MEASURED_VALUE_SEQUENCE).push(measured_item);
+        item
+    }
+
+    /// A COMPOSITE/IMAGE value: ReferencedSOPSequence items (§4.1).
+    pub fn referenced_sop(
+        concept_name: CodeItem,
+        relationship: Relationship,
+        value_type: ValueType,
+        references: &[ReferencedSop],
+    ) -> Self {
+        let mut item = Self::base(concept_name, value_type, Some(relationship));
+        let sequence = item.dataset.insert_sequence(tags::REFERENCED_SOP_SEQUENCE);
+        for reference in references {
+            let mut reference_item = Dataset::new();
+            reference.write_into(&mut reference_item);
+            sequence.push(reference_item);
+        }
+        item
+    }
+
     /// The backing dataset, for reading value tags.
     pub fn dataset(&self) -> &Dataset {
         &self.dataset
@@ -244,6 +349,24 @@ impl ContentItem {
     /// The text value, if this is a TEXT item.
     pub fn text_value(&self) -> Option<String> {
         self.dataset.try_get_str(tags::TEXT_VALUE)
+    }
+
+    /// The measured value, if this is a NUM item (§4.1).
+    pub fn measured_value(&self) -> Option<MeasuredValue> {
+        self.dataset
+            .try_get_sequence(tags::MEASURED_VALUE_SEQUENCE)
+            .and_then(|sequence| sequence.items().first())
+            .and_then(|item| MeasuredValue::read_from(item).ok())
+    }
+
+    /// The referenced SOP instances of a COMPOSITE/IMAGE item (§4.1).
+    pub fn referenced_sops(&self) -> Vec<ReferencedSop> {
+        self.dataset
+            .try_get_sequence(tags::REFERENCED_SOP_SEQUENCE)
+            .map(|sequence| {
+                sequence.items().iter().filter_map(|item| ReferencedSop::read_from(item).ok()).collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The children of a container, read from ContentSequence (§4.1).
@@ -309,6 +432,27 @@ mod tests {
         assert_eq!(item.relationship(), Some(Relationship::Contains));
         assert_eq!(item.text_value().as_deref(), Some("Mass"));
         assert_eq!(item.concept_name(), Some(concept()));
+    }
+
+    #[test]
+    fn a_num_item_carries_a_measured_value_and_units() {
+        let units = CodeItem::new("mm", "UCUM").with_meaning("millimeter");
+        let item = ContentItem::num(concept(), Relationship::Contains, MeasuredValue::new(12.5, units.clone()));
+        assert_eq!(item.value_type(), Some(ValueType::Num));
+        let measured = item.measured_value().expect("a measured value round-trips");
+        assert_eq!(measured.value, 12.5);
+        assert_eq!(measured.units, units);
+    }
+
+    #[test]
+    fn a_referenced_sop_item_carries_its_references() {
+        let references = vec![
+            ReferencedSop::new("1.2.840.10008.5.1.4.1.1.2", "1.2.3.4"),
+            ReferencedSop::new("1.2.840.10008.5.1.4.1.1.2", "1.2.3.5"),
+        ];
+        let item = ContentItem::referenced_sop(concept(), Relationship::Contains, ValueType::Image, &references);
+        assert_eq!(item.value_type(), Some(ValueType::Image));
+        assert_eq!(item.referenced_sops(), references);
     }
 
     #[test]

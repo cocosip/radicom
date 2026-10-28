@@ -30,7 +30,7 @@
 | 序列化-媒体 (MEDIA) | DICOMDIR 构建/读写（偏移符合 PS3.3 F.3.2.2 绝对文件字节偏移）、图标生成（≤128、8-bit、降采样）、媒体存储 | DONE | `media/*.rs` |
 | 网络 (NET/DIMSE) | C-ECHO/STORE/FIND/MOVE/GET、N-服务、PDV 组包（bit0/bit1）、分片、状态码分类（掩码类）、C-CANCEL | DONE | `radicom-network` 245 测试、loopback |
 | 安全/匿名化 (ANON) | PS3.15 全表（~655 行 CSV）、11 选项、序列递归、与 fo-dicom 测试交叉验证 | DONE | `anonymizer/*.rs` |
-| 结构化报告 (SR) | 15 值类型、7 关系、构建+写回 `(0040,A730)`、遍历 | DONE | `sr/*.rs` |
+| 结构化报告 (SR) | 15 值类型、7 关系、构建+写回 `(0040,A730)`、遍历、MeasuredValue/ReferencedSop 支持类型 | DONE | `sr/*.rs` |
 | 数据模型 (model) | 标签/VR/PNN/DA-TM-DT（分数秒≤6位、`:`/`.`、双向）、`Uid` 校验 | DONE | `model/*.rs` |
 | 打印 (PRINT) | render_to_image（Trim/Polarity/等比居中）、打印 SOP | DONE | `print/*.rs` |
 | JSON/XML | DICOM JSON（NaN/Inf 保留字符串、BulkDataURI 双向）、XML 转义 | DONE | `radicom-json` 33 测试 |
