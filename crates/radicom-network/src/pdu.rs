@@ -10,7 +10,7 @@ use bytes::Bytes;
 /// Upper bound for a whole received PDU (§3.1).
 ///
 /// A peer may send a P-DATA-TF up to the Max-PDU-Length *we advertise*, so
-/// [`encode_associate`] clamps every advertised value to this constant: the
+/// [`clamp_max_pdu_length`] clamps every advertised value to this constant: the
 /// read side then rejects only what we never promised to accept.
 pub const MAX_PDU_SIZE: u32 = 65535;
 
