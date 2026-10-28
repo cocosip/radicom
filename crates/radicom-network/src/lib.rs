@@ -36,7 +36,7 @@ pub use cfind::{CFindRequest, CFindResponse, QueryRetrieveLevel, QueryRoot, Retr
 pub use cget::{CGetEvent, CGetRequest, CGetResponse};
 pub use client::{ClientEvent, DicomClient, DicomClientOptions};
 pub use cmove::{store_to_destination, CMoveRequest, CMoveResponse, SubOperationSummary};
-pub use dimse::{Command, CommandField, Priority, Status, StatusState};
+pub use dimse::{status_description, Command, CommandField, Priority, Status, StatusState};
 pub use engine::{CircuitBreaker, ConnectionLifecycle, ConnectionState, EngineOptions, PendingRequest, PendingTable};
 pub use error::{AbortSource, NetworkError, RejectResult, RejectSource, Result};
 pub use expert::{send as send_expert, Connection, ConnectionEvent, ExpertRequest, ExpertResponse, ResponseStream};

@@ -497,6 +497,36 @@ impl Status {
     pub fn is_pending(&self) -> bool {
         self.state == StatusState::Pending
     }
+
+    /// Returns the standard generic description for this status code.
+    ///
+    /// Some DICOM service classes assign different wording to the same code
+    /// (for example `A900`); callers that need that distinction should keep
+    /// the service class alongside the numeric code.
+    pub fn description(&self) -> &'static str {
+        status_description(self.code)
+    }
+}
+
+/// Returns a generic PS3.7/PS3.4 description for a DIMSE status code.
+pub fn status_description(code: u16) -> &'static str {
+    match code {
+        0x0000 => "Success",
+        0x0001 | 0x0002 | 0x0107 | 0x0108 => "Warning",
+        0x0100..=0x0106 | 0xFF00 => "Pending",
+        0xFF01 => "Pending with warning",
+        0xFE00 => "Cancel",
+        0x0110 => "Processing failure",
+        0x0122 => "SOP class not supported",
+        0xA700 => "Out of resources",
+        0xA701 => "Unable to calculate number of matches",
+        0xA702 => "Unable to perform sub-operations",
+        0xA801 => "Move destination unknown",
+        0xA900 => "Identifier or data set does not match SOP class",
+        0xB000..=0xBFFF => "Completed with warnings",
+        0xC000..=0xCFFF => "Unable to process",
+        _ => "Unknown status",
+    }
 }
 
 /// Classifies a status code, resolving mask classes best-match (§6.2).
@@ -853,9 +883,13 @@ mod tests {
         let status = Status::new(0x0000);
         assert!(status.is_success());
         assert!(!status.is_pending());
+        assert_eq!(status.description(), "Success");
         let status = Status::with_comment(0xC000, "boom");
         assert_eq!(status.comment.as_deref(), Some("boom"));
         assert_eq!(status.state, StatusState::Failure);
+        assert_eq!(status.description(), "Unable to process");
+        assert_eq!(Status::new(0xB123).description(), "Completed with warnings");
+        assert_eq!(Status::new(0xDEAD).description(), "Unknown status");
     }
 
     #[test]
