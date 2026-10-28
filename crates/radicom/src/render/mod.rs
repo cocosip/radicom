@@ -220,8 +220,9 @@ impl GrayscaleRenderOptions {
             }
         };
 
-        // LINEAR with width < 1 switches to LINEAR_EXACT (fo-dicom #1905)
-        let voi_lut_function = VoiFunction::Linear;
+        // (0028,1056) VOILUTFunction selects the window formula; LINEAR by default.
+        // LINEAR with width < 1 still falls back to LINEAR_EXACT at map time (#1905).
+        let voi_lut_function = voi_function_from_dataset(dataset);
 
         let use_voi_lut = voi_lut.is_some();
         let invert = dataset
@@ -412,11 +413,11 @@ impl GrayscaleRenderOptions {
             .try_get_str(Tag::new(0x0028, 0x0004))
             .map(|pi| pi.trim() == "MONOCHROME1")
             .unwrap_or(false);
+        self.voi_lut_function = voi_function_from_dataset(dataset);
     }
 
     /// Options from an explicit window (REND-04 `from_window_level`).
-    pub fn from_window_level(center: f64, width: f64) -> Self {
-        GrayscaleRenderOptions {
+    pub fn from_window_level(center: f64, width: f64) -> Self {        GrayscaleRenderOptions {
             rescale_slope: 1.0,
             rescale_intercept: 0.0,
             voi_lut_function: VoiFunction::Linear,
@@ -475,6 +476,16 @@ impl GrayscaleRenderOptions {
         let out = linear_exact(value, self.window_center, self.window_width);
         let out = if self.invert { 255.0 - out } else { out };
         out.round().clamp(0.0, 255.0) as u8
+    }
+}
+
+/// The `(0028,1056)` VOILUTFunction selector (CS). Missing/unknown → LINEAR.
+/// fo-dicom `DicomImage.VOILUTFunction` mapping: SIGMOID / LINEAR_EXACT / LINEAR.
+fn voi_function_from_dataset(dataset: &Dataset) -> VoiFunction {
+    match dataset.try_get_str(Tag::new(0x0028, 0x1056)).as_deref().map(str::trim) {
+        Some(v) if v.eq_ignore_ascii_case("SIGMOID") => VoiFunction::Sigmoid,
+        Some(v) if v.eq_ignore_ascii_case("LINEAR_EXACT") => VoiFunction::LinearExact,
+        _ => VoiFunction::Linear,
     }
 }
 
@@ -1276,6 +1287,32 @@ mod tests {
         o.invert = true;
         assert_eq!(o.map(240.0), 0, "white becomes black when inverted");
         assert_eq!(o.map(-160.0), 255);
+    }
+
+    #[test]
+    fn voilut_function_is_read_from_the_dataset() {
+        // (0028,1056) SIGMOID must select the sigmoid window formula.
+        let mut ds = gray_image(1, 1, 16, &[0], Some(40.0), Some(400.0));
+        ds.insert_str(Tag::new(0x0028, 0x1056), Vr::Cs, "SIGMOID");
+        let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
+        assert_eq!(o.voi_lut_function, VoiFunction::Sigmoid);
+        // value 140 = center + 100 → sigmoid ≈ 186 (linear-exact would be 191)
+        assert_eq!(o.map(140.0), 186, "sigmoid formula applied from the tag");
+
+        // LINEAR_EXACT is honoured too.
+        let mut ds2 = gray_image(1, 1, 16, &[0], Some(40.0), Some(400.0));
+        ds2.insert_str(Tag::new(0x0028, 0x1056), Vr::Cs, "LINEAR_EXACT");
+        assert_eq!(
+            GrayscaleRenderOptions::from_dataset(&ds2).unwrap().voi_lut_function,
+            VoiFunction::LinearExact
+        );
+
+        // Absent tag → LINEAR.
+        let ds3 = gray_image(1, 1, 16, &[0], Some(40.0), Some(400.0));
+        assert_eq!(
+            GrayscaleRenderOptions::from_dataset(&ds3).unwrap().voi_lut_function,
+            VoiFunction::Linear
+        );
     }
 
     #[test]
