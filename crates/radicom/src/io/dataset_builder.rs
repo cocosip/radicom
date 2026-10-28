@@ -734,4 +734,102 @@ mod tests {
         bytes.extend_from_slice(&0x7FFF_FFFFu32.to_le_bytes());
         assert!(parse_dataset_bytes(&bytes, &le()).is_err(), "over-declared length must error");
     }
+
+    #[test]
+    fn fragment_sequence_delimiter_length_is_consumed() {
+        // 52-byte encapsulated value followed by a real element: the
+        // SequenceDelimitationItem's 4-byte length must be consumed, otherwise
+        // the following element is read from the wrong offset.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x7FE0u16.to_le_bytes());
+        bytes.extend_from_slice(&0x0010u16.to_le_bytes());
+        bytes.extend_from_slice(b"OB");
+        bytes.extend_from_slice(&[0, 0]);
+        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        bytes.extend_from_slice(&0xE000u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // empty basic offset table
+        bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        bytes.extend_from_slice(&0xE000u16.to_le_bytes());
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&[1, 2, 3, 4]);
+        bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        bytes.extend_from_slice(&0xE0DDu16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&el_header(0x0008, 0x0050, "SH", b"TAIL"));
+
+        let ds = parse(&bytes, &le());
+        assert_eq!(ds.get_str(Tag::ACCESSION_NUMBER).unwrap(), "TAIL", "stream stayed in sync");
+        let fragments = match ds.item(&Tag::PIXEL_DATA) {
+            Some(crate::model::item::DicomItem::Fragments(f)) => f.fragments().to_vec(),
+            other => panic!("expected fragments, got {other:?}"),
+        };
+        assert_eq!(fragments.len(), 1, "one data fragment besides the offset table");
+        assert_eq!(fragments[0].data().as_ref(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn cp246_big_endian_un_sequence_reads_its_contents_as_little_endian() {
+        // PS3.5 CP-246: a UN element with undefined length in a Big Endian
+        // dataset contains Implicit VR Little Endian item data.
+        let mut bytes = Vec::new();
+        // (0008,2112) UN, undefined length, Big Endian header
+        bytes.extend_from_slice(&0x0008u16.to_be_bytes());
+        bytes.extend_from_slice(&0x2112u16.to_be_bytes());
+        bytes.extend_from_slice(b"UN");
+        bytes.extend_from_slice(&[0, 0]);
+        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+        // item header and body in little endian
+        bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        bytes.extend_from_slice(&0xE000u16.to_le_bytes());
+        bytes.extend_from_slice(&13u32.to_le_bytes());
+        bytes.extend_from_slice(&0x0010u16.to_le_bytes());
+        bytes.extend_from_slice(&0x0020u16.to_le_bytes());
+        bytes.extend_from_slice(&5u32.to_le_bytes());
+        bytes.extend_from_slice(b"PID-1");
+        // sequence delimiter in little endian
+        bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        bytes.extend_from_slice(&0xE0DDu16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        // a following Big Endian element proves the byte order was restored
+        bytes.extend_from_slice(&0x0008u16.to_be_bytes());
+        bytes.extend_from_slice(&0x0050u16.to_be_bytes());
+        bytes.extend_from_slice(b"SH");
+        bytes.extend_from_slice(&4u16.to_be_bytes());
+        bytes.extend_from_slice(b"TAIL");
+
+        let ds = parse(&bytes, &syntaxes::EXPLICIT_VR_BIG_ENDIAN.clone());
+        let seq = ds.get_sequence(Tag::SOURCE_IMAGE_SEQUENCE).expect("CP-246 sequence");
+        assert_eq!(seq.len(), 1);
+        assert_eq!(seq.items()[0].get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
+        assert_eq!(ds.get_str(Tag::ACCESSION_NUMBER).unwrap(), "TAIL", "byte order restored");
+    }
+
+    #[test]
+    fn implicit_private_tag_uses_the_private_dictionary_vr() {
+        // (0009,1001) with creator GEMS_IDEN_01 is LO in the private dictionary;
+        // implicit VR must resolve it instead of falling back to UN.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x0009u16.to_le_bytes());
+        bytes.extend_from_slice(&0x0010u16.to_le_bytes());
+        bytes.extend_from_slice(&12u32.to_le_bytes());
+        bytes.extend_from_slice(b"GEMS_IDEN_01");
+        bytes.extend_from_slice(&0x0009u16.to_le_bytes());
+        bytes.extend_from_slice(&0x1001u16.to_le_bytes());
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(b"WIDG");
+
+        let ds = parse(&bytes, &implicit());
+        let tag = ds
+            .items()
+            .find_map(|item| {
+                let t = item.tag();
+                (t.group() == 0x0009 && t.element() == 0x1001).then(|| t.clone())
+            })
+            .expect("private tag present");
+        assert_eq!(tag.private_creator().map(|c| c.as_str()), Some("GEMS_IDEN_01"));
+        let element = ds.get_element(&tag).unwrap();
+        assert_eq!(element.vr(), crate::model::vr::Vr::Lo, "private dictionary VR wins over UN");
+        assert_eq!(ds.get_str(&tag).unwrap(), "WIDG");
+    }
 }

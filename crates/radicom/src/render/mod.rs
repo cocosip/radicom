@@ -11,6 +11,7 @@
 use crate::error::{DataError, Error};
 use crate::model::dataset::Dataset;
 use crate::model::tag::Tag;
+use crate::model::vr::Vr;
 use crate::pixel::overlay::OverlayData;
 use crate::pixel::PixelData;
 
@@ -47,9 +48,7 @@ pub const DEFAULT_OVERLAY_COLOR: crate::pixel::Color32 = crate::pixel::Color32::
 #[derive(Debug, Clone)]
 pub struct LutTable {
     first_mapped: i32,
-    entries: Vec<u16>,
-    /// Declared bits per entry (8 or 16), used to scale VOI output to a byte.
-    bits: u16,
+    entries: Vec<i32>,
 }
 
 impl LutTable {
@@ -60,32 +59,44 @@ impl LutTable {
         if desc.len() < 6 {
             return None;
         }
-        let entries = u16::from_le_bytes([desc[0], desc[1]]);
-        let count = if entries == 0 { 65536usize } else { entries as usize };
-        // first mapped pixel value is SS (signed) per PS3.3; keep its bit pattern
+        let raw_entries = u16::from_le_bytes([desc[0], desc[1]]) as i32;
+        // fo-dicom `VOISequenceLUT.GetLUTDescriptor`: a negative entry count
+        // "makes no sense" but is accepted as its absolute value
+        let count = if raw_entries == 0 { 65536usize } else { raw_entries.unsigned_abs() as usize };
+        // first mapped pixel value is SS (signed) per PS3.3
         let first_mapped = u16::from_le_bytes([desc[2], desc[3]]) as i16 as i32;
         let bits = u16::from_le_bytes([desc[4], desc[5]]);
+        if !matches!(bits, 8 | 16) {
+            return None;
+        }
         let data = element_bytes(item, Tag::LUT_DATA)?;
+        let data_vr = item.get_element(Tag::LUT_DATA).map(|e| e.vr()).unwrap_or(Vr::Ow);
 
         let mut out = Vec::with_capacity(count);
         if data.len() == count {
             // 8-bit entries (one byte each) carry the value directly
-            out.extend(data[..count].iter().map(|b| *b as u16));
+            out.extend(data[..count].iter().map(|b| *b as i32));
         } else {
-            // two bytes per entry (US/OW); 16-bit keeps both, 8-bit-allocated
-            // takes the low byte (fo-dicom GetLut semantics)
+            // two bytes per entry (US/OW/SS); an SS table keeps its sign
+            if data.len() < count * 2 {
+                // fo-dicom: "Number of entries in VOI LUT Sequence do not match"
+                return None;
+            }
             for i in 0..count {
-                let lo = *data.get(i * 2).unwrap_or(&0) as u16;
-                let hi = *data.get(i * 2 + 1).unwrap_or(&0) as u16;
-                let v = if bits >= 16 { u16::from_le_bytes([lo as u8, hi as u8]) } else { lo };
+                let pair = [data[i * 2], data[i * 2 + 1]];
+                let v = if data_vr == Vr::Ss {
+                    i16::from_le_bytes(pair) as i32
+                } else {
+                    u16::from_le_bytes(pair) as i32
+                };
                 out.push(v);
             }
         }
-        Some(LutTable { first_mapped, entries: out, bits })
+        Some(LutTable { first_mapped, entries: out })
     }
 
     /// The entry for `value`, clamped to the table's ends; `None` when empty.
-    fn at(&self, value: f64) -> Option<u16> {
+    fn at(&self, value: f64) -> Option<i32> {
         if self.entries.is_empty() {
             return None;
         }
@@ -94,14 +105,26 @@ impl LutTable {
         Some(self.entries[clamped])
     }
 
-    /// Maps an input value to an 8-bit display byte (VOI form: 16-bit entries
-    /// scale down by 8 to the output range, matching fo-dicom's LUT output stage).
+    /// Maps an input value to an 8-bit display byte. fo-dicom's grayscale
+    /// pipeline re-windows the LUT output through `VOILinearLUT(min, max)`
+    /// using the LUT's first/last entries, so a table that does not span the
+    /// full 0..2^n-1 range still reaches white at its top entry.
     pub fn map_byte(&self, value: f64) -> u8 {
-        match self.at(value) {
-            Some(v) if self.bits >= 16 => (v >> 8) as u8,
-            Some(v) => v.min(255) as u8,
-            None => 0,
-        }
+        let Some(v) = self.at(value) else {
+            return 0;
+        };
+        let (Some(&first), Some(&last)) = (self.entries.first(), self.entries.last()) else {
+            return 0;
+        };
+        let (min, max) = (first as f64, last as f64);
+        let width = max - min;
+        let center = (max + min) / 2.0;
+        let out = if width < 1.0 {
+            linear_exact(v as f64, center, width)
+        } else {
+            ((v as f64 - (center - 0.5)) / (width - 1.0) + 0.5) * 255.0
+        };
+        out.round().clamp(0.0, 255.0) as u8
     }
 
     /// Maps an input value to its raw table value (modality form).
@@ -807,7 +830,7 @@ impl RawImage {
 
         for oy in 0..ov_rows {
             for ox in 0..ov_cols {
-                let set = bits[oy * row_bytes + ox / 8] & (0x80 >> (ox % 8)) != 0;
+                let set = bits[oy * row_bytes + ox / 8] & (0x01 << (ox % 8)) != 0;
                 if !set {
                     continue;
                 }
@@ -1171,7 +1194,7 @@ impl DicomImage {
 
 /// True when `overlay` applies to `frame` (docs §1.3 frame-range filtering).
 fn overlay_covers_frame(overlay: &OverlayData, frame: u32) -> bool {
-    let (frame_origin, _) = overlay.frame_origin();
+    let frame_origin = overlay.frame_origin();
     let first = frame_origin.max(1) as u32 - 1;
     let count = overlay.number_of_frames().max(1);
     frame >= first && frame < first + count
@@ -1524,30 +1547,36 @@ mod tests {
     }
 
     #[test]
-    fn a_16_bit_voi_lut_scales_its_entries_down_to_a_byte() {
-        // entry 0x8000 (32768) → output byte 0x80 (128), not clamped to 255
+    fn a_16_bit_voi_lut_is_recalibrated_to_its_own_output_range() {
+        // fo-dicom re-windows the LUT through VOILinearLUT(first, last), so a
+        // narrow 16-bit table reaches white at its top entry instead of
+        // scaling by >>8 (which mapped 1000 to 3)
         let mut ds = gray_image(1, 1, 8, &[5], None, None);
-        put_voi_lut_16(&mut ds, 5, &[0x8000]);
+        put_voi_lut_16(&mut ds, 5, &[0, 1000]);
         let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
-        assert_eq!(o.map(5.0), 0x80, "16-bit LUT entries scale by >>8");
+        assert_eq!(o.map(5.0), 0, "first entry is black");
+        assert_eq!(o.map(5.0 + 1000.0), 255, "top entry is white");
+        let mid = o.map(5.0 + 500.0);
+        assert!(mid.abs_diff(128) <= 1, "midpoint is mid grey: {mid}");
     }
 
     #[test]
     fn a_voi_lut_sequence_overrides_the_window_function() {
         // Stored values 10, 11 with a VOI LUT at first_mapped=10 and data
-        // [0, 200]: 10 → 0, 11 → 200. No WindowCenter is present.
+        // [0, 200]: 10 → first entry → 0, 11 → last entry → 255 (the LUT is
+        // re-windowed to its own output range, as fo-dicom does).
         let mut ds = gray_image(2, 1, 8, &[10, 11], None, None);
         put_voi_lut(&mut ds, 10, &[0, 200]);
 
         let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
         assert!(o.use_voi_lut && o.voi_lut.is_some(), "VOI LUT detected");
         assert_eq!(o.map(10.0), 0);
-        assert_eq!(o.map(11.0), 200);
+        assert_eq!(o.map(11.0), 255);
 
         let image = render_frame(&ds, 0).unwrap();
         let b = image.as_bytes();
         assert_eq!(b[0], 0, "pixel 0 through the LUT");
-        assert_eq!(b[4], 200, "pixel 1 through the LUT");
+        assert_eq!(b[4], 255, "pixel 1 through the LUT");
     }
 
     #[test]
@@ -1556,7 +1585,7 @@ mod tests {
         // first_mapped=10, two entries [0, 250]; value 50 is beyond the top
         put_voi_lut(&mut ds, 10, &[0, 250]);
         let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
-        assert_eq!(o.map(50.0), 250, "above range clamps to the last entry");
+        assert_eq!(o.map(50.0), 255, "above range clamps to the last entry");
         assert_eq!(o.map(0.0), 0, "below range clamps to the first entry");
     }
 
@@ -1582,13 +1611,14 @@ mod tests {
 
     #[test]
     fn a_modality_lut_clamps_and_feeds_the_voi_stage() {
-        // storing 8 maps through modality LUT [first=8, data 200] → 200, then a
-        // VOI LUT at first=200 with data [42] returns 42.
+        // storing 8 maps through the modality LUT (first=8, data 200) → 200,
+        // which is the VOI LUT's first entry (first=200, data [0, 255]) → black
         let mut ds = gray_image(1, 1, 8, &[8], None, None);
         put_modality_lut(&mut ds, 8, &[200]);
-        put_voi_lut(&mut ds, 200, &[42]);
+        put_voi_lut(&mut ds, 200, &[0, 255]);
         let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
-        assert_eq!(o.map(8.0), 42, "modality → VOI chain");
+        assert_eq!(o.modality_lut.as_ref().unwrap().map(8.0), 200.0, "modality output");
+        assert_eq!(o.map(8.0), 0, "modality output lands on the VOI LUT's first entry");
     }
 
     #[test]

@@ -183,6 +183,12 @@ impl<'a> PixelData<'a> {
         let samples = self.samples_per_pixel() as u64;
         let mut columns = self.width() as u64;
         let rows = self.height() as u64;
+        // A zero dimension is always a broken dataset, never a zero-byte
+        // frame: returning Ok(0) would let the frame bounds check pass and
+        // yield an empty frame instead of an error.
+        if columns == 0 || rows == 0 {
+            return Err(pixel_err(format!("image has zero dimensions ({columns}x{rows})")));
+        }
         let pi = self.photometric_interpretation();
 
         if bits == 1 {
@@ -827,5 +833,35 @@ mod tests {
         }
         let palette = PixelData::from_dataset(&mut ds).unwrap().palette_color_lut().unwrap();
         assert_eq!(palette.len(), 65536, "zero entries expands to 65536");
+    }
+
+    #[test]
+    fn zero_dimensions_error_instead_of_yielding_an_empty_frame() {
+        // a dataset without Rows/Columns must not report a 0-byte frame
+        let mut ds = Dataset::new();
+        ds.insert_value(BITS_ALLOCATED, 16u16);
+        ds.insert_str(PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
+        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
+            PIXEL_DATA,
+            Vr::Ow,
+            Arc::new(MemoryBuffer::from(vec![0u8; 8])),
+        )));
+        let pd = PixelData::from_dataset(&mut ds).unwrap();
+        assert_eq!((pd.width(), pd.height()), (0, 0));
+        assert!(pd.uncompressed_frame_size().is_err(), "zero dimensions are an error");
+        assert!(pd.get_frame(0).is_err(), "no silent empty frame");
+    }
+
+    #[test]
+    fn a_parsed_file_reports_real_dimensions_and_a_full_frame() {
+        // Regression for the byte-path geometry bug: a parsed file stores
+        // Rows/Columns as US bytes, which used to read back as 0.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests-data/explicit-le/GH626.dcm");
+        let file = crate::io::file::DicomFile::open(path).expect("GH626 opens");
+        let mut ds = file.dataset;
+        let pd = PixelData::from_dataset(&mut ds).unwrap();
+        assert_eq!((pd.width(), pd.height()), (256, 256), "US geometry reads back");
+        let frame = pd.get_frame(0).expect("frame 0 available");
+        assert_eq!(frame.size(), 256 * 256 * 2, "full 16-bit frame, not an empty window");
     }
 }

@@ -24,15 +24,24 @@ const CORPUS: &[(&str, &str)] = &[
     ("explicit-le/GH487.dcm", "syntax matrix / explicit LE"),
     ("explicit-le/1403-OB.dcm", "syntax matrix / explicit LE (OB)"),
     ("explicit-le/GH178.dcm", "syntax matrix / explicit LE"),
+    ("explicit-le/GH626.dcm", "syntax matrix / private SQ with a bad VR byte"),
+    ("big-endian/GH177_D_CLUNIE_CT1_IVRLE_BigEndian_undefined_length.dcm", "syntax matrix / BE CP-246"),
     ("implicit-le/GH1958.dcm", "syntax matrix / implicit LE"),
     ("deflated/Issue1097_deflated_sq.dcm", "syntax matrix / deflated (raw RFC1951)"),
     ("deflated/GH227.dcm", "syntax matrix / deflated (raw RFC1951)"),
     ("charset/chrGB2312.dcm", "charsets / GB2312"),
     ("charset/chrJapMulti.dcm", "charsets / ISO 2022 Japanese multi-byte"),
     ("charset/chrSQEncoding.dcm", "charsets / SQ with specific charset"),
+    ("charset/chrRuss.dcm", "charsets / ISO_IR 144 Cyrillic"),
+    ("charset/chrArab.dcm", "charsets / ISO_IR 127 Arabic"),
+    ("charset/chrGreek.dcm", "charsets / ISO_IR 126 Greek"),
+    ("charset/chrHbrw.dcm", "charsets / ISO_IR 138 Hebrew"),
+    ("charset/chrI2.dcm", "charsets / ISO 2022 IR 149 mixed 8-bit"),
+    ("charset/chrKoreanMulti.dcm", "charsets / ISO 2022 IR 149 Korean"),
     ("sr/test_SR.dcm", "structures / SR document tree"),
     ("media/DICOMDIR", "media / DICOMDIR"),
     ("encapsulated/GH538-jpeg1.dcm", "encapsulated / JPEG baseline"),
+    ("encapsulated/D_CLUNIE_CT1_RLE_FRAGS.dcm", "encapsulated / RLE with a trailing element"),
 ];
 
 #[test]
@@ -108,16 +117,22 @@ fn every_corpus_file_round_trips_semantically() {
 /// value is empty must still resolve to its first non-empty encoding (ENC-01/02).
 #[test]
 fn charset_corpus_decodes_to_real_characters() {
-    let cases = [
-        ("charset/chrGB2312.dcm", ["张", "小东"]),
-        ("charset/chrJapMulti.dcm", ["やまだ", "たろう"]),
+    let cases: &[(&str, &[&str])] = &[
+        ("charset/chrGB2312.dcm", &["张", "小东"]),
+        ("charset/chrJapMulti.dcm", &["やまだ", "たろう"]),
+        ("charset/chrRuss.dcm", &["Люкceмбypг"]),
+        ("charset/chrArab.dcm", &["قباني^لنزار"]),
+        ("charset/chrGreek.dcm", &["Διονυσιος"]),
+        ("charset/chrHbrw.dcm", &["שרון^דבורה"]),
+        ("charset/chrI2.dcm", &["Hong^Gildong=洪^吉洞=홍^길동"]),
+        ("charset/chrKoreanMulti.dcm", &["김희중"]),
     ];
     for (rel, expected) in cases {
         let bytes = std::fs::read(corpus_dir().join(rel)).unwrap();
         let file = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
         let name = file.dataset.try_get_str(Tag::PATIENT_NAME).unwrap_or_default();
         assert!(!name.contains('\u{FFFD}'), "{rel}: PatientName has replacement chars: {name:?}");
-        for want in expected {
+        for want in *expected {
             assert!(name.contains(want), "{rel}: PatientName {name:?} should contain {want:?}");
         }
     }

@@ -26,15 +26,25 @@ license. Files are used here only as inert test fixtures.
 | `explicit-le/GH487.dcm` | `GH487.dcm` | syntax matrix — explicit VR LE |
 | `explicit-le/1403-OB.dcm` | `1403-OB.dcm` | syntax matrix — explicit VR LE (OB) |
 | `explicit-le/GH178.dcm` | `GH178.dcm` | syntax matrix — explicit VR LE, deep SQ + private tags |
+| `explicit-le/GH626.dcm` | `GH626.dcm` | syntax matrix — private SQ with a bad VR byte |
+| `explicit-le/GH179B.dcm` | `GH179B.dcm` | syntax matrix — truncated file (partial-read fixture) |
+| `big-endian/GH177_D_CLUNIE_CT1_IVRLE_BigEndian_undefined_length.dcm` | same | syntax matrix — Big Endian + CP-246 UN SQ |
 | `implicit-le/GH1958.dcm` | `GH1958.dcm` | syntax matrix — implicit VR LE |
 | `deflated/Issue1097_deflated_sq.dcm` | `Issue1097_FailToOpenDeflatedFileWithSQ.dcm` | syntax matrix — deflated (raw RFC 1951) with SQ |
 | `deflated/GH227.dcm` | `GH227.dcm` | syntax matrix — deflated (raw RFC 1951) |
 | `charset/chrGB2312.dcm` | `charset/chrGB2312.dcm` | charsets — GB2312 (`ISO 2022 IR 58`) |
 | `charset/chrJapMulti.dcm` | `charset/chrJapMulti.dcm` | charsets — ISO 2022 Japanese multi-byte |
 | `charset/chrSQEncoding.dcm` | `charset/chrSQEncoding.dcm` | charsets — SQ with specific charset |
+| `charset/chrRuss.dcm` | `charset/chrRuss.dcm` | charsets — ISO_IR 144 (ISO-8859-5) |
+| `charset/chrArab.dcm` | `charset/chrArab.dcm` | charsets — ISO_IR 127 (ISO-8859-6) |
+| `charset/chrGreek.dcm` | `charset/chrGreek.dcm` | charsets — ISO_IR 126 (ISO-8859-7) |
+| `charset/chrHbrw.dcm` | `charset/chrHbrw.dcm` | charsets — ISO_IR 138 (ISO-8859-8) |
+| `charset/chrI2.dcm` | `charset/chrI2.dcm` | charsets — ISO 2022 IR 149 mixed 7/8-bit |
+| `charset/chrKoreanMulti.dcm` | `charset/chrKoreanMulti.dcm` | charsets — ISO 2022 IR 149 Korean |
 | `sr/test_SR.dcm` | `test_SR.dcm` | structures — SR document tree |
 | `media/DICOMDIR` | `DICOMDIR` | media — DICOMDIR |
 | `encapsulated/GH538-jpeg1.dcm` | `GH538-jpeg1.dcm` | encapsulated — JPEG baseline (metadata/decode-skip) |
+| `encapsulated/D_CLUNIE_CT1_RLE_FRAGS.dcm` | same | encapsulated — RLE fragments followed by a real element |
 
 ## Baselines enforced
 

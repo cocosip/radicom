@@ -16,15 +16,15 @@ use std::sync::Mutex;
 static BUILTINS: &[(&str, &str)] = &[
     ("ISO_IR 6", "ASCII"),
     ("ISO_IR 13", "Shift_JIS"),
-    ("ISO_IR 100", "windows-1252"),
-    ("ISO_IR 101", "windows-1250"),
-    ("ISO_IR 109", "windows-1253"),
-    ("ISO_IR 110", "windows-1251"),
-    ("ISO_IR 126", "windows-1253"),
-    ("ISO_IR 127", "windows-1256"),
-    ("ISO_IR 138", "windows-1255"),
-    ("ISO_IR 144", "windows-1251"),
-    ("ISO_IR 148", "windows-1254"),
+    ("ISO_IR 100", "iso-8859-1"),
+    ("ISO_IR 101", "iso-8859-2"),
+    ("ISO_IR 109", "iso-8859-3"),
+    ("ISO_IR 110", "iso-8859-4"),
+    ("ISO_IR 126", "iso-8859-7"),
+    ("ISO_IR 127", "iso-8859-6"),
+    ("ISO_IR 138", "iso-8859-8"),
+    ("ISO_IR 144", "iso-8859-5"),
+    ("ISO_IR 148", "iso-8859-9"),
     ("ISO_IR 149", "EUC-KR"),
     ("ISO_IR 166", "windows-874"),
     ("ISO_IR 192", "UTF-8"),
@@ -32,17 +32,17 @@ static BUILTINS: &[(&str, &str)] = &[
     ("GB18030", "gb18030"),
     ("ISO 2022 IR 6", "ASCII"),
     ("ISO 2022 IR 13", "Shift_JIS"),
-    ("ISO 2022 IR 58", "GBK"),
+    ("ISO 2022 IR 58", "gb2312"),
     ("ISO 2022 IR 87", "ISO-2022-JP"),
-    ("ISO 2022 IR 100", "windows-1252"),
-    ("ISO 2022 IR 101", "windows-1250"),
-    ("ISO 2022 IR 109", "windows-1253"),
-    ("ISO 2022 IR 110", "windows-1251"),
-    ("ISO 2022 IR 126", "windows-1253"),
-    ("ISO 2022 IR 127", "windows-1256"),
-    ("ISO 2022 IR 138", "windows-1255"),
-    ("ISO 2022 IR 144", "windows-1251"),
-    ("ISO 2022 IR 148", "windows-1254"),
+    ("ISO 2022 IR 100", "iso-8859-1"),
+    ("ISO 2022 IR 101", "iso-8859-2"),
+    ("ISO 2022 IR 109", "iso-8859-3"),
+    ("ISO 2022 IR 110", "iso-8859-4"),
+    ("ISO 2022 IR 126", "iso-8859-7"),
+    ("ISO 2022 IR 127", "iso-8859-6"),
+    ("ISO 2022 IR 138", "iso-8859-8"),
+    ("ISO 2022 IR 144", "iso-8859-5"),
+    ("ISO 2022 IR 148", "iso-8859-9"),
     ("ISO 2022 IR 149", "EUC-KR"),
     ("ISO 2022 IR 159", "ISO-2022-JP"),
     ("ISO 2022 IR 166", "windows-874"),
@@ -127,28 +127,38 @@ pub fn decode_multi_charset(bytes: &[u8], first: &'static Encoding, pn: bool) ->
         let (text, _, _) = first.decode(bytes);
         return text.into_owned();
     }
-    // ISO 2022 Korean (KS X 1001, ESC $ ) C): the 7-bit double bytes (0x21-0x7E)
-    // must be shifted to their EUC-KR 8-bit form (0xA1-0xFE) before decoding —
-    // encoding_rs has no stateful ISO-2022-KR decoder. Triggered only when the
-    // stream actually carries the Korean designator; found before ASCI I runs.
-    if let Some(decoded) = decode_korean_iso2022(bytes) {
-        return decoded;
-    }
-    fn flush(out: &mut String, bytes: &[u8], range: std::ops::Range<usize>, enc: &'static Encoding) {
-        if range.start < range.end {
-            let (text, _, _) = enc.decode(&bytes[range]);
-            out.push_str(&text);
+    fn flush(
+        out: &mut String,
+        bytes: &[u8],
+        range: std::ops::Range<usize>,
+        enc: &'static Encoding,
+        korean: bool,
+    ) {
+        if range.start >= range.end {
+            return;
+        }
+        let slice = &bytes[range];
+        // ISO 2022 Korean: 7-bit double bytes (0x21-0x7E) after `ESC $ ) C`
+        // must be shifted to their EUC-KR 8-bit form. Bytes already in 8-bit
+        // form (mixed encodings) are passed through unchanged.
+        if korean && !slice.iter().any(|b| *b >= 0x80) {
+            let shifted: Vec<u8> = slice.iter().map(|b| b + 0x80).collect();
+            out.push_str(&enc.decode(&shifted).0);
+        } else {
+            out.push_str(&enc.decode(slice).0);
         }
     }
     let mut out = String::with_capacity(bytes.len());
     let mut current = first;
+    let mut korean = false;
     let mut segment_start = 0usize;
     let mut i = 0usize;
     while i < bytes.len() {
         let b = bytes[i];
         if b == 0x1B {
             if let Some(len) = escape_sequence_len(bytes, i) {
-                flush(&mut out, bytes, segment_start..i, current);
+                flush(&mut out, bytes, segment_start..i, current, korean);
+                korean = bytes[i..i + len] == [0x1B, 0x24, 0x29, 0x43];
                 if let Some(enc) = encoding_for_escape(&bytes[i..i + len]) {
                     current = enc;
                 }
@@ -160,46 +170,15 @@ pub fn decode_multi_charset(bytes: &[u8], first: &'static Encoding, pn: bool) ->
         let reset = (pn && (b == b'^' || b == b'='))
             || matches!(b, b'\r' | b'\n' | b'\t' | 0x0C);
         if reset {
-            flush(&mut out, bytes, segment_start..i, current);
+            flush(&mut out, bytes, segment_start..i, current, korean);
             segment_start = i;
             current = first;
+            korean = false;
         }
         i += 1;
     }
-    flush(&mut out, bytes, segment_start..bytes.len(), current);
+    flush(&mut out, bytes, segment_start..bytes.len(), current, korean);
     out
-}
-
-/// Decodes an ISO 2022 Korean byte run by shifting its 7-bit double bytes into
-/// their EUC-KR 8-bit form. Returns `None` when the stream has no `ESC $ ) C`
-/// Korean designator (so unrelated charsets keep the per-segment path).
-fn decode_korean_iso2022(bytes: &[u8]) -> Option<String> {
-    const KO: &[u8] = &[0x1B, 0x24, 0x29, 0x43]; // ESC $ ) C (KS X 1001)
-    if !bytes.windows(KO.len()).any(|w| w == KO) {
-        return None;
-    }
-    let mut euc = Vec::with_capacity(bytes.len());
-    let mut korean = false; // inside the KS X 1001 double-byte set
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] == 0x1B {
-            if let Some(len) = escape_sequence_len(bytes, i) {
-                let seq = &bytes[i..i + len];
-                // ESC $ ) C enters Korean; any other designator leaves it
-                korean = seq == KO;
-                i += len;
-                continue;
-            }
-        }
-        if korean {
-            euc.push(bytes[i] + 0x80); // 7-bit → EUC-KR 8-bit
-        } else {
-            euc.push(bytes[i]);
-        }
-        i += 1;
-    }
-    let (text, _, _) = encoding_rs::EUC_KR.decode(&euc);
-    Some(text.into_owned())
 }
 
 /// Length of a recognizable ISO 2022 escape sequence at `bytes[i]` (0x1B),
@@ -252,13 +231,20 @@ fn encoding_for_escape(seq: &[u8]) -> Option<&'static Encoding> {
     };
     let label = match designator.as_str() {
         "(B" => "ASCII",
-        "-A" => "windows-1252", // Latin-1 (ISO 2022 IR 100 designator)
-        "(J" | "$ ( B" | "$(B" => "Shift_JIS",        // JIS X 0201 romaji / JIS X 0208
-        "(I" => "Shift_JIS",                          // JIS X 0201 katakana
-        "$B" | "$@(B" => "ISO-2022-JP",
-        "-C" => "GBK",
-        "$(D" => "EUC-KR",
-        "-T" => "windows-874",
+        "(J" | "(I" => "Shift_JIS",                    // JIS X 0201 romaji / katakana
+        "-A" => "iso-8859-1",                          // Latin 1 (ISO 2022 IR 100)
+        "-B" => "iso-8859-2",                          // Latin 2 (ISO 2022 IR 101)
+        "-C" => "iso-8859-3",                          // Latin 3 (ISO 2022 IR 109)
+        "-D" => "iso-8859-4",                          // Latin 4 (ISO 2022 IR 110)
+        "-F" => "iso-8859-7",                          // Greek (ISO 2022 IR 126)
+        "-G" => "iso-8859-6",                          // Arabic (ISO 2022 IR 127)
+        "-H" => "iso-8859-8",                          // Hebrew (ISO 2022 IR 138)
+        "-L" => "iso-8859-5",                          // Cyrillic (ISO 2022 IR 144)
+        "-M" => "iso-8859-9",                          // Latin 5 (ISO 2022 IR 148)
+        "-T" => "windows-874",                         // Thai (ISO 2022 IR 166)
+        "$B" | "$@" | "$(D" => "ISO-2022-JP",          // JIS X 0208 / 0212
+        "$)A" => "gb2312",                             // GB 2312 (ISO 2022 IR 58)
+        "$)C" => "EUC-KR",                             // KS X 1001 (ISO 2022 IR 149)
         _ => return None,
     };
     Encoding::for_label(label.as_bytes())
@@ -349,11 +335,19 @@ fn segment_can_encode(enc: &'static Encoding, segment: &str) -> bool {
 fn escape_for_encoding(enc: &'static Encoding) -> Option<&'static [u8]> {
     match enc.name() {
         "windows-1252" => Some(b"\x1B-A"),
+        "ISO-8859-2" => Some(b"\x1B-B"),
+        "ISO-8859-3" => Some(b"\x1B-C"),
+        "ISO-8859-4" => Some(b"\x1B-D"),
+        "ISO-8859-7" => Some(b"\x1B-F"),
+        "ISO-8859-6" => Some(b"\x1B-G"),
+        "ISO-8859-8" => Some(b"\x1B-H"),
+        "ISO-8859-5" => Some(b"\x1B-L"),
+        "ISO-8859-9" => Some(b"\x1B-M"),
+        "windows-874" => Some(b"\x1B-T"),
         "Shift_JIS" => Some(b"\x1B(J"),
         "ISO-2022-JP" => Some(b"\x1B$B"),
-        "GBK" => Some(b"\x1B-C"),
-        "EUC-KR" => Some(b"\x1B$(D"),
-        "windows-874" => Some(b"\x1B-T"),
+        "GBK" => Some(b"\x1B$)A"),
+        "EUC-KR" => Some(b"\x1B$)C"),
         "UTF-8" | "ASCII" => Some(b"\x1B(B"),
         _ => None,
     }
@@ -433,8 +427,53 @@ mod tests {
     fn reverse_lookup() {
         let utf8 = charset_encoding("ISO_IR 192");
         assert_eq!(charset_for_encoding(utf8), Some("ISO_IR 192"));
-        let koi = Encoding::for_label(b"windows-1251").unwrap();
-        assert_eq!(charset_for_encoding(koi), Some("ISO_IR 110"));
+        let cyrillic = Encoding::for_label(b"iso-8859-5").unwrap();
+        assert_eq!(charset_for_encoding(cyrillic), Some("ISO_IR 144"));
+    }
+
+    #[test]
+    fn iso_ir_144_decodes_cyrillic_as_iso_8859_5() {
+        // bytes from fo-dicom's chrRuss.dcm; fo-dicom asserts the same text
+        let enc = charset_encoding("ISO_IR 144");
+        let bytes = [0xBBu8, 0xEE, 0xDA, 0x63, 0x65, 0xDC, 0xD1, 0x79, 0x70, 0xD3];
+        assert_eq!(decode_multi_charset(&bytes, enc, true), "Люкceмбypг");
+    }
+
+    #[test]
+    fn iso_ir_127_decodes_arabic_as_iso_8859_6() {
+        // bytes from fo-dicom's chrArab.dcm
+        let enc = charset_encoding("ISO_IR 127");
+        let bytes = [0xE2u8, 0xC8, 0xC7, 0xE6, 0xEA, 0x5E, 0xE4, 0xE6, 0xD2, 0xC7, 0xD1, 0x20];
+        assert_eq!(decode_multi_charset(&bytes, enc, true).trim_end(), "قباني^لنزار");
+    }
+
+    #[test]
+    fn mixed_8bit_korean_and_delimiters_decode_per_fragment() {
+        // chrI2.dcm shape: ESC $ ) C 洪 ^ ESC $ ) C 홍; the 8-bit bytes must
+        // pass through and the delimiter must reset to the base encoding
+        let base = charset_encoding("ISO_IR 6");
+        let bytes = [
+            0x1Bu8, 0x24, 0x29, 0x43, 0xFB, 0xF3, 0x5E, 0x1B, 0x24, 0x29, 0x43, 0xC8, 0xAB,
+        ];
+        assert_eq!(decode_multi_charset(&bytes, base, true), "洪^홍");
+    }
+
+    #[test]
+    fn korean_designator_with_8bit_byte_never_overflows() {
+        let base = charset_encoding("EUC-KR");
+        let out = decode_multi_charset(&[0x1B, 0x24, 0x29, 0x43, 0xFB], base, false);
+        assert!(!out.is_empty(), "deterministic output, no panic");
+    }
+
+    #[test]
+    fn iso2022_single_byte_designators_switch_encoding() {
+        // ESC - L designates ISO-8859-5 (Cyrillic) for the following bytes
+        let base = charset_encoding("ISO_IR 6");
+        let out = decode_multi_charset(b"\x1B-L\xBB\xEE\xDA", base, false);
+        assert_eq!(out, "Люк");
+        // ESC - C is Latin-3, not a Chinese designator
+        assert_eq!(encoding_for_escape(b"\x1B-C").map(|e| e.name()), Some("ISO-8859-3"));
+        assert_eq!(encoding_for_escape(b"\x1B$)A").map(|e| e.name()), Some("GBK"));
     }
 
     #[test]

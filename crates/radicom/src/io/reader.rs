@@ -136,7 +136,11 @@ enum Step {
         tag: Tag,
         pos: u64,
         defined: Option<u32>,
+        /// Re-probe the subtree's VR explicitness (private sequences only).
         private_probe: bool,
+        /// CP-246: a UN-encoded, non-private SQ is read as Implicit VR LE
+        /// regardless of the dataset byte order.
+        cp246: bool,
     },
     /// A sequence item to descend into.
     Item {
@@ -183,16 +187,17 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         Ok((group, element))
     }
 
-    /// Dictionary VR resolution for implicit VRs and fallbacks.
-    fn dictionary_vr(&self, group: u16, element: u16) -> Vr {
-        if element == 0x0000 {
+    /// Dictionary VR resolution for implicit VRs and fallbacks. The tag must
+    /// carry its private creator: without it a private element has no
+    /// dictionary row and stays UN (RD-05).
+    fn dictionary_vr(&self, tag: &Tag) -> Vr {
+        if tag.element() == 0x0000 {
             return Vr::Ul; // group length is always UL (T9 target)
         }
-        let tag = Tag::new(group, element);
-        if tag.is_private() {
-            return if tag.is_private_creator_slot() { Vr::Lo } else { Vr::Un };
+        let entry = crate::model::dictionary::default_dictionary().entry(tag);
+        if entry.keyword == "Unknown" {
+            return Vr::Un;
         }
-        let entry = crate::model::dictionary::default_dictionary().entry(&tag);
         match entry.vrs.as_ref() {
             [] => Vr::Un,
             [only] => *only,
@@ -216,26 +221,61 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
     }
 
     /// T4: probes whether the SQ subtree at the current position is encoded
-    /// explicitly. An item header is `tag(4) + length(4)`; the first element
-    /// inside carries a 2-letter VR at offset 12 under explicit encoding,
-    /// while an implicit item has the first half of a 32-bit length there.
-    fn probe_inner_explicit(&mut self) -> Result<bool, Error> {
-        const PROBE: usize = 14;
+    /// explicitly. Zero-length items are skipped first (#223/#487), then the
+    /// first element inside carries a 2-letter VR at offset 4 of the item
+    /// body under explicit encoding, while an implicit item has the first
+    /// half of a 32-bit length there.
+    fn probe_inner_explicit(&mut self, count: u32) -> Result<bool, Error> {
         let pos = self.position()?;
-        if self.source.require(PROBE as u64).is_err() {
-            return Ok(self.explicit_vr);
+        let mut remaining = count as i64;
+        // Skip empty items until one has a body (fo-dicom IsPrivateSequenceBad).
+        loop {
+            if self.source.require(8).is_err() {
+                self.source.goto(pos).map_err(|e| io_err(e, pos))?;
+                return Ok(self.explicit_vr);
+            }
+            let g = self.source.read_u16().map_err(|e| io_err(e, pos))?;
+            let e = self.source.read_u16().map_err(|e| io_err(e, pos))?;
+            if (g, e) != (0xFFFE, 0xE000) {
+                self.source.goto(pos).map_err(|e| io_err(e, pos))?;
+                return Ok(self.explicit_vr);
+            }
+            let len = self.source.read_u32().map_err(|e| io_err(e, pos))?;
+            if len > 0 {
+                break;
+            }
+            remaining -= 8;
+            if remaining <= 0 {
+                self.source.goto(pos).map_err(|e| io_err(e, pos))?;
+                return Ok(self.explicit_vr);
+            }
         }
-        let mut header = [0u8; PROBE];
-        self.source.read_exact(&mut header).map_err(|e| io_err(e, pos))?;
+        // At the first element of the first non-empty item: tag(4) + VR(2).
+        let mut probe = [0u8; 6];
+        let ok = self.source.read_exact(&mut probe).is_ok();
         self.source.goto(pos).map_err(|e| io_err(e, pos))?;
-        // item tag in either byte order
-        let item_ok = (header[0] == 0xFF && header[1] == 0xFE && header[2] == 0xE0 && header[3] == 0x00)
-            || (header[0] == 0xFE && header[1] == 0xFF && header[2] == 0x00 && header[3] == 0xE0);
-        if !item_ok {
+        if !ok {
             return Ok(self.explicit_vr);
         }
-        // a real VR code beats "two uppercase letters" as a signal
-        Ok(Vr::try_parse(&[header[12], header[13]]).is_some())
+        Ok(Vr::try_parse(&[probe[4], probe[5]]).is_some())
+    }
+
+    /// fo-dicom `IsPrivateSequence`: true when the value at the current
+    /// position starts with an item or a sequence delimiter tag.
+    fn next_is_item_or_delimiter(&mut self) -> Result<bool, Error> {
+        let pos = self.position()?;
+        if self.source.require(4).is_err() {
+            return Ok(false);
+        }
+        let mut tag = [0u8; 4];
+        self.source.read_exact(&mut tag).map_err(|e| io_err(e, pos))?;
+        self.source.goto(pos).map_err(|e| io_err(e, pos))?;
+        // item/delimiter tags follow the transfer syntax byte order
+        let item = (tag[0] == 0xFF && tag[1] == 0xFE && tag[2] == 0xE0 && tag[3] == 0x00)
+            || (tag[0] == 0xFE && tag[1] == 0xFF && tag[2] == 0x00 && tag[3] == 0xE0);
+        let delimiter = (tag[0] == 0xFF && tag[1] == 0xFE && tag[2] == 0xDD && tag[3] == 0xE0)
+            || (tag[0] == 0xFE && tag[1] == 0xFF && tag[2] == 0xE0 && tag[3] == 0xDD);
+        Ok(item || delimiter)
     }
 
     /// Reads a value buffer, wrapping binary VRs so downstream typed reads
@@ -294,7 +334,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
 
     /// VR determination (§3.2) with T1/T2 fallbacks; returns the VR and
     /// whether the element turned out explicit.
-    fn parse_vr(&mut self, group: u16, element: u16, at: u64) -> Result<(Vr, bool), Error> {
+    fn parse_vr(&mut self, tag: &Tag, at: u64) -> Result<(Vr, bool), Error> {
         if self.explicit_vr {
             let pos = self.position()?;
             let mut code = [0u8; 2];
@@ -304,7 +344,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                 None => {
                     if code == [0x20, 0x20] {
                         // T1: two spaces — dictionary VR, stay explicit
-                        return Ok((self.dictionary_vr(group, element), true));
+                        return Ok((self.dictionary_vr(tag), true));
                     }
                     // T2: rewind the two VR bytes and read this element
                     // implicitly (those bytes are the head of a 32-bit length)
@@ -312,7 +352,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                 }
             }
         }
-        Ok((self.dictionary_vr(group, element), false))
+        Ok((self.dictionary_vr(tag), false))
     }
 
     /// Length field per VR/syntax (§3.3).
@@ -407,7 +447,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
             }
         }
 
-        let (raw_vr, explicit) = match self.parse_vr(group, element, tag_pos) {
+        let (raw_vr, explicit) = match self.parse_vr(&tag, tag_pos) {
             Ok(v) => v,
             Err(Error::Reader(ReaderError::Eof { .. })) => return Ok(Step::End(LevelEnd::Eof)),
             Err(e) => return Err(e),
@@ -420,27 +460,48 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
             Err(Error::Reader(ReaderError::Eof { .. })) => return Ok(Step::End(LevelEnd::Eof)),
             Err(e) => return Err(e),
         };
-        let vr = self.fix_group_length_vr(element, raw_vr);
+        let mut vr = self.fix_group_length_vr(element, raw_vr);
+        // fo-dicom `DicomReader.ParseValue`: an UN element is re-resolved
+        // through the dictionary now that the length has been read, so a
+        // UN-encoded SQ is still recognised as a sequence.
+        if vr == Vr::Un {
+            let dict_vr = self.dictionary_vr(&tag);
+            if dict_vr != Vr::Un {
+                vr = dict_vr;
+            }
+        }
         let defined = (length != 0xFFFF_FFFF).then_some(length);
         let raw = (group, element);
 
-        // Sequence detection (§3.4): an explicit SQ; or an undefined-length
-        // value that must be read as SQ (T3 UN-encoded SQ recovery, CP-246).
-        // Undefined-length OB/OW is a fragment sequence; an undefined-length
-        // private value goes to the T4 probe path.
-        let is_sequence = vr == Vr::Sq
-            || (defined.is_none()
-                && !tag.is_private()
-                && (vr == Vr::Un || self.dictionary_vr(group, element) == Vr::Sq));
-        if is_sequence {
-            return Ok(Step::Sequence { raw, tag, pos: value_start, defined, private_probe: false });
+        // fo-dicom `IsPrivateSequence`: a private tag the dictionary calls SQ
+        // only descends when the value really starts with an item or sequence
+        // delimiter; otherwise it is read as UN bytes.
+        let mut private_probe = false;
+        if vr == Vr::Sq && tag.is_private() && length > 0 {
+            if self.next_is_item_or_delimiter()? {
+                private_probe = true;
+            } else {
+                vr = Vr::Un;
+            }
+        }
+
+        if vr == Vr::Sq {
+            let cp246 = raw_vr == Vr::Un && !tag.is_private();
+            return Ok(Step::Sequence { raw, tag, pos: value_start, defined, private_probe, cp246 });
         }
 
         let Some(length) = defined else {
             if tag.is_private() {
                 // T4: private undefined-length value; the probe decides
                 // whether the subtree is encoded explicitly
-                return Ok(Step::Sequence { raw, tag, pos: value_start, defined: None, private_probe: true });
+                return Ok(Step::Sequence {
+                    raw,
+                    tag,
+                    pos: value_start,
+                    defined: None,
+                    private_probe: true,
+                    cp246: false,
+                });
             }
             return Ok(Step::Fragments { raw, tag, vr, pos: value_start });
         };
@@ -492,7 +553,14 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                         Some(_) => observer.on_fragment(&self.ctx(pos), buffer)?,
                     }
                 }
-                (0xFFFE, 0xE0DD) => break,
+                (0xFFFE, 0xE0DD) => {
+                    // the delimiter is tag(4) + length(4); consuming only the
+                    // tag leaves the length in the stream and desynchronizes
+                    // every following element
+                    let _ = self.source.read_u32().map_err(|e| io_err(e, pos))?;
+                    debug_assert_eq!(self.position()?, pos + 8);
+                    break;
+                }
                 _ => {
                     return Err(Error::Reader(ReaderError::Invalid {
                         message: format!("unexpected tag in DICOM fragment sequence {g:04X},{e:04X}"),
@@ -570,14 +638,19 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                     self.parse_fragment_sequence(observer, &tag, vr, pos)?;
                     previous = Some(raw);
                 }
-                Step::Sequence { raw, tag, pos, defined, private_probe } => {
+                Step::Sequence { raw, tag, pos, defined, private_probe, cp246 } => {
                     observer.on_begin_sequence(&self.ctx(pos), &tag, defined)?;
                     let (saved_explicit, saved_be) = (self.explicit_vr, self.big_endian);
                     if private_probe {
-                        self.explicit_vr = self.probe_inner_explicit()?;
+                        self.explicit_vr = self.probe_inner_explicit(defined.unwrap_or(u32::MAX))?;
                         if self.explicit_vr {
                             self.set_byte_order(false);
                         }
+                    } else if cp246 && self.big_endian {
+                        // CP-246: the contents of a UN-encoded SQ are Implicit
+                        // VR Little Endian; the per-element T2 fallback already
+                        // handles the VR side, so only the byte order changes.
+                        self.set_byte_order(false);
                     }
                     self.enter()?;
                     let inner = match defined {

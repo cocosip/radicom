@@ -20,8 +20,10 @@ pub struct OverlayData {
     pub data: Option<SharedBuffer>,
     rows: u16,
     columns: u16,
+    /// `(60xx,0050)` OverlayOrigin, row\column, re-ordered to `(x, y)`.
     origin: (i16, i16),
-    frame_origin: (i16, i16),
+    /// `(60xx,0051)` ImageFrameOrigin, 1-based frame number.
+    frame_origin: i16,
     number_of_frames: u32,
     bits_allocated: u16,
     bit_position: u16,
@@ -58,13 +60,18 @@ impl OverlayData {
             Some(DicomItem::Element(e)) => e.value().as_buffer().cloned(),
             _ => None,
         };
+        let origin_tag = Tag::new(group, 0x0050);
+        // PS3.3 C.9.2: OverlayOrigin is row\column (VM 2); expose (x, y).
+        let row = ds.get_at::<i16>(&origin_tag, 0).unwrap_or(0);
+        let column = ds.get_at::<i16>(&origin_tag, 1).unwrap_or(0);
         Some(OverlayData {
             group,
             data,
             rows,
             columns,
-            origin: (ds.get_or(Tag::new(group, 0x0050), 0i16), ds.get_or(Tag::new(group, 0x0051), 0i16)),
-            frame_origin: (ds.get_or(Tag::new(group, 0x0052), 0i16), ds.get_or(Tag::new(group, 0x0053), 0i16)),
+            origin: (column, row),
+            // PS3.3 C.9.2.1.4: ImageFrameOrigin (60xx,0051), US VM 1
+            frame_origin: ds.get_or(Tag::new(group, 0x0051), 0u16) as i16,
             number_of_frames: ds
                 .try_get_str(Tag::new(group, 0x0015))
                 .and_then(|s| s.trim().parse().ok())
@@ -90,7 +97,7 @@ impl OverlayData {
         self.origin
     }
 
-    pub fn frame_origin(&self) -> (i16, i16) {
+    pub fn frame_origin(&self) -> i16 {
         self.frame_origin
     }
 
@@ -174,7 +181,7 @@ impl OverlayData {
                 "frame is shorter than the overlay shape".into(),
             )));
         }
-        // 1 bit per pixel, row-packed, MSB first (PS3.5 §8.1.1)
+        // 1 bit per pixel, row-packed, LSB first (PS3.5 §8.1.2)
         let row_bytes = columns.div_ceil(8) as usize;
         let mut out = vec![0u8; row_bytes * rows as usize];
         let mut o = 0usize;
@@ -192,7 +199,7 @@ impl OverlayData {
                     }
                 };
                 if (value >> bit_position) & 1 == 1 {
-                    out[o + x / 8] |= 0x80 >> (x % 8);
+                    out[o + x / 8] |= 0x01 << (x % 8);
                 }
             }
             o += row_bytes;
@@ -306,7 +313,7 @@ mod tests {
         )));
         let overlays = OverlayData::from_dataset(&ds);
         let data = overlays[0].load(&ds).unwrap();
-        assert_eq!(data.data().as_ref(), &[0x80, 0x80], "one byte per row, MSB first");
+        assert_eq!(data.data().as_ref(), &[0x01, 0x01], "one byte per row, LSB first");
     }
 
     #[test]
@@ -327,7 +334,7 @@ mod tests {
             Arc::new(MemoryBuffer::from(pixels)),
         )));
         let data = OverlayData::from_dataset(&ds)[0].load(&ds).unwrap();
-        assert_eq!(data.data().as_ref(), &[0b1010_0000], "pixels 0 and 2 set");
+        assert_eq!(data.data().as_ref(), &[0b0000_0101], "pixels 0 and 2 set");
     }
 
     #[test]
@@ -345,7 +352,7 @@ mod tests {
             Arc::new(MemoryBuffer::from(pixels)),
         )));
         let data = OverlayData::from_dataset(&ds)[0].load(&ds).unwrap();
-        assert_eq!(data.data().as_ref(), &[0b1000_0000], "big-endian bit 12 of pixel 0 read correctly");
+        assert_eq!(data.data().as_ref(), &[0b0000_0001], "big-endian bit 12 of pixel 0 read correctly");
     }
 
     #[test]
@@ -395,13 +402,54 @@ mod tests {
     fn overlay_properties_map_the_group_tags() {
         let mut ds = base(8, 4, 2);
         add_overlay_shape(&mut ds, 0x6002, 4, 2, 0);
-        ds.insert_value(Tag::new(0x6002, 0x0050), 3i16);
-        ds.insert_value(Tag::new(0x6002, 0x0051), 4i16);
+        // OverlayOrigin is row\column: row 2, column 3 → (x, y) = (3, 2)
+        let mut origin_bytes = Vec::new();
+        origin_bytes.extend_from_slice(&2i16.to_le_bytes());
+        origin_bytes.extend_from_slice(&3i16.to_le_bytes());
+        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
+            Tag::new(0x6002, 0x0050),
+            Vr::Ss,
+            Arc::new(MemoryBuffer::from(origin_bytes)),
+        )));
+        ds.insert_value(Tag::new(0x6002, 0x0051), 4u16);
         ds.insert_str(Tag::new(0x6002, 0x1500), Vr::Lo, "LABEL");
         let overlays = OverlayData::from_dataset(&ds);
         assert_eq!(overlays[0].group, 0x6002);
-        assert_eq!(overlays[0].origin(), (3, 4));
+        assert_eq!(overlays[0].origin(), (3, 2), "OverlayOrigin is row\\column");
+        assert_eq!(overlays[0].frame_origin(), 4, "ImageFrameOrigin is (60xx,0051)");
         assert_eq!(overlays[0].label(), Some("LABEL"));
         assert_eq!(overlays[0].overlay_type(), "G");
+    }
+
+    #[test]
+    fn overlay_origin_and_frame_origin_parse_from_standard_bytes() {
+        fn element(group: u16, element: u16, vr: &[u8; 2], value: &[u8]) -> Vec<u8> {
+            let mut out = Vec::new();
+            out.extend_from_slice(&group.to_le_bytes());
+            out.extend_from_slice(&element.to_le_bytes());
+            out.extend_from_slice(vr);
+            out.extend_from_slice(&(value.len() as u16).to_le_bytes());
+            out.extend_from_slice(value);
+            out
+        }
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&element(0x6002, 0x0010, b"US", &2u16.to_le_bytes()));
+        bytes.extend_from_slice(&element(0x6002, 0x0011, b"US", &4u16.to_le_bytes()));
+        bytes.extend_from_slice(&element(0x6002, 0x0040, b"CS", b"G "));
+        // (6002,0050) SS VM2 = row 2 \ column 3
+        let mut origin = Vec::new();
+        origin.extend_from_slice(&2i16.to_le_bytes());
+        origin.extend_from_slice(&3i16.to_le_bytes());
+        bytes.extend_from_slice(&element(0x6002, 0x0050, b"SS", &origin));
+        // (6002,0051) US VM1 = frame 3
+        bytes.extend_from_slice(&element(0x6002, 0x0051, b"US", &3u16.to_le_bytes()));
+        let ds = crate::io::dataset_builder::parse_dataset_bytes(
+            &bytes,
+            &crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN,
+        )
+        .unwrap();
+        let overlays = OverlayData::from_dataset(&ds);
+        assert_eq!(overlays[0].origin(), (3, 2), "row\\column becomes (x, y)");
+        assert_eq!(overlays[0].frame_origin(), 3);
     }
 }
