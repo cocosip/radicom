@@ -239,7 +239,7 @@ fn build_with_icon<E>(
 where
     E: From<Error>,
 {
-    let mut directory = DicomDirectory::new(file_set_id);
+    let mut directory = DicomDirectory::try_new(file_set_id)?;
     for path in files {
         let file = DicomFile::open(&path)?;
         let id = file_id(&path);

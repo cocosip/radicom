@@ -223,8 +223,17 @@ pub struct DicomDirectory {
 impl DicomDirectory {
     /// Creates an empty directory with `file_set_id` (§3.3 step 3).
     pub fn new(file_set_id: impl Into<String>) -> Self {
+        Self::try_new(file_set_id).expect("DICOMDIR FileSetID must not be empty")
+    }
+
+    /// Creates an empty directory, returning an error for an invalid FileSetID.
+    pub fn try_new(file_set_id: impl Into<String>) -> Result<Self, Error> {
+        let file_set_id = file_set_id.into();
+        if file_set_id.is_empty() {
+            return Err(record_error("DICOMDIR FileSetID must not be empty"));
+        }
         let mut dataset = Dataset::new();
-        dataset.insert_str(tags::FILE_SET_ID, Vr::Sh, file_set_id.into());
+        dataset.insert_str(tags::FILE_SET_ID, Vr::Sh, file_set_id);
         dataset.insert_value(tags::FILE_SET_CONSISTENCY_FLAG, 1u16);
         // a DICOMDIR carries its own SOP Instance UID; setting it once keeps the
         // file identity (and thus every record offset) stable across re-serialisation
@@ -238,7 +247,7 @@ impl DicomDirectory {
         file.file_meta = file_meta;
         file.format = FileFormat::Dicom3;
 
-        DicomDirectory { file, records: Vec::new(), roots: Vec::new() }
+        Ok(DicomDirectory { file, records: Vec::new(), roots: Vec::new() })
     }
 
     /// Opens and stitches an existing DICOMDIR (§3.2).
@@ -808,6 +817,12 @@ mod tests {
             ),
         ));
         DicomFile::from_dataset(dataset)
+    }
+
+    #[test]
+    fn empty_file_set_id_is_rejected() {
+        let result = std::panic::catch_unwind(|| DicomDirectory::new(""));
+        assert!(result.is_err(), "an empty FileSetID must be rejected");
     }
 
     #[test]
