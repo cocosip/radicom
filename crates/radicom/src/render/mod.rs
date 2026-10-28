@@ -35,7 +35,7 @@ pub use geometry::{
     FrameOrientation,
 };
 pub use icon::IconImage;
-pub use interpolation::{bilinear_color24, bilinear_grayscale, nearest_grayscale};
+pub use interpolation::{bilinear_bgra32, bilinear_color24, bilinear_grayscale, nearest_grayscale};
 pub use math::{BitList, Histogram, Interval, Matrix, MovingAverage, Point2, Point3, Rect, Vector3};
 pub use reconstruction::{DicomGenerator, ImageData, Slice, Stack, StackType, VolumeData};
 pub use spatial::SpatialTransform;
@@ -989,12 +989,28 @@ pub fn render_grayscale_frame(dataset: &Dataset, frame: u32) -> Result<RawImage,
     render_grayscale_with_options(dataset, frame, &options)
 }
 
+/// Pixels below this count render on one thread; spawning bands for a small
+/// frame costs more than the loop itself (§3.1).
+const PARALLEL_MIN_PIXELS: usize = 1 << 17;
+
 /// Renders a grayscale frame with pre-resolved options (lets `DicomImage` apply
 /// its own window overrides).
 fn render_grayscale_with_options(
     dataset: &Dataset,
     frame: u32,
     options: &GrayscaleRenderOptions,
+) -> Result<RawImage, Error> {
+    render_grayscale_with_threshold(dataset, frame, options, PARALLEL_MIN_PIXELS)
+}
+
+/// As [`render_grayscale_with_options`] with an explicit parallel-size threshold.
+/// `usize::MAX` forces the serial path; the byte-identity test uses 0 vs
+/// `usize::MAX` to compare the parallel and serial output directly.
+fn render_grayscale_with_threshold(
+    dataset: &Dataset,
+    frame: u32,
+    options: &GrayscaleRenderOptions,
+    parallel_min_pixels: usize,
 ) -> Result<RawImage, Error> {
     // PixelData::from_dataset takes &mut Dataset, so a &Dataset render cannot
     // borrow it; the dataset is cloned per render (§3.4). Removing this clone
@@ -1026,19 +1042,7 @@ fn render_grayscale_with_options(
     // Normalise to the low `bits_stored` bits (docs §5) via BitDepth: left-align
     // on the high bit, then drop the sub-bit padding.
     let depth = BitDepth::new(bits, pixel.bits_stored(), pixel.high_bit(), signed);
-    let normalize = |v: u16| -> u16 { depth.normalize(v) };
     let count = (width as usize) * (height as usize);
-
-    // Decode one sample, normalised to the low `bits_stored` bits.
-    let sample_at = |i: usize| -> u16 {
-        if bits == 8 {
-            normalize(raw.get(i).copied().unwrap_or(0) as u16)
-        } else {
-            let lo = raw.get(i * 2).copied().unwrap_or(0);
-            let hi = raw.get(i * 2 + 1).copied().unwrap_or(0);
-            normalize(u16::from_le_bytes([lo, hi]))
-        }
-    };
 
     // Precalculate the window: the mapping is a pure function of the stored
     // value, so evaluate it once per distinct value instead of once per pixel
@@ -1048,7 +1052,7 @@ fn render_grayscale_with_options(
     // instead of holding the whole frame in a `Vec<u16>` (§3.9).
     let (mut min, mut max) = (u16::MAX, 0u16);
     for i in 0..count {
-        let v = sample_at(i);
+        let v = frame_sample_at(raw, i, depth);
         if v < min {
             min = v;
         }
@@ -1067,13 +1071,75 @@ fn render_grayscale_with_options(
         options.map(stored)
     };
     let lut: Vec<u8> = (min..=max).map(to_grey).collect();
-    let mut bytes = Vec::with_capacity(count * 4);
-    for i in 0..count {
-        let gray = lut[(sample_at(i) - min) as usize];
-        // BGRA with grey in all colour channels, opaque alpha
-        bytes.extend_from_slice(&[gray, gray, gray, 0xFF]);
-    }
+    let bytes = render_pixel_rows(raw, width, height, depth, &lut, min, parallel_min_pixels);
     Ok(RawImage::new(width, height, bytes))
+}
+
+/// Decodes one normalised sample of a native 8/16-bit frame.
+fn frame_sample_at(raw: &[u8], index: usize, depth: BitDepth) -> u16 {
+    if depth.allocated == 8 {
+        depth.normalize(raw.get(index).copied().unwrap_or(0) as u16)
+    } else {
+        let lo = raw.get(index * 2).copied().unwrap_or(0);
+        let hi = raw.get(index * 2 + 1).copied().unwrap_or(0);
+        depth.normalize(u16::from_le_bytes([lo, hi]))
+    }
+}
+
+/// Emits the output rows of one band into `dst` (the band's own contiguous
+/// slice, row 0 of `dst` = row `rows.start` of the image).
+fn emit_rows(
+    dst: &mut [u8],
+    raw: &[u8],
+    depth: BitDepth,
+    lut: &[u8],
+    min: u16,
+    width: usize,
+    rows: std::ops::Range<usize>,
+) {
+    let y0 = rows.start;
+    for y in rows {
+        let base = (y - y0) * width * 4;
+        for x in 0..width {
+            let v = frame_sample_at(raw, y * width + x, depth);
+            let gray = lut[(v - min) as usize];
+            // BGRA with grey in all colour channels, opaque alpha
+            let o = base + x * 4;
+            dst[o..o + 4].copy_from_slice(&[gray, gray, gray, 0xFF]);
+        }
+    }
+}
+
+/// Renders the pixel rows into a BGRA buffer, splitting the image into per-core
+/// row bands with `std::thread::scope` when it is large enough (§3.1). Each band
+/// writes a disjoint slice, so the result is byte-identical to the serial path.
+fn render_pixel_rows(
+    raw: &[u8],
+    width: u32,
+    height: u32,
+    depth: BitDepth,
+    lut: &[u8],
+    min: u16,
+    parallel_min_pixels: usize,
+) -> Vec<u8> {
+    let (w, h) = (width as usize, height as usize);
+    let mut bytes = vec![0u8; w * h * 4];
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(h.max(1));
+    if threads <= 1 || w * h < parallel_min_pixels {
+        emit_rows(&mut bytes, raw, depth, lut, min, w, 0..h);
+        return bytes;
+    }
+    let rows_per_band = h.div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (band, chunk) in bytes.chunks_mut(rows_per_band * w * 4).enumerate() {
+            let y0 = band * rows_per_band;
+            scope.spawn(move || {
+                let rows = chunk.len() / (w * 4);
+                emit_rows(chunk, raw, depth, lut, min, w, y0..y0 + rows);
+            });
+        }
+    });
+    bytes
 }
 
 fn unsupported(message: &str) -> Error {
@@ -1884,6 +1950,22 @@ mod tests {
         let pixels = image.pixels();
         let lum = |p: u32| (p & 0xFF) as u8;
         assert!(lum(pixels[3]) >= lum(pixels[0]), "brighter stored value renders brighter");
+    }
+
+    #[test]
+    fn parallel_pixel_rows_are_byte_identical_to_serial() {
+        // 512x512 = 262144 px exceeds PARALLEL_MIN_PIXELS: threshold 0 takes the
+        // threaded path, usize::MAX forces serial. Output must match byte for byte.
+        let (w, h) = (512u16, 512u16);
+        let samples: Vec<u16> = (0..(w as usize * h as usize)).map(|i| ((i * 37) % 4096) as u16).collect();
+        let ds = gray_image(w, h, 16, &samples, Some(2048.0), Some(4096.0));
+        let options = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
+        let serial = render_grayscale_with_threshold(&ds, 0, &options, usize::MAX).unwrap();
+        let parallel = render_grayscale_with_threshold(&ds, 0, &options, 0).unwrap();
+        assert_eq!(parallel.as_bytes(), serial.as_bytes(), "threaded bands match the serial bytes");
+        // the shipped entry point (real threshold) also matches on this large frame
+        let shipped = render_grayscale_with_options(&ds, 0, &options).unwrap();
+        assert_eq!(shipped.as_bytes(), serial.as_bytes(), "shipped threshold preserves the bytes");
     }
 
     #[test]

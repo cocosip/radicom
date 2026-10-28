@@ -10,7 +10,7 @@ use super::layout::LayoutCell;
 use super::models::FilmBox;
 use crate::error::{DataError, Error};
 use crate::pixel::Color32;
-use crate::render::{bilinear_color24, render_frame, RawImage};
+use crate::render::{bilinear_bgra32, render_frame, RawImage};
 
 /// How dense to rasterise the film: pixels per millimetre on the printed page.
 #[derive(Debug, Clone, Copy)]
@@ -143,17 +143,36 @@ impl Canvas {
         let dst_w = ((patch.width() as f64 * scale).round() as i64).max(1);
         let dst_h = ((patch.height() as f64 * scale).round() as i64).max(1);
 
-        let rgb = to_rgb24(patch);
-        let rescaled = bilinear_color24(&rgb, patch.width() as usize, patch.height() as usize, dst_w as usize, dst_h as usize);
+        // Resample the BGRA patch directly into one full-image buffer, then copy
+        // its rows into the canvas — no RGB round trip and no per-pixel set (§3.7).
+        let rescaled = bilinear_bgra32(
+            patch.as_bytes(),
+            patch.width() as usize,
+            patch.height() as usize,
+            dst_w as usize,
+            dst_h as usize,
+        );
 
         let off_x = cell_x + (cell_w - dst_w) / 2;
         let off_y = cell_y + (cell_h - dst_h) / 2;
-        for dy in 0..dst_h {
-            for dx in 0..dst_w {
-                let si = ((dy * dst_w + dx) * 3) as usize;
-                let color = Color32::new(rescaled[si], rescaled[si + 1], rescaled[si + 2]);
-                self.set(off_x + dx, off_y + dy, color);
-            }
+        self.blit_bgra(off_x, off_y, dst_w, dst_h, &rescaled);
+    }
+
+    /// Copies a `dst_w`×`dst_h` BGRA patch at (`off_x`,`off_y`), clipping to the
+    /// canvas exactly like the per-pixel [`Canvas::set`] loop did.
+    fn blit_bgra(&mut self, off_x: i64, off_y: i64, dst_w: i64, dst_h: i64, src: &[u8]) {
+        let x0 = (-off_x).max(0).min(dst_w);
+        let x1 = (self.width as i64 - off_x).min(dst_w);
+        let y0 = (-off_y).max(0).min(dst_h);
+        let y1 = (self.height as i64 - off_y).min(dst_h);
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let run = ((x1 - x0) * 4) as usize;
+        for dy in y0..y1 {
+            let src_start = ((dy * dst_w + x0) * 4) as usize;
+            let dst_start = (((off_y + dy) * self.width as i64 + (off_x + x0)) * 4) as usize;
+            self.bytes[dst_start..dst_start + run].copy_from_slice(&src[src_start..src_start + run]);
         }
     }
 
@@ -170,17 +189,6 @@ fn invert(image: &mut RawImage) {
         .flat_map(|px| [255 - px[0], 255 - px[1], 255 - px[2], px[3]])
         .collect();
     *image = RawImage::new(image.width(), image.height(), inverted);
-}
-
-fn to_rgb24(image: &RawImage) -> Vec<u8> {
-    let bytes = image.as_bytes();
-    let mut rgb = Vec::with_capacity((image.width() * image.height() * 3) as usize);
-    for px in bytes.as_chunks::<4>().0 {
-        rgb.push(px[2]);
-        rgb.push(px[1]);
-        rgb.push(px[0]);
-    }
-    rgb
 }
 
 #[cfg(test)]
@@ -287,5 +295,53 @@ mod tests {
         let mut film = FilmBox::new();
         film.set_image_display_format("STANDARD\\1,1").unwrap();
         assert!(film.render_to_image(10.0, RenderScale::default(), EmptyDensity::Black).is_err());
+    }
+
+    #[test]
+    fn blit_scaled_matches_the_previous_rgb_round_trip_bytes() {
+        // §3.7: the new direct-BGRA blit must produce the same canvas bytes as the
+        // old to_rgb24 → bilinear_color24 → per-pixel set path (incl. clipping).
+        let patch = RawImage::new(
+            3,
+            2,
+            vec![
+                10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, //
+                100, 110, 120, 255, 130, 140, 150, 255, 160, 170, 180, 255,
+            ],
+        );
+        // a cell placed partly off the top-left of the canvas to exercise clipping
+        let cell = LayoutCell { x: -0.5, y: -0.5, width: 5.0, height: 4.0 };
+        let (cw, ch, ppm) = (30u32, 25u32, 3.0f64);
+        let bg = crate::pixel::Color32::new(5, 6, 7);
+        let mut actual = Canvas::filled(cw, ch, bg);
+        actual.blit_scaled(&cell, &patch, ppm);
+
+        // reference implementation: the previous RGB round-trip + per-pixel set
+        let mut expected = Canvas::filled(cw, ch, bg);
+        let bytes = patch.as_bytes();
+        let mut rgb = Vec::new();
+        for px in bytes.as_chunks::<4>().0 {
+            rgb.push(px[2]);
+            rgb.push(px[1]);
+            rgb.push(px[0]);
+        }
+        let cell_x = (cell.x * ppm).round() as i64;
+        let cell_y = (cell.y * ppm).round() as i64;
+        let cell_w = (cell.width * ppm).round() as i64;
+        let cell_h = (cell.height * ppm).round() as i64;
+        let fit = (cell_w as f64 / patch.width() as f64).min(cell_h as f64 / patch.height() as f64);
+        let dst_w = ((patch.width() as f64 * fit).round() as i64).max(1);
+        let dst_h = ((patch.height() as f64 * fit).round() as i64).max(1);
+        let rescaled = crate::render::bilinear_color24(&rgb, patch.width() as usize, patch.height() as usize, dst_w as usize, dst_h as usize);
+        let off_x = cell_x + (cell_w - dst_w) / 2;
+        let off_y = cell_y + (cell_h - dst_h) / 2;
+        for dy in 0..dst_h {
+            for dx in 0..dst_w {
+                let si = ((dy * dst_w + dx) * 3) as usize;
+                expected.set(off_x + dx, off_y + dy, crate::pixel::Color32::new(rescaled[si], rescaled[si + 1], rescaled[si + 2]));
+            }
+        }
+
+        assert_eq!(actual.bytes, expected.bytes, "direct BGRA blit matches the RGB round trip byte for byte");
     }
 }

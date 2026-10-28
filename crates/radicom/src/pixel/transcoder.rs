@@ -5,6 +5,7 @@
 //! bookkeeping correct. Codecs themselves never live here.
 
 use crate::error::{CodecError, Error};
+use crate::model::buffer::SharedBuffer;
 use crate::model::dataset::Dataset;
 use crate::model::item::{DicomFragmentSequence, DicomItem};
 use crate::model::tag::Tag;
@@ -98,7 +99,7 @@ impl Transcoder {
         {
             let mut pd = PixelData::from_dataset(&mut out)?;
             for frame in frames {
-                pd.add_frame(frame)?;
+                pd.add_frame(frame.data())?;
             }
         }
         self.finish(&mut out)?;
@@ -131,7 +132,7 @@ impl Transcoder {
         target.remove(Tag::NUMBER_OF_FRAMES);
         {
             let mut dst = PixelData::from_dataset(&mut target)?;
-            dst.add_frame(&bytes)?;
+            dst.add_frame(bytes.data())?;
         }
         let mut decoded = target.clone();
         decoded.remove(PIXEL_DATA);
@@ -145,26 +146,30 @@ impl Transcoder {
 
     // -- flows ---------------------------------------------------------------
 
-    /// Every frame of `ds` as owned bytes, in order.
-    fn read_frames(&self, ds: &Dataset) -> Result<Vec<Vec<u8>>, Error> {
+    /// Every frame of `ds` as a zero-copy shared buffer, in order.
+    ///
+    /// The frame is a window over the dataset's pixel buffer, so no per-frame
+    /// `to_vec()` materialisation is needed; `add_frame` copies once into the
+    /// output when it is written.
+    fn read_frames(&self, ds: &Dataset) -> Result<Vec<SharedBuffer>, Error> {
         let mut owned = ds.clone();
         let pd = PixelData::from_dataset(&mut owned)?;
         let count = pd.number_of_frames();
         let mut frames = Vec::with_capacity(count as usize);
         for i in 0..count {
-            frames.push(pd.get_frame(i)?.data().to_vec());
+            frames.push(pd.get_frame(i)?);
         }
         Ok(frames)
     }
 
-    /// One frame of `ds` as owned bytes.
-    fn read_frame(&self, ds: &Dataset, frame: u32) -> Result<Vec<u8>, Error> {
+    /// One frame of `ds` as a zero-copy shared buffer.
+    fn read_frame(&self, ds: &Dataset, frame: u32) -> Result<SharedBuffer, Error> {
         let mut owned = ds.clone();
-        Ok(PixelData::from_dataset(&mut owned)?.get_frame(frame)?.data().to_vec())
+        PixelData::from_dataset(&mut owned)?.get_frame(frame)
     }
 
     /// Row 3: decode `ds` and return the decoded frames.
-    fn decode_frames(&self, ds: &Dataset) -> Result<Vec<Vec<u8>>, Error> {
+    fn decode_frames(&self, ds: &Dataset) -> Result<Vec<SharedBuffer>, Error> {
         let codec = codec_registry().get_codec(&self.from)?;
         let frames = self.read_frames(ds)?;
         let mut source = ds.clone();
@@ -173,7 +178,7 @@ impl Transcoder {
         {
             let mut pd = PixelData::from_dataset(&mut source)?;
             for frame in frames {
-                pd.add_frame(frame)?;
+                pd.add_frame(frame.data())?;
             }
         }
         let mut decoded = source.clone();
@@ -187,7 +192,7 @@ impl Transcoder {
     }
 
     /// Row 4: encode `ds` and return the encoded frames.
-    fn encode_frames(&self, ds: &Dataset) -> Result<Vec<Vec<u8>>, Error> {
+    fn encode_frames(&self, ds: &Dataset) -> Result<Vec<SharedBuffer>, Error> {
         let codec = codec_registry().get_codec(&self.to)?;
         let mut encoded = ds.clone();
         encoded.set_transfer_syntax(self.to.clone());
@@ -202,7 +207,7 @@ impl Transcoder {
     }
 
     /// Row 5 via the direct hook.
-    fn run_direct(&self, ds: &Dataset, hook: Arc<dyn DirectTranscoder>) -> Result<Vec<Vec<u8>>, Error> {
+    fn run_direct(&self, ds: &Dataset, hook: Arc<dyn DirectTranscoder>) -> Result<Vec<SharedBuffer>, Error> {
         let mut encoded = ds.clone();
         encoded.set_transfer_syntax(self.to.clone());
         encoded.remove(PIXEL_DATA);
@@ -225,7 +230,7 @@ impl Transcoder {
         {
             let mut pd = PixelData::from_dataset(&mut out)?;
             for frame in frames {
-                pd.add_frame(frame)?;
+                pd.add_frame(frame.data())?;
             }
         }
         Ok(out)
