@@ -293,6 +293,28 @@ pub fn require_codec(syntax: &TransferSyntax) -> Result<(), Error> {
     Ok(())
 }
 
+/// TR-03: a transcoded copy of a dataset (the source is never mutated).
+impl Dataset {
+    pub fn clone_with_syntax(
+        &self,
+        syntax: Arc<TransferSyntax>,
+        out_params: Option<CodecParams>,
+    ) -> Result<Dataset, Error> {
+        Transcoder::new(self.transfer_syntax(), syntax, None, out_params).transcode_dataset(self)
+    }
+}
+
+/// TR-03: a transcoded copy of a file (the source is never mutated).
+impl crate::io::file::DicomFile {
+    pub fn clone_with_syntax(
+        &self,
+        syntax: Arc<TransferSyntax>,
+        out_params: Option<CodecParams>,
+    ) -> Result<crate::io::file::DicomFile, Error> {
+        Transcoder::new(self.dataset.transfer_syntax(), syntax, None, out_params).transcode_file(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,5 +636,23 @@ mod tests {
             "meta group transfer syntax follows the dataset"
         );
         crate::pixel::codec::reset_codec_registry();
+    }
+
+    #[test]
+    fn dataset_clone_with_syntax_transcodes_without_touching_the_source() {
+        let ds = with_pixels(8, 2, 2, &[&[1, 2, 3, 4]]);
+        let out = ds.clone_with_syntax(syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone(), None).unwrap();
+        assert_eq!(out.transfer_syntax().uid(), "1.2.840.10008.1.2");
+        assert_eq!(frames_of(&out), vec![vec![1, 2, 3, 4]], "frames are copied through");
+        assert_eq!(ds.transfer_syntax().uid(), "1.2.840.10008.1.2.1", "the source syntax is untouched");
+    }
+
+    #[test]
+    fn file_clone_with_syntax_updates_the_meta_group() {
+        let mut file = crate::io::file::DicomFile::from_dataset(with_pixels(8, 2, 2, &[&[1, 2, 3, 4]]));
+        file.file_meta.insert_str(Tag::new(0x0002, 0x0010), Vr::Ui, "1.2.840.10008.1.2.1");
+        let out = file.clone_with_syntax(syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone(), None).unwrap();
+        assert_eq!(out.dataset.transfer_syntax().uid(), "1.2.840.10008.1.2");
+        assert_eq!(out.file_meta.get_str(Tag::new(0x0002, 0x0010)).unwrap(), "1.2.840.10008.1.2");
     }
 }
