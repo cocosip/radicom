@@ -23,6 +23,11 @@ tracing.workspace = true
 [features]
 default = []
 render = []
+# `anonymize` also gates the `Regex` variants of `rules::{MatchRule, TransformRule}`
+# (crates/radicom/src/rules/), which are the only users of `regex` — the anonymizer
+# itself has none (its profile matcher is the hand-rolled subset in
+# anonymizer/profile.rs, review §3.6). Decoupling them needs the `regex-rules`
+# cfg in rules/, so the two remain coupled for now.
 anonymize = ["dep:regex"]
 
 [dev-dependencies]

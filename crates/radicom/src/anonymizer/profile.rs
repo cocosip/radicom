@@ -14,6 +14,9 @@
 //! crate light per architecture §"heavy deps isolated").
 
 use crate::error::{DataError, Error};
+use once_cell::sync::Lazy;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// The 11 de-identification options, in CSV column order (§6.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,22 +159,22 @@ impl TagPattern {
     }
 
     /// True when `tag` (as `GGGG,EEEE`, uppercase) matches this pattern.
+    ///
+    /// Compared byte-wise without allocating: patterns only ever hold ASCII
+    /// (hex digits, `,`, `[`, `]`, `{n}`), so a byte that is not ASCII can never
+    /// equal a literal or class member.
     pub fn matches(&self, tag: &str) -> bool {
-        let tag = tag.to_ascii_uppercase();
-        let chars: Vec<char> = tag.chars().collect();
-        if chars.len() != self.tokens.len() {
+        let bytes = tag.as_bytes();
+        if bytes.len() != self.tokens.len() {
             return false;
         }
-        for (ch, token) in chars.iter().zip(&self.tokens) {
-            let ok = match token {
-                Token::Literal(expected) => ch.to_ascii_uppercase() == *expected,
-                Token::Class(set) => set.contains(&ch.to_ascii_uppercase()),
-            };
-            if !ok {
-                return false;
+        bytes.iter().zip(&self.tokens).all(|(byte, token)| {
+            let upper = byte.to_ascii_uppercase();
+            match token {
+                Token::Literal(expected) => expected.is_ascii() && upper == *expected as u8,
+                Token::Class(set) => set.contains(&char::from(upper)),
             }
-        }
-        true
+        })
     }
 
     pub fn text(&self) -> &str {
@@ -201,6 +204,19 @@ fn pattern_error(text: &str, reason: &str) -> Error {
     Error::Data(DataError::Other { message: format!("bad profile pattern \"{text}\": {reason}") })
 }
 
+/// The packed `group << 16 | element` key of a `GGGG,EEEE` tag string — the
+/// form [`SecurityProfile::action_for`] takes. `None` when the string is not a
+/// plain tag, which also identifies the patterns that are not literal tags.
+fn tag_key(text: &str) -> Option<u32> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 9 || bytes[4] != b',' {
+        return None;
+    }
+    let group = u16::from_str_radix(std::str::from_utf8(&bytes[..4]).ok()?, 16).ok()?;
+    let element = u16::from_str_radix(std::str::from_utf8(&bytes[5..]).ok()?, 16).ok()?;
+    Some(u32::from(group) << 16 | u32::from(element))
+}
+
 /// One profile row: a tag pattern and its per-option action (§6.1).
 #[derive(Debug, Clone)]
 pub struct ProfileRow {
@@ -217,15 +233,38 @@ impl ProfileRow {
 }
 
 /// A parsed de-identification profile (§6.1).
+///
+/// Cloning is cheap: the rows and their lookup index are shared behind an
+/// `Arc`, so [`SecurityProfile::basic`] can hand out the one parsed table.
 #[derive(Debug, Clone)]
 pub struct SecurityProfile {
+    inner: Arc<ProfileInner>,
+}
+
+/// The parsed rows plus the lookup structures derived from them.
+#[derive(Debug)]
+struct ProfileInner {
     rows: Vec<ProfileRow>,
+    /// Indices of the rows whose pattern is not a single literal tag; they are
+    /// the only rows a non-literal tag can match.
+    wildcards: Vec<usize>,
+    /// Per option: the resolved action of every tag the table names literally,
+    /// in row order (the first matching row that has a cell for the option
+    /// wins, exactly like the linear scan).
+    exact: [HashMap<u32, Action>; 11],
 }
 
 impl SecurityProfile {
     /// Parses the CSV embedded in this module (rows of `tag;action x11`).
+    ///
+    /// The 655-row table is parsed once per process and shared; earlier this
+    /// re-parsed the CSV on every call (~316 µs each).
     pub fn basic() -> Self {
-        Self::parse(include_str!("ps3.15.csv")).expect("the built-in PS3.15 profile must parse")
+        static BASIC: Lazy<SecurityProfile> = Lazy::new(|| {
+            SecurityProfile::parse(include_str!("ps3.15.csv"))
+                .expect("the built-in PS3.15 profile must parse")
+        });
+        BASIC.clone()
     }
 
     /// Parses a CSV profile string; used for the built-in table and custom ones.
@@ -252,7 +291,48 @@ impl SecurityProfile {
         if rows.is_empty() {
             return Err(Error::Data(DataError::Other { message: "profile has no rows".into() }));
         }
-        Ok(SecurityProfile { rows })
+        Ok(Self::indexed(rows))
+    }
+
+    /// Builds the exact-tag index over the parsed rows (§3.2).
+    ///
+    /// For each option the rows are replayed in order: a literal row claims its
+    /// own tag, and a wildcard row claims the literal tags below it that it
+    /// matches. The result is the same action the row-by-row scan would pick,
+    /// but the common case becomes one hash lookup.
+    fn indexed(rows: Vec<ProfileRow>) -> Self {
+        let literals: Vec<(u32, String)> = rows
+            .iter()
+            .filter_map(|row| {
+                tag_key(row.pattern.text()).map(|key| (key, row.pattern.text().to_ascii_uppercase()))
+            })
+            .collect();
+        let wildcards: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| tag_key(row.pattern.text()).is_none())
+            .map(|(index, _)| index)
+            .collect();
+
+        let mut exact: [HashMap<u32, Action>; 11] = Default::default();
+        for (slot, option) in exact.iter_mut().zip(AnonOption::ALL) {
+            for row in &rows {
+                let Some(action) = row.action_for(option) else { continue };
+                match tag_key(row.pattern.text()) {
+                    Some(key) => {
+                        slot.entry(key).or_insert(action);
+                    }
+                    None => {
+                        for (key, text) in &literals {
+                            if !slot.contains_key(key) && row.pattern.matches(text) {
+                                slot.insert(*key, action);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        SecurityProfile { inner: Arc::new(ProfileInner { rows, wildcards, exact }) }
     }
 
     /// The action for `tag` under `option` (§6.2).
@@ -264,13 +344,29 @@ impl SecurityProfile {
     /// odd-private-group row swallow every later row for options it does not
     /// take part in, which is why `CleanGraph` did nothing.
     pub fn action_for(&self, tag: &str, option: AnonOption) -> Option<Action> {
-        self.rows
+        if let Some(key) = tag_key(tag) {
+            if let Some(action) = self.inner.exact[option as usize].get(&key) {
+                return Some(*action);
+            }
+        }
+        // not a tag the table names literally: only the wildcard rows can match
+        self.inner.wildcards.iter().find_map(|index| {
+            let row = &self.inner.rows[*index];
+            row.pattern.matches(tag).then(|| row.action_for(option)).flatten()
+        })
+    }
+
+    /// The unindexed scan this type used to do; kept to prove the index agrees.
+    #[cfg(test)]
+    fn linear_action_for(&self, tag: &str, option: AnonOption) -> Option<Action> {
+        self.inner
+            .rows
             .iter()
             .find_map(|row| row.pattern.matches(tag).then(|| row.action_for(option)).flatten())
     }
 
     pub fn rows(&self) -> &[ProfileRow] {
-        &self.rows
+        &self.inner.rows
     }
 }
 
@@ -334,6 +430,71 @@ mod tests {
         assert!(pattern.matches("50ab,1234"), "matching is case-insensitive");
         assert!(!pattern.matches("60AB,1234"), "the first literal must match");
         assert!(!pattern.matches("50AB,12345"), "length must match exactly");
+    }
+
+    #[test]
+    fn the_builtin_profile_is_parsed_once_and_shared() {
+        let first = SecurityProfile::basic();
+        let second = SecurityProfile::basic();
+        assert!(Arc::ptr_eq(&first.inner, &second.inner), "basic() shares one parsed table");
+
+        // the two handles describe the same table
+        assert_eq!(first.rows().len(), second.rows().len());
+        for (left, right) in first.rows().iter().zip(second.rows()) {
+            assert_eq!(left.pattern.text(), right.pattern.text());
+            assert_eq!(left.actions, right.actions);
+        }
+
+        // a custom profile stays its own table and does not disturb the cached one
+        let custom = SecurityProfile::parse("0010,0010;D\n").unwrap();
+        assert_eq!(custom.rows().len(), 1);
+        assert_eq!(custom.action_for("0010,0010", AnonOption::BasicProfile), Some(Action::Dummy));
+        assert_eq!(
+            SecurityProfile::basic().action_for("0010,0010", AnonOption::BasicProfile),
+            Some(Action::ZeroLength),
+            "the built-in row is unchanged"
+        );
+    }
+
+    /// A tag string that matches `pattern`: literals as they are, the first
+    /// character of each class.
+    fn sample_tag(pattern: &TagPattern) -> String {
+        pattern
+            .tokens
+            .iter()
+            .map(|token| match token {
+                Token::Literal(ch) => *ch,
+                Token::Class(set) => set[0],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_exact_tag_index_agrees_with_the_linear_scan() {
+        // every literal row's tag, every wildcard row's sample tag, plus tags the
+        // table does not mention and a few edge shapes
+        let profile = SecurityProfile::basic();
+        let mut probes: Vec<String> = Vec::new();
+        for row in profile.rows() {
+            match tag_key(row.pattern.text()) {
+                Some(key) => probes.push(format!("{:04X},{:04X}", key >> 16, key & 0xFFFF)),
+                None => probes.push(sample_tag(&row.pattern)),
+            }
+        }
+        probes.extend(
+            ["0008,0060", "0008,0001", "0009,0001", "5011,1234", "60FF,3000", "0070,0001", "FFFF,FFFF"]
+                .map(String::from),
+        );
+
+        for option in AnonOption::ALL {
+            for tag in &probes {
+                assert_eq!(
+                    profile.action_for(tag, option),
+                    profile.linear_action_for(tag, option),
+                    "index and scan disagree for {tag} under {option:?}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! CLI (INF-07), mirroring fo-dicom's `FO-DICOM.Dump`.
 
 use crate::model::dataset::Dataset;
-use crate::model::dictionary::dictionary;
+use crate::model::dictionary::{dictionary, Dictionary};
 use crate::model::element::ElementValue;
 use crate::model::item::DicomItem;
 use crate::model::tag::Tag;
@@ -32,7 +32,7 @@ impl Default for DumpOptions {
 /// Formats a dataset (and all nested sequences) as a multi-line string (INF-04).
 pub fn dump_dataset(dataset: &Dataset, options: &DumpOptions) -> String {
     let mut out = String::new();
-    write_level(dataset, 0, options, &mut out);
+    write_level(dataset, 0, options, dictionary(), &mut out);
     out
 }
 

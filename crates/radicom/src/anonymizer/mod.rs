@@ -113,59 +113,65 @@ impl Anonymizer {
 
     /// The recursive walk: apply each element's action, recurse into sequences
     /// unless the action is K (§6.2).
+    ///
+    /// Only the tags are collected up front — the items themselves stay in the
+    /// dataset, so a 32 MB pixel buffer or a whole SR subtree is never cloned
+    /// just to be walked (§3.4).
     fn walk(&self, dataset: &mut Dataset, replaced: &mut HashMap<String, String>) -> Result<(), Error> {
         let mut to_remove: Vec<Tag> = Vec::new();
-        let items: Vec<DicomItem> = dataset.items().cloned().collect();
+        let tags: Vec<Tag> = dataset.items().map(|item| item.tag().clone()).collect();
 
-        for item in &items {
-            let tag = item.tag().clone();
+        for tag in tags {
             let tag_text = format!("{:04X},{:04X}", tag.group(), tag.element());
             let action = self.profile.action_for(&tag_text, self.option);
 
             // sequences: a Remove action deletes the whole sequence; otherwise
             // recurse into the children (Keep leaves the sequence and its
             // children untouched). Without the Remove case an SQ tag marked X
-            // would survive as an empty/kept shell.
-            if let DicomItem::Sequence(sequence) = item {
+            // would survive as an empty/kept shell. The sequence is moved out and
+            // back rather than cloned, so only the traversal is paid for.
+            if matches!(dataset.item(&tag), Some(DicomItem::Sequence(_))) {
                 match action {
-                    Some(Action::Remove) => to_remove.push(tag.clone()),
+                    Some(Action::Remove) => to_remove.push(tag),
                     Some(Action::Keep) => {}
                     _ => {
-                        let mut new_items: Vec<Dataset> = sequence.items().to_vec();
-                        for child in &mut new_items {
+                        let Some(DicomItem::Sequence(mut sequence)) = dataset.remove(&tag) else { continue };
+                        for child in sequence.items_mut() {
                             self.walk(child, replaced)?;
                         }
-                        *dataset
-                            .insert_sequence(tag.clone())
-                            .items_mut() = new_items;
+                        dataset.insert_or_update(DicomItem::Sequence(sequence));
                     }
                 }
                 continue;
             }
 
             let Some(action) = action else { continue };
+            if action == Action::Remove {
+                to_remove.push(tag);
+                continue;
+            }
+            // fragments carry no VR and no value the actions know how to blank
+            let Some(DicomItem::Element(element)) = dataset.item(&tag) else { continue };
+            let vr = element.vr();
+
             match action {
                 Action::Keep => {}
-                Action::Remove => to_remove.push(tag.clone()),
-                Action::ZeroLength => self.blank(dataset, item, false)?,
-                Action::Dummy => {
-                    // UID → new UID; numeric strings (DS/IS) → "0"; other typed
-                    // values via blank() (dates → MinValue, binary → zero dummy,
-                    // generic strings → "ANONYMOUS") so D never writes an
-                    // invalid value such as "ANONYMOUS" into a DS/IS element.
-                    if item.vr() == Vr::Ui {
-                        self.replace_uid(dataset, item, replaced)?;
-                    } else {
-                        self.blank(dataset, item, true)?;
-                    }
+                Action::Remove => unreachable!("handled above"),
+                Action::ZeroLength => self.blank(dataset, &tag, vr, false)?,
+                // UID → new UID; numeric strings (DS/IS) → "0"; other typed
+                // values via blank() (dates → MinValue, binary → zero dummy,
+                // generic strings → "ANONYMOUS") so D never writes an invalid
+                // value such as "ANONYMOUS" into a DS/IS element.
+                Action::Dummy if vr == Vr::Ui => self.replace_uid(dataset, &tag, replaced),
+                Action::Dummy => self.blank(dataset, &tag, vr, true)?,
+                Action::Clean | Action::Uid if vr == Vr::Ui => {
+                    self.replace_uid(dataset, &tag, replaced)
                 }
                 Action::Clean | Action::Uid => {
-                    if item.vr() == Vr::Ui {
-                        self.replace_uid(dataset, item, replaced)?;
-                    } else if item.vr().is_string() {
-                        dataset.insert_str(tag.clone(), item.vr(), "ANONYMOUS");
+                    if vr.is_string() {
+                        dataset.insert_str(tag.clone(), vr, "ANONYMOUS");
                     } else {
-                        self.blank(dataset, item, true)?;
+                        self.blank(dataset, &tag, vr, true)?;
                     }
                 }
             }
@@ -189,31 +195,19 @@ impl Anonymizer {
     }
 
     /// Rewrites a UID element to a consistent replacement (§6.2).
-    fn replace_uid(
-        &self,
-        dataset: &mut Dataset,
-        item: &DicomItem,
-        replaced: &mut HashMap<String, String>,
-    ) -> Result<(), Error> {
-        let DicomItem::Element(element) = item else { return Ok(()) };
-        let old = element.string_value().to_string();
+    fn replace_uid(&self, dataset: &mut Dataset, tag: &Tag, replaced: &mut HashMap<String, String>) {
+        let old = dataset.try_get_str(tag).unwrap_or_default();
         if old.trim().is_empty() {
-            return Ok(()); // no need to replace empty UIDs
+            return; // no need to replace empty UIDs
         }
-        let new_uid = replaced
-            .entry(old.clone())
-            .or_insert_with(Uid::generate_value)
-            .clone();
-        dataset.insert_str(element.tag().clone(), Vr::Ui, new_uid);
-        Ok(())
+        let new_uid = replaced.entry(old).or_insert_with(Uid::generate_value).clone();
+        dataset.insert_str(tag.clone(), Vr::Ui, new_uid);
     }
 
     /// Blanks an element to a value suitable for its VR (§6.2, fo-dicom
     /// `BlankItem`). `non_zero` requests a dummy (D) rather than zero-length (Z).
-    fn blank(&self, dataset: &mut Dataset, item: &DicomItem, non_zero: bool) -> Result<(), Error> {
-        let DicomItem::Element(element) = item else { return Ok(()) };
-        let tag = element.tag().clone();
-        let vr = element.vr();
+    fn blank(&self, dataset: &mut Dataset, tag: &Tag, vr: Vr, non_zero: bool) -> Result<(), Error> {
+        let tag = tag.clone();
 
         // date/time: fo-dicom writes an empty (Z) or MinValue (D) value
         if matches!(vr, Vr::Da | Vr::Dt | Vr::Tm) {
