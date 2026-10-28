@@ -3,6 +3,8 @@
 //! Only the well-known values are typed; anything else round-trips as the
 //! raw string so unknown vendor values never fail a read.
 
+use crate::model::dataset::Dataset;
+use crate::model::tag::Tag;
 use crate::model::vr::Vr;
 
 /// How the samples of a pixel map to colour.
@@ -152,6 +154,26 @@ impl PhotometricInterpretation {
     pub fn is_420(self) -> bool {
         self.color_space().is_some_and(|cs| cs.chroma_subsampling() == (2, 2))
     }
+
+    /// Infers the photometric interpretation for legacy (ACR-NEMA) files whose
+    /// `(0028,0004)` is absent (docs §1.1 / REND-05 `PixelDataFactory`): a palette
+    /// LUT (`(0028,1101/1102/1103)`) with ≤1 sample ⇒ PALETTE COLOR, other
+    /// single-sample data ⇒ MONOCHROME2, and multi-sample data ⇒ RGB.
+    pub fn infer_from_dataset(dataset: &Dataset) -> Self {
+        let samples = dataset.try_get::<u16>(Tag::new(0x0028, 0x0002)).unwrap_or(1);
+        if samples <= 1 {
+            let palette = dataset.contains(&Tag::new(0x0028, 0x1101))
+                && dataset.contains(&Tag::new(0x0028, 0x1102))
+                && dataset.contains(&Tag::new(0x0028, 0x1103));
+            if palette {
+                Self::PaletteColor
+            } else {
+                Self::Monochrome2
+            }
+        } else {
+            Self::Rgb
+        }
+    }
 }
 
 impl std::fmt::Display for PhotometricInterpretation {
@@ -230,5 +252,28 @@ mod tests {
 
         // undocumented colour spaces have no descriptor
         assert!(PhotometricInterpretation::Hsv.color_space().is_none());
+    }
+
+    #[test]
+    fn infer_photometric_for_legacy_files() {
+        // no PI, single sample, no palette → MONOCHROME2
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::new(0x0028, 0x0002), 1u16);
+        assert_eq!(
+            PhotometricInterpretation::infer_from_dataset(&ds),
+            PhotometricInterpretation::Monochrome2
+        );
+        // single sample + all three palette descriptors present → PALETTE COLOR
+        for t in [0x1101u16, 0x1102, 0x1103] {
+            ds.insert_value(Tag::new(0x0028, t), 0u16);
+        }
+        assert_eq!(
+            PhotometricInterpretation::infer_from_dataset(&ds),
+            PhotometricInterpretation::PaletteColor
+        );
+        // multi-sample → RGB
+        let mut rgb = Dataset::new();
+        rgb.insert_value(Tag::new(0x0028, 0x0002), 3u16);
+        assert_eq!(PhotometricInterpretation::infer_from_dataset(&rgb), PhotometricInterpretation::Rgb);
     }
 }

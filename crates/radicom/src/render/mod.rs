@@ -939,10 +939,11 @@ fn unsupported(message: &str) -> Error {
 /// YBR_PARTIAL_422 → YCbCr→RGB conversion. Other PIs error.
 pub fn render_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error> {
     use crate::pixel::photometric::PhotometricInterpretation as Pi;
-    let pi = dataset
-        .try_get_str(Tag::new(0x0028, 0x0004))
-        .map(|s| Pi::parse(&s))
-        .unwrap_or(Pi::Monochrome2);
+    let pi = match dataset.try_get_str(Tag::new(0x0028, 0x0004)) {
+        Some(s) => Pi::parse(&s),
+        // ACR-NEMA files may omit PI; infer from samples + palette (docs §1.1).
+        None => Pi::infer_from_dataset(dataset),
+    };
     match pi {
         Pi::Monochrome1 | Pi::Monochrome2 => render_grayscale_frame(dataset, frame),
         Pi::Rgb => render_rgb_frame(dataset, frame),
@@ -1119,11 +1120,10 @@ impl DicomImage {
     /// scale in order.
     pub fn render_frame(&self, frame: u32) -> Result<RawImage, Error> {
         use crate::pixel::photometric::PhotometricInterpretation as Pi;
-        let pi = self
-            .dataset
-            .try_get_str(Tag::new(0x0028, 0x0004))
-            .map(|s| Pi::parse(&s))
-            .unwrap_or(Pi::Monochrome2);
+        let pi = match self.dataset.try_get_str(Tag::new(0x0028, 0x0004)) {
+            Some(s) => Pi::parse(&s),
+            None => Pi::infer_from_dataset(&self.dataset),
+        };
         // Only true monochrome goes through the window pipeline; palettes are
         // single-sample but must use the palette path (not grayscale windowing).
         let grayscale = matches!(pi, Pi::Monochrome1 | Pi::Monochrome2);
@@ -2144,6 +2144,17 @@ mod tests {
         assert_eq!(&png[12..16], b"IHDR");
         // colour type is byte 9 of IHDR data (offset 16..29)
         assert_eq!(png[16 + 9], 2, "PNG colour type 2 = truecolour");
+    }
+
+    #[test]
+    fn render_frame_infers_rgb_when_pi_is_absent() {
+        // Legacy file: no (0028,0004), 3 samples per pixel → inferred RGB.
+        let mut ds = color_image("RGB", 3, 8, &[255, 0, 0, 0, 255, 0], 0);
+        ds.remove(Tag::new(0x0028, 0x0004));
+        let img = render_frame(&ds, 0).unwrap();
+        assert_eq!(img.width(), 2);
+        assert_eq!(&img.as_bytes()[0..4], &[0, 0, 255, 255], "first pixel red");
+        assert_eq!(&img.as_bytes()[4..8], &[0, 255, 0, 255], "second pixel green");
     }
 
     #[test]
