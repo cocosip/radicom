@@ -213,11 +213,16 @@ impl GrayscaleRenderOptions {
             .unwrap_or(false);
 
         // A modality LUT Sequence (0028,3000) replaces the rescale slope/intercept
-        // at the modality stage (docs §4: the sequence LUT takes over).
-        let modality_lut = dataset
-            .try_get_sequence(Tag::new(0x0028, 0x3000))
-            .and_then(|seq| seq.items().first())
-            .and_then(ModalityLut::from_item);
+        // at the modality stage (docs §4: the sequence LUT takes over). XA/XRF
+        // display follows Clunie guidance: the modality LUT is *not* applied.
+        let modality_lut = if is_xa_xrf(dataset) {
+            None
+        } else {
+            dataset
+                .try_get_sequence(Tag::new(0x0028, 0x3000))
+                .and_then(|seq| seq.items().first())
+                .and_then(ModalityLut::from_item)
+        };
         let (rescale_slope, rescale_intercept) = if modality_lut.is_some() {
             (1.0, 0.0)
         } else {
@@ -237,12 +242,79 @@ impl GrayscaleRenderOptions {
         })
     }
 
+    /// Options whose window covers the central `percent` of the frame's stored
+    /// value histogram (REND-04 `from_histogram`, docs §4). Decodes native 8/16-bit
+    /// frame samples to build the histogram; the modality rescale and PI inversion
+    /// follow the same rules as `from_dataset`.
+    pub fn from_histogram(dataset: &Dataset, frame: u32, percent: i32) -> Result<Self, Error> {
+        let mut owned = dataset.clone();
+        let pixel = PixelData::from_dataset(&mut owned)?;
+        let bits = pixel.bits_allocated()?;
+        if !matches!(bits, 8 | 16) || pixel.transfer_syntax().is_encapsulated() {
+            return Err(unsupported("histogram window needs native 8/16-bit samples"));
+        }
+        let buffer = pixel.get_frame(frame)?;
+        let raw = buffer.data();
+        let raw: &[u8] = raw.as_ref();
+        let signed = pixel.pixel_representation() != 0;
+
+        // One pass to find the value range, then a histogram over [min, max].
+        let mut values: Vec<i32> = Vec::with_capacity(raw.len() / if bits == 8 { 1 } else { 2 });
+        if bits == 8 {
+            values.extend(raw.iter().map(|b| *b as i32));
+        } else {
+            for c in raw.chunks_exact(2) {
+                let v = u16::from_le_bytes([c[0], c[1]]);
+                values.push(if signed { (v as i16) as i32 } else { v as i32 });
+            }
+        }
+        let (min, max) = match (values.iter().min(), values.iter().max()) {
+            (Some(&lo), Some(&hi)) => (lo, hi),
+            _ => return Err(unsupported("frame has no samples for a histogram")),
+        };
+        let mut histogram = Histogram::new(min, max);
+        for &v in &values {
+            histogram.add(v);
+        }
+        histogram.apply_window_percent(percent.clamp(1, 100));
+
+        let start = histogram.window_start() as f64;
+        let end = histogram.window_end() as f64;
+        let center = (start + end) / 2.0;
+        let width = (end - start).max(1.0);
+
+        // Same modality/invert rules as from_dataset, but the window is explicit.
+        let mut base = GrayscaleRenderOptions::from_window_level(center, width);
+        base.rescale_slope = dataset
+            .try_get::<String>(Tag::new(0x0028, 0x1053))
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(1.0);
+        base.rescale_intercept = dataset
+            .try_get::<String>(Tag::new(0x0028, 0x1052))
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0.0);
+        if !is_xa_xrf(dataset) {
+            base.modality_lut = dataset
+                .try_get_sequence(Tag::new(0x0028, 0x3000))
+                .and_then(|seq| seq.items().first())
+                .and_then(ModalityLut::from_item);
+            if base.modality_lut.is_some() {
+                base.rescale_slope = 1.0;
+                base.rescale_intercept = 0.0;
+            }
+        }
+        base.invert = dataset
+            .try_get_str(Tag::new(0x0028, 0x0004))
+            .map(|pi| pi.trim() == "MONOCHROME1")
+            .unwrap_or(false);
+        Ok(base)
+    }
+
     /// Options from an explicit window (REND-04 `from_window_level`).
     pub fn from_window_level(center: f64, width: f64) -> Self {
         GrayscaleRenderOptions {
             rescale_slope: 1.0,
-            rescale_intercept: 0.0,
-            voi_lut_function: VoiFunction::Linear,
+            rescale_intercept: 0.0,            voi_lut_function: VoiFunction::Linear,
             window_center: center,
             window_width: width,
             invert: false,
@@ -306,6 +378,20 @@ fn linear_exact(value: f64, center: f64, width: f64) -> f64 {
         return if value > center { 255.0 } else { 0.0 };
     }
     ((value - center) / width + 0.5) * 255.0
+}
+
+/// True for X-Ray Angiographic / X-Ray Radiofluoroscopic Image Storage SOP
+/// classes, whose display omits the modality LUT (Clunie guidance, docs §4).
+fn is_xa_xrf(dataset: &Dataset) -> bool {
+    const XA: &str = "1.2.840.10008.5.1.4.1.1.12.1";
+    const XRF: &str = "1.2.840.10008.5.1.4.1.1.12.2";
+    dataset
+        .try_get_str(Tag::new(0x0008, 0x0016))
+        .map(|uid| {
+            let uid = uid.trim();
+            uid == XA || uid == XRF
+        })
+        .unwrap_or(false)
 }
 
 /// Resolves the window centre/width (docs §4 priority 1 and 3).
@@ -993,6 +1079,44 @@ mod tests {
         put_voi_lut(&mut ds, 200, &[42]);
         let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
         assert_eq!(o.map(8.0), 42, "modality → VOI chain");
+    }
+
+    #[test]
+    fn xa_xrf_display_skips_the_modality_lut() {
+        // An XA image with a modality LUT that would map 5→200. Display must
+        // ignore it (Clunie guidance) and use the rescale slope/intercept.
+        let mut ds = gray_image(1, 1, 8, &[5], Some(10.0), Some(1.0));
+        ds.insert_str(Tag::new(0x0008, 0x0016), Vr::Ui, "1.2.840.10008.5.1.4.1.1.12.1"); // XA
+        ds.insert_str(Tag::new(0x0028, 0x1053), Vr::Ds, "3");
+        ds.insert_str(Tag::new(0x0028, 0x1052), Vr::Ds, "0");
+        put_modality_lut(&mut ds, 5, &[200]);
+        let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
+        assert!(o.modality_lut.is_none(), "XA display ignores the modality LUT");
+        assert_eq!((o.rescale_slope, o.rescale_intercept), (3.0, 0.0), "rescale kept");
+
+        // The same dataset as a CT class does apply the modality LUT.
+        ds.insert_str(Tag::new(0x0008, 0x0016), Vr::Ui, "1.2.840.10008.5.1.4.1.1.2");
+        let ct = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
+        assert!(ct.modality_lut.is_some(), "CT applies the modality LUT");
+    }
+
+    #[test]
+    fn from_histogram_windows_the_central_percent() {
+        // 10 distinct values 0..9 (one sample each). A 100% window covers the
+        // full range; a tighter percent yields a strictly narrower window.
+        let ds = gray_image(10, 1, 8, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9], None, None);
+        let full = GrayscaleRenderOptions::from_histogram(&ds, 0, 100).unwrap();
+        let full_end = full.window_center + full.window_width / 2.0;
+        let full_start = full.window_center - full.window_width / 2.0;
+        assert!(full_start <= 0.0 && full_end >= 9.0, "100% covers the full range");
+
+        let narrow = GrayscaleRenderOptions::from_histogram(&ds, 0, 50).unwrap();
+        assert!(
+            narrow.window_width < full.window_width,
+            "50% window (w={}) is narrower than 100% (w={})",
+            narrow.window_width,
+            full.window_width
+        );
     }
 
     #[test]
