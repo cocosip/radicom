@@ -184,7 +184,12 @@ impl OverlayData {
                 let value = if unit == 1 {
                     raw[idx] as u16
                 } else {
-                    u16::from_ne_bytes([raw[idx], raw[idx + 1]])
+                    // pixel data is in the dataset's byte order, not the host's
+                    let pair = [raw[idx], raw[idx + 1]];
+                    match syntax.endian() {
+                        crate::model::endian::Endian::Big => u16::from_be_bytes(pair),
+                        crate::model::endian::Endian::Little => u16::from_le_bytes(pair),
+                    }
                 };
                 if (value >> bit_position) & 1 == 1 {
                     out[o + x / 8] |= 0x80 >> (x % 8);
@@ -307,14 +312,15 @@ mod tests {
     #[test]
     fn embedded_overlay_extracts_the_bit_plane_16bit() {
         let mut ds = base(16, 4, 1);
+        ds.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
         ds.insert_value(BITS_STORED, 12u16);
         add_overlay_shape(&mut ds, 0x6000, 4, 1, 12);
         // set bit 12 of pixels 0 and 2
         let mut pixels = vec![0u8; 8];
         let p0 = 1u16 << 12;
         let p2 = 1u16 << 12;
-        pixels[0..2].copy_from_slice(&p0.to_ne_bytes());
-        pixels[4..6].copy_from_slice(&p2.to_ne_bytes());
+        pixels[0..2].copy_from_slice(&p0.to_le_bytes());
+        pixels[4..6].copy_from_slice(&p2.to_le_bytes());
         ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
             PIXEL_DATA,
             Vr::Ow,
@@ -322,6 +328,24 @@ mod tests {
         )));
         let data = OverlayData::from_dataset(&ds)[0].load(&ds).unwrap();
         assert_eq!(data.data().as_ref(), &[0b1010_0000], "pixels 0 and 2 set");
+    }
+
+    #[test]
+    fn embedded_overlay_reads_big_endian_pixels_correctly() {
+        let mut ds = base(16, 2, 1);
+        ds.set_transfer_syntax(syntaxes::EXPLICIT_VR_BIG_ENDIAN.clone());
+        ds.insert_value(BITS_STORED, 12u16);
+        add_overlay_shape(&mut ds, 0x6000, 2, 1, 12);
+        // pixel 0 = 0x1000 (bit 12) in BIG-endian bytes; pixel 1 = 0
+        let mut pixels = vec![0u8; 4];
+        pixels[0..2].copy_from_slice(&(1u16 << 12).to_be_bytes());
+        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
+            PIXEL_DATA,
+            Vr::Ow,
+            Arc::new(MemoryBuffer::from(pixels)),
+        )));
+        let data = OverlayData::from_dataset(&ds)[0].load(&ds).unwrap();
+        assert_eq!(data.data().as_ref(), &[0b1000_0000], "big-endian bit 12 of pixel 0 read correctly");
     }
 
     #[test]
