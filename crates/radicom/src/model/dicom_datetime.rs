@@ -166,7 +166,9 @@ pub fn parse_dt(s: &str) -> Result<Range<DtPoint>, Error> {
                     }
                     _ => return Err(invalid()),
                 };
-                if oh > 14 || om > 59 {
+                // PS3.3 §6.2: positive offsets are limited to 14h, negative to 12h.
+                let max_hour = if sign > 0 { 14 } else { 12 };
+                if oh > max_hour || om > 59 {
                     return Err(invalid());
                 }
                 let off = FixedOffset::east_opt(sign * ((oh * 3600 + om * 60) as i32))
@@ -247,7 +249,9 @@ pub fn has_invalid_dt_offset(s: &str) -> bool {
                 4 => nums[..2].parse().unwrap_or(u32::MAX),
                 _ => continue,
             };
-            if hour > 14 {
+            // PS3.3 §6.2: positive offsets ≤14h, negative ≤12h.
+            let max_hour = if bytes[i] == b'+' { 14 } else { 12 };
+            if hour > max_hour {
                 return true;
             }
         }
@@ -368,6 +372,14 @@ mod tests {
         assert!(parse_dt("20240305T103015").is_err(), "non-digit separator");
         assert!(parse_dt("20240305103015+2500").is_err(), "offset hour > 14");
         assert!(parse_dt("20240305103015.1234567890").is_err(), "fraction too long");
+
+        // PS3.3 §6.2: a negative offset is limited to 12 hours (positive to 14).
+        // A bare parse_dt() falls back to range-splitting on a bad suffix, so the
+        // guard has_invalid_dt_offset() is what rejects the out-of-range offset.
+        assert!(has_invalid_dt_offset("20240305103015-1300"), "negative offset hour > 12");
+        assert!(!has_invalid_dt_offset("20240305103015-1200"), "negative offset of 12h is allowed");
+        assert!(!has_invalid_dt_offset("20240305103015+1400"), "positive offset of 14h is allowed");
+        assert!(has_invalid_dt_offset("20240305103015+1500"), "positive offset hour > 14");
     }
 
 }
