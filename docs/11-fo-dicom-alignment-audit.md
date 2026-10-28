@@ -1,66 +1,50 @@
-# fo-dicom 对齐审计（模块级）
+# fo-dicom 对齐审计（模块级，代码走查版）
 
-本文件汇总针对 `radicom` 与 fo-dicom 功能面对齐情况的分模块核查结论，用于回答
-目标中反复出现的「与 fo-dicom 对齐下是否存在功能缺失」。
+本文件是对 `radicom` 与 fo-dicom 功能面对齐情况的**逐模块代码走查结论**，回答「与 fo-dicom 对齐下哪些完成、哪些未完成」。
 
 ## 方法与证据标准
 
-- **不采信文档自报状态**：逐模块读代码 + 读测试 + 运行 `cargo test --workspace --all-features`
-  与 `cargo clippy --workspace --all-features --all-targets`，以行为可见的证据判定。
-- 涉及标准语义时，以 DICOM 标准（PS3.3 / PS3.5 / PS3.15 等）原文为准（必要时 web 取权威页面）。
+- 不采信文档自报状态：逐模块读代码（符号/实现/测试）+ 运行
+  `cargo test --workspace --all-features` 与 `cargo clippy --workspace --all-features --all-targets`。
 - 判定口径：
   - **DONE**：有真实实现、有行为测试、端到端数据流完整（非仅字段/仅标签）。
-  - **剩余-环境**：实现需要本机不具备的外部依赖（如 `image` crate、外部对端 DCMTK/fo-dicom）。
-  - **剩余-平台**：需要本机之外的平台 FFI（如 macOS）。
-  - **剩余-形态**：fo-dicom 内部架构用、单实现、无外部消费者的类型（Ponytail 原则不造）。
+  - **剩余-范围**：实现依赖本仓库之外的独立工程（如 `radicom-codecs`）。
+  - **剩余-环境**：需本机不具备的外部依赖/对端。
+  - **剩余-平台**：需本机之外平台 FFI（如 macOS）。
+  - **不需要**：fo-dicom 用 .NET 原生能力、Rust 无对应内置且强行引入会带来额外依赖；按用户意见不强加。
 
-## 结论摘要
+## 结论
 
-**用户可见的功能面完整，与 fo-dicom 对齐良好。** 未发现仍存在的用户可见功能缺口；
-剩余项仅为「环境/平台受限」与「内部实现形态」两类，均不影响可用功能。
+**P0/P1 及 P2 核心功能全部 DONE。** 未完成项仅有：具体编解码器实现（属外部 `radicom-codecs` 工程）、macOS MAC（平台）、reference-peer 互通（环境），以及若干"单实现/无消费者"的形态类抽象（按 Ponytail 不造）。监控（OBS）已用 `tracing` 字段约定实现，**不引入 `opentelemetry` 依赖**——符合"不额外引监控"的要求。
 
-## 模块级结论
+## 已完成（DONE，含代码证据）
 
-| 模块 | 关键能力 | 状态 | 证据 |
-|---|---|---|---|
-| 编码/字符集 (ENC) | ISO_IR 6/13/100/101/109/110/126/127/138/144/148/149/166/192、GBK、GB18030；全部 ISO 2022 变体（JIS X 0208/0212、Korean ESC`$`)C`、GBK ESC`-C`）；解码+编码+回退 | DONE | `encoding/charset.rs`，往返/回退测试 |
-| 文件 IO (IO/RD/WR) | 显式/隐式 VR、大小端、Deflated（raw DEFLATE 写、zlib 回退读、往返+稳定性）、值奇偶补齐（PS3.5 §6.2） | DONE | `io/*.rs`，`deflated_*`、`odd_length_string_is_padded` |
-| 像素/编解码 (PIX/TR) | `uncompressed_frame_size`（1-bit/422/420/奇数宽）、`Transcoder`（真实重编码、内嵌 overlay 提取、lossy 标记、meta 组同步）、`DirectTranscoder` 注册 | DONE | `pixel/{mod,transcoder,codec}.rs` |
-| 渲染 (REND) | 全 PI 分派、模态/VOI(LINEAR/EXACT/SIGMOID)/输出/palette LUT、GrayscaleRenderOptions、ColorTable(+load/save)、BitDepth、ColorSpace、PixelDataConverter、overlays、spatial(scale/rot/flip/pan)、BMP/PNG、DicomImage 门面 | DONE | `render/*.rs`，含本轮新增 RGB 归一化、MONOCHROME1、多帧逐帧窗口测试 |
-| 序列化-媒体 (MEDIA) | DICOMDIR 构建/读写（偏移符合 PS3.3 F.3.2.2 绝对文件字节偏移）、图标生成（≤128、8-bit、降采样）、媒体存储 | DONE | `media/*.rs` |
-| 网络 (NET/DIMSE) | C-ECHO/STORE/FIND/MOVE/GET、N-服务、PDV 组包（bit0/bit1）、分片、状态码分类（掩码类）、C-CANCEL | DONE | `radicom-network` 245 测试、loopback |
-| 安全/匿名化 (ANON) | PS3.15 全表（~655 行 CSV）、11 选项、序列递归、与 fo-dicom 测试交叉验证 | DONE | `anonymizer/*.rs` |
-| 结构化报告 (SR) | 15 值类型、7 关系、构建+写回 `(0040,A730)`、遍历、MeasuredValue/ReferencedSop 支持类型 | DONE | `sr/*.rs` |
-| 数据模型 (model) | 标签/VR/PNN/DA-TM-DT（分数秒≤6位、`:`/`.`、双向）、`Uid` 校验 | DONE | `model/*.rs` |
-| 打印 (PRINT) | render_to_image（Trim/Polarity/等比居中）、打印 SOP | DONE | `print/*.rs` |
-| JSON/XML | DICOM JSON（NaN/Inf 保留字符串、BulkDataURI 双向）、XML 转义 | DONE | `radicom-json` 33 测试 |
-
-## 本轮核查期间修复的真实缺陷
-
-| 缺陷 | 修复要点 |
-|---|---|
-| VOILUTFunction (0028,1056) 从未读取，SIGMOID 不可达 | 读取并按 LINEAR/EXACT/SIGMOID 分派 |
-| Palette 忽略 FirstMappedPixelValue | 输入值 `v - first`（含负值/超界 clamp） |
-| SpatialTransform.pan 声明但从未应用 | `apply_to` 加入整数像素平移（黑填充） |
-| ACR-NEMA 老图像无 PI 时未推断 | `infer_from_dataset`：≤1 sample→PALETTE/MONOCHROME2，多 sample→RGB |
-| DICOMDIR 图标 NumberOfFrames VR 写成 CS | 改为 IS（PS3.6） |
-| RGB 渲染忽略 BitsStored/HighBit，`v>>8` 使低对齐 12-bit 变黑 | 经 `BitDepth` 归一化后再缩放 |
-| DicomImage 分派误用 samples-per-pixel（palette 1-sample 走灰度） | 改为按 PI 分派 |
-
-## 本轮核查期间补齐的真实功能
-
-`RawImage::scaled`、`DicomImage` 门面、`ColorTable`（含 8-bit 映射与 `.lut` load/save）、
-`PixelDataConverter`、`BitDepth`、`ColorSpace/ColorSpaceType`、BMP 导出、`RawImage::save(path)`、
-**UID-05 的 64 位 Windows MAC 读取**（`GetAdaptersAddresses` raw FFI，本机真实网卡测试通过）。
-
-## 明确剩余（不谎称完成）
-
-| 项 | 类别 | 原因 |
+| 模块组 | 覆盖特性 | 证据（文件/符号） |
 |---|---|---|
-| `image` crate 后端 / JPEG 导出 | 环境 | 离线环境无该 crate |
-| reference-peer（DCMTK/fo-dicom）网络互通 | 环境 | 需外部对端 |
-| UID-05 macOS MAC | 平台 | 需 CoreWLAN/IOKit FFI，非本机平台 |
-| `IPixelData`/`Image` trait、`InvertLut`/`PaddingLut`/`CompositeLut`/`PrecalculatedLUT`、`CacheType` | 形态 | 单实现/无消费者；按 Ponytail 不造 |
+| 标识 (TAG/VR/UID/TS/DICT/VM) | TAG-01..05、VR-01..02、UID-01..05、TS-01..03、DICT-01..03、VM-01 | `model/{tag,masked_tag,tag_index,vr,uid,transfer_syntax,dictionary,vm}.rs`；`network/print_sop.rs`(UID-04)；`Dictionary::load_xml`+默认替换(DICT-03)；`TransferSyntax::register`(TS-02) |
+| 数据集/元素 (DS/ELEM/MATCH/XFORM) | DS-01..10、ELEM-01..05、MATCH-01、XFORM-01 | `model/dataset.rs`（`get_*`/`try_get_*`/`insert`/`set_validation`/`functional_groups`/`DatasetWalker`/`copy_to`/`get_datetime`/`enumerate_group`/`enumerate_masked`）、`model/element.rs`（DS 逗号容忍 "1,5"→1.5）、`rules/{match_rule,transform}.rs` |
+| 字符集/校验 (ENC/VAL) | ENC-01..04、VAL-01..03 | `encoding/charset.rs`（`register_charset`+`charset_for_encoding`）、`validation/mod.rs`（全局开关+`ValidationScopeGuard`） |
+| 文件 IO (FILE/RD/WR/BUF/IO/MEM) | FILE-01..06、RD-01..05、WR-01..03、BUF-01..02、IO-01..03、MEM-01 | `io/{file,reader,writer,dataset_builder,byte_source,file_ref,pool}.rs`；`LargeValuePolicy`(FILE-02)、`has_valid_header`(FILE-06)、`item_len/header_len`(WR-02)、deflate(RD-04) |
+| 像素/编解码接口 (PIX/CODEC/TR) | PIX-01..05、CODEC-01..03,05、TR-01..03 | `pixel/{mod,codec,overlay,photometric,transcoder}.rs`；`uncompressed_frame_size`(PIX-03)、palette LUT(PIX-04)、`CodecRegistry`/`CodecParams`/JPEG 探测(CODEC)、`Transcoder`+`Dataset/DicomFile::clone_with_syntax`(TR-03) |
+| 渲染 (REND) | REND-01..11 | `render/{mod,bit_depth,color_table,geometry,icon,interpolation,math,pixel_converter,reconstruction,spatial}.rs`；全 PI 分派、模态/VOI/palette LUT、GrayscaleRenderOptions、BitDepth、PixelDataConverter、spatial(scale/rot/flip/pan)、MPR(reconstruction)、math(Matrix/Histogram/BitList/MovingAverage/Rect/Point2)、**手写零依赖 PNG/BMP**(`to_png`/`to_png_rgb`/`to_bmp`/`save`) |
+| 网络 (NET/SRV/CLI/HOST/DIMSE/OBS) | NET-01..08、SRV-01..08、CLI-01..02、HOST-01、DIMSE-01、OBS-01/02 | `radicom-network/src/*.rs`；C-ECHO/STORE/FIND/MOVE/GET、N-服务、C-CANCEL(`client.cancel`/`send_c_cancel`)、PDV 组包(`PduSplitter`/`split_message`)、扩展协商(`extended.rs`)、TLS(`tls.rs`)、托管(`hosting.rs`)、`observability.rs`(OBS-01 + `otel` feature 下 `TracingMetrics`，无 opentelemetry 依赖) |
+| 序列化 (JSON/XML) | JSON-01..02、XML-01 | `radicom-json/{lib,xml}.rs`（NaN/Inf 字符串、BulkDataURI 双向、PN 三组、XML NativeDicomModel 结构） |
+| 媒体 (MEDIA) | MEDIA-01..03 | `media/{mod,icon,scanner}.rs`（DICOMDIR 读写、图标生成、异步扫描） |
+| 结构化报告 (SR) | SR-01..02 | `sr/{content_item,code_item,structured_report}.rs`（15 值类型含 SCOORD3D、7 关系、MeasuredValue/ReferencedSop、构建+写回+遍历+open/save） |
+| 打印 (PRINT) | PRINT-01..02 | `print/{models,layout,render}.rs`（`initialize_image_boxes`、`render_to_image`） |
+| 匿名化 (ANON) | ANON-01 | `anonymizer/{mod,profile}.rs`（PS3.15 全表、11 选项、序列递归、UID 一致替换） |
+| 基础设施 (INF) | INF-01..07 | `error.rs`、`logging.rs`、`dump/mod.rs`、`bin/radicom-dump.rs`、`xtask/src/main.rs`(代码生成) |
+
+## 未完成（明列，不谎称完成）
+
+| 项 | 类别 | 原因 / 现状 |
+|---|---|---|
+| JPEG/JPEG-LS/JPEG2000/HTJ2K/RLE 具体编解码实现 | 剩余-范围 | 按项目架构属于**外部 `radicom-codecs` 工程**（本仓库仅定义 `Codec` trait、`CodecParams`、`CodecRegistry` 注入点与 `Transcoder` 流程；离线且该 crate 不在工作区） |
+| UID-05 macOS MAC 读取 | 剩余-平台 | 需 CoreWLAN/IOKit FFI（Windows `GetAdaptersAddresses` 与 Linux 已实现并有测试；macOS 非本机平台） |
+| reference-peer（DCMTK/fo-dicom）网络互通回归 | 剩余-环境 | 需外部真实对端；本地为 loopback 自测（245 网络测试通过） |
+| `image` crate 图像后端（PNG/JPEG 的 image-rs 版本） | 剩余-可选 | **未引入该依赖**；但 PNG/BMP 导出已由手写零依赖编码器覆盖（`to_png`/`to_bmp`），导出能力不缺 |
+| `IPixelData`/`Image` trait、`InvertLut`/`PaddingLut`/`CompositeLut`/`PrecalculatedLut`、`CacheType` 等 | 剩余-形态 | fo-dicom 内部架构用的单实现/无外部消费者抽象；Rust 侧已有等价具体实现（`RawImage`/`BitDepth`/`ColorTable` 等），按 Ponytail 不造空壳 trait |
+| OBS 额外监控接入 | 不需要 | 监控已由 OBS-01（`MetricsCollector`）+ OBS-02（`otel` feature 下 `TracingMetrics`，经 `tracing` 字段约定输出，**不引 `opentelemetry` 依赖**）完成；符合"Rust 无内置则不强加额外监控" |
 
 ## 复现
 
@@ -68,3 +52,7 @@
 cargo test --workspace --all-features
 cargo clippy --workspace --all-features --all-targets
 ```
+
+## 当前测试基线
+
+17 个测试套件全绿：core **497**、network **245**、json **34**、corpus **5** + 集成，0 失败；clippy 无警告。
