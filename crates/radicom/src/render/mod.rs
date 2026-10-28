@@ -930,6 +930,8 @@ pub struct DicomImage {
     frame: u32,
     window_override: Option<(f64, f64)>,
     colormap: Option<ColorTable>,
+    show_overlays: bool,
+    overlay_color: crate::pixel::Color32,
     scale: f64,
     transform: SpatialTransform,
 }
@@ -949,6 +951,8 @@ impl DicomImage {
             frame,
             window_override: None,
             colormap: None,
+            show_overlays: true,
+            overlay_color: DEFAULT_OVERLAY_COLOR,
             scale: 1.0,
             transform: SpatialTransform::new(),
         })
@@ -1020,6 +1024,19 @@ impl DicomImage {
         self
     }
 
+    /// Turns overlay compositing on/off (docs §1.2 `show_overlays`; default on).
+    pub fn set_show_overlays(&mut self, show: bool) -> &mut Self {
+        self.show_overlays = show;
+        self
+    }
+
+    /// Sets the overlay compositing colour (docs §1.2 `overlay_color`; default
+    /// magenta `0xFF_FF00FF`).
+    pub fn set_overlay_color(&mut self, color: crate::pixel::Color32) -> &mut Self {
+        self.overlay_color = color;
+        self
+    }
+
     /// Mutable access to the flip/rotate transform applied at the output stage.
     pub fn transform(&mut self) -> &mut SpatialTransform {
         &mut self.transform
@@ -1065,7 +1082,9 @@ impl DicomImage {
             }
         }
 
-        composite_overlays(&mut image, &self.dataset, frame, DEFAULT_OVERLAY_COLOR);
+        if self.show_overlays {
+            composite_overlays(&mut image, &self.dataset, frame, self.overlay_color);
+        }
         if self.transform.is_transformed() {
             image = self.transform.apply_to(&image);
         }
@@ -2028,6 +2047,25 @@ mod tests {
             assert_eq!(&px[..3], &[0, 0, 255], "BGRA red");
             assert_eq!(px[3], 255);
         }
+    }
+
+    #[test]
+    fn dicom_image_overlay_toggle_and_colour() {
+        // overlay bit only at (0,0); the rest of the 4x4 frame stays grey 128.
+        let ds = image_with_embedded_overlay(&[(0, 0)]);
+        let mut img = DicomImage::from_dataset(&ds).unwrap();
+        // default overlays shown in magenta == render_frame_with_overlays default
+        assert_eq!(
+            img.render().unwrap().as_bytes(),
+            render_frame_with_overlays(&ds, 0, DEFAULT_OVERLAY_COLOR).unwrap().as_bytes(),
+        );
+        // disabled → identical to the plain render (no overlay pixel)
+        img.set_show_overlays(false);
+        assert_eq!(img.render().unwrap().as_bytes(), render_frame(&ds, 0).unwrap().as_bytes());
+        // custom colour paints the overlay pixel green (BGRA [0,255,0,255])
+        img.set_show_overlays(true);
+        img.set_overlay_color(crate::pixel::Color32::new(0, 255, 0));
+        assert_eq!(&img.render().unwrap().as_bytes()[0..4], &[0, 255, 0, 255]);
     }
 
     #[test]
