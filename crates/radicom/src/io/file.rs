@@ -151,12 +151,11 @@ impl DicomFile {
             });
 
         let (mut dataset, outcome) = if syntax.is_deflate() {
-            // a deflated body must be inflated before parsing; windows cannot
-            // address into the compressed stream
-            let mut comp = vec![0u8; (file_len - dataset_offset) as usize];
-            file.seek(SeekFrom::Start(dataset_offset)).map_err(|e| file_err(path, "seek", e))?;
-            file.read_exact(&mut comp).map_err(|e| file_err(path, "read", e))?;
-            parse_dataset_with(&comp, &syntax, options)?
+            // Stream the inflate straight from the file: the compressed body is
+            // never held in memory, so the peak is one full (inflated) copy plus
+            // the codec window rather than compressed + inflated.
+            let plain = crate::io::reader::inflate_stream(&mut file, dataset_offset)?;
+            parse_slice(&plain, &syntax, options)?
         } else {
             file.seek(SeekFrom::Start(dataset_offset)).map_err(|e| file_err(path, "seek", e))?;
             // Buffered reads: the parser issues several small reads per element,
@@ -364,20 +363,30 @@ fn policy_of(read: FileReadOption) -> LargeValuePolicy {
 
 /// Parses a dataset byte slice honoring the large-value policy (FILE-02).
 /// Deflated bodies are inflated first; there is no window source here, so
-/// `ReadLargeOnDemand` falls back to materializing.
+/// `ReadLargeOnDemand` falls back to materializing. The caller-owned slice stays
+/// live alongside the inflated copy here (slice input cannot be freed); the
+/// file path uses [`crate::io::reader::inflate_stream`] instead.
 fn parse_dataset_with(
     bytes: &[u8],
     syntax: &TransferSyntax,
     options: &ReadOptions,
 ) -> Result<(Dataset, crate::io::reader::ReadOutcome), Error> {
-    let owned;
-    let bytes = if syntax.is_deflate() {
-        owned = crate::io::reader::inflate(bytes)?;
-        &owned[..]
+    if syntax.is_deflate() {
+        let plain = crate::io::reader::inflate(bytes)?;
+        parse_slice(&plain, syntax, options)
     } else {
-        bytes
-    };
-    let mut source = ByteSourceReader::new(Cursor::new(bytes.to_vec()), syntax.endian());
+        parse_slice(bytes, syntax, options)
+    }
+}
+
+/// Parses an already-inflated dataset slice without copying it again
+/// (`Cursor<&[u8]>` borrows the bytes).
+fn parse_slice(
+    bytes: &[u8],
+    syntax: &TransferSyntax,
+    options: &ReadOptions,
+) -> Result<(Dataset, crate::io::reader::ReadOutcome), Error> {
+    let mut source = ByteSourceReader::new(Cursor::new(bytes), syntax.endian());
     let reader = DicomReader {
         large_object_size: options.large_object_size,
         large_policy: policy_of(options.read),
@@ -652,6 +661,10 @@ mod tests {
         let file = sample_file();
         let bytes = file.to_bytes(&WriteOptions::default()).unwrap();
         assert_eq!(&bytes[128..132], b"DICM", "preamble + magic");
+        // literal encoded values, independent of the reader: a wrong writer that
+        // the reader happens to mirror would fail these
+        assert!(bytes.windows(8).any(|w| w == b"Doe^John"), "PN value written verbatim");
+        assert!(bytes.windows(5).any(|w| w == b"PID-1"), "LO value written verbatim");
         let back = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
         assert_eq!(back.format, FileFormat::Dicom3);
         assert_eq!(back.get_str(Tag::PATIENT_NAME), "Doe^John");
@@ -783,6 +796,27 @@ mod tests {
     }
 
     #[test]
+    fn open_reports_a_truncated_meta_group_as_an_invalid_format() {
+        // 128-byte preamble + DICM, then a group-0002 element that declares 100
+        // bytes but the file ends after 4: a typed format error, never a panic.
+        let dir = std::env::temp_dir().join(format!("radicom-truncmeta-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("trunc-meta.dcm");
+        let mut bytes = vec![0u8; 128];
+        bytes.extend_from_slice(b"DICM");
+        bytes.extend_from_slice(&[0x02, 0x00, 0x10, 0x00, b'U', b'I', 0x64, 0x00]);
+        bytes.extend_from_slice(b"1.2."); // only 4 of the declared 100 bytes
+        std::fs::write(&path, &bytes).unwrap();
+        match DicomFile::open(&path) {
+            Err(Error::File(FileError::InvalidFormat(message))) => {
+                assert!(message.contains("meta group"), "typed meta-group error, got {message}");
+            }
+            other => panic!("expected FileError::InvalidFormat(meta group), got {other:?}"),
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn read_meta_block_grows_in_one_pass_and_rejects_truncation() {
         let dir = std::env::temp_dir().join(format!("radicom-metablock-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -876,6 +910,39 @@ mod tests {
         let back = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
         assert_eq!(back.get_str(Tag::PATIENT_NAME), "Doe^John");
         assert!(back.dataset.transfer_syntax().is_deflate());
+    }
+
+    #[test]
+    fn deflated_file_opens_from_disk_like_its_uncompressed_twin() {
+        let dir = std::env::temp_dir().join(format!("radicom-deflate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let deflated_path = dir.join("deflated.dcm");
+        let plain_path = dir.join("plain.dcm");
+
+        let mut deflated = sample_file();
+        deflated.dataset.set_transfer_syntax(syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        std::fs::write(&deflated_path, deflated.to_bytes(&WriteOptions::default()).unwrap()).unwrap();
+        std::fs::write(&plain_path, sample_file().to_bytes(&WriteOptions::default()).unwrap()).unwrap();
+
+        // `open` goes through the streaming inflate path; both must yield the same data
+        let from_disk = DicomFile::open(&deflated_path).unwrap();
+        let plain = DicomFile::open(&plain_path).unwrap();
+        assert!(from_disk.dataset.transfer_syntax().is_deflate());
+        assert_eq!(from_disk.get_str(Tag::PATIENT_NAME), plain.get_str(Tag::PATIENT_NAME));
+        assert_eq!(from_disk.get_str(Tag::PATIENT_ID), plain.get_str(Tag::PATIENT_ID));
+        assert_eq!(from_disk.dataset.len(), plain.dataset.len());
+
+        // a truncated deflate stream is a typed error, never a panic
+        let bytes = std::fs::read(&deflated_path).unwrap();
+        let cut = dir.join("cut.dcm");
+        std::fs::write(&cut, &bytes[..bytes.len() - 4]).unwrap();
+        match DicomFile::open(&cut) {
+            Err(Error::Reader(crate::error::ReaderError::Other(message))) => {
+                assert!(message.contains("deflate"), "typed error, got {message}");
+            }
+            other => panic!("expected ReaderError::Other(deflate), got {other:?}"),
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

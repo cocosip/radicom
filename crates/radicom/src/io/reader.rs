@@ -844,3 +844,72 @@ pub fn inflate(bytes: &[u8]) -> Result<Vec<u8>, Error> {
         .map_err(|e| Error::Reader(ReaderError::Other(format!("deflate: {e}"))))?;
     Ok(out)
 }
+
+/// Streaming variant of [`inflate`] for a seekable source: decompresses the
+/// deflate body starting at `start` **without first materialising the compressed
+/// payload**, so the file path peaks at one full (inflated) copy plus the codec's
+/// small window instead of compressed + inflated. Same zlib-then-raw fallback and
+/// the same typed error on a truncated stream.
+pub fn inflate_stream<R: Read + Seek>(source: &mut R, start: u64) -> Result<Vec<u8>, Error> {
+    use std::io::Read as _;
+    source.seek(std::io::SeekFrom::Start(start)).map_err(|e| Error::Reader(ReaderError::Other(format!("deflate seek: {e}"))))?;
+    let mut out = Vec::new();
+    {
+        let mut decoder = flate2::read::ZlibDecoder::new(&mut *source);
+        if decoder.read_to_end(&mut out).is_ok() {
+            return Ok(out);
+        }
+    }
+    out.clear();
+    source.seek(std::io::SeekFrom::Start(start)).map_err(|e| Error::Reader(ReaderError::Other(format!("deflate seek: {e}"))))?;
+    flate2::read::DeflateDecoder::new(&mut *source)
+        .read_to_end(&mut out)
+        .map_err(|e| Error::Reader(ReaderError::Other(format!("deflate: {e}"))))?;
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+
+    fn raw_deflate(plain: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut encoder = flate2::write::DeflateEncoder::new(&mut out, flate2::Compression::default());
+        encoder.write_all(plain).unwrap();
+        encoder.finish().unwrap();
+        out
+    }
+
+    fn zlib_deflate(plain: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut encoder = flate2::write::ZlibEncoder::new(&mut out, flate2::Compression::default());
+        encoder.write_all(plain).unwrap();
+        encoder.finish().unwrap();
+        out
+    }
+
+    #[test]
+    fn inflate_stream_matches_inflate_for_raw_and_zlib_at_an_offset() {
+        let plain = b"a deflated dataset body";
+        for body in [raw_deflate(plain), zlib_deflate(plain)] {
+            let mut source = Cursor::new([b"PRE".as_slice(), body.as_slice()].concat());
+            let streamed = inflate_stream(&mut source, 3).unwrap();
+            assert_eq!(streamed, plain);
+            assert_eq!(streamed, inflate(&body).unwrap(), "streaming == slice decoder");
+        }
+    }
+
+    #[test]
+    fn inflate_stream_truncated_stream_is_a_typed_error() {
+        let body = raw_deflate(b"a deflated dataset body that will be truncated");
+        let truncated = &body[..body.len() - 4];
+        let mut source = Cursor::new(truncated.to_vec());
+        match inflate_stream(&mut source, 0) {
+            Err(Error::Reader(ReaderError::Other(message))) => {
+                assert!(message.contains("deflate"), "typed deflate error, got {message}");
+            }
+            other => panic!("expected ReaderError::Other(deflate), got {other:?}"),
+        }
+    }
+}

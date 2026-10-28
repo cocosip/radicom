@@ -747,6 +747,16 @@ mod tests {
         ds.insert_str(Tag::SPECIFIC_CHARACTER_SET, Vr::Cs, "ISO_IR 192");
         ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "王^小明");
         let bytes = encode(&ds, &le(), WriteOptions::default());
+        // independent expectation: ISO_IR 192 is UTF-8, so the literal UTF-8
+        // bytes of each character must appear. A windows-1252 fallback (the old
+        // whole-table bug) would write `?` and still round-trip through itself.
+        for ch in ["王", "小", "明"] {
+            assert!(
+                bytes.windows(ch.len()).any(|w| w == ch.as_bytes()),
+                "PN should be UTF-8 encoded, missing {ch:?}"
+            );
+        }
+        assert!(!bytes.contains(&b'?'), "no replacement fallback for encodable characters");
         let back = parse_dataset_bytes(&bytes, &le()).unwrap();
         assert_eq!(back.get_str(Tag::PATIENT_NAME).unwrap(), "王^小明", "UTF-8 round-trip");
     }

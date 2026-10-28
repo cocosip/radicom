@@ -199,11 +199,37 @@ mod tests {
         let pool = BufferPool::shared();
         {
             let mut lease = pool.lease(128);
-            lease[0] = 42;
+            lease.as_mut_slice().fill(0xAB);
+            assert!(lease.iter().all(|&b| b == 0xAB));
         }
-        // smoke: subsequent leases still work after a return
+        // a lease from the shared pool is always full length and zero-filled
         let lease = pool.lease(128);
         assert_eq!(lease.len(), 128);
+        assert!(lease.iter().all(|&b| b == 0), "recycled storage is zeroed");
+    }
+
+    #[test]
+    fn pool_is_usable_across_threads() {
+        use std::sync::Arc;
+        let pool = Arc::new(BufferPool::new(DEFAULT_MAX_RETAINED_BYTES));
+        let mut handles = Vec::new();
+        for worker in 0..4u8 {
+            let pool = Arc::clone(&pool);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..64 {
+                    let mut lease = pool.lease(256);
+                    lease[0] = worker;
+                    assert_eq!(lease[0], worker);
+                    assert_eq!(lease.len(), 256);
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("worker thread panicked");
+        }
+        // all leases returned; the pool is still functional
+        let lease = pool.lease(256);
+        assert!(lease.iter().all(|&b| b == 0));
     }
 
     #[test]

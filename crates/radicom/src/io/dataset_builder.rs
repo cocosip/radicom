@@ -727,14 +727,21 @@ mod tests {
     #[test]
     fn declared_length_beyond_the_file_errors_without_allocating() {
         // OB element claiming ~2 GB with no value bytes: must fail cleanly (Eof),
-        // never attempt a 2 GB allocation.
+        // never attempt a 2 GB allocation. Assert the exact error shape so an
+        // implementation that read from the wrong offset cannot pass.
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0x7FE0u16.to_le_bytes());
         bytes.extend_from_slice(&0x0010u16.to_le_bytes());
         bytes.extend_from_slice(b"OB");
         bytes.extend_from_slice(&[0, 0]);
         bytes.extend_from_slice(&0x7FFF_FFFFu32.to_le_bytes());
-        assert!(parse_dataset_bytes(&bytes, &le()).is_err(), "over-declared length must error");
+        match parse_dataset_bytes(&bytes, &le()) {
+            Err(Error::Reader(crate::error::ReaderError::Eof { position, needed })) => {
+                assert_eq!(position, 12, "error points at the value start");
+                assert_eq!(needed, 0x7FFF_FFFF, "error reports the declared length");
+            }
+            other => panic!("expected ReaderError::Eof at the value start, got {other:?}"),
+        }
     }
 
     #[test]
@@ -929,5 +936,51 @@ mod tests {
         assert_eq!(frags.offset_table(), &[1], "32-bit entries in big-endian order");
         assert_eq!(frags.fragments().len(), 1);
         assert_eq!(ds.get_str(Tag::ACCESSION_NUMBER).unwrap(), "TAIL", "byte order restored");
+    }
+
+    #[test]
+    fn creator_slots_in_the_same_group_key_distinct_blocks() {
+        // (gggg,0010) and (gggg,0011) are distinct creator slots; block 0x10/0x11
+        // data elements must bind to their own creator strings.
+        let mut bytes = Vec::new();
+        let mut slot = |element: u16, creator: &[u8]| {
+            bytes.extend_from_slice(&0x0029u16.to_le_bytes());
+            bytes.extend_from_slice(&element.to_le_bytes());
+            bytes.extend_from_slice(&(creator.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(creator);
+        };
+        slot(0x0010, b"ACME 1.2");
+        slot(0x0011, b"OTHER 3.4");
+        for (element, value) in [(0x1001u16, b"AAAA".as_slice()), (0x1101, b"BBBB".as_slice())] {
+            bytes.extend_from_slice(&0x0029u16.to_le_bytes());
+            bytes.extend_from_slice(&element.to_le_bytes());
+            bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(value);
+        }
+
+        let ds = parse(&bytes, &implicit());
+        let mut seen = Vec::new();
+        for item in ds.items() {
+            if let DicomItem::Element(element) = item {
+                let tag = element.tag();
+                if tag.group() == 0x0029 && (tag.element() == 0x1001 || tag.element() == 0x1101) {
+                    let value = element.value().as_buffer().map(|b| b.data().to_vec()).unwrap_or_default();
+                    seen.push((
+                        tag.element(),
+                        tag.private_creator().map(|c| c.as_str().to_string()),
+                        value,
+                    ));
+                }
+            }
+        }
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![
+                (0x1001, Some("ACME 1.2".to_string()), b"AAAA".to_vec()),
+                (0x1101, Some("OTHER 3.4".to_string()), b"BBBB".to_vec()),
+            ],
+            "slot 0x0010 and 0x0011 stay distinct"
+        );
     }
 }
