@@ -19,10 +19,12 @@ pub mod geometry;
 pub mod icon;
 pub mod interpolation;
 pub mod math;
+pub mod pixel_converter;
 pub mod reconstruction;
 pub mod spatial;
 
 pub use color_table::ColorTable;
+pub use pixel_converter::PixelDataConverter;
 pub use geometry::{
     can_draw_localizer, intersection_localizer, projection_localizer, FrameGeometry, FrameGeometryType,
     FrameOrientation,
