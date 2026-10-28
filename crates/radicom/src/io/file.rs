@@ -421,14 +421,22 @@ enum MetaScan {
 
 /// Reads the leading group 0002 element run, growing the buffer as needed so a
 /// large file is never read whole. Returns the meta bytes and their length.
+///
+/// The buffer grows geometrically; each growth reads only the newly needed
+/// bytes from the one already-seeked file position, so the bytes read are
+/// O(n) rather than re-reading the prefix on every step.
 fn read_meta_block(file: &mut std::fs::File, start: u64, file_len: u64) -> std::io::Result<(Vec<u8>, u64)> {
-    let avail = file_len.saturating_sub(start);
+    let avail = file_len.saturating_sub(start) as usize;
+    file.seek(SeekFrom::Start(start))?;
+    let mut buf: Vec<u8> = Vec::new();
     let mut want = avail.min(4096);
     loop {
         let take = want.min(avail);
-        let mut buf = vec![0u8; take as usize];
-        file.seek(SeekFrom::Start(start))?;
-        file.read_exact(&mut buf)?;
+        if buf.len() < take {
+            let old = buf.len();
+            buf.resize(take, 0);
+            file.read_exact(&mut buf[old..])?;
+        }
         match scan_meta(&buf) {
             MetaScan::Run(len) => return Ok((buf[..len].to_vec(), len as u64)),
             MetaScan::None => return Ok((Vec::new(), 0)),
@@ -772,6 +780,56 @@ mod tests {
             Err(Error::File(FileError::InvalidFormat(_))) => {}
             other => panic!("expected InvalidFormat, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn read_meta_block_grows_in_one_pass_and_rejects_truncation() {
+        let dir = std::env::temp_dir().join(format!("radicom-metablock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dataset = [0x08u8, 0x00, 0x05, 0x00, b'C', b'S', 0x02, 0x00, b'A', b' '];
+
+        // well-formed: one UI element, then a group-0008 dataset element
+        let ok_path = dir.join("ok.dcm");
+        let mut bytes = vec![0x02, 0x00, 0x10, 0x00, b'U', b'I', 0x04, 0x00];
+        bytes.extend_from_slice(b"1.2.");
+        bytes.extend_from_slice(&dataset);
+        std::fs::write(&ok_path, &bytes).unwrap();
+        {
+            let mut f = std::fs::File::open(&ok_path).unwrap();
+            let (block, len) = read_meta_block(&mut f, 0, bytes.len() as u64).unwrap();
+            assert_eq!(len as usize, 12);
+            assert_eq!(&block[..], &bytes[..12]);
+        }
+
+        // a meta group larger than the first 4 KiB window exercises the growing pass
+        let big_path = dir.join("big.dcm");
+        let mut big = vec![0x02, 0x00, 0x10, 0x00, b'U', b'I'];
+        big.extend_from_slice(&5000u16.to_le_bytes());
+        big.extend_from_slice(&vec![b'7'; 5000]);
+        let meta_len = big.len();
+        big.extend_from_slice(&dataset);
+        std::fs::write(&big_path, &big).unwrap();
+        {
+            let mut f = std::fs::File::open(&big_path).unwrap();
+            let (block, len) = read_meta_block(&mut f, 0, big.len() as u64).unwrap();
+            assert_eq!(len as usize, meta_len);
+            assert_eq!(block.len(), meta_len);
+            assert_eq!(&block[..], &big[..meta_len]);
+        }
+
+        // truncated: the element declares 100 bytes but the file ends after 4
+        let trunc_path = dir.join("trunc.dcm");
+        let mut trunc = vec![0x02, 0x00, 0x10, 0x00, b'U', b'I', 0x64, 0x00];
+        trunc.extend_from_slice(b"abcd");
+        std::fs::write(&trunc_path, &trunc).unwrap();
+        {
+            let mut f = std::fs::File::open(&trunc_path).unwrap();
+            let err = read_meta_block(&mut f, 0, trunc.len() as u64).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+            assert_eq!(err.to_string(), "meta group is truncated");
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

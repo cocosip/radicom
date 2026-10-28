@@ -80,17 +80,78 @@ fn build_entry(raw: &RawDictEntry, creator: Option<Arc<PrivateCreator>>) -> Resu
     })
 }
 
+/// Masked (repeating-group) rows with an O(1) lookup index.
+///
+/// A masked row matches a tag when the tag's groups/elements masked by the row
+/// mask equal the row's masked values. Rows fall into a small set of mask
+/// shapes (`(group_mask, element_mask)`); each shape gets a hash bucket keyed by
+/// the row's masked `(group, element)`. `entries` keeps insertion order so the
+/// first row in the table still wins when several shapes match.
+#[derive(Default)]
+struct MaskedIndex {
+    entries: Vec<Arc<DictionaryEntry>>,
+    shapes: Vec<(u16, u16)>,
+    /// `(group_mask, element_mask, masked_group, masked_element) -> first entry`.
+    buckets: HashMap<(u16, u16, u16, u16), usize>,
+}
+
+impl MaskedIndex {
+    fn push(&mut self, entry: Arc<DictionaryEntry>) {
+        let idx = self.entries.len();
+        if let Some((gm, em)) = entry.mask {
+            if !self.shapes.contains(&(gm, em)) {
+                self.shapes.push((gm, em));
+            }
+            self.buckets
+                .entry((gm, em, entry.tag.group() & gm, entry.tag.element() & em))
+                .or_insert(idx);
+        }
+        self.entries.push(entry);
+    }
+
+    /// First (lowest-index) matching entry, mirroring a linear scan.
+    fn find(&self, tag: &Tag) -> Option<Arc<DictionaryEntry>> {
+        let mut best: Option<usize> = None;
+        for &(gm, em) in &self.shapes {
+            if let Some(&idx) = self.buckets.get(&(gm, em, tag.group() & gm, tag.element() & em)) {
+                best = Some(best.map_or(idx, |b| b.min(idx)));
+            }
+        }
+        best.map(|i| self.entries[i].clone())
+    }
+}
+
 #[derive(Default)]
 struct PrivateSubDict {
     exact: HashMap<u32, Arc<DictionaryEntry>>,
-    masked: Vec<Arc<DictionaryEntry>>,
+    masked: MaskedIndex,
+}
+
+/// The private-creator placeholder entry, applied by tag shape (odd group,
+/// element `0x0010..=0x00FF`): LO VM 1. Built once — resolution runs per
+/// private block, so allocating a fresh `Arc` per call was pure waste.
+fn private_creator_placeholder() -> Arc<DictionaryEntry> {
+    static PLACEHOLDER: Lazy<Arc<DictionaryEntry>> = Lazy::new(|| {
+        Arc::new(DictionaryEntry {
+            // the entry is shape-based, so the concrete tag is not meaningful here
+            tag: Tag::UNKNOWN,
+            mask: None,
+            creator: None,
+            name: "Private Creator",
+            keyword: "PrivateCreator",
+            vrs: Box::new([Vr::Lo]),
+            vm: Vm::ONE,
+            retired: false,
+        })
+    });
+    PLACEHOLDER.clone()
 }
 
 /// The DICOM data dictionary: public entries, repeating-group (masked)
 /// entries and per-creator private sub-dictionaries (DICT-01).
 pub struct Dictionary {
     exact: HashMap<u32, Arc<DictionaryEntry>>,
-    masked: Vec<Arc<DictionaryEntry>>,
+    masked: MaskedIndex,
     keywords: HashMap<&'static str, u32>,
     private: RwLock<HashMap<String, PrivateSubDict>>,
     creators: Mutex<HashMap<String, Arc<PrivateCreator>>>,
@@ -102,7 +163,7 @@ impl Dictionary {
     pub fn with_generated() -> Result<Self, Error> {
         let mut dict = Dictionary {
             exact: HashMap::with_capacity(DICTIONARY.len()),
-            masked: Vec::with_capacity(MASKED_DICTIONARY.len()),
+            masked: MaskedIndex::default(),
             keywords: HashMap::with_capacity(DICTIONARY.len()),
             private: RwLock::new(HashMap::with_capacity(PRIVATE_DICTIONARY.len() / 8)),
             creators: Mutex::new(HashMap::new()),
@@ -151,8 +212,8 @@ impl Dictionary {
                 if let Some(e) = sub.exact.get(&tag.to_u32()) {
                     return e.clone();
                 }
-                if let Some(e) = sub.masked.iter().find(|e| mask_matches(e, tag)) {
-                    return e.clone();
+                if let Some(e) = sub.masked.find(tag) {
+                    return e;
                 }
             }
             drop(subs);
@@ -160,22 +221,13 @@ impl Dictionary {
         if tag.is_private_creator_slot() {
             // private creator placeholder: (gggg,00xx) LO VM 1 - applies by
             // tag shape regardless of whether a creator is attached yet
-            return Arc::new(DictionaryEntry {
-                tag: tag.clone(),
-                mask: None,
-                creator: tag.private_creator().map(|c| self.intern_creator(c.as_str())),
-                name: "Private Creator",
-                keyword: "PrivateCreator",
-                vrs: Box::new([Vr::Lo]),
-                vm: Vm::ONE,
-                retired: false,
-            });
+            return private_creator_placeholder();
         }
         if let Some(e) = self.exact.get(&tag.to_u32()) {
             return e.clone();
         }
-        if let Some(e) = self.masked.iter().find(|e| mask_matches(e, tag)) {
-            return e.clone();
+        if let Some(e) = self.masked.find(tag) {
+            return e;
         }
         DictionaryEntry::unknown(tag.clone())
     }
@@ -216,11 +268,6 @@ impl Dictionary {
             }
         }
     }
-}
-
-fn mask_matches(entry: &DictionaryEntry, tag: &Tag) -> bool {
-    let Some((gm, em)) = entry.mask else { return false };
-    (tag.group() & gm) == (entry.tag.group() & gm) && (tag.element() & em) == (entry.tag.element() & em)
 }
 
 /// A runtime-built dictionary entry (from XML loading), creator included.
@@ -548,5 +595,88 @@ mod tests {
         let gz = encoder.finish().unwrap();
         let entries = load_xml(gz.as_slice()).unwrap();
         assert_eq!(entries[0].entry.keyword, "PatientID");
+    }
+
+    #[test]
+    fn private_creator_placeholder_is_built_once() {
+        let dict = Dictionary::with_generated().unwrap();
+        let a = dict.entry(&Tag::new(0x0029, 0x0010));
+        let b = dict.entry(&Tag::new(0x0031, 0x0010));
+        assert!(Arc::ptr_eq(&a, &b), "placeholder is a shared static, not a per-call Arc");
+        assert_eq!(a.keyword, "PrivateCreator");
+        assert_eq!(&*a.vrs, &[Vr::Lo]);
+        assert_eq!(a.vm, Vm::ONE);
+    }
+
+    #[test]
+    fn masked_index_prefers_first_row_across_shapes() {
+        let mk = |element: u16, gm: u16, em: u16, kw: &'static str| {
+            Arc::new(DictionaryEntry {
+                tag: Tag::new(0x0029, element),
+                mask: Some((gm, em)),
+                creator: None,
+                name: kw,
+                keyword: kw,
+                vrs: Box::new([Vr::Lo]),
+                vm: Vm::ONE,
+                retired: false,
+            })
+        };
+        let mut idx = MaskedIndex::default();
+        idx.push(mk(0x10F0, 0xFFFF, 0x00F0, "GeneralFirst")); // matches 0x10FF
+        idx.push(mk(0x10FF, 0xFFFF, 0x00FF, "BlockLater")); // also matches 0x10FF
+        assert_eq!(
+            idx.find(&Tag::new(0x0029, 0x10FF)).unwrap().keyword,
+            "GeneralFirst",
+            "the earlier row wins even when the later one has a faster mask shape"
+        );
+
+        let mut idx2 = MaskedIndex::default();
+        idx2.push(mk(0x1005, 0xFFFF, 0x00FF, "Block"));
+        assert_eq!(idx2.find(&Tag::new(0x0029, 0x1205)).unwrap().keyword, "Block");
+    }
+
+    #[test]
+    fn resolution_order_is_private_exact_masked_placeholder_public_exact_masked_unknown() {
+        let creator = Arc::new(PrivateCreator::new("ACME"));
+        let pub_exact_tag = Tag::new(0x0010, 0x0020);
+        let pub_masked_tag = Tag::new(0x6000, 0x0010);
+        let mk = |tag: Tag, mask: Option<(u16, u16)>, kw: &'static str| {
+            Arc::new(DictionaryEntry {
+                tag,
+                mask,
+                creator: None,
+                name: kw,
+                keyword: kw,
+                vrs: Box::new([Vr::Lo]),
+                vm: Vm::ONE,
+                retired: false,
+            })
+        };
+        let mut exact = HashMap::new();
+        exact.insert(pub_exact_tag.to_u32(), mk(pub_exact_tag.clone(), None, "PublicExact"));
+        let mut masked = MaskedIndex::default();
+        masked.push(mk(pub_masked_tag.clone(), Some((0xFF00, 0xFFFF)), "PublicMasked"));
+        let mut sub = PrivateSubDict::default();
+        sub.exact.insert(0x0029_1001, mk(Tag::new(0x0029, 0x1001), None, "PrivateExact"));
+        sub.masked.push(mk(Tag::new(0x0029, 0x1000), Some((0xFFFF, 0x00FF)), "PrivateMasked"));
+        let mut private = HashMap::new();
+        private.insert("ACME".to_string(), sub);
+        let dict = Dictionary {
+            exact,
+            masked,
+            keywords: HashMap::new(),
+            private: RwLock::new(private),
+            creators: Mutex::new(HashMap::new()),
+            keyword_creator: HashMap::new(),
+        };
+
+        let p = |element: u16| Tag::private(0x0029, element, creator.clone());
+        assert_eq!(dict.entry(&p(0x1001)).keyword, "PrivateExact");
+        assert_eq!(dict.entry(&p(0x1000)).keyword, "PrivateMasked");
+        assert_eq!(dict.entry(&p(0x0010)).keyword, "PrivateCreator", "creator slot placeholder");
+        assert_eq!(dict.entry(&pub_exact_tag).keyword, "PublicExact");
+        assert_eq!(dict.entry(&Tag::new(0x6014, 0x0010)).keyword, "PublicMasked");
+        assert_eq!(dict.entry(&Tag::new(0x0043, 0x9999)).keyword, "Unknown");
     }
 }

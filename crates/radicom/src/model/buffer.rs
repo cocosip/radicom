@@ -200,14 +200,20 @@ impl ByteBuffer for RangeBuffer {
 }
 
 /// Concatenation view over several buffers (fo-dicom `CompositeByteBuffer`).
+///
+/// `data()` is the one place that has to materialise the whole value; the
+/// concatenation is cached on first use so repeated `data()`/equality checks do
+/// not copy again. Range reads and `copy_to` stay streaming over the parts and
+/// never touch the cache.
 #[derive(Debug, Clone, Default)]
 pub struct CompositeBuffer {
     parts: Vec<SharedBuffer>,
+    concat: once_cell::sync::OnceCell<Bytes>,
 }
 
 impl CompositeBuffer {
     pub fn new(parts: Vec<SharedBuffer>) -> Self {
-        CompositeBuffer { parts }
+        CompositeBuffer { parts, concat: once_cell::sync::OnceCell::new() }
     }
 
     pub fn parts(&self) -> &[SharedBuffer] {
@@ -223,11 +229,14 @@ impl ByteBuffer for CompositeBuffer {
         self.parts.iter().all(|p| p.is_memory())
     }
     fn data(&self) -> std::borrow::Cow<'_, [u8]> {
-        let mut out = Vec::with_capacity(self.size() as usize);
-        for p in &self.parts {
-            out.extend_from_slice(&p.data());
-        }
-        std::borrow::Cow::Owned(out)
+        let bytes = self.concat.get_or_init(|| {
+            let mut out = Vec::with_capacity(self.size() as usize);
+            for p in &self.parts {
+                out.extend_from_slice(&p.data());
+            }
+            Bytes::from(out)
+        });
+        std::borrow::Cow::Borrowed(bytes)
     }
     fn get_byte_range(&self, offset: u64, buf: &mut [u8]) {
         let mut remaining = offset;
@@ -655,6 +664,68 @@ mod tests {
         let mut sink = Vec::new();
         assert_eq!(c.copy_to(&mut sink).unwrap(), 6);
         assert_eq!(sink, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    /// Counts how many times each part is materialised, to prove `data()` caches.
+    #[derive(Debug)]
+    struct CountingBuffer {
+        bytes: Vec<u8>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ByteBuffer for CountingBuffer {
+        fn size(&self) -> u64 {
+            self.bytes.len() as u64
+        }
+        fn is_memory(&self) -> bool {
+            true
+        }
+        fn data(&self) -> std::borrow::Cow<'_, [u8]> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::borrow::Cow::Borrowed(&self.bytes)
+        }
+    }
+
+    #[test]
+    fn composite_data_is_concatenated_once() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let a = shared(CountingBuffer { bytes: vec![1, 2], calls: calls.clone() });
+        let b = shared(CountingBuffer { bytes: vec![3], calls: calls.clone() });
+        let c = CompositeBuffer::new(vec![a, b]);
+        assert_eq!(&*c.data(), &[1, 2, 3]);
+        assert_eq!(&*c.data(), &[1, 2, 3], "second data() reuses the cached concat");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2, "each part read once");
+        // size() still reflects the parts after caching
+        assert_eq!(c.size(), 3);
+    }
+
+    #[test]
+    fn composite_range_read_does_not_materialize_a_part() {
+        // `data()` panics so a range read that materialises the part fails loudly.
+        #[derive(Debug)]
+        struct RangeOnly(Vec<u8>);
+        impl ByteBuffer for RangeOnly {
+            fn size(&self) -> u64 {
+                self.0.len() as u64
+            }
+            fn is_memory(&self) -> bool {
+                true
+            }
+            fn data(&self) -> std::borrow::Cow<'_, [u8]> {
+                panic!("data() must not be called for a range read");
+            }
+            fn get_byte_range(&self, offset: u64, buf: &mut [u8]) {
+                let start = offset as usize;
+                buf.copy_from_slice(&self.0[start..start + buf.len()]);
+            }
+        }
+        let c = CompositeBuffer::new(vec![
+            shared(MemoryBuffer::from(vec![0, 1])),
+            shared(RangeOnly(vec![2, 3, 4])),
+        ]);
+        let mut out = [0u8; 3];
+        c.get_byte_range(1, &mut out); // spans part 0 and part 1
+        assert_eq!(out, [1, 2, 3]);
     }
 
     #[test]

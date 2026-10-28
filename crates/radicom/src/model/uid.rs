@@ -125,6 +125,11 @@ static SEED: Lazy<()> = Lazy::new(|| {
     }
 });
 
+/// A sorted, shared snapshot of the registry.
+type EnumSnapshot = Arc<Vec<Arc<Uid>>>;
+/// Sorted snapshot of the registry, rebuilt only when `register` mutates it.
+static ENUM_CACHE: Lazy<RwLock<Option<EnumSnapshot>>> = Lazy::new(|| RwLock::new(None));
+
 /// Forces the generated UID table into the registry.
 pub fn ensure_seeded() {
     Lazy::force(&SEED);
@@ -165,6 +170,8 @@ impl Uid {
             retired,
         });
         REGISTRY.write().expect("registry lock").insert(Arc::from(value), uid.clone());
+        // a registration invalidates the sorted enumerate snapshot
+        *ENUM_CACHE.write().expect("enum cache lock") = None;
         uid
     }
 
@@ -187,13 +194,22 @@ impl Uid {
         REGISTRY.read().expect("registry lock").get(trimmed).cloned()
     }
 
-    /// All registered UIDs sorted by value.
+    /// All registered UIDs sorted by value. The sorted snapshot is built once
+    /// and reused until a runtime `register` invalidates it, so repeated calls
+    /// do not re-sort the whole registry.
     pub fn enumerate() -> Vec<Arc<Uid>> {
         ensure_seeded();
-        let reg = REGISTRY.read().expect("registry lock");
-        let mut all: Vec<Arc<Uid>> = reg.values().cloned().collect();
+        {
+            let cache = ENUM_CACHE.read().expect("enum cache lock");
+            if let Some(list) = cache.as_ref() {
+                return (**list).clone();
+            }
+        }
+        let mut all: Vec<Arc<Uid>> = REGISTRY.read().expect("registry lock").values().cloned().collect();
         all.sort();
-        all
+        let list = Arc::new(all);
+        *ENUM_CACHE.write().expect("enum cache lock") = Some(Arc::clone(&list));
+        (*list).clone()
     }
 
     // -- classification (UID-01) ------------------------------------------
@@ -357,6 +373,26 @@ mod tests {
         Uid::register("1.2.0.1", "B", UidType::CodingScheme, true);
         let all = Uid::enumerate();
         assert!(all.windows(2).all(|w| w[0] <= w[1]), "sorted by value");
+    }
+
+    #[test]
+    fn enumerate_is_sorted_unique_and_sees_new_registrations() {
+        let marker = Uid::register("1.2.999.42", "Enumerate Marker", UidType::ServiceClass, false);
+        let first = Uid::enumerate();
+        assert!(first.windows(2).all(|w| w[0] <= w[1]), "sorted by value");
+        let mut keys: Vec<&str> = first.iter().map(|u| u.value()).collect();
+        let total = keys.len();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), total, "unique by value");
+        assert!(
+            first.iter().any(|u| Arc::ptr_eq(u, &marker)),
+            "a registration invalidates the cached snapshot"
+        );
+        // a second call reuses the cached snapshot and stays sorted
+        let second = Uid::enumerate();
+        assert!(second.windows(2).all(|w| w[0] <= w[1]));
+        assert!(second.iter().any(|u| Arc::ptr_eq(u, &marker)));
     }
 
     #[test]
