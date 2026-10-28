@@ -494,7 +494,7 @@ impl ByteBuffer for FileWindow {
 /// A temp-file spill of a large value (fo-dicom temp-file byte buffer; BUF-02).
 ///
 /// The file is removed when the buffer is dropped. Field order matters: the
-/// [`FileWindow`] (and its open handle) must drop before [`TempFile`] deletes
+/// [`FileWindow`] (and its open handle) must drop before `TempFile` deletes
 /// the path, which is required on Windows.
 #[derive(Debug)]
 pub struct TempFileSpill {

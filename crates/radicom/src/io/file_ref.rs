@@ -3,7 +3,7 @@
 //! A [`FileRef`] abstracts "a file that can be opened, created, moved, deleted and
 //! range-read", with [`PathFile`] as the default path-backed implementation. A
 //! [`DirectoryRef`] enumerates a directory's entries with an optional glob filter
-//! (reusing the same [`Glob`](crate::media::scanner::Glob) as the media scanner).
+//! (reusing the same `Glob` as the media scanner).
 //! [`TempFileProvider`] hands out UUID-named temporary files whose deletions are
 //! deferred and retried on Windows' "still locked" semantics, with a final sweep
 //! at process exit.

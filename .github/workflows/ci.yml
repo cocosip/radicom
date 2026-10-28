@@ -1,0 +1,91 @@
+name: CI
+
+# master / main: build + test only. dev is intentionally not wired to CI.
+# Publishing happens exclusively from tags, in release.yml.
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --all-features
+
+      - name: Docs
+        run: cargo doc --workspace --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+  msrv:
+    name: msrv (1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.85.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check
+        run: cargo check --workspace --all-features
+
+  package:
+    name: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Validates publishable metadata (license file, dependency versions,
+      # included files) without a crates.io token. `--list` is used because
+      # `cargo package` cannot resolve our own unpublished path deps.
+      - name: Check publishable metadata
+        run: |
+          for pkg in radicom-dict radicom radicom-json radicom-network; do
+            echo "::group::$pkg"
+            cargo package -p "$pkg" --list
+            echo "::endgroup::"
+          done
+
+      # The LICENSE must travel with every published crate (MIT requirement).
+      - name: Every crate ships the LICENSE
+        run: |
+          for pkg in radicom-dict radicom radicom-json radicom-network; do
+            if ! cargo package -p "$pkg" --list | tr -d '\r' | grep -qx "LICENSE"; then
+              echo "::error::$pkg does not package the LICENSE file"
+              exit 1
+            fi
+            echo "$pkg ships LICENSE"
+          done

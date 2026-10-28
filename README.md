@@ -28,4 +28,23 @@ Milestones M0–M4 are complete (workspace, identifier system, dataset/elements,
 
 ## License
 
-TBD for radicom's own code. Note: the DICOM dictionary XML files reused from fo-dicom (and tables generated from them) are licensed under the **Microsoft Public License (MS-PL)** and must retain the fo-dicom copyright notice and attribution.
+radicom's own code is licensed under the **MIT License** — see [LICENSE](LICENSE).
+
+Third-party data: the DICOM dictionary XML files reused from fo-dicom (and the tables generated
+from them) are licensed under the **Microsoft Public License (MS-PL)** and retain the fo-dicom
+copyright notice and attribution — see [NOTICE](NOTICE).
+
+## CI/CD
+
+| Trigger | What runs |
+|---|---|
+| push / PR to `master` or `main` | `ci.yml`: clippy, tests, docs and publishable-metadata checks on Linux + Windows, plus an MSRV (1.85) check. **No publishing.** |
+| push of a `v*` tag | `release.yml`: verifies the tag matches the crate version, re-runs tests, then publishes `radicom-dict` → `radicom` → `radicom-json` → `radicom-network` to crates.io |
+
+`dev` is intentionally not wired to CI. Publishing requires a `CARGO_REGISTRY_TOKEN` repository
+secret; releasing is done by pushing a tag:
+
+```pwsh
+git tag v0.1.0
+git push origin v0.1.0
+```

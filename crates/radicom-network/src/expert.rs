@@ -2,7 +2,7 @@
 //!
 //! One [`Connection`] holds one TCP/TLS connection and at most one open
 //! association — the rule the wire itself imposes: a second A-ASSOCIATE-RQ on
-//! the same connection is a protocol violation. [`Association`] sends requests
+//! the same connection is a protocol violation. An association sends requests
 //! and hands back a stream of responses, so a caller that wants incremental
 //! delivery never has to wait for the whole answer set.
 //!

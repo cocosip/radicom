@@ -5,7 +5,7 @@
 //! arguments are parsed by hand.
 //!
 //! Usage:
-//!   radicom-dump <file> [--max-value N] [--max-binary N] [--no-private]
+//!   radicom-dump `<file>` [--max-value N] [--max-binary N] [--no-private]
 
 use radicom::dump::{dump_dataset, pixel_summary, DumpOptions};
 use radicom::io::file::DicomFile;

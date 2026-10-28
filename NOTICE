@@ -1,0 +1,14 @@
+radicom
+Copyright (c) radicom contributors
+Licensed under the MIT License (see LICENSE).
+
+Third-party data notice
+-----------------------
+
+The DICOM data dictionary XML files under `crates/radicom-dict/` (and the tables
+generated from them) are reused from the fo-dicom project and are licensed under
+the Microsoft Public License (MS-PL). The fo-dicom copyright notice and
+attribution are retained as required by that license.
+
+  fo-dicom: https://github.com/fo-dicom/fo-dicom
+  MS-PL:    https://opensource.org/license/ms-pl

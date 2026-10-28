@@ -4,9 +4,11 @@ description = "DICOM JSON (PS3.18) serialization for radicom"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license-file.workspace = true
+repository.workspace = true
 
 [dependencies]
-radicom = { path = "../radicom" }
+radicom = { path = "../radicom", version = "0.1.0" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -4,9 +4,9 @@
 //! and JSON all reuse it. Tolerance rows T1–T10 map to the behaviors in
 //! docs/05-file-io.md §3.8.
 //!
-//! Recursion happens only in [`Parser::parse_level`], whose stack frame
-//! holds nothing but a [`Step`] value; the per-element work lives in
-//! [`Parser::step`], which returns before any nested level starts. That
+//! Recursion happens only in `Parser::parse_level`, whose stack frame
+//! holds nothing but a `Step` value; the per-element work lives in
+//! `Parser::step`, which returns before any nested level starts. That
 //! keeps the `max_depth = 256` guard meaningful on the default 2 MiB thread
 //! stack (docs/05-file-io.md §3.1).
 
