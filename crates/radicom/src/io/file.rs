@@ -159,7 +159,12 @@ impl DicomFile {
             parse_dataset_with(&comp, &syntax, options)?
         } else {
             file.seek(SeekFrom::Start(dataset_offset)).map_err(|e| file_err(path, "seek", e))?;
-            let mut source = ByteSourceReader::new(file, syntax.endian())
+            // Buffered reads: the parser issues several small reads per element,
+            // and each one used to be its own syscall. This is safe now that the
+            // source tracks its own position instead of asking the stream, so the
+            // buffer is never consulted for offsets (docs/fo-dicom-alignment/05 §3.4).
+            let buffered = std::io::BufReader::with_capacity(64 * 1024, file);
+            let mut source = ByteSourceReader::new(buffered, syntax.endian())
                 .with_window_source(Arc::new(PathWindow { path: path.to_path_buf() }));
             let reader = DicomReader {
                 large_object_size: options.large_object_size,

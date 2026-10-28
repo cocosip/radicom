@@ -129,4 +129,36 @@ fn main() {
         });
         report("render_frame", ns, iters);
     }
+
+    // file vs memory parsing of a many-element dataset: the file path must not
+    // pay per-element syscalls (docs/fo-dicom-alignment/05 §3.4)
+    let many = many_element_dataset(800);
+    let many_file = DicomFile::from_dataset(many);
+    let many_bytes = many_file.to_bytes(&WriteOptions::default()).unwrap();
+    let path = std::env::temp_dir().join(format!("radicom-bench-{}.dcm", std::process::id()));
+    std::fs::write(&path, &many_bytes).expect("write bench fixture");
+    let iters = 300;
+    let ns = time_ops(iters, || {
+        let opened = DicomFile::open(black_box(&path)).unwrap();
+        black_box(opened);
+    });
+    report("open_800_elements", ns, iters);
+    let ns = time_ops(iters, || {
+        let parsed = DicomFile::from_bytes(black_box(&many_bytes), &ReadOptions::default()).unwrap();
+        black_box(parsed);
+    });
+    report("from_bytes_800", ns, iters);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// 800 small elements: the shape that exposes per-element parsing overhead.
+fn many_element_dataset(count: u16) -> Dataset {
+    let mut ds = Dataset::new();
+    for i in 0..count {
+        // an even, unassigned group: 800 distinct tags with no private creator
+        // bookkeeping in the way
+        ds.insert_str(Tag::new(0x7777, 0x0010 + i), Vr::Lo, format!("value-{i}"));
+    }
+    ds.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+    ds
 }

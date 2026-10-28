@@ -15,15 +15,34 @@ pub trait WindowSource: Send + Sync {
 }
 
 /// Sequential/seekable byte reader with endianness-aware scalar reads.
+///
+/// The total length is measured once and the current position is tracked here,
+/// so `require`/`position`/`is_eof` cost no syscalls. Asking a `File` for
+/// `stream_position` + `seek(End)` + `seek(Start)` on every element made file
+/// parsing an order of magnitude slower than parsing from memory
+/// (docs/fo-dicom-alignment/05 §3.4).
 pub struct ByteSourceReader<R: Read + Seek> {
     inner: R,
     pub endian: Endian,
     window: Option<Arc<dyn WindowSource>>,
+    /// Total source length; `u64::MAX` when it could not be measured, in which
+    /// case EOF detection falls back to the read errors.
+    len: u64,
+    /// Cached stream position, kept in step with every read and seek.
+    pos: u64,
 }
 
 impl<R: Read + Seek> ByteSourceReader<R> {
-    pub fn new(inner: R, endian: Endian) -> Self {
-        ByteSourceReader { inner, endian, window: None }
+    pub fn new(mut inner: R, endian: Endian) -> Self {
+        let pos = inner.stream_position().unwrap_or(0);
+        let len = match inner.seek(SeekFrom::End(0)) {
+            Ok(end) => {
+                let _ = inner.seek(SeekFrom::Start(pos));
+                end
+            }
+            Err(_) => u64::MAX,
+        };
+        ByteSourceReader { inner, endian, window: None, len, pos }
     }
 
     /// Attaches a window source so large values can stay off-heap (FILE-02).
@@ -35,7 +54,7 @@ impl<R: Read + Seek> ByteSourceReader<R> {
     /// A lazy window over the value about to be read (does not advance).
     /// `None` when this reader has no window source.
     pub fn window_at_current(&mut self, len: u64) -> io::Result<Option<SharedBuffer>> {
-        let pos = self.inner.stream_position()?;
+        let pos = self.pos;
         match &self.window {
             Some(source) => Ok(Some(source.window(pos, len)?)),
             None => Ok(None),
@@ -47,55 +66,59 @@ impl<R: Read + Seek> ByteSourceReader<R> {
     }
 
     pub fn position(&mut self) -> io::Result<u64> {
-        self.inner.stream_position()
+        Ok(self.pos)
     }
 
     /// Absolute seek (parser rewind for stop predicates).
     pub fn goto(&mut self, pos: u64) -> io::Result<()> {
         self.inner.seek(SeekFrom::Start(pos))?;
+        self.pos = pos;
         Ok(())
     }
 
     /// Relative skip.
     pub fn skip(&mut self, n: u64) -> io::Result<()> {
         self.inner.seek(SeekFrom::Current(n as i64))?;
+        self.pos = self.pos.saturating_add(n);
         Ok(())
     }
 
     /// True when fewer than `n` bytes remain.
     pub fn require(&mut self, n: u64) -> Result<(), ReaderError> {
-        let pos = self.inner.stream_position().map_err(|e| ReaderError::Other(e.to_string()))?;
-        let end = self
-            .inner
-            .seek(SeekFrom::End(0))
-            .map_err(|e| ReaderError::Other(e.to_string()))?;
-        self.inner.seek(SeekFrom::Start(pos)).map_err(|e| ReaderError::Other(e.to_string()))?;
-        if end - pos < n {
-            return Err(ReaderError::Eof { position: pos, needed: n });
+        if self.len.saturating_sub(self.pos) < n {
+            return Err(ReaderError::Eof { position: self.pos, needed: n });
         }
         Ok(())
     }
 
     pub fn is_eof(&mut self) -> io::Result<bool> {
-        let pos = self.inner.stream_position()?;
-        let end = self.inner.seek(SeekFrom::End(0))?;
-        self.inner.seek(SeekFrom::Start(pos))?;
-        Ok(pos >= end)
+        Ok(self.pos >= self.len)
     }
 
     pub fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
-        self.inner.read_exact(buf)
+        match self.inner.read_exact(buf) {
+            Ok(()) => {
+                self.pos += buf.len() as u64;
+                Ok(())
+            }
+            Err(error) => {
+                // a partial read leaves the real position unknown; re-sync so a
+                // later `require` does not report a stale one
+                self.pos = self.inner.stream_position().unwrap_or(self.pos);
+                Err(error)
+            }
+        }
     }
 
     pub fn read_u8(&mut self) -> io::Result<u8> {
         let mut b = [0u8; 1];
-        self.inner.read_exact(&mut b)?;
+        self.read_exact(&mut b)?;
         Ok(b[0])
     }
 
     pub fn read_u16(&mut self) -> io::Result<u16> {
         let mut b = [0u8; 2];
-        self.inner.read_exact(&mut b)?;
+        self.read_exact(&mut b)?;
         Ok(match self.endian {
             Endian::Little => u16::from_le_bytes(b),
             Endian::Big => u16::from_be_bytes(b),
@@ -104,7 +127,7 @@ impl<R: Read + Seek> ByteSourceReader<R> {
 
     pub fn read_u32(&mut self) -> io::Result<u32> {
         let mut b = [0u8; 4];
-        self.inner.read_exact(&mut b)?;
+        self.read_exact(&mut b)?;
         Ok(match self.endian {
             Endian::Little => u32::from_le_bytes(b),
             Endian::Big => u32::from_be_bytes(b),
@@ -113,7 +136,7 @@ impl<R: Read + Seek> ByteSourceReader<R> {
 
     pub fn read_u64(&mut self) -> io::Result<u64> {
         let mut b = [0u8; 8];
-        self.inner.read_exact(&mut b)?;
+        self.read_exact(&mut b)?;
         Ok(match self.endian {
             Endian::Little => u64::from_le_bytes(b),
             Endian::Big => u64::from_be_bytes(b),
@@ -130,7 +153,7 @@ impl<R: Read + Seek> ByteSourceReader<R> {
 
     pub fn read_bytes(&mut self, n: usize) -> io::Result<Vec<u8>> {
         let mut v = vec![0u8; n];
-        self.inner.read_exact(&mut v)?;
+        self.read_exact(&mut v)?;
         Ok(v)
     }
 
@@ -252,6 +275,25 @@ mod tests {
         src.skip(2).unwrap();
         assert!(src.is_eof().unwrap());
         assert!(src.require(1).is_err());
+    }
+
+    #[test]
+    fn position_tracking_matches_the_underlying_stream() {
+        // the length is measured once and the position is tracked, so require
+        // and position cost no syscalls (docs/fo-dicom-alignment/05 §3.4)
+        let mut src = ByteSourceReader::new(io::Cursor::new(vec![1u8; 10]), Endian::Little);
+        assert_eq!(src.position().unwrap(), 0);
+        src.skip(3).unwrap();
+        assert_eq!(src.position().unwrap(), 3);
+        src.goto(5).unwrap();
+        assert_eq!(src.position().unwrap(), 5);
+        assert!(src.require(6).is_err(), "only 5 bytes remain");
+        assert!(src.require(5).is_ok());
+        src.read_u32().unwrap();
+        assert_eq!(src.position().unwrap(), 9);
+        assert!(src.read_u32().is_err(), "one byte short");
+        assert_eq!(src.position().unwrap(), 10, "the position re-syncs after a short read");
+        assert!(src.is_eof().unwrap());
     }
 
     #[test]
