@@ -808,30 +808,126 @@ mod tests {
     }
 
     #[test]
-    fn implicit_private_tag_uses_the_private_dictionary_vr() {
-        // (0009,1001) with creator GEMS_IDEN_01 is LO in the private dictionary;
-        // implicit VR must resolve it instead of falling back to UN.
+    fn private_undefined_length_real_sequence_still_parses() {
+        // Implicit dataset: (0029,1001) undefined length whose value IS an item
+        // (implicit inner element). The private-sequence probe must descend.
+        let inner = {
+            let mut v = Vec::new();
+            v.extend_from_slice(&0x0029u16.to_le_bytes());
+            v.extend_from_slice(&0x1010u16.to_le_bytes());
+            v.extend_from_slice(&6u32.to_le_bytes());
+            v.extend_from_slice(b"widget");
+            v
+        };
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0x0009u16.to_le_bytes());
-        bytes.extend_from_slice(&0x0010u16.to_le_bytes());
-        bytes.extend_from_slice(&12u32.to_le_bytes());
-        bytes.extend_from_slice(b"GEMS_IDEN_01");
-        bytes.extend_from_slice(&0x0009u16.to_le_bytes());
+        bytes.extend_from_slice(&0x0029u16.to_le_bytes());
         bytes.extend_from_slice(&0x1001u16.to_le_bytes());
-        bytes.extend_from_slice(&4u32.to_le_bytes());
-        bytes.extend_from_slice(b"WIDG");
+        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        bytes.extend_from_slice(&item(&inner, false));
+        bytes.extend_from_slice(&sequence_delimiter());
+        bytes.extend_from_slice(&0x0010u16.to_le_bytes());
+        bytes.extend_from_slice(&0x0020u16.to_le_bytes());
+        bytes.extend_from_slice(&5u32.to_le_bytes());
+        bytes.extend_from_slice(b"PID-1");
 
         let ds = parse(&bytes, &implicit());
-        let tag = ds
-            .items()
-            .find_map(|item| {
-                let t = item.tag();
-                (t.group() == 0x0009 && t.element() == 0x1001).then(|| t.clone())
-            })
-            .expect("private tag present");
-        assert_eq!(tag.private_creator().map(|c| c.as_str()), Some("GEMS_IDEN_01"));
-        let element = ds.get_element(&tag).unwrap();
-        assert_eq!(element.vr(), crate::model::vr::Vr::Lo, "private dictionary VR wins over UN");
-        assert_eq!(ds.get_str(&tag).unwrap(), "WIDG");
+        let seq = ds.get_sequence(Tag::new(0x0029, 0x1001)).expect("real private SQ parses");
+        assert_eq!(seq.len(), 1);
+        assert_eq!(seq.items()[0].get_str(Tag::new(0x0029, 0x1010)).unwrap(), "widget");
+        assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
+    }
+
+    #[test]
+    fn bad_private_undefined_length_value_is_skipped_and_stream_stays_aligned() {
+        // Implicit private undefined-length value that is not SQ items: the
+        // bytes must be skipped to the sequence delimiter, not parsed as
+        // elements, and the following element must still be read.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x0029u16.to_le_bytes());
+        bytes.extend_from_slice(&0x1001u16.to_le_bytes());
+        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        bytes.extend_from_slice(b"GARBAGE!"); // no FFFE tag bytes inside
+        bytes.extend_from_slice(&sequence_delimiter());
+        bytes.extend_from_slice(&0x0010u16.to_le_bytes());
+        bytes.extend_from_slice(&0x0020u16.to_le_bytes());
+        bytes.extend_from_slice(&5u32.to_le_bytes());
+        bytes.extend_from_slice(b"PID-1");
+
+        let ds = parse(&bytes, &implicit());
+        assert!(ds.get_sequence(Tag::new(0x0029, 0x1001)).is_err(), "not treated as a sequence");
+        assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1", "stream stayed aligned");
+    }
+
+    #[test]
+    fn basic_offset_table_odd_length_keeps_entries_aligned() {
+        // Offset table item length 5: one complete 32-bit entry + one trailing
+        // byte. The entry must survive and the next fragment must stay aligned.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x7FE0u16.to_le_bytes());
+        bytes.extend_from_slice(&0x0010u16.to_le_bytes());
+        bytes.extend_from_slice(b"OB");
+        bytes.extend_from_slice(&[0, 0]);
+        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        bytes.extend_from_slice(&0xE000u16.to_le_bytes());
+        bytes.extend_from_slice(&5u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.push(0x7F);
+        bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        bytes.extend_from_slice(&0xE000u16.to_le_bytes());
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&[0xAA, 0xBB]);
+        bytes.extend_from_slice(&sequence_delimiter());
+        bytes.extend_from_slice(&el_header(0x0008, 0x0050, "SH", b"TAIL"));
+
+        let ds = parse(&bytes, &le());
+        let frags = match ds.item(&Tag::PIXEL_DATA) {
+            Some(DicomItem::Fragments(f)) => f,
+            other => panic!("expected fragments, got {other:?}"),
+        };
+        assert_eq!(frags.offset_table(), &[1], "complete entry kept, trailing byte ignored");
+        assert_eq!(frags.fragments().len(), 1);
+        assert_eq!(&*frags.fragments()[0].data(), &[0xAA, 0xBB]);
+        assert_eq!(ds.get_str(Tag::ACCESSION_NUMBER).unwrap(), "TAIL");
+    }
+
+    #[test]
+    fn basic_offset_table_big_endian_reads_four_byte_entries() {
+        // Big-endian OW pixel data: the offset table entries are 32-bit BE
+        // values. Reading it through the OW (2-byte) swap would corrupt them, so
+        // fragment 0 must be decoded in 4-byte units. Length 6 adds a trailing
+        // partial entry the decoder must ignore.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x7FE0u16.to_be_bytes());
+        bytes.extend_from_slice(&0x0010u16.to_be_bytes());
+        bytes.extend_from_slice(b"OW");
+        bytes.extend_from_slice(&[0, 0]);
+        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+        bytes.extend_from_slice(&0xFFFEu16.to_be_bytes());
+        bytes.extend_from_slice(&0xE000u16.to_be_bytes());
+        bytes.extend_from_slice(&6u32.to_be_bytes());
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        bytes.extend_from_slice(&[0x00, 0x00]);
+        bytes.extend_from_slice(&0xFFFEu16.to_be_bytes());
+        bytes.extend_from_slice(&0xE000u16.to_be_bytes());
+        bytes.extend_from_slice(&2u32.to_be_bytes());
+        bytes.extend_from_slice(&[0x11, 0x11]);
+        bytes.extend_from_slice(&0xFFFEu16.to_be_bytes());
+        bytes.extend_from_slice(&0xE0DDu16.to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&0x0008u16.to_be_bytes());
+        bytes.extend_from_slice(&0x0050u16.to_be_bytes());
+        bytes.extend_from_slice(b"SH");
+        bytes.extend_from_slice(&4u16.to_be_bytes());
+        bytes.extend_from_slice(b"TAIL");
+
+        let ds = parse(&bytes, &syntaxes::EXPLICIT_VR_BIG_ENDIAN.clone());
+        let frags = match ds.item(&Tag::PIXEL_DATA) {
+            Some(DicomItem::Fragments(f)) => f,
+            other => panic!("expected fragments, got {other:?}"),
+        };
+        assert_eq!(frags.offset_table(), &[1], "32-bit entries in big-endian order");
+        assert_eq!(frags.fragments().len(), 1);
+        assert_eq!(ds.get_str(Tag::ACCESSION_NUMBER).unwrap(), "TAIL", "byte order restored");
     }
 }

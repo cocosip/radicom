@@ -507,16 +507,24 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
 
         let Some(length) = defined else {
             if tag.is_private() {
-                // T4: private undefined-length value; the probe decides
-                // whether the subtree is encoded explicitly
-                return Ok(Step::Sequence {
-                    raw,
-                    tag,
-                    pos: value_start,
-                    defined: None,
-                    private_probe: true,
-                    cp246: false,
-                });
+                // T4: private undefined-length value. Only a value that really
+                // starts with an item or sequence delimiter can be read as a
+                // sequence (fo-dicom `IsPrivateSequence`). Otherwise the bytes
+                // are not usable SQ items; consume them up to the sequence
+                // delimiter as a skipped raw value so the stream stays aligned
+                // instead of mis-parsing them as dataset elements.
+                if self.next_is_item_or_delimiter()? {
+                    return Ok(Step::Sequence {
+                        raw,
+                        tag,
+                        pos: value_start,
+                        defined: None,
+                        private_probe: true,
+                        cp246: false,
+                    });
+                }
+                let buffer = self.skip_undefined_value_to_delimiter()?;
+                return Ok(Step::Element { raw, tag, vr: Vr::Un, pos: tag_pos, buffer });
             }
             return Ok(Step::Fragments { raw, tag, vr, pos: value_start });
         };
@@ -538,6 +546,28 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
             self.private_creators.insert((group, (element & 0xFF) as u8), creator);
         }
         Ok(Step::Element { raw, tag, vr, pos: tag_pos, buffer })
+    }
+
+    /// Best-effort recovery for an undefined-length private value that is not a
+    /// sequence: consume bytes up to and including the `SequenceDelimitationItem`
+    /// (`FFFE,E0DD`) so the following element stays aligned, and return an empty
+    /// (skipped) buffer. At EOF without a delimiter the source is left at EOF.
+    fn skip_undefined_value_to_delimiter(&mut self) -> Result<SharedBuffer, Error> {
+        // Item/delimiter tags follow the transfer syntax byte order; match both.
+        let le = [0xFEu8, 0xFF, 0xDD, 0xE0];
+        let be = [0xFFu8, 0xFE, 0xE0, 0xDD];
+        let mut window = [0u8; 4];
+        let mut filled = 0usize;
+        while let Ok(byte) = self.source.read_u8() {
+            window = [window[1], window[2], window[3], byte];
+            filled = (filled + 1).min(4);
+            if filled == 4 && (window == le || window == be) {
+                // the delimiter is tag(4) + length(4); consume its length too
+                let _ = self.source.read_u32();
+                break;
+            }
+        }
+        Ok(EmptyBuffer::shared())
     }
 
     /// Fragment sequences (§3.4): fragment 0 is the basic offset table in
@@ -565,7 +595,13 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                             position: pos,
                         }));
                     }
-                    let buffer = match self.read_value_buffer(vr, length as u64, pos) {
+                    let first = offset_table.is_none();
+                    // Fragment 0 is the basic offset table: its entries are
+                    // 32-bit values in transfer-syntax byte order, so read it
+                    // without the pixel VR's word swap and decode it explicitly
+                    // (a malformed odd length must not trigger a unit swap).
+                    let read_vr = if first { Vr::Ob } else { vr };
+                    let buffer = match self.read_value_buffer(read_vr, length as u64, pos) {
                         Ok(buffer) => buffer,
                         Err(Error::Reader(ReaderError::Eof { .. })) if self.options.partial_on_eof => {
                             self.suspended = true;
@@ -573,14 +609,12 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                         }
                         Err(e) => return Err(e),
                     };
-                    match offset_table {
-                        // fragment 0 is the basic offset table, never data
-                        None => {
-                            let table = decode_offset_table(&buffer, self.big_endian);
-                            observer.on_begin_fragment(&self.ctx(start), tag, vr, table.clone())?;
-                            offset_table = Some(table);
-                        }
-                        Some(_) => observer.on_fragment(&self.ctx(pos), buffer)?,
+                    if first {
+                        let table = decode_offset_table(&buffer, self.big_endian);
+                        observer.on_begin_fragment(&self.ctx(start), tag, vr, table.clone())?;
+                        offset_table = Some(table);
+                    } else {
+                        observer.on_fragment(&self.ctx(pos), buffer)?;
                     }
                 }
                 (0xFFFE, 0xE0DD) => {
@@ -765,19 +799,29 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
 }
 
 
-/// Basic offset table entries follow the transfer syntax byte order.
+/// Basic offset table entries follow the transfer syntax byte order, four bytes
+/// each. PS3.5 requires the item length to be a multiple of 4; a malformed
+/// trailing partial entry is ignored without shifting the complete entries (and
+/// without a word-swap unit assertion firing on an odd length).
 fn decode_offset_table(buffer: &SharedBuffer, big_endian: bool) -> Vec<u32> {
     let data = buffer.data();
-    data.as_chunks::<4>().0.iter()
-        .map(|c| {
-            let raw = [c[0], c[1], c[2], c[3]];
-            if big_endian {
-                u32::from_be_bytes(raw)
-            } else {
-                u32::from_le_bytes(raw)
-            }
-        })
-        .collect()
+    let (chunks, remainder) = data.as_chunks::<4>();
+    let mut entries = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        let raw = [chunk[0], chunk[1], chunk[2], chunk[3]];
+        entries.push(if big_endian {
+            u32::from_be_bytes(raw)
+        } else {
+            u32::from_le_bytes(raw)
+        });
+    }
+    if !remainder.is_empty() {
+        tracing::debug!(
+            bytes = remainder.len(),
+            "basic offset table length is not a multiple of 4; ignoring trailing bytes"
+        );
+    }
+    entries
 }
 
 /// RD-04: inflates a deflated dataset body. The file meta group is never
