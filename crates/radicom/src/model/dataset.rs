@@ -4,6 +4,7 @@ use crate::error::{DataError, Error, TagRef};
 use crate::model::buffer::SharedBuffer;
 use crate::model::element::{DicomElement, FromElement, IntoElement};
 use crate::model::item::{DicomFragmentSequence, DicomItem, DicomSequence};
+use crate::model::masked_tag::MaskedTag;
 use crate::model::tag::Tag;
 use crate::model::transfer_syntax::{syntaxes, TransferSyntax};
 use crate::model::vr::Vr;
@@ -74,6 +75,26 @@ impl Dataset {
     /// Ascending tag order iteration (invariant: file write order).
     pub fn items(&self) -> impl Iterator<Item = &DicomItem> {
         self.items.values()
+    }
+
+    /// Items whose tag is in `group`, excluding the group-length element
+    /// `(gggg,0000)` (DS-10). In ascending tag order.
+    pub fn enumerate_group(&self, group: u16) -> impl Iterator<Item = &DicomItem> {
+        self.items.values().filter(move |item| {
+            let tag = item.tag();
+            tag.group() == group && tag.element() != 0x0000
+        })
+    }
+
+    /// Items whose tag matches `masked` (e.g. `(60xx,3000)`) (DS-10).
+    /// In ascending tag order.
+    pub fn enumerate_masked<'a>(
+        &'a self,
+        masked: &'a MaskedTag,
+    ) -> impl Iterator<Item = &'a DicomItem> + 'a {
+        self.items
+            .values()
+            .filter(move |item| masked.matches(item.tag().group(), item.tag().element()))
     }
 
     pub fn contains(&self, tag: &Tag) -> bool {
@@ -432,6 +453,28 @@ mod tests {
         assert_eq!(ds.get_str(PATIENT_ID).unwrap(), "PID-1");
         let rows: u16 = ds.get(ROWS).unwrap();
         assert_eq!(rows, 512, "IS parses to numeric");
+    }
+
+    #[test]
+    fn group_and_masked_enumeration() {
+        let mut ds = Dataset::new();
+        // patient group, plus its group-length element which must be excluded
+        ds.insert_empty(Tag::new(0x0010, 0x0000), Vr::Ul); // group length
+        ds.insert_str(PATIENT_NAME, Vr::Pn, "DOE^JOHN");
+        ds.insert_str(PATIENT_ID, Vr::Lo, "PID-1");
+        // two overlay groups (60xx) with the same element, one other overlay elem
+        ds.insert_empty(Tag::new(0x6000, 0x3000), Vr::Ow);
+        ds.insert_empty(Tag::new(0x6002, 0x3000), Vr::Ow);
+        ds.insert_empty(Tag::new(0x6002, 0x0010), Vr::Us);
+
+        let group: Vec<_> = ds.enumerate_group(0x0010).map(|i| i.tag().clone()).collect();
+        assert_eq!(group, vec![PATIENT_NAME, PATIENT_ID], "group length (0000) excluded");
+
+        let overlay = MaskedTag::parse("(60xx,3000)").unwrap();
+        let masked: Vec<_> = ds.enumerate_masked(&overlay).map(|i| i.tag().clone()).collect();
+        assert_eq!(masked, vec![Tag::new(0x6000, 0x3000), Tag::new(0x6002, 0x3000)]);
+
+        assert_eq!(ds.enumerate_group(0x7FE0).count(), 0);
     }
 
     #[test]
