@@ -977,17 +977,39 @@ fn render_grayscale_with_options(
     let normalize = |v: u16| -> u16 { depth.normalize(v) };
     let count = (width as usize) * (height as usize);
     let mut bytes = Vec::with_capacity(count * 4);
-    for i in 0..count {
-        let stored = if bits == 8 {
-            let v = normalize(raw.get(i).copied().unwrap_or(0) as u16);
-            if signed { (v as i8) as f64 } else { v as f64 }
+
+    // Precalculate the window: the mapping is a pure function of the stored
+    // value, so evaluate it once per distinct value instead of once per pixel
+    // (docs/fo-dicom-alignment/02 §3.2). The table spans only the range that
+    // actually occurs, so a 12-bit frame builds 4096 entries, not 65536.
+    let stored_values: Vec<u16> = (0..count)
+        .map(|i| {
+            if bits == 8 {
+                normalize(raw.get(i).copied().unwrap_or(0) as u16)
+            } else {
+                let lo = raw.get(i * 2).copied().unwrap_or(0);
+                let hi = raw.get(i * 2 + 1).copied().unwrap_or(0);
+                normalize(u16::from_le_bytes([lo, hi]))
+            }
+        })
+        .collect();
+    let (min, max) = match (stored_values.iter().min(), stored_values.iter().max()) {
+        (Some(&lo), Some(&hi)) => (lo, hi),
+        _ => (0, 0),
+    };
+    let to_grey = |v: u16| -> u8 {
+        // the sign handling matches the per-pixel form exactly: reinterpret the
+        // allocated width, do not sign-extend from BitsStored
+        let stored = if signed {
+            if bits == 8 { (v as i8) as f64 } else { (v as i16) as f64 }
         } else {
-            let lo = raw.get(i * 2).copied().unwrap_or(0);
-            let hi = raw.get(i * 2 + 1).copied().unwrap_or(0);
-            let v = normalize(u16::from_le_bytes([lo, hi]));
-            if signed { (v as i16) as f64 } else { v as f64 }
+            v as f64
         };
-        let gray = options.map(stored);
+        options.map(stored)
+    };
+    let lut: Vec<u8> = (min..=max).map(to_grey).collect();
+    for v in stored_values {
+        let gray = lut[(v - min) as usize];
         // BGRA with grey in all colour channels, opaque alpha
         bytes.extend_from_slice(&[gray, gray, gray, 0xFF]);
     }
@@ -2578,8 +2600,48 @@ mod tests {
     }
 
     #[test]
-    fn a_non_right_angle_rotation_is_ignored() {
-        let image = RawImage::new(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 255]);
+    fn the_precalculated_window_matches_per_pixel_mapping() {
+        // §3.2: the renderer evaluates the window once per distinct stored value.
+        // It must agree exactly with applying the mapping to every pixel, for
+        // unsigned and signed data and for an inverted window.
+        for (bits, signed, samples) in [
+            (8u16, false, vec![0u16, 1, 127, 128, 255, 255, 0, 64]),
+            (16u16, false, vec![0u16, 4095, 2048, 1, 4095, 100, 0, 3999]),
+            (16u16, true, vec![0x0001u16, 0xFFFF, 0x0F00, 0x8000, 0x7FFF, 5, 0x0100, 0x0FFF]),
+        ] {
+            let mut ds = gray_image(8, 1, bits, &samples, Some(2000.0), Some(4000.0));
+            ds.insert_value(Tag::BITS_STORED, if bits == 8 { 8u16 } else { 12u16 });
+            ds.insert_value(Tag::HIGH_BIT, if bits == 8 { 7u16 } else { 11u16 });
+            ds.insert_value(Tag::PIXEL_REPRESENTATION, if signed { 1u16 } else { 0u16 });
+            let options =
+                GrayscaleRenderOptions { invert: true, ..GrayscaleRenderOptions::from_dataset(&ds).unwrap() };
+            let image = render_grayscale_with_options(&ds, 0, &options).unwrap();
+
+            let depth = BitDepth::new(bits, options_stored(&ds), options_high_bit(&ds), signed);
+            for (i, &raw) in samples.iter().enumerate() {
+                let stored = if signed {
+                    if bits == 8 { (depth.normalize(raw) as i8) as f64 } else { (depth.normalize(raw) as i16) as f64 }
+                } else {
+                    depth.normalize(raw) as f64
+                };
+                let expected = options.map(stored);
+                assert_eq!(image.as_bytes()[i * 4], expected, "pixel {i} of {bits}-bit signed={signed}");
+            }
+        }
+    }
+
+    /// `(0028,0102)` of a fixture, defaulting to the allocated width.
+    fn options_stored(ds: &Dataset) -> u16 {
+        ds.get_or(Tag::BITS_STORED, 16u16)
+    }
+
+    /// `(0028,0103)` of a fixture, defaulting to `stored - 1`.
+    fn options_high_bit(ds: &Dataset) -> u16 {
+        ds.get_or(Tag::HIGH_BIT, options_stored(ds).saturating_sub(1))
+    }
+
+    #[test]
+    fn a_non_right_angle_rotation_is_ignored() {        let image = RawImage::new(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 255]);
         let mut transform = SpatialTransform::new();
         transform.rotate(45);
         let rotated = transform.apply_to(&image);
