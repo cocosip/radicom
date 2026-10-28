@@ -1,0 +1,4 @@
+# Golden snapshot baselines must stay byte-identical to what the tests produce
+# (to_dump_string / JSON emit LF and the network goldens are hex). Without this,
+# core.autocrlf=true rewrites them to CRLF on checkout and the golden tests fail.
+tests-data/goldens/** -text

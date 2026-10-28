@@ -25,6 +25,7 @@ anonymize = ["dep:regex"]
 
 [dev-dependencies]
 rayon.workspace = true
+tracing-core = { version = "0.1", default-features = false }
 
 [[bench]]
 name = "core"

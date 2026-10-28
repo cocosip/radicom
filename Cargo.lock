@@ -463,6 +463,7 @@ dependencies = [
  "regex",
  "thiserror",
  "tracing",
+ "tracing-core",
  "uuid",
 ]
 

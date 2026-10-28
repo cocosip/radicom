@@ -159,6 +159,10 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
         let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
         tracing::subscriber::with_default(Counter(count.clone()), || {
+            // The callsite interest cache is process-global; other parallel tests
+            // can pin these debug! callsites to `never` before this subscriber is
+            // installed, so force a rebuild while our subscriber is default.
+            tracing_core::callsite::rebuild_interest_cache();
             trace(&pn_element(), &syntax).expect("trace parse succeeds");
         });
         assert!(
