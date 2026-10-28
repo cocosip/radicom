@@ -718,6 +718,25 @@ mod tests {
     }
 
     #[test]
+    fn big_endian_file_round_trips_numeric_and_text() {
+        // Full Part-10 file (preamble + ELE meta + BE dataset): numeric US values
+        // must survive the reader's byte swap and the writer's target-endian swap.
+        let mut dataset = Dataset::new();
+        dataset.insert_str(Tag::new(0x0010, 0x0020), Vr::Lo, "PID-1");
+        dataset.insert_value(Tag::new(0x0028, 0x0010), 512u16); // Rows (US)
+        dataset.insert_value(Tag::new(0x0028, 0x0011), 256u16); // Columns (US)
+        dataset.set_transfer_syntax(syntaxes::EXPLICIT_VR_BIG_ENDIAN.clone());
+        let bytes = DicomFile::from_dataset(dataset).to_bytes(&WriteOptions::default()).unwrap();
+
+        let back = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
+        assert_eq!(back.dataset.transfer_syntax().uid(), "1.2.840.10008.1.2.2");
+        assert_eq!(back.get_str(Tag::new(0x0010, 0x0020)), "PID-1");
+        let rows: u16 = back.dataset.get(Tag::new(0x0028, 0x0010)).unwrap();
+        let cols: u16 = back.dataset.get(Tag::new(0x0028, 0x0011)).unwrap();
+        assert_eq!((rows, cols), (512, 256), "US values survive the big-endian file round-trip");
+    }
+
+    #[test]
     fn acr_nema_recognition_code_marks_unsaveable() {
         let mut dataset = Dataset::new();
         dataset.insert_str(Tag::new(0x0008, 0x0010), Vr::Sh, "ACR-NEMA 2.0");
