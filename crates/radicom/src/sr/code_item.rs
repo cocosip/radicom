@@ -32,6 +32,16 @@ impl CodeItem {
         CodeItem { value: value.into(), scheme: scheme.into(), meaning: None, scheme_version: None }
     }
 
+    /// Builds a URN code item with its display meaning and no scheme metadata.
+    pub fn from_urn(urn: impl Into<String>, meaning: impl Into<String>) -> Self {
+        CodeItem {
+            value: urn.into(),
+            scheme: String::new(),
+            meaning: Some(meaning.into()),
+            scheme_version: None,
+        }
+    }
+
     pub fn with_meaning(mut self, meaning: impl Into<String>) -> Self {
         self.meaning = Some(meaning.into());
         self
@@ -193,6 +203,22 @@ mod tests {
             code.write_into(&mut ds);
             assert_eq!(CodeItem::read_from(&ds).unwrap(), code);
         }
+    }
+
+    #[test]
+    fn from_urn_builds_a_code_item_without_a_scheme_or_version() {
+        let code = CodeItem::from_urn("urn:oid:1.2.3", "Example meaning");
+        assert_eq!(code.value, "urn:oid:1.2.3");
+        assert_eq!(code.scheme, "");
+        assert_eq!(code.meaning.as_deref(), Some("Example meaning"));
+        assert_eq!(code.scheme_version, None);
+
+        let mut ds = Dataset::new();
+        code.write_into(&mut ds);
+        assert_eq!(ds.try_get_str(URN_CODE_VALUE).as_deref(), Some("urn:oid:1.2.3"));
+        assert_eq!(ds.try_get_str(CODE_MEANING).as_deref(), Some("Example meaning"));
+        assert_eq!(ds.try_get_str(CODING_SCHEME_DESIGNATOR).as_deref(), Some(""));
+        assert!(ds.try_get_str(CODING_SCHEME_VERSION).is_none());
     }
 
     #[test]
