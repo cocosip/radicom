@@ -367,6 +367,37 @@ impl Dataset {
         tag.clone()
     }
 
+    // -- validation (VAL-01..03) ------------------------------------------------
+
+    /// Validates every element's content and value multiplicity, recursing into
+    /// sequences (VAL-01/02); returns the first [`crate::error::ValidationFailure`].
+    ///
+    /// Validation is on demand, mirroring fo-dicom's `Validate()`: the write path
+    /// and the file parser do **not** call it, so tolerant round-trips of
+    /// real-world files keep working. Runs only when the per-dataset flag and the
+    /// global switch are both on (`should_validate`); returns `Ok(())` otherwise.
+    pub fn validate(&self) -> Result<(), Error> {
+        if !crate::validation::should_validate(self.validate) {
+            return Ok(());
+        }
+        self.validate_items()
+    }
+
+    fn validate_items(&self) -> Result<(), Error> {
+        for item in self.items.values() {
+            match item {
+                DicomItem::Element(e) => crate::validation::validate_element(e)?,
+                DicomItem::Sequence(s) => {
+                    for item_ds in s.items() {
+                        item_ds.validate_items()?;
+                    }
+                }
+                DicomItem::Fragments(_) => {}
+            }
+        }
+        Ok(())
+    }
+
     // -- walker (DS-09) ----------------------------------------------------------
 
     /// Depth-first traversal in tag order; shared by the writer, dump and
@@ -475,6 +506,34 @@ mod tests {
         assert_eq!(masked, vec![Tag::new(0x6000, 0x3000), Tag::new(0x6002, 0x3000)]);
 
         assert_eq!(ds.enumerate_group(0x7FE0).count(), 0);
+    }
+
+    #[test]
+    fn dataset_validate_is_on_demand_and_recursive() {
+        let mut ds = Dataset::new();
+        ds.insert_str(PATIENT_ID, Vr::Lo, "PID-1");
+        // a valid dataset passes
+        ds.validate().expect("valid dataset");
+
+        // an invalid AE (>16 chars) fails with a ValidationFailure naming the tag
+        ds.insert_str(Tag::new(0x0008, 0x0050), Vr::Ae, "SEVENTEEN_CHARS_X");
+        let err = ds.validate().unwrap_err();
+        assert!(matches!(err, Error::Validation(_)), "{err}");
+        assert!(err.to_string().contains("(0008,0050)"), "{err}");
+
+        // recursion: a bad value inside a sequence item is caught
+        let mut inner = Dataset::new();
+        inner.insert_str(Tag::new(0x0008, 0x0050), Vr::Ae, "SEVENTEEN_CHARS_X");
+        let mut outer = Dataset::new();
+        let seq = outer.insert_sequence(Tag::new(0x0008, 0x1110));
+        seq.push(inner);
+        assert!(outer.validate().is_err(), "invalid nested item is detected");
+
+        // the per-dataset switch disables validation entirely
+        let mut off = Dataset::new();
+        off.set_validation(false);
+        off.insert_str(Tag::new(0x0008, 0x0050), Vr::Ae, "SEVENTEEN_CHARS_X");
+        off.validate().expect("validation disabled ignores bad values");
     }
 
     #[test]
