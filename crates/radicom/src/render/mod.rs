@@ -730,6 +730,31 @@ impl RawImage {
         out
     }
 
+    /// Writes the image to `path`, choosing the encoding from the extension:
+    /// `.bmp` → BMP; otherwise PNG (single-channel grayscale when every pixel is
+    /// grey, else true-colour RGB). Dependency-free `save(path)` (docs §7).
+    pub fn save(&self, path: impl AsRef<std::path::Path>) -> Result<(), Error> {
+        let path = path.as_ref();
+        let is_bmp = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("bmp"));
+        let bytes = if is_bmp {
+            self.to_bmp()
+        } else if self.pixels_are_gray() {
+            self.to_png()
+        } else {
+            self.to_png_rgb()
+        };
+        std::fs::write(path, bytes)?;
+        Ok(())
+    }
+
+    /// True when every pixel has equal R, G and B (so grayscale PNG is lossless).
+    fn pixels_are_gray(&self) -> bool {
+        self.bytes.chunks_exact(4).all(|p| p[0] == p[1] && p[1] == p[2])
+    }
+
     /// Wraps filtered scanlines in the PNG container with the given colour type.
     fn encode_png(&self, raw: &[u8], color_type: u8) -> Vec<u8> {
         let mut png = Vec::new();
@@ -2145,6 +2170,31 @@ mod tests {
         assert_eq!(&bmp[54..60], &[255, 0, 0, 255, 255, 255], "bottom row blue,white in BGR");
         // top row (red, green) follows, then 2 padding bytes per row
         assert_eq!(&bmp[62..68], &[0, 0, 255, 0, 255, 0], "top row red,green in BGR");
+    }
+
+    #[test]
+    fn save_writes_png_or_bmp_by_extension() {
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let colour = RawImage::new(1, 1, vec![10, 20, 30, 255]); // not grey
+
+        let png = dir.join(format!("radicom_save_{pid}.png"));
+        colour.save(&png).unwrap();
+        assert_eq!(&std::fs::read(&png).unwrap()[1..4], b"PNG");
+        std::fs::remove_file(&png).ok();
+
+        let bmp = dir.join(format!("radicom_save_{pid}.bmp"));
+        colour.save(&bmp).unwrap();
+        assert_eq!(&std::fs::read(&bmp).unwrap()[0..2], b"BM");
+        std::fs::remove_file(&bmp).ok();
+
+        // a grey pixel saves as a single-channel (colour type 0) PNG
+        let grey = RawImage::new(1, 1, vec![128, 128, 128, 255]);
+        let gpng = dir.join(format!("radicom_save_grey_{pid}.png"));
+        grey.save(&gpng).unwrap();
+        let bytes = std::fs::read(&gpng).unwrap();
+        assert_eq!(bytes[16 + 9], 0, "grayscale PNG colour type 0");
+        std::fs::remove_file(&gpng).ok();
     }
 
     /// Builds a dataset with a grayscale image plus one embedded overlay group
