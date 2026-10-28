@@ -86,6 +86,30 @@ impl Tag {
         format!("{:04X}{:04X}", self.group, self.element)
     }
 
+    /// Formats the tag like fo-dicom `DicomTag.ToString(format)`:
+    ///
+    /// - `"G"` (also the fallback): `(7fe0,0010)`, private `(0029,1001:CREATOR)`
+    /// - `"X"`: like `G`, but a private element shows its block offset:
+    ///   `(0029,xx01:CREATOR)`
+    /// - `"g"`: no parentheses, `7fe0,0010` / `0029,1001:CREATOR`
+    /// - `"J"`: `7FE00010`, uppercase, no creator (the JSON key form)
+    ///
+    /// [`Display`](std::fmt::Display) keeps radicom's uppercase general form;
+    /// this method is the fo-dicom-compatible spelling for callers that need to
+    /// match its output.
+    pub fn to_string_with(&self, format: &str) -> String {
+        let creator = self.private_creator.as_deref().map(|c| c.as_str());
+        match (format, creator) {
+            ("X", Some(c)) => format!("({:04x},xx{:02x}:{})", self.group, self.element & 0xFF, c),
+            ("X", None) => format!("({:04x},{:04x})", self.group, self.element),
+            ("g", Some(c)) => format!("{:04x},{:04x}:{}", self.group, self.element, c),
+            ("g", None) => format!("{:04x},{:04x}", self.group, self.element),
+            ("J", _) => self.to_json_string(),
+            (_, Some(c)) => format!("({:04x},{:04x}:{})", self.group, self.element, c),
+            (_, None) => format!("({:04x},{:04x})", self.group, self.element),
+        }
+    }
+
     /// Parses `(GGGG,EEEE)`, `GGGG,EEEE`, `(GGGG,EEEE:CREATOR)` or
     /// `GGGGEEEE` (8 hex digits). Group and element are case-insensitive hex.
     pub fn parse(s: &str) -> Result<Self, Error> {
@@ -305,6 +329,23 @@ mod tests {
         let t = Tag::parse("(0029,1001:Vendor X)").unwrap();
         assert_eq!(t, Tag::private(0x0029, 0x1001, creator("Vendor X")));
         assert_eq!(t.to_string(), "(0029,1001:Vendor X)");
+    }
+
+    #[test]
+    fn the_fo_dicom_format_variants_are_available() {
+        // expected strings taken from fo-dicom DicomTag.ToString(format)
+        let public = Tag::PIXEL_DATA; // (7fe0,0010)
+        assert_eq!(public.to_string_with("G"), "(7fe0,0010)");
+        assert_eq!(public.to_string_with("X"), "(7fe0,0010)");
+        assert_eq!(public.to_string_with("g"), "7fe0,0010");
+        assert_eq!(public.to_string_with("J"), "7FE00010");
+        assert_eq!(public.to_string_with("anything"), "(7fe0,0010)", "G is the fallback");
+
+        let private = Tag::private(0x0029, 0x1001, creator("Vendor X"));
+        assert_eq!(private.to_string_with("G"), "(0029,1001:Vendor X)");
+        assert_eq!(private.to_string_with("X"), "(0029,xx01:Vendor X)", "X hides the block number");
+        assert_eq!(private.to_string_with("g"), "0029,1001:Vendor X");
+        assert_eq!(private.to_string_with("J"), "00291001", "J never shows the creator");
     }
 
     #[test]
