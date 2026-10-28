@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "crates/radicom",
     "crates/radicom-dict",
@@ -11,7 +11,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.89"
 license-file = "LICENSE"
 repository = "https://github.com/cocosip/radicom"
 authors = ["radicom contributors"]

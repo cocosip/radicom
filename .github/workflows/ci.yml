@@ -46,12 +46,12 @@ jobs:
           RUSTDOCFLAGS: "-D warnings"
 
   msrv:
-    name: msrv (1.85)
+    name: msrv (1.89)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@1.89.0
 
       - uses: Swatinem/rust-cache@v2
 
