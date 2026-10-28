@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn trace_emits_debug_events() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
+        use std::sync::{Arc, Once};
 
         #[derive(Clone)]
         struct Counter(Arc<AtomicUsize>);
@@ -156,17 +156,25 @@ mod tests {
             fn exit(&self, _span: &tracing::span::Id) {}
         }
 
-        let count = Arc::new(AtomicUsize::new(0));
-        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
-        tracing::subscriber::with_default(Counter(count.clone()), || {
-            // The callsite interest cache is process-global; other parallel tests
-            // can pin these debug! callsites to `never` before this subscriber is
-            // installed, so force a rebuild while our subscriber is default.
+        // The callsite interest cache is process-global, so a thread-scoped
+        // subscriber races other parallel tests that touch tracing callsites
+        // (they can pin ours to `never`). Install one counting subscriber as the
+        // *global* default once, force one cache rebuild, then emit. The counter
+        // is shared, so concurrent tracing elsewhere only inflates it, never
+        // starves our assertion.
+        static INSTALL: Once = Once::new();
+        static COUNT: std::sync::OnceLock<Arc<AtomicUsize>> = std::sync::OnceLock::new();
+        let count = COUNT.get_or_init(|| Arc::new(AtomicUsize::new(0))).clone();
+        INSTALL.call_once(|| {
+            let _ = tracing::subscriber::set_global_default(Counter(count.clone()));
             tracing_core::callsite::rebuild_interest_cache();
-            trace(&pn_element(), &syntax).expect("trace parse succeeds");
         });
+
+        let before = count.load(Ordering::Relaxed);
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        trace(&pn_element(), &syntax).expect("trace parse succeeds");
         assert!(
-            count.load(Ordering::Relaxed) >= 1,
+            count.load(Ordering::Relaxed) > before,
             "the observer must emit at least one debug event"
         );
     }
