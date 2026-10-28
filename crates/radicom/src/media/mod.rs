@@ -24,8 +24,8 @@ pub mod icon;
 pub mod scanner;
 pub use icon::{attach_icon, BasicIconGenerator, IconGenerator};
 pub use scanner::{
-    scan_directory, DicomDirectoryBuilder, Glob, ScanErrorPolicy, ScanEvent, ScanOptions, ScanSummary,
-    ScanVisitor,
+    scan_directory, scan_directory_with_control, DicomDirectoryBuilder, Glob, ScanControl, ScanErrorPolicy, ScanEvent,
+    ScanOptions, ScanSummary, ScanVisitor,
 };
 
 /// Tags of the media storage directory (§3.1, §3.2).

@@ -15,6 +15,8 @@ use crate::io::file::DicomFile;
 use crate::media::icon::IconGenerator;
 use crate::media::DicomDirectory;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// What the scanner does when a directory entry cannot be read (§3.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -43,6 +45,29 @@ impl Default for ScanOptions {
     fn default() -> Self {
         // fo-dicom's scanner default: recurse fully, skip errors, no filter
         ScanOptions { max_depth: None, error_policy: ScanErrorPolicy::Skip, glob: None, check_for_valid_header: false }
+    }
+}
+
+/// Shared cancellation flag for a running scan.
+#[derive(Clone, Debug, Default)]
+pub struct ScanControl {
+    stopped: Arc<AtomicBool>,
+}
+
+impl ScanControl {
+    /// Creates a control that allows the scan to run.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Requests that the scan stop after the current callback returns.
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::Release);
+    }
+
+    /// Returns whether [`stop`](Self::stop) has been requested.
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Acquire)
     }
 }
 
@@ -83,6 +108,8 @@ pub struct ScanSummary {
     pub files_matched: usize,
     /// Paths skipped because they could not be read.
     pub errors: usize,
+    /// Whether the scan was stopped through [`ScanControl`].
+    pub stopped: bool,
 }
 
 /// Scans `root` and feeds matched files to `on_match` (§3.5).
@@ -92,6 +119,20 @@ pub struct ScanSummary {
 pub fn scan_directory<F>(
     root: impl AsRef<Path>,
     options: &ScanOptions,
+    visitor: &mut dyn ScanVisitor,
+    on_match: F,
+) -> Result<ScanSummary, Error>
+where
+    F: FnMut(&Path) -> Result<(), Error>,
+{
+    scan_directory_with_control(root, options, &ScanControl::default(), visitor, on_match)
+}
+
+/// Scans `root` with an explicit cancellation control.
+pub fn scan_directory_with_control<F>(
+    root: impl AsRef<Path>,
+    options: &ScanOptions,
+    control: &ScanControl,
     visitor: &mut dyn ScanVisitor,
     mut on_match: F,
 ) -> Result<ScanSummary, Error>
@@ -103,16 +144,19 @@ where
         None => None,
     };
     let mut summary = ScanSummary::default();
-    walk(root.as_ref(), 0, options, matcher.as_ref(), &mut summary, visitor, &mut on_match)?;
+    walk(root.as_ref(), 0, options, matcher.as_ref(), control, &mut summary, visitor, &mut on_match)?;
+    summary.stopped = control.is_stopped();
     visitor.on_event(ScanEvent::Complete { summary: summary.clone() });
     Ok(summary)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk<F>(
     dir: &Path,
     depth: usize,
     options: &ScanOptions,
     matcher: Option<&Glob>,
+    control: &ScanControl,
     summary: &mut ScanSummary,
     visitor: &mut dyn ScanVisitor,
     on_match: &mut F,
@@ -120,6 +164,9 @@ fn walk<F>(
 where
     F: FnMut(&Path) -> Result<(), Error>,
 {
+    if control.is_stopped() {
+        return Ok(());
+    }
     summary.directories += 1;
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -127,6 +174,9 @@ where
     };
 
     for entry in entries {
+        if control.is_stopped() {
+            return Ok(());
+        }
         let entry = match entry {
             Ok(entry) => entry,
             Err(e) => {
@@ -147,7 +197,7 @@ where
         if file_type.is_dir() {
             let can_descend = options.max_depth.is_none_or(|max| depth < max);
             if can_descend {
-                walk(&path, depth + 1, options, matcher, summary, visitor, on_match)?;
+                walk(&path, depth + 1, options, matcher, control, summary, visitor, on_match)?;
             }
             continue;
         }
@@ -471,6 +521,33 @@ mod tests {
         .unwrap();
 
         assert_eq!(complete, Some(summary));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn scan_can_be_stopped_explicitly() {
+        let dir = temp_dir("stop");
+        touch(&dir.join("a.dcm"));
+        touch(&dir.join("b.dcm"));
+        let control = ScanControl::new();
+        let callback_control = control.clone();
+        let mut seen = 0;
+
+        let summary = scan_directory_with_control(
+            &dir,
+            &ScanOptions::default(),
+            &control,
+            &mut |_| {},
+            |_| {
+                seen += 1;
+                callback_control.stop();
+                Ok::<(), Error>(())
+            },
+        )
+        .unwrap();
+
+        assert!(summary.stopped);
+        assert_eq!(seen, 1, "stopping from the first callback prevents later files");
         let _ = fs::remove_dir_all(dir);
     }
 
