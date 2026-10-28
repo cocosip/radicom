@@ -82,7 +82,7 @@ Async directory walk with glob filter; events `on_progress/on_file`; output feed
 
 ### 4.1 Content tree
 
-`ContentItem` wraps one dataset: `Code` (ConceptNameCodeSequence), `ValueType` (14: CONTAINER/TEXT/CODE/NUM/PNAME/DATE/TIME/DATETIME/UIDREF/COMPOSITE/IMAGE/WAVEFORM/SCOORD/TCOORD), `Relationship` (7: CONTAINS/HAS PROPERTIES/INFERRED FROM/SELECTED FROM/HAS OBS CONTEXT/HAS ACQ CONTEXT/HAS CONCEPT MOD), `Continuity`. Children = ContentSequence items; add/remove with relationship maintenance.
+`ContentItem` wraps one dataset: `Code` (ConceptNameCodeSequence), `ValueType` (15: CONTAINER/TEXT/CODE/NUM/PNAME/DATE/TIME/DATETIME/UIDREF/COMPOSITE/IMAGE/WAVEFORM/SCOORD/SCOORD3D/TCOORD), `Relationship` (7: CONTAINS/HAS PROPERTIES/INFERRED FROM/SELECTED FROM/HAS OBS CONTEXT/HAS ACQ CONTEXT/HAS CONCEPT MOD), `Continuity`. Children = ContentSequence items; add/remove with relationship maintenance.
 
 Type-checked constructors write the correct value tag per type (TextValue / PersonName / Date/Time/DateTime / UID / ConceptCodeSequence / MeasuredValueSequence / ReferencedSOPSequence).
 

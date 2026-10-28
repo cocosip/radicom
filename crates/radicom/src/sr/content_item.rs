@@ -43,7 +43,7 @@ pub mod tags {
     pub const CONTINUITY_OF_CONTENT: Tag = Tag::new(0x0040, 0xA050);
 }
 
-/// The 14 SR value types (§4.1, PS3.3 C.18.1).
+/// The 15 SR value types (§4.1, PS3.3 C.18.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueType {
     Container,
@@ -59,6 +59,7 @@ pub enum ValueType {
     Image,
     Waveform,
     Scoord,
+    Scoord3D,
     Tcoord,
 }
 
@@ -78,6 +79,7 @@ impl ValueType {
             ValueType::Image => "IMAGE",
             ValueType::Waveform => "WAVEFORM",
             ValueType::Scoord => "SCOORD",
+            ValueType::Scoord3D => "SCOORD3D",
             ValueType::Tcoord => "TCOORD",
         }
     }
@@ -97,6 +99,7 @@ impl ValueType {
             "IMAGE" => ValueType::Image,
             "WAVEFORM" => ValueType::Waveform,
             "SCOORD" => ValueType::Scoord,
+            "SCOORD3D" => ValueType::Scoord3D,
             "TCOORD" => ValueType::Tcoord,
             _ => return None,
         })
@@ -324,6 +327,7 @@ mod tests {
             ValueType::Image,
             ValueType::Waveform,
             ValueType::Scoord,
+            ValueType::Scoord3D,
             ValueType::Tcoord,
         ] {
             assert_eq!(ValueType::parse(value_type.as_str()), Some(value_type));
