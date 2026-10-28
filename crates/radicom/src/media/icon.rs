@@ -148,7 +148,7 @@ fn icon_dataset(
     icon.insert_value(Tag::new(0x0028, 0x0101), 8u16); // BitsStored
     icon.insert_value(Tag::new(0x0028, 0x0102), 7u16); // HighBit
     icon.insert_value(Tag::new(0x0028, 0x0103), 0u16); // PixelRepresentation (unsigned)
-    icon.insert_str(Tag::new(0x0028, 0x0008), Vr::Cs, "1"); // NumberOfFrames
+    icon.insert_str(Tag::new(0x0028, 0x0008), Vr::Is, "1"); // NumberOfFrames (IS)
     icon.insert_or_update(crate::model::item::DicomItem::Element(
         crate::model::element::DicomElement::new_bytes(
             Tag::new(0x7FE0, 0x0010),
@@ -211,6 +211,12 @@ mod tests {
         assert_eq!(icon.try_get_str(Tag::new(0x0028, 0x0011)).as_deref(), Some("64"), "columns");
         assert_eq!(icon.try_get_str(Tag::new(0x0028, 0x0010)).as_deref(), Some("32"), "rows");
         assert_eq!(icon.try_get_str(Tag::new(0x0028, 0x0100)).as_deref(), Some("8"), "8-bit icon");
+        // NumberOfFrames (0028,0008) must be IS, not CS (PS3.6)
+        assert_eq!(
+            icon.get_element(Tag::new(0x0028, 0x0008)).unwrap().vr(),
+            Vr::Is,
+            "NumberOfFrames VR is IS"
+        );
     }
 
     #[test]
