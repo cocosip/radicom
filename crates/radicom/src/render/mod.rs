@@ -34,19 +34,22 @@ pub use spatial::SpatialTransform;
 /// Default overlay colour: magenta `0xFF_FF00FF` (docs §1.2).
 pub const DEFAULT_OVERLAY_COLOR: crate::pixel::Color32 = crate::pixel::Color32::new(0xFF, 0x00, 0xFF);
 
-/// A parsed VOI LUT (`(0028,3010)` item, PS3.3 C.11.2.1.1): maps rescaled input
-/// values to 8-bit output via a descriptor + data table.
+/// A parsed LUT table shared by the VOI (`(0028,3010)`) and modality
+/// (`(0028,3000)`) LUT sequences (PS3.3 C.11.2.1.1 / C.11.2.1.1): a descriptor
+/// `(0028,3002)` plus data `(0028,3006)`, mapping an input value to the entry at
+/// `value - first_mapped`, clamped to the table's ends.
 #[derive(Debug, Clone)]
-pub struct VoiLut {
+pub struct LutTable {
     first_mapped: i32,
-    /// One output byte per entry (8-bit; 16-bit data keeps the high byte).
-    entries: Vec<u8>,
+    entries: Vec<u16>,
+    /// Declared bits per entry (8 or 16), used to scale VOI output to a byte.
+    bits: u16,
 }
 
-impl VoiLut {
-    /// Builds from a VOI LUT Sequence item's `(0028,3002)` descriptor and
+impl LutTable {
+    /// Builds from a LUT-sequence item's `(0028,3002)` descriptor and
     /// `(0028,3006)` data. Returns `None` when either is missing or malformed.
-    pub fn from_item(item: &Dataset) -> Option<VoiLut> {
+    pub fn from_item(item: &Dataset) -> Option<LutTable> {
         let desc = element_bytes(item, Tag::new(0x0028, 0x3002))?;
         if desc.len() < 6 {
             return None;
@@ -60,26 +63,81 @@ impl VoiLut {
 
         let mut out = Vec::with_capacity(count);
         if data.len() == count {
-            out.extend_from_slice(&data[..count]);
+            // 8-bit entries (one byte each) carry the value directly
+            out.extend(data[..count].iter().map(|b| *b as u16));
         } else {
-            // two bytes per entry; 16-bit uses the high byte (offset 1), else low
-            let offset = if bits == 16 { 1 } else { 0 };
+            // two bytes per entry (US/OW); 16-bit keeps both, 8-bit-allocated
+            // takes the low byte (fo-dicom GetLut semantics)
             for i in 0..count {
-                out.push(*data.get(i * 2 + offset).unwrap_or(&0));
+                let lo = *data.get(i * 2).unwrap_or(&0) as u16;
+                let hi = *data.get(i * 2 + 1).unwrap_or(&0) as u16;
+                let v = if bits >= 16 { u16::from_le_bytes([lo as u8, hi as u8]) } else { lo };
+                out.push(v);
             }
         }
-        Some(VoiLut { first_mapped, entries: out })
+        Some(LutTable { first_mapped, entries: out, bits })
+    }
+
+    /// The entry for `value`, clamped to the table's ends; `None` when empty.
+    fn at(&self, value: f64) -> Option<u16> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        let index = value.round() as i64 - self.first_mapped as i64;
+        let clamped = index.clamp(0, self.entries.len() as i64 - 1) as usize;
+        Some(self.entries[clamped])
+    }
+
+    /// Maps an input value to an 8-bit display byte (VOI form: 16-bit entries
+    /// scale down by 8 to the output range, matching fo-dicom's LUT output stage).
+    pub fn map_byte(&self, value: f64) -> u8 {
+        match self.at(value) {
+            Some(v) if self.bits >= 16 => (v >> 8) as u8,
+            Some(v) => v.min(255) as u8,
+            None => 0,
+        }
+    }
+
+    /// Maps an input value to its raw table value (modality form).
+    pub fn map_value(&self, value: f64) -> f64 {
+        self.at(value).map(|v| v as f64).unwrap_or(0.0)
+    }
+}
+
+/// A parsed VOI LUT (`(0028,3010)` item): maps rescaled input values to an
+/// 8-bit output byte.
+#[derive(Debug, Clone)]
+pub struct VoiLut {
+    table: LutTable,
+}
+
+impl VoiLut {
+    pub fn from_item(item: &Dataset) -> Option<VoiLut> {
+        LutTable::from_item(item).map(|table| VoiLut { table })
     }
 
     /// Maps a rescaled input value to an output byte; out-of-range clamps to the
     /// nearest endpoint (PS3.3 C.11.2.1.1).
     pub fn map(&self, value: f64) -> u8 {
-        if self.entries.is_empty() {
-            return 0;
-        }
-        let index = value.round() as i64 - self.first_mapped as i64;
-        let clamped = index.clamp(0, self.entries.len() as i64 - 1) as usize;
-        self.entries[clamped]
+        self.table.map_byte(value)
+    }
+}
+
+/// A parsed modality LUT (`(0028,3000)` item): maps a stored pixel value to a
+/// modality-transformed value before the VOI stage.
+#[derive(Debug, Clone)]
+pub struct ModalityLut {
+    table: LutTable,
+}
+
+impl ModalityLut {
+    pub fn from_item(item: &Dataset) -> Option<ModalityLut> {
+        LutTable::from_item(item).map(|table| ModalityLut { table })
+    }
+
+    /// Maps a stored value to the modality-transformed value (raw table entry).
+    pub fn map(&self, stored: f64) -> f64 {
+        self.table.map_value(stored)
     }
 }
 
@@ -118,15 +176,17 @@ pub struct GrayscaleRenderOptions {
     /// Parsed first VOI LUT item, applied in place of the window function when
     /// `use_voi_lut` is set (PS3.3 C.11.2.1.1).
     pub voi_lut: Option<VoiLut>,
+    /// Parsed first modality LUT item `(0028,3000)`; when present it replaces the
+    /// rescale slope/intercept at the modality stage (docs §4).
+    pub modality_lut: Option<ModalityLut>,
 }
 
 impl GrayscaleRenderOptions {
     /// Resolves options from a dataset (docs §4 factory chain).
     ///
-    /// Priority this round: top-level WindowCenter/WindowWidth (first pair),
-    /// else Smallest/LargestImagePixelValue, else a fixed default kept honest by
-    /// returning an error when nothing usable is present. Rescale slope/intercept
-    /// come from `(0028,1053)`/`(0028,1052)`.
+    /// Priority: a `(0028,3010)` VOI LUT Sequence (else WindowCenter/Width, else
+    /// Smallest/LargestImagePixelValue). Rescale comes from a `(0028,3000)`
+    /// modality LUT Sequence when present, else `(0028,1053)`/`(0028,1052)`.
     pub fn from_dataset(dataset: &Dataset) -> Result<Self, Error> {
         let rescale_intercept = dataset.try_get::<String>(Tag::new(0x0028, 0x1052)).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
         let rescale_slope = dataset.try_get::<String>(Tag::new(0x0028, 0x1053)).and_then(|s| s.trim().parse().ok()).unwrap_or(1.0);
@@ -152,6 +212,18 @@ impl GrayscaleRenderOptions {
             .map(|pi| pi.trim() == "MONOCHROME1")
             .unwrap_or(false);
 
+        // A modality LUT Sequence (0028,3000) replaces the rescale slope/intercept
+        // at the modality stage (docs §4: the sequence LUT takes over).
+        let modality_lut = dataset
+            .try_get_sequence(Tag::new(0x0028, 0x3000))
+            .and_then(|seq| seq.items().first())
+            .and_then(ModalityLut::from_item);
+        let (rescale_slope, rescale_intercept) = if modality_lut.is_some() {
+            (1.0, 0.0)
+        } else {
+            (rescale_slope, rescale_intercept)
+        };
+
         Ok(GrayscaleRenderOptions {
             rescale_slope,
             rescale_intercept,
@@ -161,6 +233,7 @@ impl GrayscaleRenderOptions {
             invert,
             use_voi_lut,
             voi_lut,
+            modality_lut,
         })
     }
 
@@ -175,13 +248,18 @@ impl GrayscaleRenderOptions {
             invert: false,
             use_voi_lut: false,
             voi_lut: None,
+            modality_lut: None,
         }
     }
 
     /// Maps a stored pixel value to an 8-bit display value through the full
-    /// chain: modality rescale → VOI LUT (docs §3 formulas).
+    /// chain: modality (LUT sequence or rescale) → VOI (LUT or window).
     pub fn map(&self, stored: f64) -> u8 {
-        let value = stored * self.rescale_slope + self.rescale_intercept;
+        let value = match &self.modality_lut {
+            // a present modality LUT replaces the rescale slope/intercept
+            Some(lut) => lut.map(stored),
+            None => stored * self.rescale_slope + self.rescale_intercept,
+        };
         self.map_rescaled(value)
     }
 
@@ -785,10 +863,10 @@ mod tests {
         assert_eq!(o.map(150.0), 255);
     }
 
-    /// Inserts a `(0028,3010)` VOI LUT Sequence whose one item maps stored values
+    /// Inserts a LUT sequence at `seq_tag` whose one item maps stored values
     /// `[first .. first+entries)` through `data` (8-bit entries).
-    fn put_voi_lut(ds: &mut Dataset, first: i16, data: &[u8]) {
-        let seq = ds.insert_sequence(Tag::new(0x0028, 0x3010));
+    fn put_lut_seq(ds: &mut Dataset, seq_tag: Tag, first: i16, data: &[u8]) {
+        let seq = ds.insert_sequence(seq_tag);
         let mut item = Dataset::new();
         let entries = data.len() as u16;
         let mut desc = Vec::new();
@@ -810,6 +888,52 @@ mod tests {
             ),
         ));
         seq.push(item);
+    }
+
+    fn put_voi_lut(ds: &mut Dataset, first: i16, data: &[u8]) {
+        put_lut_seq(ds, Tag::new(0x0028, 0x3010), first, data);
+    }
+
+    fn put_modality_lut(ds: &mut Dataset, first: i16, data: &[u8]) {
+        put_lut_seq(ds, Tag::new(0x0028, 0x3000), first, data);
+    }
+
+    /// Inserts a 16-bit-entry VOI LUT Sequence mapping `[first ..)` through `data`.
+    fn put_voi_lut_16(ds: &mut Dataset, first: i16, data: &[u16]) {
+        let seq = ds.insert_sequence(Tag::new(0x0028, 0x3010));
+        let mut item = Dataset::new();
+        let mut desc = Vec::new();
+        desc.extend_from_slice(&(data.len() as u16).to_le_bytes());
+        desc.extend_from_slice(&(first as u16).to_le_bytes());
+        desc.extend_from_slice(&16u16.to_le_bytes()); // 16 bits per entry
+        item.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::new(0x0028, 0x3002),
+                Vr::Us,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(desc)),
+            ),
+        ));
+        let mut bytes = Vec::new();
+        for &v in data {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        item.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::new(0x0028, 0x3006),
+                Vr::Ow,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(bytes)),
+            ),
+        ));
+        seq.push(item);
+    }
+
+    #[test]
+    fn a_16_bit_voi_lut_scales_its_entries_down_to_a_byte() {
+        // entry 0x8000 (32768) → output byte 0x80 (128), not clamped to 255
+        let mut ds = gray_image(1, 1, 8, &[5], None, None);
+        put_voi_lut_16(&mut ds, 5, &[0x8000]);
+        let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
+        assert_eq!(o.map(5.0), 0x80, "16-bit LUT entries scale by >>8");
     }
 
     #[test]
@@ -838,6 +962,37 @@ mod tests {
         let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
         assert_eq!(o.map(50.0), 250, "above range clamps to the last entry");
         assert_eq!(o.map(0.0), 0, "below range clamps to the first entry");
+    }
+
+    #[test]
+    fn a_modality_lut_replaces_the_rescale_slope_and_intercept() {
+        // stored value 5 with a modality LUT mapping 5 → 200. A rescale
+        // slope/intercept is also present and must be ignored; a window centred
+        // on 200 then maps the 200 to mid grey.
+        let mut ds = gray_image(1, 1, 8, &[5], Some(200.0), Some(400.0));
+        ds.insert_str(Tag::new(0x0028, 0x1053), Vr::Ds, "2"); // slope (ignored)
+        ds.insert_str(Tag::new(0x0028, 0x1052), Vr::Ds, "0"); // intercept
+        put_modality_lut(&mut ds, 5, &[200]);
+
+        let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
+        assert!(o.modality_lut.is_some(), "modality LUT detected");
+        assert_eq!((o.rescale_slope, o.rescale_intercept), (1.0, 0.0), "rescale neutralised");
+        // modality LUT: 5 → 200, then window(200,400) → ~128 (mid grey)
+        let mapped = o.map(5.0);
+        assert!(mapped.abs_diff(128) <= 1, "200 through the window is mid grey: {mapped}");
+        // without the modality LUT the raw 5*2=10 would render near black
+        assert!(mapped > 100, "the modality LUT, not rescale, drove the value");
+    }
+
+    #[test]
+    fn a_modality_lut_clamps_and_feeds_the_voi_stage() {
+        // storing 8 maps through modality LUT [first=8, data 200] → 200, then a
+        // VOI LUT at first=200 with data [42] returns 42.
+        let mut ds = gray_image(1, 1, 8, &[8], None, None);
+        put_modality_lut(&mut ds, 8, &[200]);
+        put_voi_lut(&mut ds, 200, &[42]);
+        let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
+        assert_eq!(o.map(8.0), 42, "modality → VOI chain");
     }
 
     #[test]
