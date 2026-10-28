@@ -2986,7 +2986,7 @@ mod tests {
                                 context_id: pdata.pdvs[0].context_id,
                                 is_command: true,
                                 is_last: true,
-                                data: bytes,
+                                data: bytes.into(),
                             };
                             write_pdu(&mut stream, &Pdu::PData(crate::pdu::PData { pdvs: vec![pdv] }))
                                 .await

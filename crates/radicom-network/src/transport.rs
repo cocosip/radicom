@@ -46,16 +46,23 @@ pub async fn read_pdu<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Pdu
     if length > MAX_PDU_SIZE {
         return Err(NetworkError::protocol("PDU length exceeds 65535"));
     }
-    let mut frame = Vec::with_capacity(HEADER_LEN + length as usize);
-    frame.extend_from_slice(&header);
-    let mut body = vec![0u8; length as usize];
-    reader.read_exact(&mut body).await.map_err(NetworkError::Io)?;
-    frame.extend_from_slice(&body);
+    // One allocation sized from the validated length field, then read the body
+    // straight into it: no intermediate zero-initialised copy (§3.1). The
+    // MAX_PDU_SIZE check above keeps a peer from requesting a huge allocation.
+    let mut frame = vec![0u8; HEADER_LEN + length as usize];
+    frame[..HEADER_LEN].copy_from_slice(&header);
+    reader.read_exact(&mut frame[HEADER_LEN..]).await.map_err(NetworkError::Io)?;
 
-    pdu::decode(&frame).map(Some)
+    // Hand the frame over as `Bytes` so PDVs share it instead of copying (§3.4).
+    pdu::decode_bytes(bytes::Bytes::from(frame)).map(Some)
 }
 
 /// Writes one PDU frame to an async stream.
+///
+/// Ceiling: `pdu` is a structured value, so it has to be encoded on every call;
+/// the signature gives no place to hand in a reusable buffer, and the call sites
+/// all hold a `&Pdu` rather than bytes. Removing that per-send allocation would
+/// require threading a caller-owned encode buffer through the engine (§3.2).
 pub async fn write_pdu<W: AsyncWrite + Unpin>(writer: &mut W, pdu: &Pdu) -> Result<()> {
     let bytes = pdu::encode(pdu)?;
     writer.write_all(&bytes).await.map_err(NetworkError::Io)?;
@@ -87,6 +94,13 @@ pub fn apply_options(stream: &tokio::net::TcpStream, options: &TcpOptions) -> Re
 /// Machine identity, mirroring fo-dicom `TryGetNetworkIdentifier`. Purely a
 /// utility: nothing in the engine depends on it.
 pub fn network_identifier() -> Option<String> {
+    // Read the environment / hash once: the value is constant for the process,
+    // so callers do not pay the lookup on every call (§3.7).
+    static IDENTIFIER: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    IDENTIFIER.get_or_init(compute_network_identifier).clone()
+}
+
+fn compute_network_identifier() -> Option<String> {
     // `mac_address` is not a dependency; derive from the hostname instead so
     // the value is stable per machine without extra crates.
     let host = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).ok()?;
@@ -121,7 +135,7 @@ mod tests {
     async fn writes_and_reads_a_pdata_pdu() {
         let (mut client, mut server) = duplex(4096);
         let pdata = Pdu::PData(PData {
-            pdvs: vec![Pdv { context_id: 1, is_command: true, is_last: true, data: vec![1, 2, 3, 4] }],
+            pdvs: vec![Pdv { context_id: 1, is_command: true, is_last: true, data: vec![1, 2, 3, 4].into() }],
         });
         write_pdu(&mut client, &pdata).await.unwrap();
         assert_eq!(read_pdu(&mut server).await.unwrap().unwrap(), pdata);
@@ -198,6 +212,18 @@ mod tests {
         assert_eq!(read_pdu(&mut server).await.unwrap().unwrap(), Pdu::ReleaseRp);
     }
 
+    #[tokio::test]
+    async fn absurd_length_field_is_rejected_before_allocating() {
+        // §3.5: a peer-declared 4 GiB body must be rejected by the MAX_PDU_SIZE
+        // gate before any buffer is sized from it, not allocated then filled.
+        let (mut client, mut server) = duplex(64);
+        client.write_all(&[0x04, 0x00, 0xFF, 0xFF, 0xFF, 0xFF]).await.unwrap();
+        match read_pdu(&mut server).await {
+            Err(NetworkError::Protocol(message)) => assert!(message.contains("65535"), "got {message}"),
+            other => panic!("expected a Protocol error, got {other:?}"),
+        }
+    }
+
     #[test]
     fn tcp_options_default_to_nodelay() {
         let options = TcpOptions::default();
@@ -235,6 +261,12 @@ mod tests {
             socket.recv_buffer_size().unwrap() < default_recv,
             "SO_RCVBUF is still the OS default of {default_recv}"
         );
+    }
+
+    #[test]
+    fn network_identifier_is_stable_across_calls() {
+        // §3.7: the value is process-constant, so caching it must not change it.
+        assert_eq!(network_identifier(), network_identifier());
     }
 
     #[test]

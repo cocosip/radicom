@@ -497,7 +497,13 @@ fn exact_state(code: u16) -> Option<StatusState> {
     })
 }
 
-/// The generic status codes (§6.2), usable as constants.
+/// The generic status codes (§6.2 / PS3.7 Annex C), usable as constants.
+///
+/// A few numeric codes carry a service-class-specific name: `0xA900` is
+/// "Identifier does not match SOP Class" in Query/Retrieve and "Data Set does
+/// not match SOP Class" in Storage, and `0xA700` is "Refused: Out of resources"
+/// in both. Those shared values are kept as separate, correctly named constants
+/// rather than collapsed into an opaque alias.
 pub mod status {
     pub const SUCCESS: u16 = 0x0000;
     pub const CANCEL: u16 = 0xFE00;
@@ -506,23 +512,26 @@ pub mod status {
     pub const PROCESSING_FAILURE: u16 = 0x0110;
     pub const SOP_CLASS_NOT_SUPPORTED: u16 = 0x0122;
     pub const OUT_OF_RESOURCES: u16 = 0xA700;
-    pub const OUT_OF_RESOURCES_2: u16 = 0xA701;
     pub const UNABLE_TO_PROCESS: u16 = 0xC000;
+    /// Query/Retrieve: "Identifier does not match SOP Class" (PS3.7 Annex C).
     pub const IDENTIFIER_DOES_NOT_MATCH_SOP_CLASS: u16 = 0xA900;
-    pub const INVALID_ARGUMENT_VALUE: u16 = 0xA900;
     // storage
     pub const STORAGE_FAILURE: u16 = 0xA700;
     pub const STORAGE_OUT_OF_RESOURCES: u16 = 0xA700;
+    /// Storage: "Data Set does not match SOP Class" (PS3.7 Annex C).
     pub const STORAGE_DATA_SET_DOES_NOT_MATCH_SOP_CLASS: u16 = 0xA900;
     // query/retrieve
     pub const REFUSED_OUT_OF_RESOURCES: u16 = 0xA700;
     pub const REFUSED_SOP_CLASS_NOT_SUPPORTED: u16 = 0x0122;
     pub const CANCELLED: u16 = 0xFE00;
-    pub const NO_SUCH_SOP_INSTANCE: u16 = 0xA701;
     pub const MOVE_DESTINATION_UNKNOWN: u16 = 0xA801;
     pub const SUBOPERATIONS_COMPLETED_WITH_WARNINGS: u16 = 0xB000;
     /// No sub-operation succeeded (PS3.4 C-GET/C-MOVE terminal failure).
     pub const UNABLE_TO_PERFORM_SUBOPERATIONS: u16 = 0xA702;
+    /// C-GET: "Refused: Out of Resources - Unable to calculate number of
+    /// matches" (PS3.7 Annex C / PS3.4 C.4.3). Previously the opaque
+    /// `OUT_OF_RESOURCES_2`, which named neither the service nor the meaning.
+    pub const UNABLE_TO_CALCULATE_MATCH_COUNT: u16 = 0xA701;
 }
 
 #[cfg(test)]
@@ -766,6 +775,36 @@ mod tests {
         assert_eq!(classify(0xC999), StatusState::Failure);
         // unknown codes fall back to failure
         assert_eq!(classify(0xE123), StatusState::Failure);
+    }
+
+    #[test]
+    fn status_constants_match_ps37_annex_c_literals() {
+        // Every constant is spelled out against its PS3.7 Annex C / PS3.4 value
+        // with a literal, so a changed or mistyped constant fails here rather
+        // than silently agreeing with itself.
+        use status::*;
+        assert_eq!(SUCCESS, 0x0000);
+        assert_eq!(CANCEL, 0xFE00);
+        assert_eq!(CANCELLED, 0xFE00);
+        assert_eq!(PENDING, 0xFF00);
+        assert_eq!(PENDING_WARNING, 0xFF01);
+        assert_eq!(PROCESSING_FAILURE, 0x0110);
+        assert_eq!(SOP_CLASS_NOT_SUPPORTED, 0x0122);
+        assert_eq!(REFUSED_SOP_CLASS_NOT_SUPPORTED, 0x0122);
+        assert_eq!(UNABLE_TO_PROCESS, 0xC000);
+        // 0xA700: Refused - Out of resources (Storage and Query/Retrieve alike)
+        assert_eq!(OUT_OF_RESOURCES, 0xA700);
+        assert_eq!(STORAGE_OUT_OF_RESOURCES, 0xA700);
+        assert_eq!(STORAGE_FAILURE, 0xA700);
+        assert_eq!(REFUSED_OUT_OF_RESOURCES, 0xA700);
+        // C-GET: out of resources - unable to calculate matches / sub-operations
+        assert_eq!(UNABLE_TO_CALCULATE_MATCH_COUNT, 0xA701);
+        assert_eq!(UNABLE_TO_PERFORM_SUBOPERATIONS, 0xA702);
+        assert_eq!(MOVE_DESTINATION_UNKNOWN, 0xA801);
+        // 0xA900: does not match SOP Class (Q/R Identifier, Storage Data Set)
+        assert_eq!(IDENTIFIER_DOES_NOT_MATCH_SOP_CLASS, 0xA900);
+        assert_eq!(STORAGE_DATA_SET_DOES_NOT_MATCH_SOP_CLASS, 0xA900);
+        assert_eq!(SUBOPERATIONS_COMPLETED_WITH_WARNINGS, 0xB000);
     }
 
     #[test]

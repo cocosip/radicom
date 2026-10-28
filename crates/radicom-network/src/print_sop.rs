@@ -29,34 +29,36 @@ pub mod uids {
 /// Mirrors fo-dicom `MetaSopClasses.Instances` / `GetMetaSopClass`.
 pub struct MetaSopClasses;
 
+/// The meta → sub SOP class table, built once at compile time (§3.6).
+const TABLE: &[(&str, &[&str])] = &[
+    (
+        uids::BASIC_GRAYSCALE_PRINT_MANAGEMENT_META,
+        &[uids::BASIC_FILM_SESSION, uids::BASIC_FILM_BOX, uids::BASIC_GRAYSCALE_IMAGE_BOX, uids::PRINTER],
+    ),
+    (
+        uids::BASIC_COLOR_PRINT_MANAGEMENT_META,
+        &[uids::BASIC_FILM_SESSION, uids::BASIC_FILM_BOX, uids::BASIC_COLOR_IMAGE_BOX, uids::PRINTER],
+    ),
+];
+
 impl MetaSopClasses {
     /// Every meta-class → sub-classes entry, as fo-dicom's `Instances` table.
     pub fn instances() -> Vec<(&'static str, Vec<&'static str>)> {
-        use uids::*;
-        vec![
-            (
-                BASIC_GRAYSCALE_PRINT_MANAGEMENT_META,
-                vec![BASIC_FILM_SESSION, BASIC_FILM_BOX, BASIC_GRAYSCALE_IMAGE_BOX, PRINTER],
-            ),
-            (
-                BASIC_COLOR_PRINT_MANAGEMENT_META,
-                vec![BASIC_FILM_SESSION, BASIC_FILM_BOX, BASIC_COLOR_IMAGE_BOX, PRINTER],
-            ),
-        ]
+        TABLE.iter().map(|(meta, subs)| (*meta, subs.to_vec())).collect()
     }
 
     /// The sub SOP classes aggregated by a meta SOP class, or `None` when
     /// `meta` is not a known meta class.
     pub fn sub_sop_classes(meta: &str) -> Option<Vec<&'static str>> {
-        Self::instances().into_iter().find(|(key, _)| *key == meta).map(|(_, subs)| subs)
+        TABLE.iter().find(|(key, _)| *key == meta).map(|(_, subs)| subs.to_vec())
     }
 
     /// Reverse lookup: every meta SOP class whose sub-class list contains
     /// `sop_class`; when it belongs to none, returns `[sop_class]` itself
     /// (fo-dicom `GetMetaSopClass` with `DefaultIfEmpty`).
     pub fn meta_sop_classes_for(sop_class: &str) -> Vec<String> {
-        let matches: Vec<String> = Self::instances()
-            .into_iter()
+        let matches: Vec<String> = TABLE
+            .iter()
             .filter(|(_, subs)| subs.contains(&sop_class))
             .map(|(meta, _)| meta.to_string())
             .collect();

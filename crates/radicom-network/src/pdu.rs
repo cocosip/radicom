@@ -5,6 +5,7 @@
 //! typed error, never a panic (docs/01-architecture.md §11 fuzz requirement).
 
 use crate::error::{AbortSource, NetworkError, RejectResult, RejectSource, Result};
+use bytes::Bytes;
 
 /// Upper bound for a whole received PDU (§3.1).
 ///
@@ -258,7 +259,9 @@ pub struct Pdv {
     pub is_command: bool,
     /// True when this PDV completes the message unit.
     pub is_last: bool,
-    pub data: Vec<u8>,
+    /// The PDV value. `Bytes` so a decoded PDV shares its frame's buffer
+    /// instead of copying it (§3.4).
+    pub data: Bytes,
 }
 
 /// P-DATA-TF body (§3.3).
@@ -277,29 +280,38 @@ pub struct Abort {
 // -- decoding ------------------------------------------------------------
 
 /// Decodes one PDU from a complete frame (header included).
+///
+/// Borrowed convenience wrapper; the transport uses [`decode_bytes`] so a
+/// P-DATA frame is not copied.
 pub fn decode(bytes: &[u8]) -> Result<Pdu> {
-    if bytes.len() < 6 {
+    decode_bytes(Bytes::copy_from_slice(bytes))
+}
+
+/// Decodes one PDU from an owned frame, letting each P-DATA PDV share the
+/// frame's buffer (`Bytes::slice`) instead of copying it (§3.4).
+pub fn decode_bytes(frame: Bytes) -> Result<Pdu> {
+    if frame.len() < 6 {
         return Err(NetworkError::protocol("PDU is shorter than its 6-byte header"));
     }
-    let pdu_type = PduType::from_code(bytes[0]).ok_or(NetworkError::protocol("unknown PDU type"))?;
-    let length = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
+    let pdu_type = PduType::from_code(frame[0]).ok_or(NetworkError::protocol("unknown PDU type"))?;
+    let length = u32::from_be_bytes([frame[2], frame[3], frame[4], frame[5]]);
     if length > MAX_PDU_SIZE {
         return Err(NetworkError::protocol("PDU length exceeds 65535"));
     }
-    let body = &bytes[6..];
-    if body.len() < length as usize {
+    let end = 6 + length as usize;
+    if frame.len() < end {
         return Err(NetworkError::protocol("PDU body is truncated"));
     }
-    let body = &body[..length as usize];
+    let body = frame.slice(6..end);
 
     Ok(match pdu_type {
-        PduType::AssociateRq => Pdu::AssociateRq(decode_associate(body, true)?),
-        PduType::AssociateAc => Pdu::AssociateAc(decode_associate(body, false)?),
-        PduType::AssociateRj => Pdu::AssociateRj(decode_associate_rj(body)?),
-        PduType::PDataTf => Pdu::PData(decode_pdata(body)?),
+        PduType::AssociateRq => Pdu::AssociateRq(decode_associate(&body, true)?),
+        PduType::AssociateAc => Pdu::AssociateAc(decode_associate(&body, false)?),
+        PduType::AssociateRj => Pdu::AssociateRj(decode_associate_rj(&body)?),
+        PduType::PDataTf => Pdu::PData(decode_pdata_bytes(body)?),
         PduType::ReleaseRq => Pdu::ReleaseRq,
         PduType::ReleaseRp => Pdu::ReleaseRp,
-        PduType::Abort => Pdu::Abort(decode_abort(body)?),
+        PduType::Abort => Pdu::Abort(decode_abort(&body)?),
     })
 }
 
@@ -561,11 +573,15 @@ fn decode_associate_rj(body: &[u8]) -> Result<AssociateRj> {
     Ok(AssociateRj { result, source, reason: body[3] })
 }
 
-fn decode_pdata(body: &[u8]) -> Result<PData> {
-    let mut pdvs = Vec::new();
+fn decode_pdata_bytes(body: Bytes) -> Result<PData> {
+    // The PDV count is bounded by the PDU length, but preallocation is capped
+    // so a large count cannot front-load a huge allocation; the vector grows as
+    // PDVs actually arrive (§3.5).
+    const PDV_COUNT_PREALLOC_CAP: usize = 1024;
+    let mut pdvs = Vec::with_capacity((body.len() / 6).min(PDV_COUNT_PREALLOC_CAP));
     let mut offset = 0usize;
     while offset < body.len() {
-        let len = u32_at(body, offset)? as usize;
+        let len = u32_at(body.as_ref(), offset)? as usize;
         let start = offset + 4;
         let end = start.checked_add(len).ok_or(NetworkError::protocol("PDV length overflow"))?;
         if end > body.len() || len < 2 {
@@ -577,12 +593,13 @@ fn decode_pdata(body: &[u8]) -> Result<PData> {
         // indistinguishable from real data at this layer, so it is kept.
         // The DIMSE assembler delimits real content by the command group
         // length and by dataset parsing, which tolerate trailing padding.
-        let value = &body[start + 2..start + 2 + (len - 2)];
+        // `slice` shares the frame buffer: no per-PDV copy (§3.4).
+        let value = body.slice(start + 2..end);
         pdvs.push(Pdv {
             context_id,
             is_command: header & 0x01 != 0,
             is_last: header & 0x02 != 0,
-            data: value.to_vec(),
+            data: value,
         });
         offset = end;
     }
@@ -1163,25 +1180,44 @@ mod tests {
     fn pdata_round_trips_and_pads_values() {
         let pdata = PData {
             pdvs: vec![
-                Pdv { context_id: 1, is_command: true, is_last: true, data: vec![1, 2, 3, 4] },
-                Pdv { context_id: 1, is_command: false, is_last: false, data: vec![9, 8, 7] },
+                Pdv { context_id: 1, is_command: true, is_last: true, data: vec![1, 2, 3, 4].into() },
+                Pdv { context_id: 1, is_command: false, is_last: false, data: vec![9, 8, 7].into() },
             ],
         };
         match round_trip(Pdu::PData(pdata)) {
             Pdu::PData(back) => {
                 assert_eq!(back.pdvs.len(), 2);
                 assert!(back.pdvs[0].is_command && back.pdvs[0].is_last);
-                assert_eq!(back.pdvs[0].data, vec![1, 2, 3, 4]);
+                assert_eq!(&back.pdvs[0].data[..], &[1, 2, 3, 4]);
                 assert!(!back.pdvs[1].is_command && !back.pdvs[1].is_last);
-                assert_eq!(back.pdvs[1].data, vec![9, 8, 7, 0], "pad byte is kept at the PDU layer");
+                assert_eq!(&back.pdvs[1].data[..], &[9, 8, 7, 0], "pad byte is kept at the PDU layer");
             }
             other => panic!("expected PData, got {other:?}"),
         }
     }
 
     #[test]
+    fn decode_bytes_matches_decode_and_preserves_pdvs() {
+        // §3.4: the zero-copy owned-frame path must decode exactly like the
+        // borrowed one (same PDVs, same bytes).
+        let pdata = PData {
+            pdvs: vec![
+                Pdv { context_id: 1, is_command: true, is_last: true, data: vec![1, 2, 3, 4].into() },
+                Pdv { context_id: 3, is_command: false, is_last: false, data: vec![9, 8, 7].into() },
+            ],
+        };
+        let frame = encode(&Pdu::PData(pdata.clone()));
+        let owned = super::decode_bytes(bytes::Bytes::from(frame.clone())).expect("decode_bytes");
+        let borrowed = super::decode(&frame).expect("decode");
+        assert_eq!(owned, borrowed, "both decode paths yield the same PDU");
+        let Pdu::PData(back) = owned else { panic!("expected PData") };
+        assert_eq!(&back.pdvs[0].data[..], &[1, 2, 3, 4]);
+        assert_eq!(&back.pdvs[1].data[..], &[9, 8, 7, 0], "pad byte kept, as on the wire");
+    }
+
+    #[test]
     fn pdata_odd_value_is_even_on_the_wire() {
-        let pdata = PData { pdvs: vec![Pdv { context_id: 1, is_command: true, is_last: true, data: vec![0xAA] }] };
+        let pdata = PData { pdvs: vec![Pdv { context_id: 1, is_command: true, is_last: true, data: vec![0xAA].into() }] };
         let bytes = encode(&Pdu::PData(pdata));
         // pdv-length(4) + id(1) + header(1) + value(2)
         assert_eq!(u32::from_be_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]), 4);

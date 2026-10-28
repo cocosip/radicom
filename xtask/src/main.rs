@@ -509,7 +509,7 @@ fn fixture_pdata_cecho() -> Vec<u8> {
     let mut command = Command::request(CommandField::CEchoRq, 1);
     command.affected_sop_class_uid = Some("1.2.840.10008.1.1".to_string());
     let command_bytes = encode_command(&command.to_dataset()).expect("encode command");
-    let pdv = Pdv { context_id: 1, is_command: true, is_last: true, data: command_bytes };
+    let pdv = Pdv { context_id: 1, is_command: true, is_last: true, data: command_bytes.into() };
     encode(&Pdu::PData(PData { pdvs: vec![pdv] })).expect("encode")
 }
 

@@ -122,7 +122,7 @@ impl PduSplitter {
         let mut used = 0usize;
 
         if data.is_empty() {
-            current.pdvs.push(Pdv { context_id, is_command, is_last: true, data: Vec::new() });
+            current.pdvs.push(Pdv { context_id, is_command, is_last: true, data: bytes::Bytes::new() });
             pdus.push(current);
             return Ok(pdus);
         }
@@ -143,7 +143,7 @@ impl PduSplitter {
                 context_id,
                 is_command,
                 is_last,
-                data: data[offset..end].to_vec(),
+                data: bytes::Bytes::copy_from_slice(&data[offset..end]),
             });
             // the value is even-padded on the wire, which costs a byte
             used += 6 + len + len % 2;
@@ -180,7 +180,7 @@ mod tests {
     use super::*;
 
     fn pdv(context_id: u8, is_command: bool, is_last: bool, data: &[u8]) -> Pdv {
-        Pdv { context_id, is_command, is_last, data: data.to_vec() }
+        Pdv { context_id, is_command, is_last, data: bytes::Bytes::copy_from_slice(data) }
     }
 
     #[test]
