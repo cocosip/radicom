@@ -5,7 +5,7 @@
 //! CLI (INF-07), mirroring fo-dicom's `FO-DICOM.Dump`.
 
 use crate::model::dataset::Dataset;
-use crate::model::dictionary::default_dictionary;
+use crate::model::dictionary::dictionary;
 use crate::model::element::ElementValue;
 use crate::model::item::DicomItem;
 use crate::model::tag::Tag;
@@ -37,16 +37,18 @@ pub fn dump_dataset(dataset: &Dataset, options: &DumpOptions) -> String {
 }
 
 /// Formats one element's line at `depth`.
-fn write_level(dataset: &Dataset, depth: usize, options: &DumpOptions, out: &mut String) {
-    let dictionary = default_dictionary();
+///
+/// The dictionary is resolved once per dump, and the tag is borrowed from the
+/// item instead of cloned (§3.3).
+fn write_level(dataset: &Dataset, depth: usize, options: &DumpOptions, dictionary: &Dictionary, out: &mut String) {
     let pad = " ".repeat(depth * options.indent);
     for item in dataset.items() {
-        let tag = item.tag().clone();
+        let tag = item.tag();
         // skip private elements unless requested (allowed as a trust-boundary option)
         if !options.show_private && tag.group() % 2 == 1 {
             continue;
         }
-        let name = dictionary.entry(&tag).keyword;
+        let name = dictionary.entry(tag).keyword;
         let tag_text = format!("({:04X},{:04X})", tag.group(), tag.element());
         match item {
             DicomItem::Element(e) => {
@@ -57,7 +59,7 @@ fn write_level(dataset: &Dataset, depth: usize, options: &DumpOptions, out: &mut
                 out.push_str(&format!("{pad}{tag_text} SQ {name:<30} ({} item(s))\n", s.items().len()));
                 for (index, item_ds) in s.items().iter().enumerate() {
                     out.push_str(&format!("{pad}{}item #{index}\n", " ".repeat(options.indent)));
-                    write_level(item_ds, depth + 2, options, out);
+                    write_level(item_ds, depth + 2, options, dictionary, out);
                 }
             }
             DicomItem::Fragments(f) => {

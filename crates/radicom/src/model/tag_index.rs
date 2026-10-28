@@ -7,9 +7,12 @@
 use crate::model::tag::Tag;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
-static INDEX: Lazy<RwLock<HashMap<u32, Arc<Tag>>>> = Lazy::new(|| {
+// The table is built once and never mutated (unknown tags are not inserted), so
+// it needs no lock: a read is a plain load, not a shared cache-line write
+// (docs/fo-dicom-alignment/05 §3.3).
+static INDEX: Lazy<HashMap<u32, Arc<Tag>>> = Lazy::new(|| {
     // Seed from the generated constant table: ~5259 entries, built once.
     let mut m = HashMap::with_capacity(8192);
     for raw in radicom_dict::generated::dict::DICTIONARY {
@@ -17,25 +20,26 @@ static INDEX: Lazy<RwLock<HashMap<u32, Arc<Tag>>>> = Lazy::new(|| {
             Arc::new(Tag::new(raw.group, raw.element))
         });
     }
-    RwLock::new(m)
+    m
 });
 
-/// Returns the interned `Arc<Tag>` for a known tag; `None` for unknown
-/// values (callers construct their own).
-pub fn lookup_interned(group: u16, element: u16) -> Option<Arc<Tag>> {
+/// Returns the interned tag for a known tag; `None` for unknown values
+/// (callers construct their own). The reference lives as long as the process,
+/// so the parser can hand it out without an `Arc` clone per element.
+pub fn lookup_interned(group: u16, element: u16) -> Option<&'static Tag> {
     let key = (group as u32) << 16 | element as u32;
-    INDEX.read().expect("index lock").get(&key).cloned()
+    INDEX.get(&key).map(|arc| arc.as_ref())
 }
 
 /// Returns the interned instance for a known tag, or a fresh (uninterned)
 /// tag for unknown values.
 pub fn lookup_or_create(group: u16, element: u16) -> Tag {
-    lookup_interned(group, element).map(|arc| (*arc).clone()).unwrap_or_else(|| Tag::new(group, element))
+    lookup_interned(group, element).cloned().unwrap_or_else(|| Tag::new(group, element))
 }
 
 /// Number of interned tags (the generated public exact table size).
 pub fn len() -> usize {
-    INDEX.read().expect("index lock").len()
+    INDEX.len()
 }
 
 #[cfg(test)]
@@ -47,7 +51,8 @@ mod tests {
         assert!(len() > 5000, "seeded from the generated table");
         let a = lookup_interned(0x0010, 0x0020).expect("PatientID is known");
         let b = lookup_interned(0x0010, 0x0020).expect("PatientID is known");
-        assert!(Arc::ptr_eq(&a, &b), "same instance returned across calls");
+        assert!(std::ptr::eq(a, b), "same instance returned across calls");
+        assert_eq!(a, &Tag::PATIENT_ID);
 
         let value = lookup_or_create(0x7FE0, 0x0010);
         assert_eq!(value, Tag::PIXEL_DATA);

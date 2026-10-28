@@ -305,7 +305,7 @@ pub fn validate_vm(element: &DicomElement) -> Result<(), String> {
     if matches!(element.vr(), Vr::Ob | Vr::Od | Vr::Of | Vr::Ol | Vr::Ov | Vr::Ow | Vr::Uc | Vr::Un) {
         return Ok(());
     }
-    let entry = crate::model::dictionary::default_dictionary().entry(tag);
+    let entry = crate::model::dictionary::dictionary().entry(tag);
     let count = element.count();
     if entry.vm.matches(count) {
         Ok(())

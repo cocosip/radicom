@@ -129,8 +129,21 @@ impl Dataset {
     }
 
     /// Default tier: any failure → `default`.
+    ///
+    /// A missing tag is the ordinary case and stays silent. An attribute that
+    /// is present but will not convert is a data-model problem, so it is logged
+    /// at debug level instead of vanishing without trace.
     pub fn get_or<T: FromElement>(&self, tag: impl AsRef<Tag>, default: T) -> T {
-        self.get(tag).unwrap_or(default)
+        let tag = tag.as_ref();
+        match self.get(tag) {
+            Ok(value) => value,
+            Err(error) => {
+                if self.contains(tag) {
+                    tracing::debug!(tag = %tag, %error, "attribute does not convert, using the default");
+                }
+                default
+            }
+        }
     }
 
     /// Unified string view (joined multi-value); missing tag → `Err`.
@@ -437,7 +450,7 @@ impl Dataset {
         // (the standard VR), not IS. Letting the preference always win wrote
         // non-conformant bytes that still round-tripped because reader and
         // writer shared the same mistake.
-        let entry = crate::model::dictionary::default_dictionary().entry(tag);
+        let entry = crate::model::dictionary::dictionary().entry(tag);
         let Some(dict_vr) = entry.vrs.first().copied() else {
             return preferred.unwrap_or(Vr::Un);
         };

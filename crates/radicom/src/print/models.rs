@@ -1,9 +1,9 @@
 //! Printing data models (PRINT-01; docs/01-architecture.md §12).
 //!
-//! `FilmSession`, `FilmBox`, `ImageBox` and `PresentationLut` wrap a `Dataset`
-//! each, exposing the common attributes and the film-box layout maths. They are
-//! the document model the print SCU would publish; `render_to_image` (PRINT-02)
-//! is absent until the render backend exists.
+//! `FilmSession`, `FilmBox` and `ImageBox` wrap a `Dataset` each, exposing the
+//! common attributes and the film-box layout maths. They are the document model
+//! the print SCU would publish; `FilmBox::render_to_image` (PRINT-02) is
+//! feature-gated behind `render`.
 
 use crate::error::Error;
 use crate::model::dataset::Dataset;

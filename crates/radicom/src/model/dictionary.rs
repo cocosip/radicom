@@ -230,31 +230,37 @@ pub struct RuntimeEntry {
 
 // -- default dictionary (one-shot replacement, DICT-03) -------------------
 
-static DEFAULT: Lazy<RwLock<Option<Arc<Dictionary>>>> = Lazy::new(|| RwLock::new(None));
+static DEFAULT: std::sync::OnceLock<Arc<Dictionary>> = std::sync::OnceLock::new();
 static GENERATED: Lazy<Arc<Dictionary>> = Lazy::new(|| {
     Arc::new(Dictionary::with_generated().expect("generated dictionary builds"))
 });
 
-/// The active default dictionary: either the one-shot replacement or the
-/// generated tables.
-pub fn default_dictionary() -> Arc<Dictionary> {
-    if let Some(d) = DEFAULT.read().expect("default lock").clone() {
-        return d;
+/// The active default dictionary, borrowed from a process-lifetime static.
+///
+/// Lock-free and allocation-free: the hot path resolves one VR per element and
+/// a shared `RwLock` there serializes every parsing thread
+/// (docs/fo-dicom-alignment/05 §3.3).
+pub fn dictionary() -> &'static Dictionary {
+    match DEFAULT.get() {
+        Some(d) => d,
+        None => &GENERATED,
     }
-    GENERATED.clone()
+}
+
+/// The active default dictionary as an owned handle, for callers that store it.
+pub fn default_dictionary() -> Arc<Dictionary> {
+    match DEFAULT.get() {
+        Some(d) => Arc::clone(d),
+        None => Arc::clone(&GENERATED),
+    }
 }
 
 /// Replaces the default dictionary; only the first call wins (subsequent
 /// calls error, mirroring fo-dicom's one-shot guard).
 pub fn set_default_dictionary(dict: Arc<Dictionary>) -> Result<(), Error> {
-    let mut slot = DEFAULT.write().expect("default lock");
-    if slot.is_some() {
-        return Err(Error::Data(DataError::Other {
-            message: "default dictionary already replaced".into(),
-        }));
-    }
-    *slot = Some(dict);
-    Ok(())
+    DEFAULT.set(dict).map_err(|_| Error::Data(DataError::Other {
+        message: "default dictionary already replaced".into(),
+    }))
 }
 
 // -- runtime XML loading (DICT-03) ----------------------------------------

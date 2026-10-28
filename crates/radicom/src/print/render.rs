@@ -74,7 +74,12 @@ impl FilmBox {
             };
             let mut patch = match render_frame(source, 0) {
                 Ok(image) => image,
-                Err(_) => continue, // an unrenderable cell stays background
+                Err(error) => {
+                    // an unrenderable cell stays background, but silently: a
+                    // blank film is indistinguishable from an empty cell
+                    tracing::warn!(cell = ?cell, %error, "film cell left empty");
+                    continue;
+                }
             };
             if image_box.polarity() {
                 invert(&mut patch);

@@ -209,7 +209,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         if tag.element() == 0x0000 {
             return Vr::Ul; // group length is always UL (T9 target)
         }
-        let entry = crate::model::dictionary::default_dictionary().entry(tag);
+        let entry = crate::model::dictionary::dictionary().entry(tag);
         if entry.keyword == "Unknown" {
             return Vr::Un;
         }

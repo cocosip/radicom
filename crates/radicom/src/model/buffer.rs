@@ -422,6 +422,16 @@ impl Drop for TempFile {
 
 /// A lazy read-only window over `[offset, offset+len)` of a file
 /// (fo-dicom file byte window; BUF-02).
+///
+/// `get_byte_range` and `copy_to` read straight from disk, so a consumer that
+/// only needs part of a large value never materializes it. `data()` does
+/// materialize — once, into the `OnceCell` — because the buffer API hands out
+/// `&[u8]`; that cache is the ceiling of this design, not a bug.
+///
+/// Each window owns its own file handle (fo-dicom's `FileByteBuffer` shares
+/// one); a file with hundreds of large values therefore holds hundreds of
+/// handles while it lives. ponytail: per-window handle, share one `Arc<File>`
+/// per parsed file if the handle count ever becomes a problem.
 #[derive(Debug)]
 pub struct FileWindow {
     file: Mutex<std::fs::File>,

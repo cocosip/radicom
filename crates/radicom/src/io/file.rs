@@ -108,7 +108,9 @@ impl DicomFile {
     ///
     /// The header and meta group are read with a bounded scan; the dataset is
     /// then parsed directly from the file so large values stay as lazy
-    /// [`FileWindow`]s instead of being copied into memory.
+    /// [`FileWindow`]s instead of being copied into memory. A window serves
+    /// range reads and `copy_to` streaming straight from disk; only `data()`
+    /// materializes the value, once, because the buffer API returns `&[u8]`.
     pub fn open_with_options(path: impl AsRef<Path>, options: &ReadOptions) -> Result<Self, Error> {
         let path = path.as_ref();
         let mut file = std::fs::File::open(path).map_err(|e| file_err(path, "open", e))?;
@@ -929,6 +931,13 @@ mod tests {
             let buffer = large_value_buffer(&file.dataset);
             assert_eq!(buffer.size(), 5000);
             assert!(!buffer.is_memory(), "large value must stay a file window, not in memory");
+            // range reads and streaming go straight to disk; only data() caches
+            let mut slice = [0u8; 16];
+            buffer.get_byte_range(1000, &mut slice);
+            assert_eq!(slice, big[1000..1016], "a range read returns the file's bytes");
+            let mut streamed = Vec::new();
+            assert_eq!(buffer.copy_to(&mut streamed).unwrap(), 5000);
+            assert_eq!(streamed, big, "streaming returns the whole value in chunks");
             assert_eq!(&*buffer.data(), &big[..], "window reads the real bytes");
             assert_eq!(file.dataset.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
         }
