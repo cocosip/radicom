@@ -62,7 +62,11 @@ pub struct ParseState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadOutcome {
     Success,
+    /// A stop predicate ended the pass (FILE-01).
     Stopped,
+    /// The source ended inside a declared value: the dataset holds everything
+    /// parsed so far and is marked partial (fo-dicom `DicomReaderResult.Suspended`).
+    Suspended,
 }
 
 /// How values at or above `large_object_size` are handled (FILE-02).
@@ -84,11 +88,20 @@ pub struct DicomReader {
     pub large_object_size: u64,
     pub max_depth: u32,
     pub large_policy: LargeValuePolicy,
+    /// Treat a source that ends inside a declared value as a partial success
+    /// (`ReadOutcome::Suspended`) instead of an error. Whole-file parsing
+    /// enables this so truncated files keep their readable prefix.
+    pub partial_on_eof: bool,
 }
 
 impl Default for DicomReader {
     fn default() -> Self {
-        DicomReader { large_object_size: 64 * 1024, max_depth: 256, large_policy: LargeValuePolicy::Materialize }
+        DicomReader {
+            large_object_size: 64 * 1024,
+            max_depth: 256,
+            large_policy: LargeValuePolicy::Materialize,
+            partial_on_eof: false,
+        }
     }
 }
 
@@ -163,6 +176,8 @@ struct Parser<'a, R: Read + Seek> {
     explicit_vr: bool,
     big_endian: bool,
     stopped: bool,
+    /// Set when `partial_on_eof` absorbed a truncated value.
+    suspended: bool,
     private_creators: &'a mut PrivateCreators,
 }
 
@@ -508,7 +523,15 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
 
         // A truncated *value* is a real error (its declared length is
         // known); only truncated headers end a level gracefully (T8).
-        let buffer = self.read_value_buffer(vr, length as u64, value_start)?;
+        // Whole-file parsing may instead keep the readable prefix.
+        let buffer = match self.read_value_buffer(vr, length as u64, value_start) {
+            Ok(buffer) => buffer,
+            Err(Error::Reader(ReaderError::Eof { .. })) if self.options.partial_on_eof => {
+                self.suspended = true;
+                return Ok(Step::End(LevelEnd::Eof));
+            }
+            Err(e) => return Err(e),
+        };
         // RD-05: private creator tracking
         if tag.is_private() && tag.is_private_creator_slot() && vr == Vr::Lo {
             let creator = String::from_utf8_lossy(&buffer.data()).trim_end_matches([' ', '\0']).to_string();
@@ -542,7 +565,14 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                             position: pos,
                         }));
                     }
-                    let buffer = self.read_value_buffer(vr, length as u64, pos)?;
+                    let buffer = match self.read_value_buffer(vr, length as u64, pos) {
+                        Ok(buffer) => buffer,
+                        Err(Error::Reader(ReaderError::Eof { .. })) if self.options.partial_on_eof => {
+                            self.suspended = true;
+                            return Ok(());
+                        }
+                        Err(e) => return Err(e),
+                    };
                     match offset_table {
                         // fragment 0 is the basic offset table, never data
                         None => {
@@ -605,10 +635,17 @@ impl DicomReader {
             explicit_vr: syntax.is_explicit_vr(),
             big_endian: syntax.endian() == Endian::Big,
             stopped: false,
+            suspended: false,
             private_creators: &mut private_creators,
         };
         parser.parse_level(observer, stop, Mode::Top, 0)?;
-        Ok(if parser.stopped { ReadOutcome::Stopped } else { ReadOutcome::Success })
+        Ok(if parser.suspended {
+            ReadOutcome::Suspended
+        } else if parser.stopped {
+            ReadOutcome::Stopped
+        } else {
+            ReadOutcome::Success
+        })
     }
 }
 

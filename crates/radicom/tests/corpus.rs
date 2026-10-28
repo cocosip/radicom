@@ -25,6 +25,7 @@ const CORPUS: &[(&str, &str)] = &[
     ("explicit-le/1403-OB.dcm", "syntax matrix / explicit LE (OB)"),
     ("explicit-le/GH178.dcm", "syntax matrix / explicit LE"),
     ("explicit-le/GH626.dcm", "syntax matrix / private SQ with a bad VR byte"),
+    ("explicit-le/GH179B.dcm", "syntax matrix / truncated file (partial read)"),
     ("big-endian/GH177_D_CLUNIE_CT1_IVRLE_BigEndian_undefined_length.dcm", "syntax matrix / BE CP-246"),
     ("implicit-le/GH1958.dcm", "syntax matrix / implicit LE"),
     ("deflated/Issue1097_deflated_sq.dcm", "syntax matrix / deflated (raw RFC1951)"),
@@ -136,6 +137,16 @@ fn charset_corpus_decodes_to_real_characters() {
             assert!(name.contains(want), "{rel}: PatientName {name:?} should contain {want:?}");
         }
     }
+}
+
+/// A file whose declared length runs past EOF is a *partial* read, not an
+/// error: the readable prefix stays available (fo-dicom GH179B).
+#[test]
+fn a_truncated_file_keeps_its_readable_prefix() {
+    let bytes = std::fs::read(corpus_dir().join("explicit-le/GH179B.dcm")).unwrap();
+    let file = DicomFile::from_bytes(&bytes, &ReadOptions::default()).expect("partial read succeeds");
+    assert!(file.is_partial, "truncated input must be flagged partial");
+    assert!(!file.dataset.is_empty(), "the readable prefix is retained");
 }
 
 /// A real SR document walks correctly: the content tree parses into the expected

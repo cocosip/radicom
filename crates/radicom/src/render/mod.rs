@@ -1552,12 +1552,12 @@ mod tests {
         // narrow 16-bit table reaches white at its top entry instead of
         // scaling by >>8 (which mapped 1000 to 3)
         let mut ds = gray_image(1, 1, 8, &[5], None, None);
-        put_voi_lut_16(&mut ds, 5, &[0, 1000]);
+        put_voi_lut_16(&mut ds, 5, &[0, 250, 500, 750, 1000]);
         let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
         assert_eq!(o.map(5.0), 0, "first entry is black");
-        assert_eq!(o.map(5.0 + 1000.0), 255, "top entry is white");
-        let mid = o.map(5.0 + 500.0);
-        assert!(mid.abs_diff(128) <= 1, "midpoint is mid grey: {mid}");
+        assert_eq!(o.map(9.0), 255, "top entry is white");
+        let mid = o.map(7.0);
+        assert!(mid.abs_diff(128) <= 1, "middle entry is mid grey: {mid}");
     }
 
     #[test]
@@ -2335,8 +2335,18 @@ mod tests {
         ds.insert_str(Tag::new(0x6000, 0x0040), Vr::Cs, "G"); // type
         ds.insert_value(Tag::new(0x6000, 0x0100), 1u16); // bits allocated
         ds.insert_value(Tag::new(0x6000, 0x0102), 8u16); // bit position = stored bits
-        ds.insert_value(Tag::new(0x6000, 0x0051), 1i16); // origin y = 1
-        ds.insert_value(Tag::new(0x6000, 0x0050), 1i16); // origin x = 1
+        // OverlayOrigin (6000,0050) is row\column, 1-based: row 1 \ column 1
+        let mut origin = Vec::new();
+        origin.extend_from_slice(&1i16.to_le_bytes());
+        origin.extend_from_slice(&1i16.to_le_bytes());
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::new(0x6000, 0x0050),
+                Vr::Ss,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(origin)),
+            ),
+        ));
+        ds.insert_value(Tag::new(0x6000, 0x0051), 1u16); // ImageFrameOrigin: frame 1
         // 16-bit pixel data: base value 128, with overlay bit set at the specified pixels
         let mut bytes = Vec::new();
         for y in 0..h {
@@ -2382,5 +2392,17 @@ mod tests {
         ds.insert_value(Tag::new(0x6000, 0x0051), 100i16);
         let image = render_frame_with_overlays(&ds, 0, DEFAULT_OVERLAY_COLOR).unwrap();
         assert_eq!(image.width(), 4); // rendered without panic
+    }
+
+    #[test]
+    fn a_parsed_file_renders_a_real_frame() {
+        // End-to-end: a real 256x256 16-bit file must render, not report
+        // "frame has zero width or height".
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests-data/explicit-le/GH626.dcm");
+        let file = crate::io::file::DicomFile::open(path).expect("GH626 opens");
+        let image = render_frame(&file.dataset, 0).expect("frame renders");
+        assert_eq!((image.width(), image.height()), (256, 256));
+        assert_eq!(image.as_bytes().len(), 256 * 256 * 4, "BGRA bytes for the whole frame");
+        assert!(image.as_bytes().chunks_exact(4).any(|px| px[0] != 0), "not a blank image");
     }
 }

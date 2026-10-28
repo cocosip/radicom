@@ -148,7 +148,7 @@ impl DicomFile {
                 dataset_syntax(format, &probe)
             });
 
-        let mut dataset = if syntax.is_deflate() {
+        let (mut dataset, outcome) = if syntax.is_deflate() {
             // a deflated body must be inflated before parsing; windows cannot
             // address into the compressed stream
             let mut comp = vec![0u8; (file_len - dataset_offset) as usize];
@@ -162,11 +162,12 @@ impl DicomFile {
             let reader = DicomReader {
                 large_object_size: options.large_object_size,
                 large_policy: policy_of(options.read),
+                partial_on_eof: true,
                 ..DicomReader::default()
             };
             let mut builder = DatasetBuilder::with_transfer_syntax(syntax.clone());
-            reader.read(&mut source, &syntax, &mut builder, None)?;
-            builder.into_dataset()
+            let outcome = reader.read(&mut source, &syntax, &mut builder, None)?;
+            (builder.into_dataset(), outcome)
         };
         dataset.set_transfer_syntax(syntax.clone());
 
@@ -184,7 +185,7 @@ impl DicomFile {
             file_meta,
             dataset,
             format,
-            is_partial: false,
+            is_partial: outcome == crate::io::reader::ReadOutcome::Suspended,
             source: Some(path.to_path_buf()),
         })
     }
@@ -215,7 +216,7 @@ impl DicomFile {
             .and_then(|uid| crate::model::transfer_syntax::parse(uid.trim()).ok())
             .unwrap_or_else(|| dataset_syntax(format, dataset_bytes));
 
-        let mut dataset = parse_dataset_with(dataset_bytes, &syntax, options)?;
+        let (mut dataset, outcome) = parse_dataset_with(dataset_bytes, &syntax, options)?;
         dataset.set_transfer_syntax(syntax);
         // the ACR-NEMA recognition code lives in the *dataset* (0008,0010)
         let format = match dataset.try_get_str(Tag::RECOGNITION_CODE) {
@@ -231,7 +232,7 @@ impl DicomFile {
             file_meta,
             dataset,
             format,
-            is_partial: false,
+            is_partial: outcome == crate::io::reader::ReadOutcome::Suspended,
             source: None,
         })
     }
@@ -257,7 +258,7 @@ impl DicomFile {
             file_meta,
             dataset: builder.into_dataset(),
             format,
-            is_partial: outcome == crate::io::reader::ReadOutcome::Stopped,
+            is_partial: outcome != crate::io::reader::ReadOutcome::Success,
             source: Some(path.to_path_buf()),
         })
     }
@@ -357,7 +358,11 @@ fn policy_of(read: FileReadOption) -> LargeValuePolicy {
 /// Parses a dataset byte slice honoring the large-value policy (FILE-02).
 /// Deflated bodies are inflated first; there is no window source here, so
 /// `ReadLargeOnDemand` falls back to materializing.
-fn parse_dataset_with(bytes: &[u8], syntax: &TransferSyntax, options: &ReadOptions) -> Result<Dataset, Error> {
+fn parse_dataset_with(
+    bytes: &[u8],
+    syntax: &TransferSyntax,
+    options: &ReadOptions,
+) -> Result<(Dataset, crate::io::reader::ReadOutcome), Error> {
     let owned;
     let bytes = if syntax.is_deflate() {
         owned = crate::io::reader::inflate(bytes)?;
@@ -369,11 +374,12 @@ fn parse_dataset_with(bytes: &[u8], syntax: &TransferSyntax, options: &ReadOptio
     let reader = DicomReader {
         large_object_size: options.large_object_size,
         large_policy: policy_of(options.read),
+        partial_on_eof: true,
         ..DicomReader::default()
     };
     let mut builder = DatasetBuilder::with_transfer_syntax(Arc::new(syntax.clone()));
-    reader.read(&mut source, syntax, &mut builder, None)?;
-    Ok(builder.into_dataset())
+    let outcome = reader.read(&mut source, syntax, &mut builder, None)?;
+    Ok((builder.into_dataset(), outcome))
 }
 
 /// Builds lazy [`FileWindow`]s over a file for the parser (FILE-02).
