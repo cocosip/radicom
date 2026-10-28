@@ -209,6 +209,19 @@ fn trimmed(dataset: &Dataset, tag: Tag) -> Option<String> {
     dataset.try_get_str(tag).map(|s| s.trim().to_string())
 }
 
+/// The four records associated with one file added to a DICOMDIR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DicomDirectoryEntry {
+    /// Patient record index.
+    pub patient: usize,
+    /// Study record index.
+    pub study: usize,
+    /// Series record index.
+    pub series: usize,
+    /// Image/SR/presentation record index.
+    pub instance: usize,
+}
+
 /// A media storage directory: the file plus its record list (§3.1).
 ///
 /// Records are stored in the order they appear in the sequence; `parent`
@@ -336,6 +349,16 @@ impl DicomDirectory {
         file: &DicomFile,
         referenced_file_id: impl AsRef<Path>,
     ) -> Result<&mut Self, Error> {
+        self.add_file_inner(file, referenced_file_id.as_ref(), None)?;
+        Ok(self)
+    }
+
+    /// Adds `file` and returns the patient, study, series and leaf record indices.
+    pub fn add_file_entry(
+        &mut self,
+        file: &DicomFile,
+        referenced_file_id: impl AsRef<Path>,
+    ) -> Result<DicomDirectoryEntry, Error> {
         self.add_file_inner(file, referenced_file_id.as_ref(), None)
     }
 
@@ -347,6 +370,17 @@ impl DicomDirectory {
         referenced_file_id: impl AsRef<Path>,
         generator: &dyn IconGenerator,
     ) -> Result<&mut Self, Error> {
+        self.add_file_inner(file, referenced_file_id.as_ref(), Some(generator))?;
+        Ok(self)
+    }
+
+    /// Like [`add_file_entry`](Self::add_file_entry), also attaching an icon.
+    pub fn add_file_entry_with_icon(
+        &mut self,
+        file: &DicomFile,
+        referenced_file_id: impl AsRef<Path>,
+        generator: &dyn IconGenerator,
+    ) -> Result<DicomDirectoryEntry, Error> {
         self.add_file_inner(file, referenced_file_id.as_ref(), Some(generator))
     }
 
@@ -355,7 +389,7 @@ impl DicomDirectory {
         file: &DicomFile,
         referenced_file_id: &Path,
         generator: Option<&dyn IconGenerator>,
-    ) -> Result<&mut Self, Error> {
+    ) -> Result<DicomDirectoryEntry, Error> {
         let dataset = &file.dataset;
         let patient_id = dataset.try_get_str(tags::PATIENT_ID).unwrap_or_default();
         let study_uid = required(dataset, tags::STUDY_INSTANCE_UID, "Study Instance UID")?;
@@ -394,8 +428,9 @@ impl DicomDirectory {
             }
         }
 
+        let instance = self.records.len();
         self.records.push(DirectoryRecord { dataset: record, parent: Some(series) });
-        Ok(self)
+        Ok(DicomDirectoryEntry { patient, study, series, instance })
     }
 
     /// Finds a child of `parent` with matching type and UID, else creates one.
@@ -859,6 +894,21 @@ mod tests {
         assert_eq!(dir.children(1), vec![2]);
         assert_eq!(dir.children(2), vec![3]);
         assert!(dir.children(3).is_empty());
+    }
+
+    #[test]
+    fn add_file_entry_returns_the_four_record_indices() {
+        let mut dir = DicomDirectory::new("MYFS");
+        let entry = dir
+            .add_file_entry(&instance("P1", "1.2.3", "1.2.3.4", CT, "1.2.3.4.5"), "IMG0001")
+            .unwrap();
+
+        assert_eq!((entry.patient, entry.study, entry.series, entry.instance), (0, 1, 2, 3));
+
+        let reused = dir
+            .add_file_entry(&instance("P1", "1.2.3", "1.2.3.4", CT, "1.2.3.4.6"), "IMG0002")
+            .unwrap();
+        assert_eq!((reused.patient, reused.study, reused.series, reused.instance), (0, 1, 2, 4));
     }
 
     #[test]
