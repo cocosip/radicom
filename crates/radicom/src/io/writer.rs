@@ -17,7 +17,7 @@ use crate::model::vr::Vr;
 use std::io::Write;
 
 /// Writing switches (WR-03, docs/01-architecture.md §7).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct WriteOptions {
     /// Emit defined lengths for sequences instead of delimiters.
     pub explicit_length_sequences: bool,
@@ -25,6 +25,20 @@ pub struct WriteOptions {
     pub explicit_length_sequence_items: bool,
     /// Recalculate `(GGGG,0000)` group lengths; otherwise they are removed.
     pub keep_group_lengths: bool,
+    /// Byte chunk used to stream a large value to the target (default 1 MiB),
+    /// mirroring fo-dicom's write-side `LargeObjectSize`.
+    pub large_object_size: u64,
+}
+
+impl Default for WriteOptions {
+    fn default() -> Self {
+        WriteOptions {
+            explicit_length_sequences: false,
+            explicit_length_sequence_items: false,
+            keep_group_lengths: false,
+            large_object_size: 1024 * 1024,
+        }
+    }
 }
 
 /// A resolved SpecificCharacterSet for one dataset level (ENC-03).
@@ -204,7 +218,7 @@ impl DicomWriter {
             // item lengths must be even; the pad byte is part of the value
             let pad = fragment.size() % 2;
             written += write_item_tag(out, fragment.size() + pad, true)?;
-            written += write_buffer(out, fragment.as_ref(), f.vr().byte_swap_size(), syntax.endian())?;
+            written += write_buffer(out, fragment.as_ref(), f.vr().byte_swap_size(), syntax.endian(), self.options.large_object_size)?;
             if pad == 1 {
                 out.write_u8(0).map_err(io_err)?;
                 written += 1;
@@ -247,7 +261,7 @@ impl DicomWriter {
         let size = buffer.size();
         let pad = size % 2;
         let mut written = self.write_header(e.tag().clone(), e.vr(), Some(size + pad), syntax, out)?;
-        written += write_buffer(out, buffer.as_ref(), e.vr().byte_swap_size(), syntax.endian())?;
+        written += write_buffer(out, buffer.as_ref(), e.vr().byte_swap_size(), syntax.endian(), self.options.large_object_size)?;
         if pad == 1 {
             out.write_u8(e.vr().padding()).map_err(io_err)?;
             written += 1;
@@ -466,23 +480,25 @@ fn write_delimiter<W: Write>(element: u16, out: &mut ByteTargetWriter<W>) -> Res
 }
 
 /// Streams a buffer, byte-swapping `unit`-wide groups when the target byte
-/// order differs from the native one.
+/// order differs from the native one. `chunk_size` bounds each read/write
+/// request (fo-dicom's write-side `LargeObjectSize`).
 fn write_buffer<W: Write>(
     out: &mut ByteTargetWriter<W>,
     buffer: &dyn ByteBuffer,
     unit: usize,
     target: Endian,
+    chunk_size: u64,
 ) -> Result<u64, Error> {
     let native = if cfg!(target_endian = "big") { Endian::Big } else { Endian::Little };
     if unit <= 1 || target == native {
-        return out.write_buffer(buffer).map_err(io_err);
+        return out.write_buffer_with_chunk(buffer, chunk_size.max(1) as usize).map_err(io_err);
     }
-    const CHUNK: u64 = 1024 * 1024;
+    let chunk_size = chunk_size.max(1);
     let mut written = 0u64;
     let mut offset = 0u64;
-    let mut chunk = vec![0u8; CHUNK as usize];
+    let mut chunk = vec![0u8; chunk_size as usize];
     while offset < buffer.size() {
-        let take = (buffer.size() - offset).min(CHUNK);
+        let take = (buffer.size() - offset).min(chunk_size);
         // whole units only, so the swap stays aligned across chunks
         let take = take - take % unit as u64;
         let take = if take == 0 { buffer.size() - offset } else { take };
@@ -617,6 +633,7 @@ mod tests {
             explicit_length_sequences: true,
             explicit_length_sequence_items: true,
             keep_group_lengths: false,
+            ..Default::default()
         };
         let bytes = encode(&ds, &le(), options.clone());
         assert_ne!(&bytes[8..12], &[0xFF, 0xFF, 0xFF, 0xFF], "defined SQ length");
@@ -732,5 +749,57 @@ mod tests {
         let bytes = encode(&ds, &le(), WriteOptions::default());
         let back = parse_dataset_bytes(&bytes, &le()).unwrap();
         assert_eq!(back.get_str(Tag::PATIENT_NAME).unwrap(), "王^小明", "UTF-8 round-trip");
+    }
+
+    /// Records the length of each `get_byte_range` request, proving how the
+    /// writer chunked the value.
+    #[derive(Debug)]
+    struct RecordingBuffer {
+        bytes: Vec<u8>,
+        reads: Arc<std::sync::Mutex<Vec<usize>>>,
+    }
+
+    impl ByteBuffer for RecordingBuffer {
+        fn size(&self) -> u64 {
+            self.bytes.len() as u64
+        }
+        fn is_memory(&self) -> bool {
+            true
+        }
+        fn data(&self) -> std::borrow::Cow<'_, [u8]> {
+            std::borrow::Cow::Borrowed(&self.bytes)
+        }
+        fn get_byte_range(&self, offset: u64, buf: &mut [u8]) {
+            self.reads.lock().unwrap().push(buf.len());
+            let start = offset as usize;
+            buf.copy_from_slice(&self.bytes[start..start + buf.len()]);
+        }
+    }
+
+    #[test]
+    fn large_object_size_controls_chunking_without_changing_bytes() {
+        let payload: Vec<u8> = (0..10u8).collect();
+        let build = |chunk: u64| {
+            let reads = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let buffer: Arc<dyn ByteBuffer> =
+                Arc::new(RecordingBuffer { bytes: payload.clone(), reads: reads.clone() });
+            let mut ds = Dataset::new();
+            ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+                Tag::new(0x0009, 0x1001),
+                Vr::Us,
+                buffer,
+            )));
+            let options = WriteOptions { large_object_size: chunk, ..Default::default() };
+            // big-endian target forces the swapping chunk path
+            (encode(&ds, &be(), options), reads)
+        };
+        let (small, small_reads) = build(4);
+        let (large, large_reads) = build(1024 * 1024);
+
+        assert_eq!(small, large, "chunk size must not change the written bytes");
+        assert_eq!(*small_reads.lock().unwrap(), vec![4, 4, 2], "small chunks bound each read");
+        assert_eq!(*large_reads.lock().unwrap(), vec![10], "default chunk reads the value once");
+        // the swap actually happened, so this is the swapping path
+        assert_eq!(&small[8..10], &[1, 0], "0x0001 stored big-endian from little-endian source");
     }
 }

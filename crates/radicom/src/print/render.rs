@@ -3,11 +3,15 @@
 //! `FilmBox::render_to_image`: fill a background with the EmptyImageDensity,
 //! draw the Trim border, render each ImageBox's first image through the render
 //! pipeline (docs/01-architecture.md §10) and scale it into its layout cell;
-//! Polarity REVERSE inverts the cell. Built on the REND-07 `RawImage` backend, so
-//! it is the cross-platform replacement for fo-dicom's GDI+ print extensions.
+//! Polarity REVERSE inverts the cell. The film box's Presentation LUT is applied
+//! next: a `(2050,0010)` sequence maps output bytes through its table, otherwise
+//! `IDENTITY` is a no-op and `INVERSE` inverts the cell (`LIN OD` is validated
+//! by the model but not applied here). Built on the REND-07 `RawImage` backend,
+//! so it is the cross-platform replacement for fo-dicom's GDI+ print extensions.
 
 use super::layout::LayoutCell;
 use super::models::FilmBox;
+use super::presentation_lut::{PresentationLutShape, PresentationLutTable};
 use crate::error::{DataError, Error};
 use crate::pixel::Color32;
 use crate::render::{bilinear_bgra32, render_frame, RawImage};
@@ -66,6 +70,8 @@ impl FilmBox {
             canvas.draw_border(Color32::new(0, 0, 0));
         }
 
+        // Parse/validate once: a malformed shape or truncated LUT fails the render.
+        let presentation_lut = self.presentation_lut()?;
         let cells = self.layout(margins);
         let boxes = self.image_boxes();
         for (cell, image_box) in cells.iter().zip(boxes.iter()) {
@@ -81,6 +87,11 @@ impl FilmBox {
                     continue;
                 }
             };
+            if let Some(table) = presentation_lut.table() {
+                apply_lut(&mut patch, table);
+            } else if presentation_lut.shape() == Some(PresentationLutShape::Inverse) {
+                invert(&mut patch);
+            }
             if image_box.polarity() {
                 invert(&mut patch);
             }
@@ -89,6 +100,20 @@ impl FilmBox {
 
         Ok(canvas.into_raw_image())
     }
+}
+
+/// Maps each pixel's grey channel through the presentation LUT and rebuilds the
+/// BGRA patch (alpha preserved).
+fn apply_lut(image: &mut RawImage, table: &PresentationLutTable) {
+    let bytes = image.as_bytes();
+    let mapped: Vec<u8> = bytes
+        .as_chunks::<4>().0.iter()
+        .flat_map(|px| {
+            let out = table.map_byte(px[2] as i32);
+            [out, out, out, px[3]]
+        })
+        .collect();
+    *image = RawImage::new(image.width(), image.height(), mapped);
 }
 
 /// A BGRA32 canvas under construction.
@@ -288,6 +313,30 @@ mod tests {
         let cy = image.height() / 2;
         let i = ((cy * image.width() + cx) * 4) as usize;
         assert!(image.as_bytes()[i] > 200, "a white NORMAL cell stays bright, got {}", image.as_bytes()[i]);
+    }
+
+    fn centre_grey(image: &RawImage) -> u8 {
+        let cx = image.width() / 2;
+        let cy = image.height() / 2;
+        image.as_bytes()[((cy * image.width() + cx) * 4) as usize]
+    }
+
+    #[test]
+    fn presentation_lut_identity_and_inverse_render_differently() {
+        let mut identity = film_with_one_box("", 64);
+        identity.set_presentation_lut_shape(PresentationLutShape::Identity);
+        let lit = identity
+            .render_to_image(10.0, RenderScale { pixels_per_mm: 2.0 }, EmptyDensity::Black)
+            .unwrap();
+
+        let mut inverse = film_with_one_box("", 64);
+        inverse.set_presentation_lut_shape(PresentationLutShape::Inverse);
+        let inverted = inverse
+            .render_to_image(10.0, RenderScale { pixels_per_mm: 2.0 }, EmptyDensity::Black)
+            .unwrap();
+
+        let (a, b) = (centre_grey(&lit), centre_grey(&inverted));
+        assert!(b > a + 100, "INVERSE ({b}) must be much brighter than IDENTITY ({a}) for a dark cell");
     }
 
     #[test]

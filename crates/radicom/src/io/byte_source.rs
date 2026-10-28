@@ -223,11 +223,22 @@ impl<W: Write> ByteTargetWriter<W> {
     /// Streams a buffer in 1 MiB chunks (spec: large values never buffer
     /// wholesale).
     pub fn write_buffer(&mut self, buffer: &dyn crate::model::buffer::ByteBuffer) -> io::Result<u64> {
+        self.write_buffer_with_chunk(buffer, WRITE_CHUNK)
+    }
+
+    /// Streams a buffer in `chunk_size`-byte chunks; the caller's
+    /// `WriteOptions::large_object_size` arrives here.
+    pub fn write_buffer_with_chunk(
+        &mut self,
+        buffer: &dyn crate::model::buffer::ByteBuffer,
+        chunk_size: usize,
+    ) -> io::Result<u64> {
+        let chunk_size = chunk_size.max(1);
         let mut written = 0u64;
-        let mut chunk = vec![0u8; WRITE_CHUNK];
+        let mut chunk = vec![0u8; chunk_size];
         let mut offset = 0u64;
         loop {
-            let take = (buffer.size() - offset).min(WRITE_CHUNK as u64) as usize;
+            let take = (buffer.size() - offset).min(chunk_size as u64) as usize;
             if take == 0 {
                 break;
             }

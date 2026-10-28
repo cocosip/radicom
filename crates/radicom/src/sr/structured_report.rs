@@ -99,6 +99,7 @@ impl StructuredReport {
             explicit_length_sequences: true,
             explicit_length_sequence_items: true,
             keep_group_lengths: false,
+            ..Default::default()
         };
         let bytes = self.file.to_bytes(&options)?;
         std::fs::write(path, bytes)
@@ -139,6 +140,7 @@ mod tests {
                 explicit_length_sequences: true,
                 explicit_length_sequence_items: true,
                 keep_group_lengths: false,
+                ..Default::default()
             };
             report.file().to_bytes(&options).unwrap()
         };

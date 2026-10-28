@@ -10,6 +10,7 @@ use crate::model::dataset::Dataset;
 use crate::model::tag::Tag;
 use crate::model::vr::Vr;
 use crate::print::layout::{FilmSize, ImageDisplayFormat, LayoutCell};
+use crate::print::presentation_lut::{PresentationLut, PresentationLutShape};
 
 /// Tags used by the print data model (§5).
 pub mod tags {
@@ -45,6 +46,14 @@ pub mod tags {
     pub const IMAGE_POSITION: Tag = Tag::IMAGE_BOX_POSITION;
     /// (2020,0020) Polarity.
     pub const POLARITY: Tag = Tag::POLARITY;
+    /// (2050,0010) Presentation LUT Sequence.
+    pub const PRESENTATION_LUT_SEQUENCE: Tag = Tag::PRESENTATION_LUT_SEQUENCE;
+    /// (2050,0020) Presentation LUT Shape.
+    pub const PRESENTATION_LUT_SHAPE: Tag = Tag::PRESENTATION_LUT_SHAPE;
+    /// (0028,3002) LUT Descriptor (inside a Presentation LUT Sequence item).
+    pub const LUT_DESCRIPTOR: Tag = Tag::LUT_DESCRIPTOR;
+    /// (0028,3006) LUT Data (inside a Presentation LUT Sequence item).
+    pub const LUT_DATA: Tag = Tag::LUT_DATA;
 }
 
 /// A print film session (§5): film destination/label/medium/priority/copies.
@@ -200,6 +209,19 @@ impl FilmBox {
             .try_get_sequence(tags::REFERENCED_IMAGE_BOX_SEQUENCE)
             .map(|sequence| sequence.items().iter().cloned().map(ImageBox::from_dataset).collect())
             .unwrap_or_default()
+    }
+
+    /// The Presentation LUT carried by this film box (PS3.3 C.11.4): a
+    /// `(2050,0010)` sequence and/or a `(2050,0020)` shape. Malformed values are
+    /// an error rather than silently ignored.
+    pub fn presentation_lut(&self) -> Result<PresentationLut, Error> {
+        PresentationLut::from_dataset(&self.dataset)
+    }
+
+    /// Sets the Presentation LUT Shape `(2050,0020)`.
+    pub fn set_presentation_lut_shape(&mut self, shape: PresentationLutShape) -> &mut Self {
+        self.dataset.insert_str(tags::PRESENTATION_LUT_SHAPE, Vr::Cs, shape.as_str());
+        self
     }
 }
 

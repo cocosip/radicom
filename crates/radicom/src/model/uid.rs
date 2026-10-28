@@ -327,6 +327,51 @@ impl UidGenerator {
         map.insert(source.value.clone(), generated.clone());
         generated
     }
+
+    /// A stable local UID root derived from the Radicom implementation UID
+    /// (`1.2.826.0.1.3680043.<org>.<root>`), used by [`regenerate_all`].
+    ///
+    /// [`regenerate_all`]: UidGenerator::regenerate_all
+    pub const fn root_uid() -> &'static str {
+        "1.2.826.0.1.3680043.10.1330"
+    }
+
+    /// Re-derives every UID this generator has mapped under [`root_uid`], in
+    /// ascending source-UID order, as `{root_uid}.{n}` with `n` starting at 1.
+    /// That scheme is deterministic and stable across runs. Returns the new UIDs
+    /// in the same order and replaces the memoized mappings.
+    ///
+    /// [`root_uid`]: UidGenerator::root_uid
+    pub fn regenerate_all(&self) -> Vec<Arc<Uid>> {
+        let mut map = self.map.lock().expect("generator lock");
+        let mut sources: Vec<Arc<str>> = map.keys().cloned().collect();
+        sources.sort();
+        let root = Self::root_uid();
+        let mut regenerated = Vec::with_capacity(sources.len());
+        for (index, source) in sources.into_iter().enumerate() {
+            let uid = Uid::parse(&format!("{root}.{}", index + 1));
+            map.insert(source, uid.clone());
+            regenerated.push(uid);
+        }
+        regenerated
+    }
+
+    /// The Meta SOP Class a member SOP Class belongs to, where PS3.6 defines a
+    /// single one. Covers the unambiguous print-management members; ambiguous
+    /// members (Film Session/Film Box/Printer belong to both the grayscale and
+    /// color metas) and classes without a meta return `None`.
+    pub fn meta_sop_class(sop_class: &Uid) -> Option<Arc<Uid>> {
+        let meta = match sop_class.value() {
+            // Basic Grayscale Image Box -> Basic Grayscale Print Management Meta
+            "1.2.840.10008.5.1.1.4" => "1.2.840.10008.5.1.1.9",
+            // Basic Color Image Box -> Basic Color Print Management Meta
+            "1.2.840.10008.5.1.1.4.1" => "1.2.840.10008.5.1.1.18",
+            // Pull Print Request -> Pull Stored Print Management Meta
+            "1.2.840.10008.5.1.1.31" => "1.2.840.10008.5.1.1.32",
+            _ => return None,
+        };
+        Some(Uid::parse(meta))
+    }
 }
 
 #[cfg(test)]
@@ -476,5 +521,41 @@ mod tests {
         let b = gen.map(&source);
         assert!(Arc::ptr_eq(&a, &b), "same source maps to the same instance");
         assert_ne!(a.as_ref().value(), source.value());
+    }
+
+    #[test]
+    fn uid_generator_root_is_stable() {
+        assert_eq!(UidGenerator::root_uid(), "1.2.826.0.1.3680043.10.1330");
+    }
+
+    #[test]
+    fn regenerate_all_is_deterministic_and_rooted() {
+        let gen = UidGenerator::new();
+        let a = Uid::new("1.2.3");
+        let b = Uid::new("1.2.4");
+        assert_ne!(gen.map(&a).value(), gen.map(&b).value());
+
+        let all = gen.regenerate_all();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].value(), "1.2.826.0.1.3680043.10.1330.1", "sorted by source, 1-based");
+        assert_eq!(all[1].value(), "1.2.826.0.1.3680043.10.1330.2");
+        assert!(Arc::ptr_eq(&gen.map(&a), &all[0]), "the mapping is replaced");
+        assert!(Arc::ptr_eq(&gen.map(&b), &all[1]));
+        // running again is stable
+        let again = gen.regenerate_all();
+        assert_eq!(again[0].value(), all[0].value());
+        assert_eq!(again[1].value(), all[1].value());
+    }
+
+    #[test]
+    fn meta_sop_class_maps_known_print_classes() {
+        let gray = Uid::new("1.2.840.10008.5.1.1.4");
+        assert_eq!(UidGenerator::meta_sop_class(&gray).unwrap().value(), "1.2.840.10008.5.1.1.9");
+        let color = Uid::new("1.2.840.10008.5.1.1.4.1");
+        assert_eq!(UidGenerator::meta_sop_class(&color).unwrap().value(), "1.2.840.10008.5.1.1.18");
+        let pull = Uid::new("1.2.840.10008.5.1.1.31");
+        assert_eq!(UidGenerator::meta_sop_class(&pull).unwrap().value(), "1.2.840.10008.5.1.1.32");
+        // a storage SOP class has no meta class
+        assert!(UidGenerator::meta_sop_class(&Uid::new("1.2.840.10008.5.1.4.1.1.2")).is_none());
     }
 }
