@@ -21,3 +21,12 @@ Thumbs.db
 *.profraw
 *.profdata
 tarpaulin-report.html
+
+# Scratch / temporary files (patches, backups, merge leftovers)
+*.patch
+*.diff
+*.orig
+*.rej
+*.bak
+*.tmp
+*.log
