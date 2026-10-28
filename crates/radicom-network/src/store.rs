@@ -16,7 +16,8 @@ use std::sync::Arc;
 /// Where an incoming instance is put before the provider sees it (§5.2).
 #[derive(Debug, Clone, Default)]
 pub enum StoreSink {
-    /// Spool to a temporary file, then open it (the default, memory bounded).
+    /// Spool to a temporary file that is removed once the instance is done
+    /// with (the default).
     #[default]
     SpoolToTemp,
     /// Spool into a named directory, keeping the file afterwards.
@@ -29,8 +30,29 @@ pub enum StoreSink {
 #[derive(Debug)]
 pub struct ReceivedInstance {
     pub file: DicomFile,
-    /// The spooled file, when the sink kept it.
+    /// The spooled file, when the sink kept it (only [`StoreSink::SpoolToDir`]).
     pub path: Option<PathBuf>,
+    /// A temporary spool file that must not outlive the instance
+    /// ([`StoreSink::SpoolToTemp`]). Drop-only: it is never read.
+    #[allow(dead_code)]
+    temp: Option<TempSpool>,
+}
+
+impl ReceivedInstance {
+    /// An instance that owns no spool file.
+    pub fn from_file(file: DicomFile) -> Self {
+        ReceivedInstance { file, path: None, temp: None }
+    }
+}
+
+/// Removes its spool file on drop, so no code path can leak it.
+#[derive(Debug)]
+struct TempSpool(PathBuf);
+
+impl Drop for TempSpool {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 impl StoreSink {
@@ -41,16 +63,26 @@ impl StoreSink {
                 let mut file = DicomFile::from_bytes(bytes, &ReadOptions::default()).map_err(parse_err)?;
                 // the wire syntax wins: the spooled bytes carry no file meta
                 file.dataset.set_transfer_syntax(syntax.clone());
-                Ok(ReceivedInstance { file, path: None })
+                Ok(ReceivedInstance::from_file(file))
             }
             StoreSink::SpoolToTemp => {
                 let path = temp_path();
-                write_and_parse(&path, bytes, syntax).map(|file| ReceivedInstance { file, path: None })
+                // the guard removes the file on every error path below
+                let temp = TempSpool(path.clone());
+                let file = write_and_parse(&path, bytes, syntax)?;
+                // the instance is parsed from memory, so the spool file has no
+                // reader: the guard deletes it as soon as the instance is done
+                Ok(ReceivedInstance {
+                    file,
+                    path: None,
+                    temp: Some(temp),
+                })
             }
             StoreSink::SpoolToDir(dir) => {
                 std::fs::create_dir_all(dir).map_err(NetworkError::Io)?;
                 let path = dir.join(format!("{}.dcm", uuid_like()));
-                write_and_parse(&path, bytes, syntax).map(|file| ReceivedInstance { file, path: Some(path) })
+                write_and_parse(&path, bytes, syntax)
+                    .map(|file| ReceivedInstance { file, path: Some(path), temp: None })
             }
         }
     }
@@ -172,12 +204,16 @@ mod tests {
     }
 
     #[test]
-    fn spool_to_temp_parses_and_removes_the_file() {
+    fn spool_to_temp_removes_its_file_with_the_instance() {
         let syntax = syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone();
         let bytes = dataset_bytes(&syntax);
         let instance = StoreSink::SpoolToTemp.materialize(&bytes, &syntax).unwrap();
         assert_eq!(instance.file.dataset.get_str(Tag::SOP_INSTANCE_UID).unwrap(), "1.2.3.4.5");
         assert!(instance.path.is_none(), "temporary spool files are not reported");
+        let spooled = instance.temp.as_ref().expect("a temp spool file").0.clone();
+        assert!(spooled.exists(), "the instance was spooled to disk");
+        drop(instance);
+        assert!(!spooled.exists(), "the temp spool file must not outlive the instance");
     }
 
     #[test]

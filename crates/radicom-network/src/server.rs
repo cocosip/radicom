@@ -121,18 +121,35 @@ impl<P: ServiceProvider + 'static> DicomServer<P> {
 
     /// Serves connections until the listener errors (§8).
     ///
-    /// Each connection gets its own task; `max_clients` bounds concurrency.
+    /// Each connection gets its own task; `max_clients` bounds concurrency by
+    /// gating the accept loop, so a full server leaves further peers in the
+    /// listen backlog instead of spawning unbounded tasks.
     pub async fn run(self) -> Result<()> {
         let provider = self.provider.clone();
         let options = self.options.clone();
+        // 0 = unlimited (a semaphore with no permits would block forever)
+        let slots = (options.max_clients > 0)
+            .then(|| Arc::new(tokio::sync::Semaphore::new(options.max_clients)));
         loop {
             let (stream, _peer) = match self.listener.accept().await {
                 Ok(pair) => pair,
                 Err(e) => return Err(NetworkError::Io(e)),
             };
+            let permit = match &slots {
+                Some(slots) => Some(
+                    slots
+                        .clone()
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| NetworkError::protocol("connection limiter closed"))?,
+                ),
+                None => None,
+            };
             let provider = provider.clone();
             let options = options.clone();
             tokio::spawn(async move {
+                // the slot is released when the connection task ends
+                let _permit = permit;
                 #[cfg(feature = "tls")]
                 if let Some(tls) = options.tls.clone() {
                     // a failed handshake ends this connection only
@@ -174,8 +191,18 @@ where
     let mut stream = crate::observability::CountingStream::new(stream, metrics.clone());
 
     // -- association handshake ------------------------------------------
-    let Some(Pdu::AssociateRq(request)) = read_pdu(&mut stream).await? else {
-        return Err(NetworkError::protocol("expected A-ASSOCIATE-RQ"));
+    // The ACSE phase has its own timeout: a peer that connects and never sends
+    // (or half-sends) an A-ASSOCIATE-RQ must not hold this task and fd forever.
+    let request = match tokio::time::timeout(options.association_timeout, read_pdu(&mut stream)).await {
+        Ok(Ok(Some(Pdu::AssociateRq(request)))) => request,
+        Ok(Ok(_)) => return Err(NetworkError::protocol("expected A-ASSOCIATE-RQ")),
+        Ok(Err(error)) => return Err(error),
+        Err(_) => {
+            // PS3.8 §9.3.8: provider-initiated abort, reason "not specified"
+            let abort = Abort { source: AbortSource::Provider, reason: 0 };
+            let _ = write_pdu(&mut stream, &Pdu::Abort(abort)).await;
+            return Err(NetworkError::AssociationRequestTimedOut { attempts: 1 });
+        }
     };
 
     let policy = NegotiationPolicy::new(provider.supported_sop_classes());
@@ -223,7 +250,7 @@ where
 
     let accepted = AcceptedContexts::from_negotiated(negotiated);
     let peer_max_pdu = if request.user_information.max_pdu_length == 0 {
-        16384
+        crate::pdu::clamp_max_pdu_length(options.max_pdu_length)
     } else {
         request.user_information.max_pdu_length
     };
@@ -352,7 +379,14 @@ where
             handle_n_service(serving, context_id, command, None, &default_syntax).await
         }
         other => {
-            // unsupported request: answer ProcessingFailure, keep the connection
+            // A response field means the peer violated DIMSE: there is no
+            // status to answer a response with. Abort instead of panicking.
+            if crate::dimse::response_field(other).is_none() {
+                let abort = Abort { source: AbortSource::User, reason: 0 };
+                serving.send_pdu(&Pdu::Abort(abort)).await?;
+                return Err(NetworkError::protocol("peer sent a command that is not a request"));
+            }
+            // a request we do not serve: answer ProcessingFailure, keep the connection
             serving
                 .fail(context_id, &command, &format!("unsupported command {other:?}"))
                 .await
@@ -584,16 +618,20 @@ where
         }
     }
 
+    // Sub-operation counters are cumulative per response (PS3.4 §C.4.2), so the
+    // last Pending response carries the real progress; a provider that never
+    // terminates its stream still gets an answer built from it.
+    let mut summary = crate::cmove::SubOperationSummary::default();
     let mut terminated = false;
     for response in responses {
-        if !response.is_pending() {
+        if response.is_pending() {
+            summary = response.summary;
+        } else {
             terminated = true;
         }
         serving.send(context_id, &response.to_command()).await?;
     }
     if !terminated {
-        // a provider that never terminated its stream still gets a final answer
-        let summary = crate::cmove::SubOperationSummary::default();
         let response = crate::cmove::CMoveResponse::completed(&request, summary);
         serving.send(context_id, &response.to_command()).await?;
     }
@@ -750,7 +788,9 @@ where
 
     /// Answers with ProcessingFailure and a truncated comment.
     async fn fail(&mut self, context_id: u8, request: &Command, comment: &str) -> Result<()> {
-        let mut response = Command::response(request, crate::dimse::status::PROCESSING_FAILURE);
+        let Some(mut response) = Command::response(request, crate::dimse::status::PROCESSING_FAILURE) else {
+            return Err(NetworkError::protocol("cannot answer a command that is not a request"));
+        };
         response.error_comment = Some(crate::dimse::truncate_lo(comment));
         self.send(context_id, &response).await
     }
@@ -1139,17 +1179,14 @@ impl Association {
 
     /// True when the peer granted `field` of `sop_class` (§4.3).
     ///
-    /// A field the peer did not answer, or answered with length 0, is not
-    /// granted.
+    /// A field the peer did not answer, or answered with 0, is not granted.
     pub fn extended_field(&self, sop_class: &str, field: u8) -> Option<&[u8]> {
         self.peer_extended
             .iter()
             .find(|ext| ext.sop_class == sop_class)
             .and_then(|ext| {
-                ext.accepted
-                    .iter()
-                    .find(|(f, value)| *f == field && !value.is_empty())
-                    .map(|(_, value)| value.as_slice())
+                let index = usize::from(field.checked_sub(1)?);
+                (ext.accepted.get(index).copied()? != 0).then(|| &ext.accepted[index..index + 1])
             })
     }
 
@@ -1488,10 +1525,12 @@ impl Association {
                                         CommandField::CStoreRq => {
                                             if command.no_dataset {
                                                 // an instance without a dataset is unusable
-                                                let response = Command::response(
+                                                let Some(response) = Command::response(
                                                     &command,
                                                     crate::dimse::status::PROCESSING_FAILURE,
-                                                );
+                                                ) else {
+                                                    continue;
+                                                };
                                                 for pdata in self
                                                     .splitter
                                                     .split(unit.context_id, true, &command_bytes(&response)?)?
@@ -1525,7 +1564,7 @@ impl Association {
                                     file.dataset.set_transfer_syntax(syntax.clone());
                                     let request = crate::store::c_store_request_from_message(
                                         &store,
-                                        crate::store::ReceivedInstance { file, path: None },
+                                        crate::store::ReceivedInstance::from_file(file),
                                     )?;
                                     // the handler's verdict goes straight back
                                     let response = match handler(&request) {
@@ -2615,7 +2654,7 @@ mod tests {
             if sop_class != "1.2.840.10008.5.1.4.1.1.7" {
                 return None;
             }
-            Some(crate::extended::AppInfo::answer(requested, |field, _| (field == 1).then(|| vec![1])))
+            Some(crate::extended::AppInfo::answer(requested, |field, _| (field == 1).then_some(1)))
         }
 
         let options = ServerOptions {
@@ -2908,5 +2947,146 @@ mod tests {
 
         association.release().await.unwrap();
         handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_response_command_aborts_the_association_instead_of_panicking() {
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association = Association::open(addr, "SCU", "SCP", vec![echo_context()], ClientOptions::default())
+            .await
+            .unwrap();
+
+        // A C-FIND-RSP-shaped command set where a request belongs: the peer is
+        // violating DIMSE, and the SCP must answer with A-ABORT, not panic.
+        let bogus = command_bytes(&Command::request(CommandField::CFindRsp, 1)).unwrap();
+        let context_id = association.contexts().all()[0].id;
+        for pdata in association.splitter.split(context_id, true, &bogus).unwrap() {
+            write_pdu(&mut association.stream, &Pdu::PData(pdata)).await.unwrap();
+        }
+
+        match read_pdu(&mut association.stream).await {
+            Ok(Some(Pdu::Abort(abort))) => {
+                assert_eq!(abort.source, AbortSource::User, "service-user abort");
+                assert_eq!(abort.reason, 0, "reason not specified");
+            }
+            other => panic!("expected A-ABORT, got {other:?}"),
+        }
+        // a panicking connection task would surface as a JoinError here
+        let outcome = handle.await.unwrap();
+        assert!(outcome.is_err(), "the connection ends with a protocol error");
+    }
+
+    /// A provider that reports progress but never terminates its stream.
+    struct ProgressOnlyMoveProvider;
+
+    #[async_trait::async_trait]
+    impl ServiceProvider for ProgressOnlyMoveProvider {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec![sop_class::STUDY_ROOT_QR_MOVE.to_string()]
+        }
+
+        fn on_c_move<'a>(
+            &'a self,
+            request: &'a crate::cmove::CMoveRequest,
+        ) -> futures::stream::BoxStream<'a, Result<crate::cmove::CMoveResponse>> {
+            let summary = crate::cmove::SubOperationSummary { completed: 2, failed: 1, warning: 0 };
+            Box::pin(futures::stream::once(async move {
+                Ok(crate::cmove::CMoveResponse::pending(request, 0, summary))
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn c_move_reports_the_real_counts_when_the_provider_never_terminates() {
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(ProgressOnlyMoveProvider), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association =
+            Association::open(addr, "SCU", "SCP", vec![move_context()], ClientOptions::default())
+                .await
+                .unwrap();
+        let responses = association
+            .send_c_move(&crate::cmove::CMoveRequest::study("1.2.3.4", "STORE-SCP", 1))
+            .await
+            .unwrap();
+
+        assert_eq!(responses.len(), 2, "the pending progress plus the engine's terminal answer");
+        let terminal = responses.last().unwrap();
+        assert!(!terminal.is_pending());
+        assert_eq!(terminal.summary.completed, 2, "the reported progress is not replaced with zeros");
+        assert_eq!(terminal.summary.failed, 1);
+        assert_eq!(terminal.state(), crate::dimse::StatusState::Warning);
+
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn max_clients_bounds_concurrent_associations() {
+        let options = ServerOptions { max_clients: 1, ..Default::default() };
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), options).await.unwrap();
+        let addr = server.local_addr();
+        tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+
+        // the first association takes the only slot
+        let first =
+            Association::open(addr, "SCU", "SCP", vec![echo_context()], ClientOptions::default())
+                .await
+                .unwrap();
+
+        // a second peer gets no answer while the slot is taken
+        let second = Association::open(
+            addr,
+            "SCU",
+            "SCP",
+            vec![echo_context()],
+            ClientOptions { association_timeout: Duration::from_millis(200), ..Default::default() },
+        )
+        .await;
+        match second {
+            Err(NetworkError::AssociationRequestTimedOut { .. }) => {}
+            other => panic!("expected the second association to wait for a slot, got {other:?}"),
+        }
+
+        // releasing the slot serves the next peer
+        first.release().await.unwrap();
+        let third = Association::open(addr, "SCU", "SCP", vec![echo_context()], ClientOptions::default()).await;
+        third.expect("the slot is released when the association ends").release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_association_that_never_sends_a_request_times_out() {
+        use tokio::io::AsyncReadExt;
+
+        let options = ServerOptions { association_timeout: Duration::from_millis(100), ..Default::default() };
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), options).await.unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        // connect and stay silent: the ACSE phase must not hold the task forever
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let mut abort = [0u8; 10];
+        tokio::time::timeout(Duration::from_secs(2), client.read_exact(&mut abort))
+            .await
+            .expect("the server answers within its association timeout")
+            .unwrap();
+        assert_eq!(abort[0], 0x07, "A-ABORT");
+        assert_eq!(abort[8], AbortSource::Provider.code());
+        assert_eq!(abort[9], 0, "reason not specified");
+
+        match handle.await.unwrap() {
+            Err(NetworkError::AssociationRequestTimedOut { .. }) => {}
+            other => panic!("expected AssociationRequestTimedOut, got {other:?}"),
+        }
     }
 }

@@ -145,9 +145,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_pdu_at_the_advertised_max_is_accepted() {
+        // `encode_associate` never advertises more than MAX_PDU_SIZE, so a peer
+        // may legitimately send a P-DATA-TF of exactly that size: it must be
+        // read, not rejected.
+        let (mut client, mut server) = duplex(2 * MAX_PDU_SIZE as usize);
+        let mut frame = vec![0x04, 0x00];
+        frame.extend_from_slice(&MAX_PDU_SIZE.to_be_bytes());
+        let pdv_len = MAX_PDU_SIZE - 4;
+        frame.extend_from_slice(&pdv_len.to_be_bytes());
+        frame.extend_from_slice(&[0x01, 0x03]); // context 1, command + last
+        frame.resize(HEADER_LEN + MAX_PDU_SIZE as usize, 0x00);
+        client.write_all(&frame).await.unwrap();
+
+        match read_pdu(&mut server).await.expect("a PDU at the advertised maximum is accepted") {
+            Some(Pdu::PData(pdata)) => {
+                assert_eq!(pdata.pdvs.len(), 1);
+                assert_eq!(pdata.pdvs[0].data.len(), (pdv_len - 2) as usize);
+            }
+            other => panic!("expected PData, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn oversized_pdu_is_a_protocol_error() {
+        // 0x00010000 is above the largest value this side ever advertises, so
+        // rejecting it is not a false claim about our own capacity.
         let (mut client, mut server) = duplex(64);
-        // 0x00010000 exceeds the 65535 limit
         client.write_all(&[0x05, 0x00, 0x00, 0x01, 0x00, 0x00]).await.unwrap();
         match read_pdu(&mut server).await {
             Err(NetworkError::Protocol(message)) => assert!(message.contains("65535"), "got {message}"),

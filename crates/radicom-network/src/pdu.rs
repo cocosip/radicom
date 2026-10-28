@@ -6,8 +6,24 @@
 
 use crate::error::{AbortSource, NetworkError, RejectResult, RejectSource, Result};
 
-/// Upper bound for a whole PDU (§3.1).
+/// Upper bound for a whole received PDU (§3.1).
+///
+/// A peer may send a P-DATA-TF up to the Max-PDU-Length *we advertise*, so
+/// [`encode_associate`] clamps every advertised value to this constant: the
+/// read side then rejects only what we never promised to accept.
 pub const MAX_PDU_SIZE: u32 = 65535;
+
+/// Clamps a configured max-PDU length to what this implementation can receive.
+///
+/// 0 means "unlimited" on the wire (PS3.8 §9.3.2), which this implementation
+/// cannot honour, so it becomes [`MAX_PDU_SIZE`].
+pub fn clamp_max_pdu_length(configured: u32) -> u32 {
+    if configured == 0 {
+        MAX_PDU_SIZE
+    } else {
+        configured.min(MAX_PDU_SIZE)
+    }
+}
 
 /// The Application Context Name every DICOM association uses.
 pub const APPLICATION_CONTEXT: &str = "1.2.840.10008.3.1.1.1";
@@ -118,10 +134,12 @@ pub struct RoleSelection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtendedNegotiation {
     pub sop_class: String,
-    /// Ordered `(field, value)` pairs, raw across the wire.
-    pub requested: Vec<(u8, Vec<u8>)>,
+    /// Service Class Application Information, raw across the wire: the byte at
+    /// index `n - 1` is field `n`, one byte per field, no length prefixes
+    /// (PS3.7 §D.3.3.5).
+    pub requested: Vec<u8>,
     /// AC only.
-    pub accepted: Vec<(u8, Vec<u8>)>,
+    pub accepted: Vec<u8>,
 }
 
 /// Asynchronous operations window (§3.2, item 0x53).
@@ -363,7 +381,8 @@ fn decode_presentation_context(value: &[u8]) -> Result<PresentationContext> {
         return Err(NetworkError::protocol("presentation context is truncated"));
     }
     let id = value[0];
-    let result = value[1];
+    // ID(1) Reserved(1) Result/Reason(1) Reserved(1) — PS3.8 §9.3.3.2
+    let result = value[2];
     let mut abstract_syntax = String::new();
     let mut transfer_syntaxes = Vec::new();
 
@@ -413,11 +432,22 @@ fn decode_user_information(value: &[u8], is_rq: bool) -> Result<UserInformation>
                 }
             }
             item::ROLE_SELECTION => {
+                // [uid_len u16][uid][scu][scp] — PS3.8 §D.3.3.4
                 if raw.len() >= 4 {
+                    let uid_len = u16::from_be_bytes([raw[0], raw[1]]) as usize;
+                    let uid = raw
+                        .get(2..2 + uid_len)
+                        .ok_or(NetworkError::protocol("role selection UID runs past the item"))?;
+                    let scu = *raw
+                        .get(2 + uid_len)
+                        .ok_or(NetworkError::protocol("role selection has no SCU role"))?;
+                    let scp = *raw
+                        .get(3 + uid_len)
+                        .ok_or(NetworkError::protocol("role selection has no SCP role"))?;
                     out.role_selections.push(RoleSelection {
-                        sop_class: decode_string(&raw[4..]),
-                        scu_role: raw[2] != 0,
-                        scp_role: raw[3] != 0,
+                        sop_class: String::from_utf8_lossy(uid).to_string(),
+                        scu_role: scu != 0,
+                        scp_role: scp != 0,
                     });
                 }
             }
@@ -436,16 +466,25 @@ fn decode_user_information(value: &[u8], is_rq: bool) -> Result<UserInformation>
                 }
             }
             item::USER_IDENTITY_RQ => {
-                if raw.len() >= 5 {
-                    let primary_len = u16::from_be_bytes([raw[1], raw[2]]) as usize;
-                    let secondary_len = u16::from_be_bytes([raw[3], raw[4]]) as usize;
-                    let primary = raw.get(5..5 + primary_len).unwrap_or_default().to_vec();
-                    let secondary = raw.get(5 + primary_len..5 + primary_len + secondary_len).unwrap_or_default().to_vec();
+                // type(1) positive(1) primary_len(2) primary
+                // secondary_len(2) secondary — PS3.8 §D.3.3.7
+                if raw.len() >= 4 {
+                    let primary_len = u16::from_be_bytes([raw[2], raw[3]]) as usize;
+                    let primary = raw
+                        .get(4..4 + primary_len)
+                        .ok_or(NetworkError::protocol("user identity primary field runs past the item"))?
+                        .to_vec();
+                    let secondary_at = 4 + primary_len;
+                    let secondary_len = u16_at(raw, secondary_at)? as usize;
+                    let secondary = raw
+                        .get(secondary_at + 2..secondary_at + 2 + secondary_len)
+                        .ok_or(NetworkError::protocol("user identity secondary field runs past the item"))?
+                        .to_vec();
                     out.user_identity = Some(UserIdentity {
                         identity_type: raw[0],
                         primary,
                         secondary,
-                        positive_response_requested: raw.get(5 + primary_len + secondary_len) == Some(&1),
+                        positive_response_requested: raw[1] != 0,
                     });
                 }
             }
@@ -465,30 +504,18 @@ fn decode_extended_negotiation(raw: &[u8]) -> Result<ExtendedNegotiation> {
         return Err(NetworkError::protocol("extended negotiation is truncated"));
     }
     let uid_len = u16::from_be_bytes([raw[0], raw[1]]) as usize;
-    let sop_class = String::from_utf8_lossy(raw.get(2..2 + uid_len).unwrap_or_default()).to_string();
-    let app_info = raw.get(2 + uid_len..).unwrap_or_default();
+    let uid = raw
+        .get(2..2 + uid_len)
+        .ok_or(NetworkError::protocol("extended negotiation UID runs past the item"))?;
     Ok(ExtendedNegotiation {
-        sop_class,
-        requested: decode_app_info(app_info),
+        sop_class: String::from_utf8_lossy(uid).to_string(),
+        // The rest is the flat Service Class Application Information array. An
+        // odd-length array is even-padded by the item framing and that pad byte
+        // is indistinguishable from a real field here, so it reads back as one
+        // trailing 0 field — 0 means "not supported", so no grant is invented.
+        requested: raw[2 + uid_len..].to_vec(),
         accepted: Vec::new(),
     })
-}
-
-/// `AppInfo` is a series of `field(1) length(2) value`.
-fn decode_app_info(raw: &[u8]) -> Vec<(u8, Vec<u8>)> {
-    let mut out = Vec::new();
-    let mut offset = 0usize;
-    while offset + 3 <= raw.len() {
-        let field = raw[offset];
-        let len = u16::from_be_bytes([raw[offset + 1], raw[offset + 2]]) as usize;
-        let start = offset + 3;
-        if start + len > raw.len() {
-            break;
-        }
-        out.push((field, raw[start..start + len].to_vec()));
-        offset = start + len;
-    }
-    out
 }
 
 fn decode_common_extended(raw: &[u8]) -> Result<CommonExtended> {
@@ -624,9 +651,11 @@ fn encode_associate(a: &Associate, is_rq: bool) -> Vec<u8> {
 
     for pc in &a.presentation_contexts {
         let mut body = Vec::new();
+        // ID(1) Reserved(1) Result/Reason(1) Reserved(1) — PS3.8 §9.3.3.2
         body.push(pc.id);
+        body.push(0);
         body.push(if is_rq { 0 } else { pc.result });
-        body.extend_from_slice(&[0, 0]);
+        body.push(0);
         if is_rq {
             push_item(&mut body, item::ABSTRACT_SYNTAX, pc.abstract_syntax.as_bytes());
             for syntax in &pc.transfer_syntaxes {
@@ -645,7 +674,11 @@ fn encode_associate(a: &Associate, is_rq: bool) -> Vec<u8> {
     }
 
     let mut user = Vec::new();
-    push_item(&mut user, item::MAX_PDU_LENGTH, &a.user_information.max_pdu_length.to_be_bytes());
+    push_item(
+        &mut user,
+        item::MAX_PDU_LENGTH,
+        &clamp_max_pdu_length(a.user_information.max_pdu_length).to_be_bytes(),
+    );
     if let Some(uid) = &a.user_information.implementation_class_uid {
         push_item(&mut user, item::IMPLEMENTATION_CLASS_UID, uid.as_bytes());
     }
@@ -661,23 +694,21 @@ fn encode_associate(a: &Associate, is_rq: bool) -> Vec<u8> {
         }
     }
     for role in &a.user_information.role_selections {
+        // [uid_len u16][uid][scu][scp] — PS3.8 §D.3.3.4
         let mut value = Vec::with_capacity(4 + role.sop_class.len());
-        value.extend_from_slice(&[0, 0]); // reserved u16
+        value.extend_from_slice(&(role.sop_class.len() as u16).to_be_bytes());
+        value.extend_from_slice(role.sop_class.as_bytes());
         value.push(u8::from(role.scu_role));
         value.push(u8::from(role.scp_role));
-        value.extend_from_slice(role.sop_class.as_bytes());
         push_item(&mut user, item::ROLE_SELECTION, &value);
     }
     for ext in &a.user_information.extended_negotiations {
         let info = if is_rq { &ext.requested } else { &ext.accepted };
-        let mut value = Vec::new();
+        let mut value = Vec::with_capacity(2 + ext.sop_class.len() + info.len());
         value.extend_from_slice(&(ext.sop_class.len() as u16).to_be_bytes());
         value.extend_from_slice(ext.sop_class.as_bytes());
-        for (field, bytes) in info {
-            value.push(*field);
-            value.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
-            value.extend_from_slice(bytes);
-        }
+        // flat Service Class Application Information, one byte per field
+        value.extend_from_slice(info);
         push_item(&mut user, item::SOP_CLASS_EXTENDED_NEGOTIATION, &value);
     }
     if let Some(common) = &a.user_information.common_extended {
@@ -694,13 +725,15 @@ fn encode_associate(a: &Associate, is_rq: bool) -> Vec<u8> {
     }
     if let Some(identity) = &a.user_information.user_identity {
         if is_rq {
+            // type(1) positive(1) primary_len(2) primary
+            // secondary_len(2) secondary — PS3.8 §D.3.3.7
             let mut value = Vec::new();
             value.push(identity.identity_type);
-            value.extend_from_slice(&(identity.primary.len() as u16).to_be_bytes());
-            value.extend_from_slice(&(identity.secondary.len() as u16).to_be_bytes());
-            value.extend_from_slice(&identity.primary);
-            value.extend_from_slice(&identity.secondary);
             value.push(u8::from(identity.positive_response_requested));
+            value.extend_from_slice(&(identity.primary.len() as u16).to_be_bytes());
+            value.extend_from_slice(&identity.primary);
+            value.extend_from_slice(&(identity.secondary.len() as u16).to_be_bytes());
+            value.extend_from_slice(&identity.secondary);
             push_item(&mut user, item::USER_IDENTITY_RQ, &value);
         }
     }
@@ -745,6 +778,66 @@ mod tests {
         let bytes = encode(&pdu);
         assert_eq!(bytes.len(), 6 + u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]) as usize);
         decode(&bytes).expect("decode")
+    }
+
+    /// Storage SOP class used by the byte-layout fixtures below.
+    const STORAGE_CLASS: &str = "1.2.840.10008.5.1.4.1.1.7";
+
+    /// `type(1) reserved(1) length(2) value`, padded to an even value length.
+    ///
+    /// Hand-built on purpose: the wire-layout tests must not reuse the encoder
+    /// under test, or a shared wrong assumption would stay invisible.
+    fn item(item_type: u8, value: &[u8]) -> Vec<u8> {
+        let pad = value.len() & 1;
+        let mut out = vec![item_type, 0];
+        out.extend_from_slice(&((value.len() + pad) as u16).to_be_bytes());
+        out.extend_from_slice(value);
+        out.resize(out.len() + pad, 0);
+        out
+    }
+
+    fn ae(title: &str) -> Vec<u8> {
+        let mut out = vec![b' '; 16];
+        out[..title.len()].copy_from_slice(title.as_bytes());
+        out
+    }
+
+    /// A complete A-ASSOCIATE frame from PS3.8 field layouts only.
+    fn associate_frame(pdu_type: u8, items: &[Vec<u8>]) -> Vec<u8> {
+        let mut body = vec![0x00, 0x01, 0x00, 0x00]; // protocol version, reserved
+        body.extend_from_slice(&ae("CALLED"));
+        body.extend_from_slice(&ae("CALLING"));
+        body.extend_from_slice(&[0u8; 32]);
+        for item in items {
+            body.extend_from_slice(item);
+        }
+        let mut frame = vec![pdu_type, 0];
+        frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&body);
+        frame
+    }
+
+    /// The value of the first item of `item_type` in `buf`.
+    fn item_value(buf: &[u8], item_type: u8) -> Option<Vec<u8>> {
+        let mut offset = 0usize;
+        while offset + 4 <= buf.len() {
+            let len = u16::from_be_bytes([buf[offset + 2], buf[offset + 3]]) as usize;
+            let start = offset + 4;
+            let end = start + len;
+            if end > buf.len() {
+                return None;
+            }
+            if buf[offset] == item_type {
+                return Some(buf[start..end].to_vec());
+            }
+            offset = end;
+        }
+        None
+    }
+
+    /// The user-information item value of an encoded A-ASSOCIATE.
+    fn user_items(bytes: &[u8]) -> Vec<u8> {
+        item_value(&bytes[6 + 68..], item::USER_INFORMATION).expect("user information item")
     }
 
     #[test]
@@ -929,7 +1022,7 @@ mod tests {
         });
         assoc.user_information.extended_negotiations.push(ExtendedNegotiation {
             sop_class: "1.2.840.10008.5.1.4.1.2.1.1".into(),
-            requested: vec![(1, vec![1, 2, 3])],
+            requested: vec![1, 0, 1],
             accepted: Vec::new(),
         });
         assoc.user_information.common_extended = Some(CommonExtended {
@@ -949,7 +1042,7 @@ mod tests {
                 assert_eq!(ui.async_operations, Some(AsyncOperations { invoked: 4, performed: 2 }));
                 assert!(ui.role_selections[0].scu_role);
                 assert!(!ui.role_selections[0].scp_role);
-                assert_eq!(ui.extended_negotiations[0].requested, vec![(1, vec![1, 2, 3])]);
+                assert_eq!(ui.extended_negotiations[0].requested, vec![1, 0, 1]);
                 assert_eq!(ui.common_extended.unwrap().service_class_uid, "1.2.840.10008.4.2");
                 let identity = ui.user_identity.unwrap();
                 assert_eq!(identity.identity_type, 2);
@@ -968,24 +1061,24 @@ mod tests {
         let mut assoc = Associate::new("SCP", "SCU");
         assoc.user_information.extended_negotiations.push(ExtendedNegotiation {
             sop_class: "1.2.840.10008.5.1.4.1.1.7".into(),
-            requested: vec![(1, vec![1])],
+            requested: vec![1],
             accepted: Vec::new(),
         });
         match round_trip(Pdu::AssociateRq(assoc.clone())) {
             Pdu::AssociateRq(back) => {
                 let ext = &back.user_information.extended_negotiations[0];
-                assert_eq!(ext.requested, vec![(1, vec![1])], "an RQ keeps the request");
+                assert_eq!(ext.requested, vec![1], "an RQ keeps the request");
                 assert!(ext.accepted.is_empty());
             }
             other => panic!("expected AssociateRq, got {other:?}"),
         }
 
         assoc.user_information.extended_negotiations[0].requested = Vec::new();
-        assoc.user_information.extended_negotiations[0].accepted = vec![(1, vec![1]), (2, vec![])];
+        assoc.user_information.extended_negotiations[0].accepted = vec![1, 0, 1];
         match round_trip(Pdu::AssociateAc(assoc)) {
             Pdu::AssociateAc(back) => {
                 let ext = &back.user_information.extended_negotiations[0];
-                assert_eq!(ext.accepted, vec![(1, vec![1]), (2, vec![])], "an AC keeps the answer");
+                assert_eq!(ext.accepted, vec![1, 0, 1], "an AC keeps the answer");
                 assert!(ext.requested.is_empty());
             }
             other => panic!("expected AssociateAc, got {other:?}"),
@@ -1122,17 +1215,212 @@ mod tests {
     #[test]
     fn max_pdu_length_is_big_endian() {
         let mut assoc = Associate::new("SCP", "SCU");
-        assoc.user_information.max_pdu_length = 0x0001_0203;
+        assoc.user_information.max_pdu_length = 0x1234;
         let bytes = encode(&Pdu::AssociateRq(assoc));
-        let mut found = false;
-        for i in 0..bytes.len().saturating_sub(7) {
-            // item header is type(1) reserved(1) length(2); max-PDU item is 0x51 length 4
-            if bytes[i] == 0x51 && bytes[i + 1] == 0 && bytes[i + 2..i + 4] == [0x00, 0x04] {
-                assert_eq!(&bytes[i + 4..i + 8], &[0x00, 0x01, 0x02, 0x03]);
-                found = true;
-                break;
-            }
+        let value = item_value(&user_items(&bytes), item::MAX_PDU_LENGTH).expect("max PDU item");
+        assert_eq!(value, vec![0x00, 0x00, 0x12, 0x34]);
+    }
+
+    #[test]
+    fn advertised_max_pdu_is_clamped_to_what_we_can_receive() {
+        // A peer may send a P-DATA-TF up to the value we advertise, so a
+        // larger configured value must never reach the wire: it would be
+        // self-reported capacity this side then rejects on read.
+        for configured in [131072u32, u32::MAX, 0] {
+            let mut assoc = Associate::new("SCP", "SCU");
+            assoc.user_information.max_pdu_length = configured;
+            let bytes = encode(&Pdu::AssociateRq(assoc));
+            let value = item_value(&user_items(&bytes), item::MAX_PDU_LENGTH).expect("max PDU item");
+            let advertised = u32::from_be_bytes([value[0], value[1], value[2], value[3]]);
+            assert_eq!(advertised, MAX_PDU_SIZE, "configured {configured} is clamped");
         }
-        assert!(found, "max PDU length item present");
+    }
+
+    #[test]
+    fn associate_ac_result_lives_at_offset_two() {
+        // PS3.8 §9.3.3.2: ID(1) Reserved(1) Result/Reason(1) Reserved(1).
+        // Context 1 is accepted, context 3 is rejected with reason 3.
+        let pc = |id: u8, result: u8| {
+            let mut value = vec![id, 0x00, result, 0x00];
+            value.extend_from_slice(&item(item::TRANSFER_SYNTAX, b"1.2.840.10008.1.2.1"));
+            item(item::PRESENTATION_CONTEXT_AC, &value)
+        };
+        let frame = associate_frame(
+            0x02,
+            &[
+                item(item::APPLICATION_CONTEXT, APPLICATION_CONTEXT.as_bytes()),
+                pc(1, 0),
+                pc(3, 3),
+                item(item::USER_INFORMATION, &item(item::MAX_PDU_LENGTH, &131072u32.to_be_bytes())),
+            ],
+        );
+        assert_eq!(frame.len(), 176, "the standard 176-byte A-ASSOCIATE-AC fixture");
+
+        match decode(&frame).expect("decode") {
+            Pdu::AssociateAc(ac) => {
+                assert_eq!(ac.presentation_contexts.len(), 2);
+                assert_eq!(ac.presentation_contexts[0].result, 0);
+                assert!(ac.presentation_contexts[0].is_accepted());
+                assert_eq!(ac.presentation_contexts[1].id, 3);
+                assert_eq!(ac.presentation_contexts[1].result, 3, "the result is at offset 2");
+                assert!(!ac.presentation_contexts[1].is_accepted());
+                assert_eq!(ac.user_information.max_pdu_length, 131072, "the peer's value decodes as-is");
+            }
+            other => panic!("expected AssociateAc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn presentation_context_encoder_writes_id_reserved_result_reserved() {
+        let mut ac = Associate::new("SCP", "SCU");
+        let mut rejected = PresentationContext::new(3, STORAGE_CLASS, vec!["1.2.840.10008.1.2.1".into()]);
+        rejected.result = 3;
+        ac.presentation_contexts = vec![rejected];
+        let bytes = encode(&Pdu::AssociateAc(ac));
+        let body = item_value(&bytes[6 + 68..], item::PRESENTATION_CONTEXT_AC).expect("presentation context");
+        assert_eq!(&body[..4], &[0x03, 0x00, 0x03, 0x00], "ID, Reserved, Result, Reserved");
+
+        // the RQ direction is the same layout with a zero result
+        let mut rq = Associate::new("SCP", "SCU");
+        rq.presentation_contexts = vec![PresentationContext::new(1, STORAGE_CLASS, vec!["1.2.840.10008.1.2.1".into()])];
+        let bytes = encode(&Pdu::AssociateRq(rq));
+        let body = item_value(&bytes[6 + 68..], item::PRESENTATION_CONTEXT_RQ).expect("presentation context");
+        assert_eq!(&body[..4], &[0x01, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn role_selection_is_uid_length_then_uid_then_roles() {
+        // PS3.8 §D.3.3.4: uid_len(2) + UID + SCU(1) + SCP(1)
+        let mut value = Vec::new();
+        value.extend_from_slice(&(STORAGE_CLASS.len() as u16).to_be_bytes());
+        value.extend_from_slice(STORAGE_CLASS.as_bytes());
+        value.push(1); // SCU role
+        value.push(0); // SCP role
+        let frame = associate_frame(
+            0x01,
+            &[
+                item(item::APPLICATION_CONTEXT, APPLICATION_CONTEXT.as_bytes()),
+                item(
+                    item::USER_INFORMATION,
+                    &[
+                        item(item::MAX_PDU_LENGTH, &16384u32.to_be_bytes()),
+                        item(item::ROLE_SELECTION, &value),
+                    ]
+                    .concat(),
+                ),
+            ],
+        );
+        match decode(&frame).expect("decode") {
+            Pdu::AssociateRq(rq) => {
+                let role = &rq.user_information.role_selections[0];
+                assert_eq!(role.sop_class, STORAGE_CLASS, "the UID is not shifted");
+                assert!(role.scu_role);
+                assert!(!role.scp_role, "the SCP role is the last byte");
+            }
+            other => panic!("expected AssociateRq, got {other:?}"),
+        }
+
+        // encode direction: the same field order
+        let mut rq = Associate::new("SCP", "SCU");
+        rq.user_information.role_selections.push(RoleSelection {
+            sop_class: STORAGE_CLASS.into(),
+            scu_role: true,
+            scp_role: false,
+        });
+        let bytes = encode(&Pdu::AssociateRq(rq));
+        let value = item_value(&user_items(&bytes), item::ROLE_SELECTION).expect("role selection");
+        assert_eq!(u16::from_be_bytes([value[0], value[1]]) as usize, STORAGE_CLASS.len(), "the UID length leads");
+        assert_eq!(&value[2..2 + STORAGE_CLASS.len()], STORAGE_CLASS.as_bytes());
+        assert_eq!(&value[2 + STORAGE_CLASS.len()..4 + STORAGE_CLASS.len()], &[1, 0], "SCU then SCP");
+    }
+
+    #[test]
+    fn extended_negotiation_is_a_flat_field_array() {
+        // PS3.7 §D.3.3.5: uid_len(2) + UID + one byte per field, no lengths
+        let mut value = Vec::new();
+        value.extend_from_slice(&(STORAGE_CLASS.len() as u16).to_be_bytes());
+        value.extend_from_slice(STORAGE_CLASS.as_bytes());
+        value.extend_from_slice(&[0, 1, 4]);
+        let frame = associate_frame(
+            0x01,
+            &[
+                item(item::APPLICATION_CONTEXT, APPLICATION_CONTEXT.as_bytes()),
+                item(
+                    item::USER_INFORMATION,
+                    &[
+                        item(item::MAX_PDU_LENGTH, &16384u32.to_be_bytes()),
+                        item(item::SOP_CLASS_EXTENDED_NEGOTIATION, &value),
+                    ]
+                    .concat(),
+                ),
+            ],
+        );
+        match decode(&frame).expect("decode") {
+            Pdu::AssociateRq(rq) => {
+                let ext = &rq.user_information.extended_negotiations[0];
+                assert_eq!(ext.sop_class, STORAGE_CLASS);
+                assert_eq!(ext.requested, vec![0, 1, 4], "the flat array is field 1..=3");
+            }
+            other => panic!("expected AssociateRq, got {other:?}"),
+        }
+
+        // encode direction: three fields are three bytes
+        let mut rq = Associate::new("SCP", "SCU");
+        rq.user_information.extended_negotiations.push(ExtendedNegotiation {
+            sop_class: STORAGE_CLASS.into(),
+            requested: vec![1, 0, 1],
+            accepted: Vec::new(),
+        });
+        let bytes = encode(&Pdu::AssociateRq(rq));
+        let value = item_value(&user_items(&bytes), item::SOP_CLASS_EXTENDED_NEGOTIATION).expect("extended item");
+        assert_eq!(value.len(), 2 + STORAGE_CLASS.len() + 3, "no per-field length prefixes");
+        assert_eq!(&value[2 + STORAGE_CLASS.len()..], &[1, 0, 1]);
+    }
+
+    #[test]
+    fn user_identity_is_type_positive_then_length_prefixed_fields() {
+        // PS3.8 §D.3.3.7
+        let mut value = vec![0x02, 0x01];
+        value.extend_from_slice(&5u16.to_be_bytes());
+        value.extend_from_slice(b"alice");
+        value.extend_from_slice(&6u16.to_be_bytes());
+        value.extend_from_slice(b"secret");
+        let frame = associate_frame(
+            0x01,
+            &[
+                item(item::APPLICATION_CONTEXT, APPLICATION_CONTEXT.as_bytes()),
+                item(
+                    item::USER_INFORMATION,
+                    &[
+                        item(item::MAX_PDU_LENGTH, &16384u32.to_be_bytes()),
+                        item(item::USER_IDENTITY_RQ, &value),
+                    ]
+                    .concat(),
+                ),
+            ],
+        );
+        match decode(&frame).expect("decode") {
+            Pdu::AssociateRq(rq) => {
+                let identity = rq.user_information.user_identity.expect("identity");
+                assert_eq!(identity.identity_type, 2);
+                assert!(identity.positive_response_requested, "positive follows the type");
+                assert_eq!(identity.primary, b"alice");
+                assert_eq!(identity.secondary, b"secret");
+            }
+            other => panic!("expected AssociateRq, got {other:?}"),
+        }
+
+        // encode direction: the exact standard bytes
+        let mut rq = Associate::new("SCP", "SCU");
+        rq.user_information.user_identity = Some(UserIdentity {
+            identity_type: 2,
+            primary: b"alice".to_vec(),
+            secondary: b"secret".to_vec(),
+            positive_response_requested: true,
+        });
+        let bytes = encode(&Pdu::AssociateRq(rq));
+        let value = item_value(&user_items(&bytes), item::USER_IDENTITY_RQ).expect("identity item");
+        let expected = b"\x02\x01\x00\x05alice\x00\x06secret".to_vec();
+        assert_eq!(&value[..expected.len()], &expected[..], "type, positive, then each length+value");
     }
 }

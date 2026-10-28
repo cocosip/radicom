@@ -221,14 +221,18 @@ impl Command {
     }
 
     /// A minimal response echoing `request`.
-    pub fn response(request: &Command, status: u16) -> Self {
-        let field = response_field(request.field).expect("request field has a response counterpart");
+    ///
+    /// `None` when `request` has no response counterpart (a response field, or
+    /// C-CANCEL): answering it is meaningless, and the caller decides between
+    /// aborting the association and dropping the message.
+    pub fn response(request: &Command, status: u16) -> Option<Self> {
+        let field = response_field(request.field)?;
         let mut out = Command::request(field, request.message_id);
         out.message_id_being_responded_to = Some(request.message_id);
         out.status = Some(status);
         out.affected_sop_class_uid = request.affected_sop_class_uid.clone();
         out.no_dataset = true;
-        out
+        Some(out)
     }
 
     /// Builds the command dataset, recomputing `(0000,0000)` (§5.3).
@@ -592,7 +596,7 @@ mod tests {
     fn response_echoes_the_request() {
         let mut request = Command::request(CommandField::CFindRq, 11);
         request.affected_sop_class_uid = Some("1.2.840.10008.5.1.4.1.2.1.1".into());
-        let response = Command::response(&request, status::PENDING);
+        let response = Command::response(&request, status::PENDING).expect("C-FIND has a response");
         assert_eq!(response.field, CommandField::CFindRsp);
         assert_eq!(response.message_id_being_responded_to, Some(11));
         assert_eq!(response.status, Some(status::PENDING));
@@ -606,6 +610,22 @@ mod tests {
         assert_eq!(back.field, CommandField::CFindRsp);
         assert_eq!(back.message_id_being_responded_to, Some(11));
         assert_eq!(back.status, Some(status::PENDING));
+    }
+
+    #[test]
+    fn response_is_none_without_a_counterpart() {
+        // a peer can send any of these as a "request": none may panic, and
+        // none has a meaningful response
+        for field in [
+            CommandField::CStoreRsp,
+            CommandField::CFindRsp,
+            CommandField::CEchoRsp,
+            CommandField::NGetRsp,
+            CommandField::CCancelRq,
+        ] {
+            let request = Command::request(field, 1);
+            assert_eq!(Command::response(&request, status::SUCCESS), None, "{field:?}");
+        }
     }
 
     #[test]

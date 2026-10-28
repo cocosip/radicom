@@ -1,8 +1,9 @@
 //! Extended negotiation (NET-04; docs/01-architecture.md §11).
 //!
-//! SOP Class Extended Negotiation carries an ordered `(field, bytes)` set per
-//! SOP class; the AC echoes back the field's agreed value, or a field with
-//! length 0 to say "not supported". The curated [`AppInfo`] wrappers below
+//! SOP Class Extended Negotiation carries one Service Class Application
+//! Information array per SOP class: a flat byte array where the byte at index
+//! `n - 1` is field `n` (PS3.7 §D.3.3.5). The AC echoes the field's agreed
+//! value, or 0 to say "not supported". The curated [`AppInfo`] wrappers below
 //! name the fields of the three service families that use them.
 //!
 //! The wire model already lives in [`crate::pdu::ExtendedNegotiation`]; this
@@ -29,13 +30,14 @@ mod field {
     pub const RETRIEVE_ENHANCED_MULTIFRAME: u8 = 4;
 }
 
-/// The ordered application-info of one SOP class (§4.3).
+/// The Service Class Application Information of one SOP class (§4.3).
 ///
-/// Values are opaque byte strings: a field's meaning depends on the service
-/// class. `bytes` empty means "do not support this field".
+/// A flat byte array: index `n - 1` is field `n`, every field exactly one byte,
+/// no length prefixes (PS3.7 §D.3.3.5). A field value of 0 means "not
+/// supported"; a field the peer did not send is absent.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AppInfo {
-    pub fields: Vec<(u8, Vec<u8>)>,
+    pub fields: Vec<u8>,
 }
 
 impl AppInfo {
@@ -43,30 +45,32 @@ impl AppInfo {
         Self::default()
     }
 
-    /// Adds or replaces a field, keeping the insertion order of new fields.
-    pub fn with_field(mut self, field: u8, value: impl Into<Vec<u8>>) -> Self {
+    /// Sets a field (1-based), zero-filling any gap before it.
+    pub fn with_field(mut self, field: u8, value: u8) -> Self {
         self.set_field(field, value);
         self
     }
 
-    pub fn set_field(&mut self, field: u8, value: impl Into<Vec<u8>>) {
-        let value = value.into();
-        match self.fields.iter_mut().find(|(f, _)| *f == field) {
-            Some(existing) => existing.1 = value,
-            None => self.fields.push((field, value)),
+    pub fn set_field(&mut self, field: u8, value: u8) {
+        let Some(index) = field.checked_sub(1).map(usize::from) else {
+            return;
+        };
+        if self.fields.len() <= index {
+            self.fields.resize(index + 1, 0);
         }
+        self.fields[index] = value;
     }
 
-    pub fn field(&self, field: u8) -> Option<&[u8]> {
-        self.fields
-            .iter()
-            .find(|(f, _)| *f == field)
-            .map(|(_, v)| v.as_slice())
-    }
-
-    /// A single-byte field, the shape every standard field actually uses.
+    /// The byte of `field` (1-based), or `None` when the peer sent fewer fields.
     pub fn byte_field(&self, field: u8) -> Option<u8> {
-        self.field(field).and_then(|v| v.first().copied())
+        let index = usize::from(field.checked_sub(1)?);
+        self.fields.get(index).copied()
+    }
+
+    /// The one-byte value of `field`, as it travels on the wire.
+    pub fn field(&self, field: u8) -> Option<&[u8]> {
+        let index = usize::from(field.checked_sub(1)?);
+        self.fields.get(index..index + 1)
     }
 
     /// A flag field: 1 = supported.
@@ -75,15 +79,15 @@ impl AppInfo {
     }
 
     /// Builds the answer to a request: every requested field is echoed with
-    /// `accept(field)` deciding the value (`None` ⇒ length 0, not supported).
-    pub fn answer<'a>(
-        requested: &'a AppInfo,
-        mut accept: impl FnMut(u8, &'a [u8]) -> Option<Vec<u8>>,
-    ) -> AppInfo {
+    /// `accept(field, requested_value)` deciding the byte (`None` ⇒ 0, not
+    /// supported).
+    pub fn answer(requested: &AppInfo, mut accept: impl FnMut(u8, u8) -> Option<u8>) -> AppInfo {
         let mut out = AppInfo::new();
-        for (field, value) in &requested.fields {
-            let answer = accept(*field, value).unwrap_or_default();
-            out.set_field(*field, answer);
+        for (index, &value) in requested.fields.iter().enumerate() {
+            let Ok(field) = u8::try_from(index + 1) else {
+                break;
+            };
+            out.fields.push(accept(field, value).unwrap_or(0));
         }
         out
     }
@@ -103,9 +107,9 @@ pub struct StorageAppInfo {
 impl StorageAppInfo {
     pub fn to_app_info(self) -> AppInfo {
         AppInfo::new()
-            .with_field(field::STORAGE_LEVEL_OF_SUPPORT, vec![self.level_of_support])
-            .with_field(field::STORAGE_DIGITAL_SIGNATURE, vec![self.digital_signature])
-            .with_field(field::STORAGE_ELEMENT_COERCION, vec![self.element_coercion])
+            .with_field(field::STORAGE_LEVEL_OF_SUPPORT, self.level_of_support)
+            .with_field(field::STORAGE_DIGITAL_SIGNATURE, self.digital_signature)
+            .with_field(field::STORAGE_ELEMENT_COERCION, self.element_coercion)
     }
 
     pub fn from_app_info(info: &AppInfo) -> Self {
@@ -148,11 +152,11 @@ pub struct FindAppInfo {
 impl FindAppInfo {
     pub fn to_app_info(self) -> AppInfo {
         AppInfo::new()
-            .with_field(field::FIND_RELATIONAL_QUERIES, vec![self.relational_queries])
-            .with_field(field::FIND_DATETIME_MATCHING, vec![self.datetime_matching])
-            .with_field(field::FIND_FUZZY_MATCHING, vec![self.fuzzy_matching])
-            .with_field(field::FIND_TIMEZONE_ADJUSTMENT, vec![self.timezone_adjustment])
-            .with_field(field::FIND_ENHANCED_MULTIFRAME, vec![self.enhanced_multiframe_conversion])
+            .with_field(field::FIND_RELATIONAL_QUERIES, self.relational_queries)
+            .with_field(field::FIND_DATETIME_MATCHING, self.datetime_matching)
+            .with_field(field::FIND_FUZZY_MATCHING, self.fuzzy_matching)
+            .with_field(field::FIND_TIMEZONE_ADJUSTMENT, self.timezone_adjustment)
+            .with_field(field::FIND_ENHANCED_MULTIFRAME, self.enhanced_multiframe_conversion)
     }
 
     pub fn from_app_info(info: &AppInfo) -> Self {
@@ -176,8 +180,8 @@ pub struct RetrieveAppInfo {
 impl RetrieveAppInfo {
     pub fn to_app_info(self) -> AppInfo {
         AppInfo::new()
-            .with_field(field::RETRIEVE_RELATIONAL, vec![self.relational_retrieval])
-            .with_field(field::RETRIEVE_ENHANCED_MULTIFRAME, vec![self.enhanced_multiframe_conversion])
+            .with_field(field::RETRIEVE_RELATIONAL, self.relational_retrieval)
+            .with_field(field::RETRIEVE_ENHANCED_MULTIFRAME, self.enhanced_multiframe_conversion)
     }
 
     pub fn from_app_info(info: &AppInfo) -> Self {
@@ -190,13 +194,9 @@ impl RetrieveAppInfo {
 
 /// What the SCP accepts of an extended-negotiation request (§4.3).
 ///
-/// The default answers every requested field with "not supported" (length 0),
-/// which is exactly what a peer must understand: it asked, and the answer says
-/// no. A policy that wants to grant options fills in the fields it supports.
-/// What the SCP accepts of an extended-negotiation request (§4.3).
-///
-/// A declined field is answered with length 0, which is exactly what the peer
-/// must understand: it asked, and the answer says no.
+/// The default answers every requested field with 0, "not supported", which is
+/// exactly what a peer must understand: it asked, and the answer says no. A
+/// policy that wants to grant options fills in the fields it supports.
 #[derive(Debug, Clone)]
 pub enum ExtendedNegotiationPolicy {
     /// Accept nothing.
@@ -206,7 +206,7 @@ pub enum ExtendedNegotiationPolicy {
 }
 
 impl ExtendedNegotiationPolicy {
-    /// Accepts nothing: every field comes back with length 0.
+    /// Accepts nothing: every field comes back as 0.
     pub fn decline_all() -> Self {
         ExtendedNegotiationPolicy::DeclineAll
     }
@@ -282,11 +282,13 @@ mod tests {
     }
 
     #[test]
-    fn app_info_keeps_field_order_and_replaces_in_place() {
-        let info = AppInfo::new().with_field(3, vec![1]).with_field(1, vec![2]).with_field(3, vec![9]);
-        assert_eq!(info.fields, vec![(3, vec![9]), (1, vec![2])], "order of first insertion, last value wins");
+    fn fields_are_flat_and_gaps_are_zero_filled() {
+        let info = AppInfo::new().with_field(3, 1).with_field(1, 2).with_field(3, 9);
+        assert_eq!(info.fields, vec![2, 0, 9], "index n-1 is field n; gaps are 0; last value wins");
         assert_eq!(info.byte_field(1), Some(2));
-        assert_eq!(info.byte_field(7), None);
+        assert_eq!(info.byte_field(2), Some(0), "a gap reads as not-supported");
+        assert_eq!(info.byte_field(4), None);
+        assert_eq!(info.field(3), Some(&[9u8][..]));
     }
 
     #[test]
@@ -310,7 +312,7 @@ mod tests {
 
     #[test]
     fn missing_fields_read_as_not_supported() {
-        let info = AppInfo::new().with_field(1, vec![1]);
+        let info = AppInfo::new().with_field(1, 1);
         let storage = StorageAppInfo::from_app_info(&info);
         assert_eq!(storage.level_of_support, 1);
         assert_eq!(storage.digital_signature, 0, "an absent field is not support");
@@ -319,27 +321,23 @@ mod tests {
 
     #[test]
     fn answer_echoes_every_requested_field() {
-        let requested = AppInfo::new().with_field(1, vec![1]).with_field(2, vec![1]);
+        let requested = AppInfo::new().with_field(1, 1).with_field(2, 1);
         let answer = AppInfo::answer(&requested, |field, value| {
             // grant field 1 only
-            if field == 1 { Some(value.to_vec()) } else { None }
+            (field == 1).then_some(value)
         });
         assert_eq!(answer.field(1), Some(&[1u8][..]), "granted field is echoed");
-        assert_eq!(answer.field(2), Some(&[][..]), "declined field has zero length");
+        assert_eq!(answer.field(2), Some(&[0u8][..]), "declined field is 0");
     }
 
     #[test]
-    fn declining_policy_answers_with_zero_length_fields() {
+    fn declining_policy_answers_every_field_with_zero() {
         let requested = vec![storage_ext("1.2.840.10008.5.1.4.1.1.7", 1, 1)];
         let answered = ExtendedNegotiationPolicy::decline_all().answer(&requested);
         assert_eq!(answered.len(), 1);
         assert_eq!(answered[0].sop_class, "1.2.840.10008.5.1.4.1.1.7");
         assert!(answered[0].requested.is_empty(), "an AC item carries only the accepted side");
-        assert_eq!(answered[0].accepted.len(), 3, "every requested field is answered");
-        assert!(
-            answered[0].accepted.iter().all(|(_, value)| value.is_empty()),
-            "length 0 means not supported"
-        );
+        assert_eq!(answered[0].accepted, vec![0, 0, 0], "every requested field is answered with 0");
     }
 
     #[test]
@@ -359,17 +357,17 @@ mod tests {
             if sop_class != "1.2.840.10008.5.1.4.1.1.7" {
                 return None;
             }
-            Some(AppInfo::answer(requested, |field, _| (field == 1).then(|| vec![1])))
+            Some(AppInfo::answer(requested, |field, _| (field == 1).then_some(1)))
         }
         let policy = ExtendedNegotiationPolicy::new(grant_level);
         let answered = policy.answer(&[storage_ext("1.2.840.10008.5.1.4.1.1.7", 1, 1)]);
         let info = AppInfo { fields: answered[0].accepted.clone() };
         assert!(info.is_supported(1), "level granted");
-        assert_eq!(info.field(2), Some(&[][..]), "signature refused");
+        assert_eq!(info.field(2), Some(&[0u8][..]), "signature refused");
 
-        // a SOP class the policy does not know is answered with zero lengths
+        // a SOP class the policy does not know is answered with zeros
         let other = policy.answer(&[storage_ext("9.9.9", 1, 1)]);
-        assert!(other[0].accepted.iter().all(|(_, v)| v.is_empty()));
+        assert!(other[0].accepted.iter().all(|&value| value == 0));
     }
 
     #[test]
