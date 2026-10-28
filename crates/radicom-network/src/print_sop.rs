@@ -85,8 +85,9 @@ pub fn network_identifier_from_mac(implementation_class_uid: &str, mac: &[u8; 6]
 ///
 /// Reads the first non-loopback interface MAC address and derives the UID via
 /// [`network_identifier_from_mac`]. Returns `None` when no MAC can be read
-/// (e.g. an unsupported platform) rather than fabricating an identity. Linux
-/// reads `/sys/class/net/*/address`; other platforms currently return `None`.
+/// rather than fabricating an identity. Linux reads `/sys/class/net/*/address`;
+/// 64-bit Windows enumerates adapters via `GetAdaptersAddresses`; other
+/// platforms currently return `None`.
 pub fn try_get_network_identifier(implementation_class_uid: &str) -> Option<String> {
     // avoid the loopback interface and interfaces with a zero MAC
     for mac in host_mac_addresses() {
@@ -120,7 +121,91 @@ fn host_mac_addresses() -> Vec<[u8; 6]> {
             }
         }
     }
+    // Windows (64-bit): enumerate adapters via iphlpapi GetAdaptersAddresses
+    #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
+    {
+        out.extend(win_mac::adapter_macs());
+    }
     out
+}
+
+/// Windows 64-bit adapter MAC enumeration via `GetAdaptersAddresses`
+/// (iphlpapi). No external crate; only the leading fields of
+/// `IP_ADAPTER_ADDRESSES` are read (through `PhysicalAddressLength`).
+#[cfg(all(target_os = "windows", target_pointer_width = "64"))]
+mod win_mac {
+    /// Prefix of `IP_ADAPTER_ADDRESSES` up to `PhysicalAddressLength`.
+    #[repr(C)]
+    struct IpAdapterAddresses {
+        length: u32,
+        if_index: u32,
+        next: *mut IpAdapterAddresses,
+        adapter_name: *mut core::ffi::c_char,
+        first_unicast: *mut core::ffi::c_void,
+        first_anycast: *mut core::ffi::c_void,
+        first_multicast: *mut core::ffi::c_void,
+        first_dns_server: *mut core::ffi::c_void,
+        dns_suffix: *mut u16,
+        description: *mut u16,
+        friendly_name: *mut u16,
+        physical_address: [u8; 8],
+        physical_address_length: u32,
+    }
+
+    #[link(name = "iphlpapi")]
+    extern "system" {
+        fn GetAdaptersAddresses(
+            family: u32,
+            flags: u32,
+            reserved: *mut core::ffi::c_void,
+            addresses: *mut IpAdapterAddresses,
+            size: *mut u32,
+        ) -> u32;
+    }
+
+    pub fn adapter_macs() -> Vec<[u8; 6]> {
+        const AF_UNSPEC: u32 = 0;
+        const SKIP_ANYCAST: u32 = 0x02;
+        const SKIP_MULTICAST: u32 = 0x04;
+        const SKIP_DNS: u32 = 0x08;
+        const ERROR_BUFFER_OVERFLOW: u32 = 111;
+        const NO_ERROR: u32 = 0;
+        let flags = SKIP_ANYCAST | SKIP_MULTICAST | SKIP_DNS;
+
+        let mut out = Vec::new();
+        let mut size: u32 = 16 * 1024;
+        for _ in 0..4 {
+            // word-aligned buffer so the cast to *mut IpAdapterAddresses is sound
+            let mut buf: Vec<u64> = vec![0u64; (size as usize).div_ceil(8)];
+            let ret = unsafe {
+                GetAdaptersAddresses(
+                    AF_UNSPEC,
+                    flags,
+                    core::ptr::null_mut(),
+                    buf.as_mut_ptr() as *mut IpAdapterAddresses,
+                    &mut size,
+                )
+            };
+            if ret == ERROR_BUFFER_OVERFLOW {
+                continue; // `size` now holds the required size; retry
+            }
+            if ret != NO_ERROR {
+                break;
+            }
+            let mut cur = buf.as_ptr() as *const IpAdapterAddresses;
+            while !cur.is_null() {
+                let adapter = unsafe { &*cur };
+                if adapter.physical_address_length == 6 {
+                    let mut mac = [0u8; 6];
+                    mac.copy_from_slice(&adapter.physical_address[..6]);
+                    out.push(mac);
+                }
+                cur = adapter.next;
+            }
+            break;
+        }
+        out
+    }
 }
 
 /// Parses `aa:bb:cc:dd:ee:ff` into six bytes.
@@ -197,5 +282,16 @@ mod tests {
         assert_eq!(parse_mac("00-11-22-33-44-55"), Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]));
         assert_eq!(parse_mac("not-a-mac"), None);
         assert_eq!(parse_mac("00:11:22"), None, "wrong number of octets");
+    }
+
+    #[cfg(all(target_os = "windows", target_pointer_width = "64"))]
+    #[test]
+    fn windows_reads_a_real_mac_and_derives_a_valid_uid() {
+        // The dev/CI host has at least one NIC; GetAdaptersAddresses must find a
+        // 6-byte MAC and produce a valid DICOM UID from it.
+        let uid = try_get_network_identifier("1.2.826.0.1.3680043.10.999")
+            .expect("a host MAC is readable on Windows");
+        assert!(uid.starts_with("1.2.826.0.1.3680043.10.999."), "uid: {uid}");
+        assert!(radicom::model::uid::Uid::is_valid(&uid), "derived UID valid: {uid}");
     }
 }
