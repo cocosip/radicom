@@ -216,12 +216,12 @@ impl FrameGeometry {
         self.point_bottom_right
     }
 
-    /// Column spacing in mm (0028,0030 first value), 0 when absent.
+    /// Column spacing in mm (0028,0030 second value), 0 when absent.
     pub fn spacing_between_columns(&self) -> f64 {
         self.spacing_between_columns
     }
 
-    /// Row spacing in mm (0028,0030 second value), 0 when absent.
+    /// Row spacing in mm (0028,0030 first value), 0 when absent.
     pub fn spacing_between_rows(&self) -> f64 {
         self.spacing_between_rows
     }

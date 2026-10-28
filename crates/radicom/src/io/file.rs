@@ -278,7 +278,11 @@ impl DicomFile {
         out.extend_from_slice(&[0u8; 128]);
         out.extend_from_slice(b"DICM");
         let meta = self.refreshed_meta()?;
-        DicomWriter::new(options.clone()).write_dataset(
+        // PS3.10 Table 7.1-1: (0002,0000) File Meta Information Group Length is
+        // Type 1 (required), so always recalculate it for the meta group whatever
+        // the caller's dataset option says.
+        let meta_options = WriteOptions { keep_group_lengths: true, ..options.clone() };
+        DicomWriter::new(meta_options).write_dataset(
             &meta,
             &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN,
             &mut out,
@@ -645,6 +649,22 @@ mod tests {
             "1.2.3.4.5",
             "media storage instance UID comes from the dataset"
         );
+    }
+
+    #[test]
+    fn file_meta_group_length_is_written_and_correct() {
+        // PS3.10 Table 7.1-1: (0002,0000) FileMetaInformationGroupLength is Type 1.
+        let bytes = sample_file().to_bytes(&WriteOptions::default()).unwrap();
+        let m = 132usize; // after the 128-byte preamble + "DICM"
+        assert_eq!(&bytes[m..m + 2], &[0x02, 0x00], "first meta element is group 0002");
+        assert_eq!(&bytes[m + 2..m + 4], &[0x00, 0x00], "element is 0000");
+        assert_eq!(&bytes[m + 4..m + 6], b"UL", "(0002,0000) carries UL");
+        let group_len = u32::from_le_bytes([bytes[m + 8], bytes[m + 9], bytes[m + 10], bytes[m + 11]]) as usize;
+        assert!(group_len > 0, "group length is non-zero");
+        // the dataset must begin exactly after the declared meta remainder
+        let dataset_start = m + 12 + group_len;
+        let g = u16::from_le_bytes([bytes[dataset_start], bytes[dataset_start + 1]]);
+        assert_ne!(g, 0x0002, "the bytes after the declared meta length are the dataset, not more meta");
     }
 
     #[test]
