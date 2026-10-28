@@ -1,26 +1,31 @@
 //! External-peer interop smoke tool (联调).
 //!
 //! Runs against a real DICOM peer (e.g. a fo-dicom C-STORE SCP or a Q/R SCP):
-//! an optional C-ECHO, plus optional C-STORE of a file and optional C-FIND.
+//! an optional C-ECHO, plus optional C-STORE / C-FIND / C-GET / C-MOVE.
 //!
 //! Usage:
 //!   cargo run -p radicom-network --example peer_interop -- \
 //!     --peer 127.0.0.1:11112 --calling RADICOM --called DCM4CHE \
 //!     [--no-echo] \
 //!     [--store tests-data\explicit-le\GH487.dcm] \
-//!     [--find STUDY --patient-name "Doe*" --study-uid 1.2.3]
+//!     [--find STUDY --patient-name "Doe*"] \
+//!     [--get STUDY --study-uid 1.2.3 --storage 1.2.840.10008.5.1.4.1.1.2,...] \
+//!     [--move STUDY --study-uid 1.2.3 --dest ARCHIVE]
 //!
-//! Levels for --find: PATIENT | STUDY | SERIES | IMAGE. Filters are optional.
-//! Each phase uses its own association, so a peer that rejects Verification
-//! (some C-STORE-only SCPs do) does not poison the later C-STORE / C-FIND.
-//! The process exits non-zero when a *requested* operation fails.
+//! Levels for --find/--get/--move: PATIENT | STUDY | SERIES | IMAGE. Filters are
+//! optional. Each phase uses its own association, so a peer that rejects one
+//! service does not poison the next. The process exits non-zero when a
+//! *requested* operation fails.
 
 use radicom::io::file::DicomFile;
 use radicom::model::tag::Tag;
 use radicom::model::vr::Vr;
 use radicom_network::association::sop_class;
 use radicom_network::cfind::{CFindRequest, QueryRetrieveLevel, QueryRoot};
+use radicom_network::cget::CGetRequest;
 use radicom_network::client::DicomClient;
+use radicom_network::cmove::CMoveRequest;
+use std::sync::{Arc, Mutex};
 
 fn arg(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
@@ -28,6 +33,33 @@ fn arg(args: &[String], name: &str) -> Option<String> {
 
 fn client(calling: &str, called: &str, peer: &str) -> DicomClient {
     DicomClient::new(calling.to_string(), called.to_string(), peer.to_string())
+}
+
+/// The optional matching keys shared by FIND / GET / MOVE.
+fn filter_pairs(args: &[String]) -> Vec<(u16, u16, Vr, String)> {
+    let mut keys = Vec::new();
+    if let Some(v) = arg(args, "--patient-name") {
+        keys.push((0x0010, 0x0010, Vr::Pn, v));
+    }
+    if let Some(v) = arg(args, "--patient-id") {
+        keys.push((0x0010, 0x0020, Vr::Lo, v));
+    }
+    if let Some(v) = arg(args, "--study-uid") {
+        keys.push((0x0020, 0x000D, Vr::Ui, v));
+    }
+    if let Some(v) = arg(args, "--accession") {
+        keys.push((0x0008, 0x0050, Vr::Sh, v));
+    }
+    keys
+}
+
+fn default_storage() -> Vec<String> {
+    // CT / MR / SC cover most retrieve tests; override with --storage.
+    vec![
+        "1.2.840.10008.5.1.4.1.1.2".to_string(),
+        "1.2.840.10008.5.1.4.1.1.4".to_string(),
+        "1.2.840.10008.5.1.4.1.1.7".to_string(),
+    ]
 }
 
 #[tokio::main]
@@ -41,7 +73,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let no_echo = args.iter().any(|a| a == "--no-echo");
     let store = arg(&args, "--store").or_else(|| std::env::var("RADICOM_STORE_FILE").ok());
     let find = arg(&args, "--find").or_else(|| std::env::var("RADICOM_FIND_LEVEL").ok());
-    let has_real_op = store.is_some() || find.is_some();
+    let get = arg(&args, "--get");
+    let move_level = arg(&args, "--move");
+    let has_real_op = store.is_some() || find.is_some() || get.is_some() || move_level.is_some();
     let mut failed = false;
 
     // 1) C-ECHO (Verification). Not every SCP supports it, so it is only fatal
@@ -62,10 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2) optional C-STORE (own association).
     if let Some(path) = store {
         let file = DicomFile::open(&path)?;
-        let sop = file
-            .dataset
-            .try_get_str(Tag::new(0x0008, 0x0016))
-            .unwrap_or_default();
+        let sop = file.dataset.try_get_str(Tag::new(0x0008, 0x0016)).unwrap_or_default();
         println!("C-STORE {path} (SOP {sop})");
         let mut store_client = client(&calling, &called, &peer);
         let resp = store_client.send_c_store(&file).await?;
@@ -76,20 +107,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3) optional C-FIND (own association).
     if let Some(level_text) = find {
-        let level = QueryRetrieveLevel::parse(&level_text)
-            .ok_or("bad --find level (PATIENT|STUDY|SERIES|IMAGE)")?;
+        let level = QueryRetrieveLevel::parse(&level_text).ok_or("bad --find level")?;
         let mut request = CFindRequest::new(level, QueryRoot::Study, 1);
-        if let Some(v) = arg(&args, "--patient-name") {
-            request = request.with_key(0x0010, 0x0010, Vr::Pn, v);
-        }
-        if let Some(v) = arg(&args, "--patient-id") {
-            request = request.with_key(0x0010, 0x0020, Vr::Lo, v);
-        }
-        if let Some(v) = arg(&args, "--study-uid") {
-            request = request.with_key(0x0020, 0x000D, Vr::Ui, v);
-        }
-        if let Some(v) = arg(&args, "--accession") {
-            request = request.with_key(0x0008, 0x0050, Vr::Sh, v);
+        for (group, element, vr, value) in filter_pairs(&args) {
+            request = request.with_key(group, element, vr, value);
         }
         let mut find_client = client(&calling, &called, &peer);
         let responses = find_client.send_c_find(&request).await?;
@@ -106,6 +127,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("C-FIND final status=0x{final_status:04X}");
         failed |= final_status != 0x0000;
         find_client.release().await;
+    }
+
+    // 4) optional C-GET (own association; instances arrive as reverse C-STORE).
+    if let Some(level_text) = get {
+        let level = QueryRetrieveLevel::parse(&level_text).ok_or("bad --get level")?;
+        let mut request = CGetRequest::new(level, QueryRoot::Study, 1)?;
+        for (group, element, vr, value) in filter_pairs(&args) {
+            request = request.with_key(group, element, vr, value);
+        }
+        let storage: Vec<String> = arg(&args, "--storage")
+            .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+            .unwrap_or_else(default_storage);
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let mut get_client = DicomClient::new(calling.clone(), called.clone(), peer.clone())
+            .collect_reverse_stores(received.clone());
+        let responses = get_client.send_c_get(&request, &storage).await?;
+        let final_status = responses.last().map(|r| r.status).unwrap_or(0xFFFF);
+        {
+            let received = received.lock().unwrap();
+            println!("C-GET level={level_text} received={}", received.len());
+            for file in received.iter().take(10) {
+                let sop = file.dataset.try_get_str(Tag::new(0x0008, 0x0016)).unwrap_or_default();
+                let instance = file.dataset.try_get_str(Tag::new(0x0008, 0x0018)).unwrap_or_default();
+                println!("  - SOP={sop} instance={instance}");
+            }
+        }
+        if let Some(last) = responses.last() {
+            println!(
+                "C-GET sub-ops ok={} failed={} warning={}",
+                last.summary.completed, last.summary.failed, last.summary.warning
+            );
+        }
+        println!("C-GET final status=0x{final_status:04X}");
+        failed |= final_status != 0x0000;
+        get_client.release().await;
+    }
+
+    // 5) optional C-MOVE (own association; the SCP delivers to --dest).
+    if let Some(level_text) = move_level {
+        let dest = arg(&args, "--dest").ok_or("--move requires --dest AE")?;
+        let level = QueryRetrieveLevel::parse(&level_text).ok_or("bad --move level")?;
+        let mut request = CMoveRequest::new(level, QueryRoot::Study, &dest, 1)?;
+        for (group, element, vr, value) in filter_pairs(&args) {
+            request = request.with_key(group, element, vr, value);
+        }
+        let mut move_client = client(&calling, &called, &peer);
+        let responses = move_client.send_c_move(&request).await?;
+        let final_status = responses.last().map(|r| r.status).unwrap_or(0xFFFF);
+        println!("C-MOVE level={level_text} dest={dest}");
+        if let Some(last) = responses.last() {
+            println!(
+                "C-MOVE sub-ops ok={} failed={} warning={}",
+                last.summary.completed, last.summary.failed, last.summary.warning
+            );
+        }
+        println!("C-MOVE final status=0x{final_status:04X}");
+        failed |= final_status != 0x0000;
+        move_client.release().await;
     }
 
     if failed {

@@ -18,7 +18,7 @@ C-ECHO 与 **真实文件跨 TCP 的 C-STORE→SCP→读回语义相等**（组�
 
 位置：`crates/radicom-network/examples/peer_interop.rs`
 
-功能：可选的 C-ECHO；可选 C-STORE（发一个文件）；可选 C-FIND（QR）。
+功能：可选的 C-ECHO；可选 C-STORE（发一个文件）；可选 C-FIND / C-GET / C-MOVE（QR）。
 **每个阶段用各自的关联**，所以不支持 Verification 的 C-STORE-only SCP 不会影响后续操作。
 C-ECHO 仅在它是唯一请求的操作时才算致命；任何*被请求的*操作失败则进程以非 0 退出。
 
@@ -36,6 +36,16 @@ cargo run -p radicom-network --example peer_interop -- `
 cargo run -p radicom-network --example peer_interop -- `
   --peer 127.0.0.1:11112 --calling RADICOM --called DCM4CHE --no-echo `
   --find STUDY --patient-name "Doe*"
+
+# C-GET(STUDY)：实例以反向 C-STORE 落到本端
+cargo run -p radicom-network --example peer_interop -- `
+  --peer 127.0.0.1:11112 --calling RADICOM --called DCM4CHE --no-echo `
+  --get STUDY --study-uid 1.2.3 --storage 1.2.840.10008.5.1.4.1.1.2
+
+# C-MOVE(STUDY)：需要 SCP 端把 --dest 这个 AE 映射到本机地址
+cargo run -p radicom-network --example peer_interop -- `
+  --peer 127.0.0.1:11112 --calling RADICOM --called DCM4CHE --no-echo `
+  --move STUDY --study-uid 1.2.3 --dest ARCHIVE
 ```
 
 参数：
@@ -43,8 +53,11 @@ cargo run -p radicom-network --example peer_interop -- `
 - `--calling AE` / `--called AE`
 - `--no-echo`：跳过 C-ECHO（对端不支持 Verification 时使用）
 - `--store <file.dcm>`：对该文件做 C-STORE（SOP Class 取自 `(0008,0016)`）
-- `--find PATIENT|STUDY|SERIES|IMAGE`：做 C-FIND；可选 `--patient-name`、`--patient-id`、
-  `--study-uid`、`--accession` 作为匹配键
+- `--find PATIENT|STUDY|SERIES|IMAGE`：做 C-FIND
+- `--get PATIENT|STUDY|SERIES|IMAGE`：做 C-GET；`--storage uid1,uid2` 指定可接收的存储
+  类（默认 CT/MR/SC），它对不上时子操作会失败，需按实际实例 SOP Class 调整
+- `--move PATIENT|STUDY|SERIES|IMAGE --dest AE`：做 C-MOVE，`--dest` 是 SCP 端要投递到的 AE
+- 以上 FIND/GET/MOVE 共用匹配键：`--patient-name`、`--patient-id`、`--study-uid`、`--accession`
 
 ## 2. 联调用例（设为 CI 可选）
 
@@ -75,12 +88,17 @@ cargo test -p radicom-network --test interop -- --nocapture
 
 ## 4. 实机联调结果（fo-dicom 对端）
 
-测于 2026-10-28，对端为 fo-dicom 实现的 SCP。
+测于 2026-10-28，对端为 fo-dicom 实现的 SCP。AE 修正后复测结果：
 
-| 对端 | 端口 | Called/Calling | 结果 |
+| 服务 | 对端 | Called / Calling | 结果 |
 |---|---|---|---|
-| C-STORE SCP | 172.16.2.24:31801 | NETGATE / NETPUSH | ✅ **C-STORE 状态 0x0000**（SC `1.2.840.10008.5.1.4.1.1.7` 与 CT `…1.1.2` 均成功）；Verification 不被接受（属正常） |
-| Q/R SCP | 172.16.2.24:31803 | QRGATE / NETPUSH | ❌ A-ASSOCIATE-RJ：`result=1, source=1, reason=3`（called-AE-title-not-recognized）。尝试 `QRGATE/NETGATE/QRSCP/QR` 及 calling `NETPUSH/NETGATE/QRSCU/NETQR` 均同一拒绝 → 判为**对端 AE 配置问题**，待对端确认 Q/R SCP 的实际 AE 后复测 |
+| C-ECHO | Q/R SCP `172.16.2.24:31803` | QRGATE / NETPUSH | ✅ status 0x0000 |
+| C-STORE | C-STORE SCP `172.16.2.24:31801` | NETGATE / NETPUSH | ✅ status 0x0000（SC `…1.1.7`、CT `…1.1.2`） |
+| C-FIND | Q/R SCP `:31803` | QRGATE / NETPUSH | ✅ PATIENT 18 / STUDY 21 / SERIES 1 / IMAGE 1 条，final 均 0x0000 |
+| C-GET | Q/R SCP `:31803` | QRGATE / NETPUSH | ✅ 一个 study 拉回 1 个 CT；另一 study 拉回 **52 个 CT**，sub-ops ok=52 failed=0，final 0x0000 |
+| C-MOVE | Q/R SCP `:31803` | QRGATE / NETPUSH | ⏸️ 未测：对端未把目的 AE 映射到本机地址（属 SCP 侧网络配置）；功能已由 loopback 覆盖，待环境就绪再测 |
+
+> C-STORE SCP 不接受 Verification（C-ECHO 返回 SopClassNotSupported），属该类 SCP 的正常行为。
 
 ## 5. 联调暴露并修复的 DUL 一致性问题
 
