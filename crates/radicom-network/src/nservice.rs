@@ -46,6 +46,8 @@ pub struct NServiceRequest {
     /// the Requested or Affected tags that `field` calls for (PS3.7 §10.1).
     pub sop_class_uid: Option<String>,
     pub sop_instance_uid: Option<String>,
+    /// Requested attributes for N-GET; an empty list means the element is absent.
+    pub attribute_identifier_list: Vec<radicom::model::tag::Tag>,
     pub event_type_id: Option<u16>,
     pub action_type_id: Option<u16>,
     pub dataset: Option<Dataset>,
@@ -59,6 +61,7 @@ impl NServiceRequest {
             message_id,
             sop_class_uid: None,
             sop_instance_uid: None,
+            attribute_identifier_list: Vec::new(),
             event_type_id: None,
             action_type_id: None,
             dataset: None,
@@ -74,6 +77,9 @@ impl NServiceRequest {
         } else {
             command.affected_sop_class_uid = self.sop_class_uid.clone();
             command.affected_sop_instance_uid = self.sop_instance_uid.clone();
+        }
+        if self.field == CommandField::NGetRq && !self.attribute_identifier_list.is_empty() {
+            command.attribute_identifier_list = Some(self.attribute_identifier_list.clone());
         }
         command.event_type_id = self.event_type_id;
         command.action_type_id = self.action_type_id;
@@ -99,6 +105,7 @@ impl NServiceRequest {
             message_id: command.message_id,
             sop_class_uid,
             sop_instance_uid,
+            attribute_identifier_list: command.attribute_identifier_list.clone().unwrap_or_default(),
             event_type_id: command.event_type_id,
             action_type_id: command.action_type_id,
             dataset,
@@ -232,6 +239,25 @@ mod tests {
                 "{field:?} must not carry Affected SOP Instance UID"
             );
         }
+    }
+
+    #[test]
+    fn n_get_carries_the_attribute_identifier_list() {
+        let mut request = NServiceRequest::new(CommandField::NGetRq, 1);
+        request.sop_class_uid = Some("1.2.3".into());
+        request.sop_instance_uid = Some("1.2.3.4".into());
+        request.attribute_identifier_list = vec![
+            radicom::model::tag::Tag::PATIENT_NAME,
+            radicom::model::tag::Tag::PIXEL_DATA,
+        ];
+
+        let bytes = command_bytes(&request.to_command());
+        let value = element_value(&bytes, 0x0000, 0x1005).expect("Attribute Identifier List");
+        assert_eq!(value, vec![0x10, 0x00, 0x10, 0x00, 0xE0, 0x7F, 0x10, 0x00]);
+
+        let parsed = Command::from_dataset(&request.to_command().to_dataset()).unwrap();
+        let back = NServiceRequest::from_command(&parsed, None);
+        assert_eq!(back.attribute_identifier_list, request.attribute_identifier_list);
     }
 
     #[test]

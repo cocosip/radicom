@@ -195,6 +195,8 @@ pub struct Command {
     pub move_destination: Option<String>,
     pub affected_sop_instance_uid: Option<String>,
     pub requested_sop_instance_uid: Option<String>,
+    /// `(0000,1005)` Attribute Identifier List, used by N-GET requests.
+    pub attribute_identifier_list: Option<Vec<Tag>>,
     pub event_type_id: Option<u16>,
     pub action_type_id: Option<u16>,
     pub move_originator_ae_title: Option<String>,
@@ -221,6 +223,7 @@ impl Command {
             move_destination: None,
             affected_sop_instance_uid: None,
             requested_sop_instance_uid: None,
+            attribute_identifier_list: None,
             event_type_id: None,
             action_type_id: None,
             move_originator_ae_title: None,
@@ -287,6 +290,18 @@ impl Command {
         if let Some(uid) = &self.requested_sop_instance_uid {
             ds.insert_str(tag::REQUESTED_SOP_INSTANCE_UID, Vr::Ui, uid);
         }
+        if let Some(tags) = &self.attribute_identifier_list {
+            let mut bytes = Vec::with_capacity(tags.len() * 4);
+            for tag in tags {
+                bytes.extend_from_slice(&tag.group().to_le_bytes());
+                bytes.extend_from_slice(&tag.element().to_le_bytes());
+            }
+            ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+                tag::ATTRIBUTE_IDENTIFIER_LIST,
+                Vr::At,
+                Arc::new(MemoryBuffer::from(bytes)),
+            )));
+        }
         if let Some(id) = self.event_type_id {
             insert_us(&mut ds, tag::EVENT_TYPE_ID, id);
         }
@@ -334,6 +349,31 @@ impl Command {
             .ok_or(NetworkError::protocol("unknown command field"))?;
 
         let data_set_type: u16 = ds.get_or(tag::COMMAND_DATA_SET_TYPE, NO_DATA_SET);
+        let attribute_identifier_list = if ds.contains(&tag::ATTRIBUTE_IDENTIFIER_LIST) {
+            let element = ds
+                .get_element(tag::ATTRIBUTE_IDENTIFIER_LIST)
+                .map_err(|_| NetworkError::protocol("Attribute Identifier List is not an element"))?;
+            let Some(buffer) = element.value().as_buffer() else {
+                return Err(NetworkError::protocol("Attribute Identifier List is not binary"));
+            };
+            let bytes = buffer.data();
+            if bytes.len() % 4 != 0 {
+                return Err(NetworkError::protocol("Attribute Identifier List has an invalid length"));
+            }
+            let tags = bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|chunk| Tag::new(
+                    u16::from_le_bytes([chunk[0], chunk[1]]),
+                    u16::from_le_bytes([chunk[2], chunk[3]]),
+                ))
+                .collect();
+            Some(tags)
+        } else {
+            None
+        };
+
         Ok(Command {
             field,
             affected_sop_class_uid: ds.try_get_str(tag::AFFECTED_SOP_CLASS_UID).map(|s| s.trim().to_string()),
@@ -347,6 +387,7 @@ impl Command {
             move_destination: ds.try_get_str(tag::MOVE_DESTINATION).map(|s| s.trim().to_string()),
             affected_sop_instance_uid: ds.try_get_str(tag::AFFECTED_SOP_INSTANCE_UID).map(|s| s.trim().to_string()),
             requested_sop_instance_uid: ds.try_get_str(tag::REQUESTED_SOP_INSTANCE_UID).map(|s| s.trim().to_string()),
+            attribute_identifier_list,
             event_type_id: ds.get(tag::EVENT_TYPE_ID).ok(),
             action_type_id: ds.get(tag::ACTION_TYPE_ID).ok(),
             move_originator_ae_title: ds
