@@ -57,6 +57,8 @@ pub enum ClientEvent {
     AssociationAccepted { attempt: u32 },
     AssociationRejected { reason: u8 },
     AssociationReleased,
+    /// An association attempt timed out before the peer answered.
+    AssociationRequestTimedOut { attempts: u32 },
     /// A request exceeded its `request_timeout`; the batch moves to a new
     /// association.
     RequestTimedOut { message_id: u16 },
@@ -198,6 +200,11 @@ impl DicomClient {
                     return Err(other);
                 }
                 Err(other) => {
+                    if matches!(other, NetworkError::AssociationRequestTimedOut { .. })
+                        || matches!(&other, NetworkError::Io(error) if error.kind() == std::io::ErrorKind::TimedOut)
+                    {
+                        self.emit(ClientEvent::AssociationRequestTimedOut { attempts: attempt });
+                    }
                     // only a peer that never answered is worth another attempt:
                     // a refusal, a TLS failure or a protocol error will not
                     // improve, and 0 retries means exactly that (§2.8)
@@ -797,6 +804,22 @@ mod tests {
         let mut client = DicomClient::new("SCU", "SCP", addr.to_string()).with_options(impatient_options(0));
         assert!(client.send_c_echo(sop_class::VERIFICATION).await.is_err());
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn association_timeout_is_reported_to_event_handlers() {
+        let (addr, _attempts) = silent_peer().await;
+        let seen: Arc<std::sync::Mutex<Vec<ClientEvent>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
+            .with_options(impatient_options(2))
+            .with_event_handler(Arc::new(move |event| sink.lock().unwrap().push(event)));
+
+        let error = client.send_c_echo(sop_class::VERIFICATION).await.unwrap_err();
+        assert!(matches!(error, NetworkError::AssociationRequestTimedOut { .. }));
+        let events = seen.lock().unwrap();
+        assert!(events.contains(&ClientEvent::AssociationRequestTimedOut { attempts: 1 }));
+        assert!(events.contains(&ClientEvent::AssociationRequestTimedOut { attempts: 2 }));
     }
 
     #[tokio::test]

@@ -69,7 +69,7 @@
 | 每请求响应最多 N 次超时监控 | `DicomService.cs:1516` `WarningRequestTimedOut` + `CheckForTimeouts` | **缺失** | `client.rs:60` `ClientEvent::RequestTimedOut` 声明但全仓无 `emit`；`ClientOptions`（`server.rs:903-927`）无请求超时字段 | 长等待无上限，见 §1.3 |
 | 请求级 watchdog / PendingTable | `_pending` + `Options.RequestTimeout` | **缺失（模块未接线）** | `engine.rs:16-36` `EngineOptions{request_timeout}`、`engine.rs:67` `PendingTable`；`lib.rs:40` 仅 re-export | 全仓 grep `engine::`/`PendingTable` 除自身测试外无调用点，整模块是死代码 |
 | 关联事件 `StateChanged` | `DicomClient.cs:215-221`（6 个事件） | 缺失 | `client.rs:54-61` 只有 4 个变体 | 无状态机可见性 |
-| `AssociationRequestTimedOut` 事件 | `DicomClient.cs:215-221` | 缺失 | 仅有 `NetworkError::AssociationRequestTimedOut`（`error.rs:103`） | 事件层不暴露 |
+| `AssociationRequestTimedOut` 事件 | `DicomClient.cs:215-221` | **已实现** | `client.rs` `ClientEvent::AssociationRequestTimedOut`；超时尝试在 `open_association` 发出 | 每次可重试的关联超时都会携带累计尝试次数 |
 | 取消模式 `DicomClientCancellationMode` | `DicomClient.cs:175` `{ImmediatelyReleaseAssociation, ImmediatelyAbortAssociation}` | **缺失** | grep `CancellationMode` 无命中；只有 `client.rs:323` `release` / `client.rs:328` `abort` 两个方法 | 调用方自己组合，库层面无统一取消语义 |
 | 监听式 linger（队列空等 N ms） | `AssociationLingerTimeoutInMs` 默认 50 | 部分实现 | `client.rs:33`、`client.rs:206-208`、`client.rs:138-143` | 只在"配额用尽"时 sleep，队列语义不存在（同步 API 无队列），见 §2.7 |
 | 每关联请求配额 | `MaximumNumberOfRequestsPerAssociation` | 已实现 | `client.rs:30`、`client.rs:129-131` | 语义一致 |
