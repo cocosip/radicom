@@ -13,6 +13,7 @@
 use crate::cfind::{CFindRequest, CFindResponse};
 use crate::cget::{CGetRequest, CGetResponse};
 use crate::cmove::{CMoveRequest, CMoveResponse};
+use crate::engine::ConnectionState;
 use crate::error::{NetworkError, Result};
 use crate::pdu::PresentationContext;
 use crate::server::{Association, ClientOptions};
@@ -54,6 +55,8 @@ impl Default for DicomClientOptions {
 /// Events the client reports while it drives associations (§9.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientEvent {
+    /// The association lifecycle changed state.
+    StateChanged { state: ConnectionState },
     AssociationAccepted { attempt: u32 },
     AssociationRejected { reason: u8 },
     AssociationReleased,
@@ -195,6 +198,7 @@ impl DicomClient {
                     if let Some(handler) = self.reverse_store.clone() {
                         association.set_reverse_store_handler(handler);
                     }
+                    self.emit(ClientEvent::StateChanged { state: ConnectionState::Open });
                     self.emit(ClientEvent::AssociationAccepted { attempt });
                     self.sent_on_association = 0;
                     self.association = Some(association);
@@ -227,7 +231,9 @@ impl DicomClient {
     /// Releases the current association, tolerating a peer that already left.
     async fn close_association(&mut self) {
         if let Some(association) = self.association.take() {
+            self.emit(ClientEvent::StateChanged { state: ConnectionState::Closing });
             let _ = association.release().await;
+            self.emit(ClientEvent::StateChanged { state: ConnectionState::Closed });
             self.emit(ClientEvent::AssociationReleased);
         }
         self.sent_on_association = 0;
@@ -403,7 +409,9 @@ impl DicomClient {
     /// Aborts the association (§9.1 cancellation mode).
     pub async fn abort(&mut self) {
         if let Some(association) = self.association.take() {
+            self.emit(ClientEvent::StateChanged { state: ConnectionState::Closing });
             let _ = association.abort(0).await;
+            self.emit(ClientEvent::StateChanged { state: ConnectionState::Closed });
         }
         self.sent_on_association = 0;
         self.last_request = None;
@@ -516,8 +524,16 @@ mod tests {
         client.release().await;
 
         let events = seen.lock().unwrap().clone();
-        assert_eq!(events[0], ClientEvent::AssociationAccepted { attempt: 1 });
-        assert_eq!(events[1], ClientEvent::AssociationReleased);
+        assert_eq!(
+            events,
+            vec![
+                ClientEvent::StateChanged { state: ConnectionState::Open },
+                ClientEvent::AssociationAccepted { attempt: 1 },
+                ClientEvent::StateChanged { state: ConnectionState::Closing },
+                ClientEvent::StateChanged { state: ConnectionState::Closed },
+                ClientEvent::AssociationReleased,
+            ]
+        );
         handle.await.unwrap().unwrap();
     }
 
