@@ -3,7 +3,7 @@
 //!
 //! The engine here is intentionally small: it drives the association
 //! handshake, routes one command/response exchange, and closes gracefully.
-//! Larger service behaviour (streaming C-FIND, C-GET sub-operations) builds on
+//! Larger service behaviour (streaming C-FIND/C-MOVE, C-GET sub-operations) builds on
 //! these same primitives in M6.
 
 use crate::assembler::{PduSplitter, PdvAssembler, Stream};
@@ -706,46 +706,32 @@ where
         identifier,
     };
 
-    // collected for the same reason as C-FIND: the stream borrows the provider
-    // ponytail: buffered per request; stream straight through if a retrieve
-    // ever outgrows memory.
-    let mut responses = Vec::new();
-    {
-        use futures::StreamExt;
-        let mut stream = serving.provider.on_c_move(&request);
-        while let Some(response) = stream.next().await {
-            match response {
-                Ok(response) => {
-                    let terminal = !response.is_pending();
-                    responses.push(response);
-                    if terminal {
-                        break;
-                    }
-                }
-                Err(error) => {
-                    responses.push(crate::cmove::CMoveResponse::failure(
-                        &request,
-                        crate::dimse::status::PROCESSING_FAILURE,
-                        error.to_string(),
-                    ));
-                    break;
-                }
-            }
-        }
-    }
-
     // Sub-operation counters are cumulative per response (PS3.4 §C.4.2), so the
     // last Pending response carries the real progress; a provider that never
     // terminates its stream still gets an answer built from it.
+    use futures::StreamExt;
+    let provider = serving.provider.clone();
+    let mut stream = provider.on_c_move(&request);
     let mut summary = crate::cmove::SubOperationSummary::default();
     let mut terminated = false;
-    for response in responses {
+    while let Some(response) = stream.next().await {
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => crate::cmove::CMoveResponse::failure(
+                &request,
+                crate::dimse::status::PROCESSING_FAILURE,
+                error.to_string(),
+            ),
+        };
         if response.is_pending() {
             summary = response.summary;
         } else {
             terminated = true;
         }
         serving.send(context_id, &response.to_command()).await?;
+        if terminated {
+            break;
+        }
     }
     if !terminated {
         let response = crate::cmove::CMoveResponse::completed(&request, summary);
@@ -3536,6 +3522,80 @@ mod tests {
         assert_eq!(terminal.summary.failed, 1);
         assert_eq!(terminal.state(), crate::dimse::StatusState::Warning);
 
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn loopback_c_move_delivers_pending_before_provider_finishes() {
+        struct GatedMove {
+            release_terminal: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl ServiceProvider for GatedMove {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![sop_class::STUDY_ROOT_QR_MOVE.to_string()]
+            }
+
+            fn on_c_move<'a>(
+                &'a self,
+                request: &'a crate::cmove::CMoveRequest,
+            ) -> futures::stream::BoxStream<'a, Result<crate::cmove::CMoveResponse>> {
+                use futures::StreamExt;
+                let release_terminal = self.release_terminal.clone();
+                let pending = crate::cmove::CMoveResponse::pending(
+                    request,
+                    1,
+                    crate::cmove::SubOperationSummary::default(),
+                );
+                Box::pin(
+                    futures::stream::once(async move { Ok(pending) }).chain(futures::stream::once(async move {
+                        release_terminal.notified().await;
+                        Ok(crate::cmove::CMoveResponse::completed(
+                            request,
+                            crate::cmove::SubOperationSummary::default(),
+                        ))
+                    })),
+                )
+            }
+        }
+
+        let release_terminal = Arc::new(tokio::sync::Notify::new());
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(GatedMove { release_terminal: release_terminal.clone() }),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association =
+            Association::open(addr, "SCU", "SCP", vec![move_context()], ClientOptions::default())
+                .await
+                .unwrap();
+        let request = crate::cmove::CMoveRequest::study("1.2.3.4", "STORE-SCP", 1);
+        let mut responses = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            association.send_c_move_stream(&request, |response| {
+                let terminal = !response.is_pending();
+                responses.push(response);
+                if !terminal {
+                    release_terminal.notify_one();
+                }
+                Ok(())
+            }),
+        )
+        .await
+        .expect("the first pending response must not wait for the provider's terminal response")
+        .unwrap();
+
+        assert_eq!(responses.len(), 2);
+        assert!(responses[0].is_pending());
+        assert_eq!(responses[1].state(), crate::dimse::StatusState::Success);
         association.release().await.unwrap();
         handle.await.unwrap().unwrap();
     }

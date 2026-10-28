@@ -45,7 +45,7 @@
 | C-STORE SCP | `DicomCStoreProvider` | 已实现 | `server.rs:672-702` | 但默认 sink 有泄漏与性能问题，见 §2.2、§3.1 |
 | C-FIND SCP | `DicomCFindProvider` | 部分实现 | `server.rs:757-817` | Pending 结果已逐条发送；C-CANCEL 仍未中断 provider，见 §1.3 |
 | C-GET SCP | `DicomCGetProvider`（子操作在服务内发起） | 部分实现 | `server.rs:427-515` | 同源缓冲；`remaining` 只按预缓冲的 `Instance` 计数，见 §2.4 |
-| C-MOVE SCP | `DicomCMoveProvider` | 部分实现 | `server.rs:519-601` | provider 不终止时终端响应丢真实计数，见 §2.3 |
+| C-MOVE SCP | `DicomCMoveProvider` | 部分实现 | `server.rs:669-757` | Pending/终止响应已逐条发送；C-CANCEL 仍未中断 provider，见 §1.3 |
 | C-CANCEL 处理 | `DicomService.cs` 取消在途请求 | 部分实现 | `server.rs:338-347` | 收下即丢弃（`let _cancelled = ...; Ok(())`），provider 永远不知道被取消 |
 | N-EVENT-REPORT SCP | `IDicomNEventReportRequestProvider` | 已实现 | `services.rs:240-243`、`server.rs:404` | 实现存在；**无任何测试**覆盖（见 §4） |
 | N-GET / N-SET SCP | `IDicomNServiceProvider` | 已实现 | `services.rs:245-258`、`server.rs:405-410` | 同上，无测试 |
@@ -84,7 +84,7 @@
 
 | 项 | 位置 | 声明 | 判断 |
 | --- | --- | --- | --- |
-| C-MOVE/C-GET 结果全量缓冲 | `server.rs:567-757` `ponytail:` 注释 | "buffered per request; stream straight through if it ever outgrows memory" | C-FIND 已改为逐条发送；C-MOVE/C-GET 仍然缓冲，因此 C-CANCEL 仍无法中断这些 provider（§1.1） |
+| C-GET 结果全量缓冲 | `server.rs:567-669` `ponytail:` 注释 | "buffered per request; stream straight through if it ever outgrows memory" | C-FIND 与 C-MOVE 已改为逐条发送；C-GET 仍然缓冲，因此 C-CANCEL 仍无法中断该 provider（§1.1） |
 | role selection 默认不协商 | `association.rs:263-275` `accept_roles: false` | 默认拒绝 SCU/SCP 角色选择 | 有意取舍；但意味着 SCP 不能作为 SCU 反向发请求，C-GET 只能走同关联反向 C-STORE |
 | `expert.rs` 的 `RELEASE_TIMEOUT` | `expert.rs:233` | 常量声明 10s | **死代码**：全仓无引用（grep 确认）。不是"有意不实现"，是遗漏 |
 
@@ -175,22 +175,21 @@ StoreSink::SpoolToTemp => {
 
 这不是"内存有界换磁盘"的取舍，而是**无界磁盘增长**：文件既不交给调用方（`path: None`），也没有任何清理路径。正确行为：要么把 `path` 返回给调用方由其负责，要么在 provider 返回后删除，要么提供 `Drop` 清理；fo-dicom 对应路径 `DicomFile.Open(stream)` 直接用流，不落盘。
 
-### 2.3 【高】C-MOVE 兜底终端响应丢弃真实子操作计数
+### 2.3 【已修复】C-MOVE 兜底终端响应曾丢弃真实子操作计数
 
-位置：`server.rs:594-599`。
+此前位置：`server.rs:594-599`；当前实现位于 `server.rs:727-757`。
 
 ```rust
 if !terminated {
     // a provider that never terminated its stream still gets a final answer
-    let summary = crate::cmove::SubOperationSummary::default();   // ← 全 0
     let response = crate::cmove::CMoveResponse::completed(&request, summary);
     serving.send(context_id, &response.to_command()).await?;
 }
 ```
 
-`store_to_destination`（`cmove.rs:284-320`）返回真实 `SubOperationSummary`，但 provider 若只发 Pending 不发终端（这类 provider 现实存在：把进度和完成都交给 `store_to_destination` 自己收尾的写法），服务端会用**全 0 计数**收尾。PS3.4 C-MOVE 的终端响应必须带 `(0000,1021/1022/1023)` 实际计数，`cmove.rs:256` 也确实把它们写进命令集——于是 SCP 向 SCU 报告"0 completed, 0 failed"而实际搬了 N 个实例，`final_status()`（`cmove.rs:47-58`）也据此返回 `SUCCESS`，掩盖了全部失败。
+`store_to_destination`（`cmove.rs:284-320`）返回真实 `SubOperationSummary`。旧实现会在 provider 只发 Pending 不发终端时用**全 0 计数**收尾；当前实现保留循环中最后一个 Pending 的计数，兜底终端响应带出真实结果。PS3.4 C-MOVE 的终端响应必须带 `(0000,1021/1022/1023)` 实际计数，`cmove.rs:256` 也确实把它们写进命令集。
 
-对比 C-GET 同一位置（`server.rs:510-513`）用累加后的 `summary`，C-FIND（`server.rs:663-667`）用累计 `matches`——只有 C-MOVE 这一处退化成零值。正确行为：兜底时用循环里累加的真实 summary（与 C-GET 一致）。
+回归测试 `c_move_reports_the_real_counts_when_the_provider_never_terminates` 覆盖了该兜底路径；C-MOVE 现在还会在 provider 产生终止响应前逐条发送 Pending。
 
 ### 2.4 【高】C-GET 的 `remaining` 与进度语义错误
 
@@ -553,7 +552,7 @@ if end - pos < n { ... }
 
 位置：`server.rs:567-757`。
 
-C-MOVE 和 C-GET 仍先把 provider 的 `BoxStream` 收进 `Vec` 再逐条发送，代价是一次返回大量实例时内存峰值等于全部结果的序列化前体积，且 C-CANCEL 无法在 provider 运行期间生效。C-FIND 已采用逐条 `send_with_dataset`，首个 Pending 响应可在 provider 产生终端响应前到达 SCU；后续仍需为三种服务统一引入可观察的取消状态。
+C-GET 仍先把 provider 的 `BoxStream` 收进 `Vec` 再逐条发送，代价是一次返回大量实例时内存峰值等于全部结果的序列化前体积。C-FIND 与 C-MOVE 已采用逐条发送，首个 Pending 响应可在 provider 产生终端响应前到达 SCU；C-CANCEL 仍需引入可观察的取消状态，才能在 provider 运行期间中断三种服务。
 
 ### 3.6 【中】C-GET 每实例重新构造 `Transcoder` 并整体转码
 
@@ -704,7 +703,7 @@ async fn loopback_honours_a_small_peer_max_pdu() {   // 注释说 "a 64-byte max
 | --- | --- | --- | --- | --- |
 | 1 | 对端可触发 panic（默认连接级；`panic="abort"` 下进程级 remote DoS） | `dimse.rs:225` ← `server.rs:354-359` | **已修复** | 协议错误路径返回 Provider A-ABORT；响应型 command 保留 User-source A-ABORT |
 | 2 | 默认 sink 临时文件泄漏 | `store.rs:46-49` | 高 | 小（返回路径或删文件） |
-| 3 | C-MOVE 终端计数归零 | `server.rs:594-599` | 高 | 一行（用累加 summary） |
+| 3 | C-MOVE 终端计数归零 | `server.rs:727-757` | **已修复** | 用累加 summary 兜底，并有回归测试 |
 | 4 | `max_clients` 不生效 | `server.rs:125-147` | 高 | 小（Semaphore，fo-dicom 有现成模型） |
 | 5 | 服务端无 ACSE 超时 | `server.rs:177` | 高 | 一行（包 `timeout`） |
 | 6 | C-GET `remaining` 语义 | `server.rs:479-494` | 高 | 中（改由 provider 驱动） |
