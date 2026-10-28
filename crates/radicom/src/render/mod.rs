@@ -34,6 +34,65 @@ pub use spatial::SpatialTransform;
 /// Default overlay colour: magenta `0xFF_FF00FF` (docs §1.2).
 pub const DEFAULT_OVERLAY_COLOR: crate::pixel::Color32 = crate::pixel::Color32::new(0xFF, 0x00, 0xFF);
 
+/// A parsed VOI LUT (`(0028,3010)` item, PS3.3 C.11.2.1.1): maps rescaled input
+/// values to 8-bit output via a descriptor + data table.
+#[derive(Debug, Clone)]
+pub struct VoiLut {
+    first_mapped: i32,
+    /// One output byte per entry (8-bit; 16-bit data keeps the high byte).
+    entries: Vec<u8>,
+}
+
+impl VoiLut {
+    /// Builds from a VOI LUT Sequence item's `(0028,3002)` descriptor and
+    /// `(0028,3006)` data. Returns `None` when either is missing or malformed.
+    pub fn from_item(item: &Dataset) -> Option<VoiLut> {
+        let desc = element_bytes(item, Tag::new(0x0028, 0x3002))?;
+        if desc.len() < 6 {
+            return None;
+        }
+        let entries = u16::from_le_bytes([desc[0], desc[1]]);
+        let count = if entries == 0 { 65536usize } else { entries as usize };
+        // first mapped pixel value is SS (signed) per PS3.3; keep its bit pattern
+        let first_mapped = u16::from_le_bytes([desc[2], desc[3]]) as i16 as i32;
+        let bits = u16::from_le_bytes([desc[4], desc[5]]);
+        let data = element_bytes(item, Tag::new(0x0028, 0x3006))?;
+
+        let mut out = Vec::with_capacity(count);
+        if data.len() == count {
+            out.extend_from_slice(&data[..count]);
+        } else {
+            // two bytes per entry; 16-bit uses the high byte (offset 1), else low
+            let offset = if bits == 16 { 1 } else { 0 };
+            for i in 0..count {
+                out.push(*data.get(i * 2 + offset).unwrap_or(&0));
+            }
+        }
+        Some(VoiLut { first_mapped, entries: out })
+    }
+
+    /// Maps a rescaled input value to an output byte; out-of-range clamps to the
+    /// nearest endpoint (PS3.3 C.11.2.1.1).
+    pub fn map(&self, value: f64) -> u8 {
+        if self.entries.is_empty() {
+            return 0;
+        }
+        let index = value.round() as i64 - self.first_mapped as i64;
+        let clamped = index.clamp(0, self.entries.len() as i64 - 1) as usize;
+        self.entries[clamped]
+    }
+}
+
+/// Reads an element's bytes from a dataset (raw buffer form).
+fn element_bytes(dataset: &Dataset, tag: Tag) -> Option<Vec<u8>> {
+    match dataset.item(&tag)? {
+        crate::model::item::DicomItem::Element(e) => {
+            e.value().as_buffer().map(|b| b.data().to_vec())
+        }
+        _ => None,
+    }
+}
+
 /// VOI LUT function selector (docs §3, §4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoiFunction {
@@ -54,8 +113,11 @@ pub struct GrayscaleRenderOptions {
     pub window_center: f64,
     pub window_width: f64,
     pub invert: bool,
-    /// True when `(0028,3010)` VOI LUT Sequence is present (not yet applied).
+    /// True when `(0028,3010)` VOI LUT Sequence is present.
     pub use_voi_lut: bool,
+    /// Parsed first VOI LUT item, applied in place of the window function when
+    /// `use_voi_lut` is set (PS3.3 C.11.2.1.1).
+    pub voi_lut: Option<VoiLut>,
 }
 
 impl GrayscaleRenderOptions {
@@ -69,12 +131,22 @@ impl GrayscaleRenderOptions {
         let rescale_intercept = dataset.try_get::<String>(Tag::new(0x0028, 0x1052)).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
         let rescale_slope = dataset.try_get::<String>(Tag::new(0x0028, 0x1053)).and_then(|s| s.trim().parse().ok()).unwrap_or(1.0);
 
-        let (window_center, window_width) = resolve_window(dataset)?;
+        // A VOI LUT Sequence takes precedence over WindowCenter/Width (docs §4):
+        // when its first item is usable, no window is required.
+        let voi_lut = dataset
+            .try_get_sequence(Tag::new(0x0028, 0x3010))
+            .and_then(|seq| seq.items().first())
+            .and_then(VoiLut::from_item);
+        let (window_center, window_width) = if voi_lut.is_some() {
+            (0.0, 0.0)
+        } else {
+            resolve_window(dataset)?
+        };
 
         // LINEAR with width < 1 switches to LINEAR_EXACT (fo-dicom #1905)
         let voi_lut_function = VoiFunction::Linear;
 
-        let use_voi_lut = dataset.try_get_sequence(Tag::new(0x0028, 0x3010)).is_some();
+        let use_voi_lut = voi_lut.is_some();
         let invert = dataset
             .try_get_str(Tag::new(0x0028, 0x0004))
             .map(|pi| pi.trim() == "MONOCHROME1")
@@ -88,6 +160,7 @@ impl GrayscaleRenderOptions {
             window_width,
             invert,
             use_voi_lut,
+            voi_lut,
         })
     }
 
@@ -101,6 +174,7 @@ impl GrayscaleRenderOptions {
             window_width: width,
             invert: false,
             use_voi_lut: false,
+            voi_lut: None,
         }
     }
 
@@ -113,6 +187,14 @@ impl GrayscaleRenderOptions {
 
     /// Applies only the VOI stage to an already-rescaled value.
     pub fn map_rescaled(&self, value: f64) -> u8 {
+        // A present VOI LUT Sequence overrides the window function (docs §4).
+        if let Some(lut) = &self.voi_lut {
+            let mut out = lut.map(value) as f64;
+            if self.invert {
+                out = 255.0 - out;
+            }
+            return out.round().clamp(0.0, 255.0) as u8;
+        }
         let mut out = match self.voi_lut_function {
             // width < 1 is treated as <= 1 to avoid a divide-by-zero (docs §3)
             VoiFunction::Linear => {
@@ -701,6 +783,61 @@ mod tests {
         // must not divide by zero; below the centre clamps to black
         assert_eq!(o.map(50.0), 0);
         assert_eq!(o.map(150.0), 255);
+    }
+
+    /// Inserts a `(0028,3010)` VOI LUT Sequence whose one item maps stored values
+    /// `[first .. first+entries)` through `data` (8-bit entries).
+    fn put_voi_lut(ds: &mut Dataset, first: i16, data: &[u8]) {
+        let seq = ds.insert_sequence(Tag::new(0x0028, 0x3010));
+        let mut item = Dataset::new();
+        let entries = data.len() as u16;
+        let mut desc = Vec::new();
+        desc.extend_from_slice(&entries.to_le_bytes()); // number of entries
+        desc.extend_from_slice(&(first as u16).to_le_bytes()); // first mapped (SS)
+        desc.extend_from_slice(&8u16.to_le_bytes()); // bits per entry
+        item.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::new(0x0028, 0x3002),
+                Vr::Us,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(desc)),
+            ),
+        ));
+        item.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::new(0x0028, 0x3006),
+                Vr::Ow,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(data.to_vec())),
+            ),
+        ));
+        seq.push(item);
+    }
+
+    #[test]
+    fn a_voi_lut_sequence_overrides_the_window_function() {
+        // Stored values 10, 11 with a VOI LUT at first_mapped=10 and data
+        // [0, 200]: 10 → 0, 11 → 200. No WindowCenter is present.
+        let mut ds = gray_image(2, 1, 8, &[10, 11], None, None);
+        put_voi_lut(&mut ds, 10, &[0, 200]);
+
+        let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
+        assert!(o.use_voi_lut && o.voi_lut.is_some(), "VOI LUT detected");
+        assert_eq!(o.map(10.0), 0);
+        assert_eq!(o.map(11.0), 200);
+
+        let image = render_frame(&ds, 0).unwrap();
+        let b = image.as_bytes();
+        assert_eq!(b[0], 0, "pixel 0 through the LUT");
+        assert_eq!(b[4], 200, "pixel 1 through the LUT");
+    }
+
+    #[test]
+    fn a_voi_lut_clamps_values_outside_its_range() {
+        let mut ds = gray_image(1, 1, 8, &[50], None, None);
+        // first_mapped=10, two entries [0, 250]; value 50 is beyond the top
+        put_voi_lut(&mut ds, 10, &[0, 250]);
+        let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
+        assert_eq!(o.map(50.0), 250, "above range clamps to the last entry");
+        assert_eq!(o.map(0.0), 0, "below range clamps to the first entry");
     }
 
     #[test]
