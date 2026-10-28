@@ -762,6 +762,42 @@ mod tests {
     }
 
     #[test]
+    fn malformed_inputs_do_not_panic() {
+        // Parsing untrusted bytes must never panic — only return Ok/Err.
+        let cases: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            vec![0u8; 4],
+            vec![0xFFu8; 128],
+            {
+                let mut v = vec![0u8; 128];
+                v.extend_from_slice(b"DICM");
+                v
+            },
+            {
+                let mut v = vec![0u8; 128];
+                v.extend_from_slice(b"DICM");
+                v.extend_from_slice(&[0x02, 0x00, 0x00, 0x00]); // truncated meta tag
+                v
+            },
+            {
+                let mut v = vec![0u8; 128];
+                v.extend_from_slice(b"DICM");
+                v.extend_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x55, 0x4C, 0x04, 0x00, 0, 0, 0, 0]);
+                v.extend_from_slice(&[0x08, 0x00, 0x05, 0x00, 0x4C, 0x4F, 0x10, 0x00, 0x41]); // lies about length
+                v
+            },
+        ];
+        for bytes in &cases {
+            let _ = DicomFile::from_bytes(bytes, &ReadOptions::default());
+        }
+        // truncating a real file at every byte length must not panic either
+        let good = sample_file().to_bytes(&WriteOptions::default()).unwrap();
+        for n in 0..good.len() {
+            let _ = DicomFile::from_bytes(&good[..n], &ReadOptions::default());
+        }
+    }
+
+    #[test]
     fn deflated_file_round_trips() {
         let mut file = sample_file();
         file.dataset.set_transfer_syntax(syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone());
