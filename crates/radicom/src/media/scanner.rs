@@ -53,6 +53,8 @@ pub enum ScanEvent {
     Progress { scanned: usize, matched: usize },
     /// Emitted for each matched file, before it is opened.
     File { path: PathBuf, index: usize },
+    /// Emitted once after a scan completes successfully.
+    Complete { summary: ScanSummary },
 }
 
 /// Receives scan events (§3.5). Implement to stream progress or collect files.
@@ -102,6 +104,7 @@ where
     };
     let mut summary = ScanSummary::default();
     walk(root.as_ref(), 0, options, matcher.as_ref(), &mut summary, visitor, &mut on_match)?;
+    visitor.on_event(ScanEvent::Complete { summary: summary.clone() });
     Ok(summary)
 }
 
@@ -451,6 +454,23 @@ mod tests {
         .unwrap();
         assert_eq!(files, 2);
         assert!(progress_seen, "progress events fire after each match");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn scan_emits_a_complete_event_with_the_summary() {
+        let dir = temp_dir("complete");
+        touch(&dir.join("a.dcm"));
+
+        let mut complete = None;
+        let summary = scan_directory(&dir, &ScanOptions::default(), &mut |event| {
+            if let ScanEvent::Complete { summary } = event {
+                complete = Some(summary);
+            }
+        }, |_| Ok::<(), Error>(()))
+        .unwrap();
+
+        assert_eq!(complete, Some(summary));
         let _ = fs::remove_dir_all(dir);
     }
 
