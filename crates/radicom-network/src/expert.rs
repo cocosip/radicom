@@ -343,6 +343,10 @@ mod tests {
         connection.abort(3).await.unwrap();
         assert!(!connection.is_associated());
         assert_eq!(connection.events().last(), Some(&ConnectionEvent::Aborted { reason: 3 }));
-        handle.await.unwrap().unwrap();
+        // §2.16: the server reports the peer's abort instead of a clean close
+        match handle.await.unwrap() {
+            Err(NetworkError::Abort { source_code, reason }) => assert_eq!((source_code, reason), (0, 3)),
+            other => panic!("expected an abort error, got {other:?}"),
+        }
     }
 }

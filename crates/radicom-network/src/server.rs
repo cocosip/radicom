@@ -327,7 +327,11 @@ where
                 serving.send_pdu(&Pdu::ReleaseRp).await?;
                 return Ok(());
             }
-            Pdu::Abort(_) => return Ok(()),
+            // PS3.8 §9.3.8: the peer gave up on the association. Returning Ok
+            // here would report a peer abort as a clean close (§2.16).
+            Pdu::Abort(abort) => {
+                return Err(NetworkError::Abort { source_code: abort.source.code(), reason: abort.reason })
+            }
             other => {
                 return Err(NetworkError::protocol(match other {
                     Pdu::AssociateRq(_) => "unexpected A-ASSOCIATE-RQ after association",
@@ -359,8 +363,12 @@ where
     match command.field {
         CommandField::CEchoRq => {
             let request = CEchoRequest::from_command(&command)?;
-            let response = serving.provider.on_c_echo(&request).await?;
-            serving.send(context_id, &response.to_command()).await
+            // a provider error is a failed operation, not a broken association
+            // (the C-STORE and N-service paths already answer a failure status)
+            match serving.provider.on_c_echo(&request).await {
+                Ok(response) => serving.send(context_id, &response.to_command()).await,
+                Err(error) => serving.fail(context_id, &command, &format!("C-ECHO failed: {error}")).await,
+            }
         }
         CommandField::CCancelRq => {
             // §7.6 / SRV-08: acknowledge the cancel for the request named in
@@ -456,6 +464,18 @@ where
     }
 }
 
+/// True for failures that mean the association itself is unusable (§2.10).
+///
+/// Everything else — a missing SOP class, an instance without the UIDs needed
+/// to address it, a transcode that cannot run — describes one sub-operation,
+/// so C-GET records it as failed and carries on with the next instance.
+fn is_fatal(error: &NetworkError) -> bool {
+    matches!(
+        error,
+        NetworkError::Io(_) | NetworkError::Abort { .. } | NetworkError::ClosedPrematurely { .. }
+    )
+}
+
 /// The C-GET path: deliver instances back as reverse C-STORE sub-operations
 /// (§7.4).
 async fn handle_c_get<P: ServiceProvider, S>(
@@ -510,22 +530,32 @@ where
     }
 
     let mut summary = crate::cmove::SubOperationSummary::default();
+    // PS3.7 §9.1.3: (0000,1020) counts the C-STORE sub-operations still to be
+    // performed *including* the one the response belongs to, so the first of
+    // three instances reports 3 and only the terminal response reports 0.
     let mut remaining = events.iter().filter(|e| matches!(e, crate::cget::CGetEvent::Instance(_))).count() as u16;
+    // A provider that reports its own progress owns (0000,1020): forwarding its
+    // numbers beats recomputing them from the instances we happen to see.
+    let provider_reports_progress =
+        events.iter().any(|e| matches!(e, crate::cget::CGetEvent::Response(r) if r.is_pending()));
     let mut terminated = false;
     for event in events {
         match event {
             crate::cget::CGetEvent::Instance(file) => {
                 let state = match serving.send_reverse_store(&file).await {
                     Ok(state) => state,
-                    // the SCU did not negotiate a context for this instance:
-                    // one failed sub-operation, not a dropped association
-                    Err(NetworkError::SopClassNotSupported { .. }) => StatusState::Failure,
-                    Err(other) => return Err(other),
+                    // PS3.4 C.4.2: an instance that cannot be delivered is one
+                    // failed sub-operation, not a reason to drop the
+                    // association and every instance already sent (§2.10)
+                    Err(error) if is_fatal(&error) => return Err(error),
+                    Err(_) => StatusState::Failure,
                 };
                 summary.record(state);
+                if !provider_reports_progress {
+                    let progress = crate::cget::CGetResponse::pending(&request, remaining, summary);
+                    serving.send(context_id, &progress.to_command()).await?;
+                }
                 remaining = remaining.saturating_sub(1);
-                let progress = crate::cget::CGetResponse::pending(&request, remaining, summary);
-                serving.send(context_id, &progress.to_command()).await?;
             }
             crate::cget::CGetEvent::Response(response) => {
                 if !response.is_pending() {
@@ -943,6 +973,9 @@ where
 pub struct ClientOptions {
     pub max_pdu_length: u32,
     pub association_timeout: Duration,
+    /// How long a graceful release waits for the peer's A-RELEASE-RP before
+    /// the association is reported as timed out (§9.3.6).
+    pub release_timeout: Duration,
     /// User identity to offer; validated before the association is attempted
     /// (§4.3).
     pub user_identity: Option<crate::pdu::UserIdentity>,
@@ -958,6 +991,7 @@ impl Default for ClientOptions {
         ClientOptions {
             max_pdu_length: 16384,
             association_timeout: Duration::from_secs(5),
+            release_timeout: Duration::from_secs(10),
             user_identity: None,
             extended_negotiations: Vec::new(),
             #[cfg(feature = "tls")]
@@ -1032,7 +1066,11 @@ pub struct Association {
     contexts: AcceptedContexts,
     splitter: PduSplitter,
     assembler: PdvAssembler,
-    next_message_id: u16,
+    /// Requests this side sent and whose response is still outstanding; the
+    /// allocator skips their message IDs (§5.2).
+    pending: crate::engine::PendingTable,
+    /// How long [`Self::release`] waits for the peer's A-RELEASE-RP.
+    release_timeout: Duration,
     /// Answers reverse C-STORE sub-operations; required for C-GET (§7.4).
     reverse_store: Option<ReverseStoreHandler>,
     /// What the peer granted in SOP Class Extended Negotiation (§4.3).
@@ -1160,7 +1198,8 @@ impl Association {
             contexts: accepted,
             splitter: PduSplitter::new(peer_max_pdu, 16),
             assembler: PdvAssembler::new(),
-            next_message_id: 1,
+            pending: crate::engine::PendingTable::new(),
+            release_timeout: options.release_timeout,
             reverse_store: None,
             peer_extended,
             peer_identity_response,
@@ -1216,19 +1255,23 @@ impl Association {
     pub async fn send_c_echo(&mut self, abstract_syntax: &str) -> Result<CEchoResponse> {
         let context = self.contexts.pick(abstract_syntax, "")?;
         let context_id = context.id;
-        let message_id = self.allocate_message_id();
+        let message_id = self.allocate_message_id()?;
         let request = CEchoRequest {
             message_id,
             affected_sop_class_uid: abstract_syntax.to_string(),
         };
 
-        let bytes = command_bytes(&request.to_command())?;
+        let command = request.to_command();
+        let bytes = command_bytes(&command)?;
         for pdata in self.splitter.split(context_id, true, &bytes)? {
             write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
         }
 
-        let command = self.await_response(message_id, CommandField::CEchoRsp).await?;
-        CEchoResponse::from_command(&command)
+        self.pending
+            .insert(crate::engine::PendingRequest::new(command, std::time::Instant::now()));
+        let response = self.await_response(message_id, CommandField::CEchoRsp).await;
+        self.pending.remove(message_id);
+        CEchoResponse::from_command(&response?)
     }
 
     /// Sends a C-STORE and waits for its response (§7.2).
@@ -1264,7 +1307,7 @@ impl Association {
         let context = self.contexts.pick(&sop_class, dataset.transfer_syntax().uid())?;
         let context_id = context.id;
         let target = transfer_syntax_of(&context.transfer_syntax);
-        let message_id = self.allocate_message_id();
+        let message_id = self.allocate_message_id()?;
 
         let mut request = Command::request(CommandField::CStoreRq, message_id);
         request.affected_sop_class_uid = Some(sop_class);
@@ -1295,7 +1338,11 @@ impl Association {
             write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
         }
 
-        self.await_response(message_id, CommandField::CStoreRsp).await.map(|command| {
+        self.pending
+            .insert(crate::engine::PendingRequest::new(request.clone(), std::time::Instant::now()));
+        let response = self.await_response(message_id, CommandField::CStoreRsp).await;
+        self.pending.remove(message_id);
+        response.map(|command| {
             CStoreResponse::from_command(&command).unwrap_or_else(|_| CStoreResponse {
                 message_id_being_responded_to: message_id,
                 status: crate::dimse::status::PROCESSING_FAILURE,
@@ -1732,11 +1779,25 @@ impl Association {
         }
     }
 
+    /// Releases the association and waits for the peer's A-RELEASE-RP (§9.3.6).
+    ///
+    /// A peer that answers with an A-ABORT, with something else, or not at all
+    /// within `release_timeout` did not release: reporting success there would
+    /// hide a broken peer, so each case is an error.
     pub async fn release(mut self) -> Result<()> {
         write_pdu(&mut self.stream, &Pdu::ReleaseRq).await?;
-        // wait for A-RELEASE-RP, tolerating a peer that just closes
-        let _ = read_pdu(&mut self.stream).await;
-        Ok(())
+        let release_timeout = self.release_timeout;
+        let response = tokio::time::timeout(release_timeout, read_pdu(&mut self.stream))
+            .await
+            .map_err(|_| NetworkError::ReleaseTimedOut { timeout_ms: release_timeout.as_millis() as u64 })??;
+        match response {
+            Some(Pdu::ReleaseRp) => Ok(()),
+            Some(Pdu::Abort(abort)) => {
+                Err(NetworkError::Abort { source_code: abort.source.code(), reason: abort.reason })
+            }
+            Some(_) => Err(NetworkError::protocol("expected A-RELEASE-RP")),
+            None => Err(NetworkError::ClosedPrematurely { source: None }),
+        }
     }
 
     /// Aborts the association (§3.3).
@@ -1745,10 +1806,12 @@ impl Association {
         write_pdu(&mut self.stream, &Pdu::Abort(abort)).await
     }
 
-    fn allocate_message_id(&mut self) -> u16 {
-        let id = self.next_message_id;
-        self.next_message_id = if self.next_message_id == u16::MAX { 1 } else { self.next_message_id + 1 };
-        id
+    /// Allocates a message ID for a request this side sends (§5.2).
+    ///
+    /// IDs still awaiting a response are skipped, so the wrap at 65535 can
+    /// never hand an in-flight ID to a new request.
+    fn allocate_message_id(&mut self) -> Result<u16> {
+        self.pending.allocate_message_id()
     }
 }
 
@@ -1960,7 +2023,13 @@ mod tests {
         .await
         .unwrap();
         association.abort(0).await.unwrap();
-        handle.await.unwrap().unwrap();
+        // §2.16: a peer abort is not a clean close, so the server reports it
+        match handle.await.unwrap() {
+            Err(NetworkError::Abort { source_code, reason }) => {
+                assert_eq!((source_code, reason), (0, 0), "the peer's own abort source and reason");
+            }
+            other => panic!("expected the peer abort to surface as an error, got {other:?}"),
+        }
     }    /// A provider that records every stored instance.
     struct RecordingProvider {
         stored: std::sync::Mutex<Vec<String>>,
@@ -2151,7 +2220,54 @@ mod tests {
 
         association.release().await.unwrap();
         handle.await.unwrap().unwrap();
-    }    /// A provider answering C-FIND with fixed study matches.
+    }
+
+    #[tokio::test]
+    async fn a_failing_echo_provider_answers_processing_failure() {
+        // a provider error must not kill the association: the peer gets a
+        // failure status and can keep using the connection
+        struct FailingEcho;
+        #[async_trait::async_trait]
+        impl ServiceProvider for FailingEcho {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![sop_class::VERIFICATION.to_string()]
+            }
+            async fn on_c_echo(&self, _request: &CEchoRequest) -> Result<CEchoResponse> {
+                Err(NetworkError::protocol("provider exploded"))
+            }
+        }
+
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(FailingEcho),
+            ServerOptions { store_sink: crate::store::StoreSink::Memory, ..Default::default() },
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let contexts =
+            vec![PresentationContext::new(1, sop_class::VERIFICATION, vec!["1.2.840.10008.1.2".to_string()])];
+        let mut association = Association::open(addr, "SCU", "SCP", contexts, ClientOptions::default())
+            .await
+            .unwrap();
+
+        let response = association.send_c_echo(sop_class::VERIFICATION).await.unwrap();
+        assert_eq!(
+            response.state(),
+            crate::dimse::StatusState::Failure,
+            "a provider error is answered as a failed operation"
+        );
+        // the association is still healthy: a second echo gets an answer, not EOF
+        let again = association.send_c_echo(sop_class::VERIFICATION).await.unwrap();
+        assert_eq!(again.state(), crate::dimse::StatusState::Failure);
+
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    /// A provider answering C-FIND with fixed study matches.
     struct QueryProvider {
         matches: Vec<(String, String)>,
     }
@@ -3089,5 +3205,181 @@ mod tests {
             Err(NetworkError::AssociationRequestTimedOut { .. }) => {}
             other => panic!("expected AssociationRequestTimedOut, got {other:?}"),
         }
+    }
+
+    // -- service semantics: remaining counts, message IDs, sub-operations -----
+
+    /// The contexts a C-GET needs: the retrieve model plus the storage class.
+    fn get_contexts() -> Vec<PresentationContext> {
+        vec![
+            get_context(),
+            PresentationContext::new(3, "1.2.840.10008.5.1.4.1.1.7", vec!["1.2.840.10008.1.2".to_string()]),
+        ]
+    }
+
+    fn instance_with_uid(uid: &str) -> radicom::io::file::DicomFile {
+        let mut dataset = Dataset::new();
+        dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, uid);
+        dataset.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        radicom::io::file::DicomFile::from_dataset(dataset)
+    }
+
+    #[tokio::test]
+    async fn c_get_reports_the_remaining_sub_operations() {
+        // PS3.7 §9.1.3: (0000,1020) counts the sub-operations still to be
+        // performed including the current one, so three instances report
+        // 3, 2, 1 and only the terminal response reports 0 (§4.6).
+        let provider = Arc::new(GetProvider {
+            instances: vec![
+                instance_with_uid("1.2.3.4.5.1"),
+                instance_with_uid("1.2.3.4.5.2"),
+                instance_with_uid("1.2.3.4.5.3"),
+            ],
+        });
+        let server = DicomServer::bind("127.0.0.1:0", provider, ServerOptions::default()).await.unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association =
+            Association::open(addr, "GET-SCU", "GET-SCP", get_contexts(), ClientOptions::default())
+                .await
+                .unwrap();
+        // the reverse C-STORE message IDs must be distinct, or the SCU cannot
+        // match its responses (§4.6)
+        let stored = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = stored.clone();
+        association.set_reverse_store_handler(Arc::new(move |request: &CStoreRequest| {
+            sink.lock().unwrap().push(request.message_id);
+            Ok(CStoreResponse::success(request))
+        }));
+
+        let responses = association
+            .send_c_get(&crate::cget::CGetRequest::study("1.2.3.4", 1))
+            .await
+            .unwrap();
+
+        let pending: Vec<u16> = responses.iter().filter(|r| r.is_pending()).map(|r| r.remaining).collect();
+        assert_eq!(pending, vec![3, 2, 1], "the count includes the sub-operation being reported");
+        let terminal = responses.last().unwrap();
+        assert!(!terminal.is_pending());
+        assert_eq!(terminal.remaining, 0, "only the end reports none left");
+        assert_eq!(terminal.summary.completed, 3);
+        assert_eq!(terminal.status, crate::dimse::status::SUCCESS);
+
+        let mut ids = stored.lock().unwrap().clone();
+        assert_eq!(ids.len(), 3);
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 3, "every reverse C-STORE has its own message ID");
+
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn c_get_records_an_undeliverable_instance_and_carries_on() {
+        // §2.10: an instance the SCP cannot address is one failed
+        // sub-operation; the instances after it still have to arrive.
+        let mut broken = instance_with_uid("1.2.3.4.5.1");
+        broken.dataset.remove(Tag::SOP_INSTANCE_UID);
+        let provider = Arc::new(GetProvider { instances: vec![broken, instance_with_uid("1.2.3.4.5.2")] });
+        let server = DicomServer::bind("127.0.0.1:0", provider, ServerOptions::default()).await.unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association =
+            Association::open(addr, "GET-SCU", "GET-SCP", get_contexts(), ClientOptions::default())
+                .await
+                .unwrap();
+        let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+        association.collect_reverse_stores(received.clone());
+
+        let responses = association
+            .send_c_get(&crate::cget::CGetRequest::study("1.2.3.4", 1))
+            .await
+            .expect("the retrieval completes despite the broken instance");
+
+        assert_eq!(received.lock().unwrap().len(), 1, "the good instance still arrived");
+        let terminal = responses.last().unwrap();
+        assert_eq!(terminal.summary.completed, 1);
+        assert_eq!(terminal.summary.failed, 1);
+        assert_eq!(
+            terminal.status,
+            crate::dimse::status::SUBOPERATIONS_COMPLETED_WITH_WARNINGS,
+            "a partial retrieve is not a failure"
+        );
+
+        // the association survived: it can still be released cleanly
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn message_ids_skip_requests_still_in_flight() {
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association =
+            Association::open(addr, "SCU", "SCP", vec![echo_context()], ClientOptions::default()).await.unwrap();
+        // message ID 1 is still awaiting a response
+        association.pending.insert(crate::engine::PendingRequest::new(
+            Command::request(CommandField::CEchoRq, 1),
+            std::time::Instant::now(),
+        ));
+        assert_eq!(association.allocate_message_id().unwrap(), 2, "an in-flight ID is skipped");
+        // the ordinary path still allocates, sends and releases its entry
+        let response = association.send_c_echo(sop_class::VERIFICATION).await.unwrap();
+        assert_eq!(response.status, crate::dimse::status::SUCCESS);
+
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn release_reports_a_peer_abort_instead_of_success() {
+        // §2.13: the peer must answer A-RELEASE-RQ with A-RELEASE-RP
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            crate::test_wire::accept_association(&mut stream).await;
+            let release = read_pdu(&mut stream).await.unwrap();
+            assert!(matches!(release, Some(Pdu::ReleaseRq)), "expected A-RELEASE-RQ");
+            let abort = Abort { source: AbortSource::Provider, reason: 0 };
+            write_pdu(&mut stream, &Pdu::Abort(abort)).await.unwrap();
+        });
+
+        let association =
+            Association::open(addr, "SCU", "SCP", vec![echo_context()], ClientOptions::default()).await.unwrap();
+        match association.release().await {
+            Err(NetworkError::Abort { source_code, reason }) => assert_eq!((source_code, reason), (2, 0)),
+            other => panic!("expected the peer abort to surface, got {other:?}"),
+        }
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn release_times_out_when_the_release_rp_never_arrives() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            crate::test_wire::accept_association(&mut stream).await;
+            // swallow the release request and stay silent
+            let _ = read_pdu(&mut stream).await;
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+
+        let options = ClientOptions { release_timeout: Duration::from_millis(100), ..Default::default() };
+        let association = Association::open(addr, "SCU", "SCP", vec![echo_context()], options).await.unwrap();
+        match association.release().await {
+            Err(NetworkError::ReleaseTimedOut { timeout_ms }) => assert_eq!(timeout_ms, 100),
+            other => panic!("expected a release timeout, got {other:?}"),
+        }
+        peer.abort();
     }
 }

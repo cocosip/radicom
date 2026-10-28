@@ -101,6 +101,8 @@ pub enum NetworkError {
     AssociationRequestTimedOut { attempts: u32 },
     #[error("request {message_id} timed out")]
     RequestTimedOut { message_id: u16 },
+    #[error("A-RELEASE-RP did not arrive within {timeout_ms} ms")]
+    ReleaseTimedOut { timeout_ms: u64 },
     #[error("connection closed prematurely")]
     ClosedPrematurely { source: Option<Box<NetworkError>> },
     #[error("protocol violation: {0}")]

@@ -24,34 +24,38 @@ pub struct SubOperationSummary {
 }
 
 impl SubOperationSummary {
-    /// Total instances the operation covered.
+    /// Total instances the operation covered; a warning counts once.
     pub fn total(&self) -> u16 {
-        self.completed.saturating_add(self.failed).saturating_add(self.warning)
+        self.completed.saturating_add(self.failed)
     }
 
     /// Folds one sub-operation's terminal status into the counters.
     ///
-    /// Only terminal statuses are meaningful here: a Pending response reports
-    /// progress, not the outcome of an instance.
+    /// PS3.7 status categories: Success and Warning are both *completed*
+    /// sub-operations, and a warning only raises (0000,1023) on top of that, so
+    /// `warning` is a subset of `completed` rather than a third bucket.
+    /// Failure is the one failure bucket; Cancel and Pending are not instance
+    /// outcomes at all and must not pollute the counts.
     pub fn record(&mut self, state: StatusState) {
         match state {
             StatusState::Success => self.completed = self.completed.saturating_add(1),
-            StatusState::Warning => self.warning = self.warning.saturating_add(1),
-            _ => self.failed = self.failed.saturating_add(1),
+            StatusState::Warning => {
+                self.completed = self.completed.saturating_add(1);
+                self.warning = self.warning.saturating_add(1);
+            }
+            StatusState::Failure => self.failed = self.failed.saturating_add(1),
+            StatusState::Cancel | StatusState::Pending => {}
         }
     }
 
     /// The status the terminal response carries (PS3.4 C-MOVE/C-GET):
-    /// nothing failed → Success; some succeeded → warnings; none succeeded →
-    /// "unable to perform sub-operations".
+    /// nothing failed → Success; some instances came back → warnings; none did
+    /// → "unable to perform sub-operations".
     pub fn final_status(&self) -> u16 {
         if self.failed == 0 && self.warning == 0 {
             return status::SUCCESS;
         }
-        if self.failed == 0 {
-            return status::SUBOPERATIONS_COMPLETED_WITH_WARNINGS;
-        }
-        if self.completed == 0 && self.warning == 0 {
+        if self.completed == 0 {
             return status::UNABLE_TO_PERFORM_SUBOPERATIONS;
         }
         status::SUBOPERATIONS_COMPLETED_WITH_WARNINGS
@@ -315,7 +319,9 @@ pub async fn store_to_destination(
         let response = association.send_c_store_with_originator(file, originator_ae, originator_id).await?;
         summary.record(response.state());
     }
-    association.release().await?;
+    // the deliveries above are the result; a peer that fumbles the release
+    // afterwards must not turn them into a failure
+    let _ = association.release().await;
     Ok(summary)
 }
 
@@ -440,10 +446,41 @@ mod tests {
         summary.record(StatusState::Success);
         summary.record(StatusState::Warning);
         summary.record(StatusState::Failure);
-        assert_eq!(summary.completed, 1);
-        assert_eq!(summary.warning, 1);
+        // PS3.7: a warning is a *completed* sub-operation, not a third bucket
+        assert_eq!(summary.completed, 2, "success plus the warned instance");
+        assert_eq!(summary.warning, 1, "the warned instance is flagged as well");
         assert_eq!(summary.failed, 1);
-        assert_eq!(summary.total(), 3);
+        assert_eq!(summary.total(), 3, "three instances, counted once each");
+    }
+
+    #[test]
+    fn cancels_and_pending_are_not_instance_outcomes() {
+        // PS3.7 status categories: Cancel acknowledges a request and Pending
+        // reports progress; neither is the outcome of a sub-operation, so
+        // neither may be counted as a failure or a completion.
+        let mut summary = SubOperationSummary::default();
+        summary.record(StatusState::Cancel);
+        summary.record(StatusState::Pending);
+        assert_eq!(summary, SubOperationSummary::default());
+        assert_eq!(summary.total(), 0);
+        assert_eq!(summary.final_status(), status::SUCCESS);
+
+        summary.record(StatusState::Success);
+        summary.record(StatusState::Cancel);
+        assert_eq!(summary.completed, 1);
+        assert_eq!(summary.failed, 0);
+    }
+
+    #[test]
+    fn an_all_warned_retrieve_is_not_a_failure() {
+        // every instance came back, each with a warning
+        let mut summary = SubOperationSummary::default();
+        for _ in 0..3 {
+            summary.record(StatusState::Warning);
+        }
+        assert_eq!(summary.completed, 3);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.final_status(), status::SUBOPERATIONS_COMPLETED_WITH_WARNINGS);
     }
 
     #[tokio::test]

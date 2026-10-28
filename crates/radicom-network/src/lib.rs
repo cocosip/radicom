@@ -91,4 +91,22 @@ pub(crate) mod test_wire {
         element_value(bytes, group, element)
             .map(|value| String::from_utf8_lossy(&value).trim_end_matches('\0').to_string())
     }
+
+    /// Answers a peer's A-ASSOCIATE-RQ with an AC that accepts every offered
+    /// context (first syntax each), so a test can drive the ACSE phase itself.
+    pub(crate) async fn accept_association(stream: &mut tokio::net::TcpStream) -> crate::pdu::Associate {
+        let read = crate::transport::read_pdu(stream).await.expect("read A-ASSOCIATE-RQ");
+        let Some(crate::pdu::Pdu::AssociateRq(request)) = read else {
+            panic!("expected an A-ASSOCIATE-RQ");
+        };
+        let mut accept = request.clone();
+        for context in &mut accept.presentation_contexts {
+            context.result = 0;
+            context.transfer_syntaxes.truncate(1);
+        }
+        crate::transport::write_pdu(stream, &crate::pdu::Pdu::AssociateAc(accept))
+            .await
+            .expect("write A-ASSOCIATE-AC");
+        request
+    }
 }
