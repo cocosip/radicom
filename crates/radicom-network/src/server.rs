@@ -168,11 +168,18 @@ impl<P: ServiceProvider + 'static> DicomServer<P> {
     }
 
     /// Serves connections until the listener errors (§8).
+    pub async fn run(self) -> Result<()> {
+        let (_shutdown, receiver) = tokio::sync::watch::channel(false);
+        self.run_until(receiver).await
+    }
+
+    /// Serves connections until the listener errors or `shutdown` is set.
+    /// Existing connection tasks are allowed to finish when shutdown starts.
     ///
     /// Each connection gets its own task; `max_clients` bounds concurrency by
     /// gating the accept loop, so a full server leaves further peers in the
     /// listen backlog instead of spawning unbounded tasks.
-    pub async fn run(self) -> Result<()> {
+    pub async fn run_until(self, mut shutdown: tokio::sync::watch::Receiver<bool>) -> Result<()> {
         let provider = self.provider.clone();
         let options = self.options.clone();
         let connected_clients = self.connected_clients.clone();
@@ -180,20 +187,36 @@ impl<P: ServiceProvider + 'static> DicomServer<P> {
         let slots = (options.max_clients > 0)
             .then(|| Arc::new(tokio::sync::Semaphore::new(options.max_clients)));
         loop {
-            let (stream, _peer) = match self.listener.accept().await {
+            let accepted = tokio::select! {
+                changed = shutdown.changed() => {
+                    match changed {
+                        Ok(()) if *shutdown.borrow() => return Ok(()),
+                        Ok(()) => continue,
+                        Err(_) => return Ok(()),
+                    }
+                }
+                accepted = self.listener.accept() => accepted,
+            };
+            let (stream, _peer) = match accepted {
                 Ok(pair) => pair,
                 Err(e) => return Err(NetworkError::Io(e)),
             };
             // advisory: a refused buffer size must not drop the connection
             let _ = crate::transport::apply_options(&stream, &options.tcp);
             let permit = match &slots {
-                Some(slots) => Some(
-                    slots
-                        .clone()
-                        .acquire_owned()
-                        .await
-                        .map_err(|_| NetworkError::protocol("connection limiter closed"))?,
-                ),
+                Some(slots) => {
+                    let permit = tokio::select! {
+                        changed = shutdown.changed() => {
+                            match changed {
+                                Ok(()) if *shutdown.borrow() => return Ok(()),
+                                Ok(()) => continue,
+                                Err(_) => return Ok(()),
+                            }
+                        }
+                        permit = slots.clone().acquire_owned() => permit,
+                    };
+                    Some(permit.map_err(|_| NetworkError::protocol("connection limiter closed"))?)
+                }
                 None => None,
             };
             let provider = provider.clone();

@@ -16,7 +16,7 @@
 | **源码比对** | 逐行比对 radicom 与 fo-dicom 两侧，或顺着调用链推导，未构造运行时复现。 |
 | **grep 确认** | "缺失"类结论先用 grep 确认全仓无对应符号，再标注。 |
 
-**基线**：最近一次验证为 `radicom-network` 328 个单元测试通过，fuzz/golden/自互操作测试通过，workspace rustdoc 与 clippy 均无告警；需要真实 `RADICOM_PEER` 的外部对端测试仍显式 ignored。
+**基线**：最近一次验证为 `radicom-network` 330 个单元测试通过，fuzz/golden/自互操作测试通过，workspace rustdoc 与 clippy 均无告警；需要真实 `RADICOM_PEER` 的外部对端测试仍显式 ignored。
 
 **总体结论**：单连接、单请求的服务骨架（C-ECHO / C-STORE / C-FIND / C-GET / C-MOVE + 六个 DIMSE-N 方法）是完整可用的；C-FIND/C-MOVE/C-GET 已逐条消费 provider stream，三种查询/检索服务均能中断在途 provider，`max_clients`、called-AE 过滤与服务端 ACSE 超时也已接线。当前主要服务层缺口是公开 client 的并发取消 API、请求队列语义，以及默认 C-STORE sink 的落盘性能。协议错误、临时文件生命周期、跨 SOP 类重协商和 retrieve 计数已有回归覆盖。性能上服务端并发仍受 `radicom` 解析器全局读锁限制，服务层是暴露点而非病灶。
 
@@ -283,18 +283,11 @@ Pdu::Abort(_) => return Ok(()),
 
 对端 abort 说明会话异常结束（PS3.8 §9.3.8），但返回 `Ok(())` 会让 `ConnectionGuard`/`AssociationGuard`（`observability.rs:247-270`）按正常关闭上报指标，运维侧无法区分正常释放与异常中断。对比 `server.rs:782-784`（反向 C-STORE 等待路径）正确地把它转成 `NetworkError::Abort`。
 
-### 2.17 【低】`hosting.rs::stop` 直接 abort，不排空在途关联
+### 2.17 【已修复】`HostedDicomServer::stop` 停止接收时保留在途关联
 
-位置：`hosting.rs:169-182`。
+位置：`hosting.rs`、`server.rs::run_until`。
 
-```rust
-if let Some(task) = task {
-    task.abort();
-    let _ = task.await;
-}
-```
-
-`abort` 会连同所有已 spawn 的连接 task 一起杀掉，在途 C-STORE 数据集丢了也不发 A-ABORT。`docs/design/05-network.md §5.5` 描述的 `try_close`（graceful）在实现里没有对应物。另外 `listening` 用 `AtomicBool` 而非 `state.addr.is_some()` 双源，`stop` 后立刻 `start` 存在短暂不一致（`hosting.rs:140` 与 `hosting.rs:161`）。
+`HostedDicomServer::stop` 现在通过 watch 信号停止 accept loop，等待监听任务退出，但不再 abort 已创建的连接 task，也不清空 `connected_clients`。活动关联会继续处理，直到对端关闭或完成释放；连接数随后自然归零。accept loop 在等待 `max_clients` 配额时也响应停止信号。`hosting::tests::stop_stops_accepting_without_dropping_existing_connections` 与 `stop_interrupts_a_connection_waiting_for_a_client_slot` 覆盖这两条路径。
 
 ### 2.18 【已修复】`DicomClient::cancel` 使用请求实际的 presentation context
 

@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::error::{NetworkError, Result};
@@ -98,6 +99,7 @@ pub struct ServerHealth {
 struct State {
     addr: Option<SocketAddr>,
     task: Option<JoinHandle<()>>,
+    shutdown: Option<watch::Sender<bool>>,
     connected_clients: Option<ConnectedClients>,
 }
 
@@ -118,7 +120,7 @@ impl<P: ServiceProvider + 'static> HostedDicomServer<P> {
         HostedDicomServer {
             config,
             provider: Arc::new(provider),
-            state: Mutex::new(State { addr: None, task: None, connected_clients: None }),
+            state: Mutex::new(State { addr: None, task: None, shutdown: None, connected_clients: None }),
             listening: AtomicBool::new(false),
             last_error: Arc::new(Mutex::new(None)),
         }
@@ -150,10 +152,11 @@ impl<P: ServiceProvider + 'static> HostedDicomServer<P> {
         .await?;
         let addr = server.local_addr();
         let connected_clients = server.connected_clients();
+        let (shutdown, receiver) = watch::channel(false);
 
         let error_slot = self.last_error.clone();
         let task = tokio::spawn(async move {
-            if let Err(e) = server.run().await {
+            if let Err(e) = server.run_until(receiver).await {
                 *error_slot.lock().expect("error lock") = Some(e.to_string());
             }
         });
@@ -161,26 +164,29 @@ impl<P: ServiceProvider + 'static> HostedDicomServer<P> {
         let mut state = self.state.lock().expect("state lock");
         state.addr = Some(addr);
         state.task = Some(task);
+        state.shutdown = Some(shutdown);
         state.connected_clients = Some(connected_clients);
         *self.last_error.lock().expect("error lock") = None;
         self.listening.store(true, Ordering::SeqCst);
         Ok(())
     }
 
-    /// Stops the server: aborts the accept loop and clears the listening state.
+    /// Stops accepting new connections and clears the listening state.
+    /// Existing connection tasks remain observable until their peers close or
+    /// complete their association, so an in-flight operation is not aborted.
     pub async fn stop(&self) -> Result<()> {
-        let task = {
+        let (task, shutdown) = {
             let mut state = self.state.lock().expect("state lock");
             state.addr = None;
-            state.task.take()
+            (state.task.take(), state.shutdown.take())
         };
+        if let Some(shutdown) = shutdown {
+            let _ = shutdown.send(true);
+        }
         if let Some(task) = task {
-            task.abort();
-            // wait for the abort to settle; an aborted task yields a JoinError
             let _ = task.await;
         }
         self.listening.store(false, Ordering::SeqCst);
-        self.state.lock().expect("state lock").connected_clients = None;
         Ok(())
     }
 
@@ -207,6 +213,9 @@ impl<P: ServiceProvider + 'static> HostedDicomServer<P> {
 impl<P: ServiceProvider + 'static> Drop for HostedDicomServer<P> {
     fn drop(&mut self) {
         if let Ok(mut state) = self.state.lock() {
+            if let Some(shutdown) = state.shutdown.take() {
+                let _ = shutdown.send(true);
+            }
             if let Some(task) = state.task.take() {
                 task.abort();
             }
@@ -283,6 +292,70 @@ mod tests {
 
         server.stop().await.unwrap();
         assert_eq!(server.connected_clients(), 0);
+    }
+
+    #[tokio::test]
+    async fn stop_stops_accepting_without_dropping_existing_connections() {
+        let server = HostedDicomServer::new(HostedServerConfig::default(), EchoOnly);
+        server.start().await.unwrap();
+        let bound = server.local_addr().unwrap();
+        let addr = SocketAddr::from(([127, 0, 0, 1], bound.port()));
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while server.connected_clients() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the connection is accepted before stopping");
+
+        server.stop().await.unwrap();
+        assert!(!server.health().listening);
+        assert_eq!(server.connected_clients(), 1, "stop must not abort an active connection");
+
+        drop(client);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while server.connected_clients() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the connection count drains after the peer closes");
+    }
+
+    #[tokio::test]
+    async fn stop_interrupts_a_connection_waiting_for_a_client_slot() {
+        let config = HostedServerConfig { max_clients: 1, ..Default::default() };
+        let server = HostedDicomServer::new(config, EchoOnly);
+        server.start().await.unwrap();
+        let bound = server.local_addr().unwrap();
+        let addr = SocketAddr::from(([127, 0, 0, 1], bound.port()));
+        let first = tokio::net::TcpStream::connect(addr).await.unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while server.connected_clients() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the first connection occupies the only slot");
+
+        let second = tokio::net::TcpStream::connect(addr).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), server.stop())
+            .await
+            .expect("stop is not blocked by a queued connection")
+            .unwrap();
+
+        drop(first);
+        drop(second);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while server.connected_clients() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all accepted connections eventually drain");
     }
 
     #[tokio::test]
