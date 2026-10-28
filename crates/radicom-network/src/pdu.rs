@@ -320,10 +320,17 @@ fn decode_ae(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).trim_end_matches([' ', '\0']).to_string()
 }
 
-/// Pads or truncates an AE title to exactly 16 bytes.
+/// Pads or truncates an AE title to at most 16 **bytes** (PS3.8 §9.3.2).
+///
+/// The cut lands on a UTF-8 boundary so the value stays valid text instead of
+/// being split mid-sequence; `encode_ae` then pads it to exactly 16 bytes.
 fn into_ae(value: impl Into<String>) -> String {
     let value: String = value.into();
-    value.chars().take(16).collect()
+    let mut end = value.len().min(16);
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
 }
 
 fn encode_ae(value: &str) -> [u8; 16] {
@@ -523,16 +530,22 @@ fn decode_common_extended(raw: &[u8]) -> Result<CommonExtended> {
         return Err(NetworkError::protocol("common extended negotiation is truncated"));
     }
     let uid_len = u16::from_be_bytes([raw[0], raw[1]]) as usize;
-    let service_class_uid = String::from_utf8_lossy(raw.get(2..2 + uid_len).unwrap_or_default()).to_string();
+    let service_class_uid = String::from_utf8_lossy(
+        raw.get(2..2 + uid_len)
+            .ok_or(NetworkError::protocol("common extended service class UID runs past the item"))?,
+    )
+    .to_string();
     let mut offset = 2 + uid_len;
     let mut related = Vec::new();
     while offset + 2 <= raw.len() {
         let len = u16::from_be_bytes([raw[offset], raw[offset + 1]]) as usize;
         let start = offset + 2;
-        if start + len > raw.len() {
-            break;
-        }
-        related.push(String::from_utf8_lossy(&raw[start..start + len]).to_string());
+        // a length that overruns the item is malformed input, not a place to
+        // stop reading: match `item_header` and fail loudly
+        let uid = raw
+            .get(start..start + len)
+            .ok_or(NetworkError::protocol("common extended related SOP class runs past the item"))?;
+        related.push(String::from_utf8_lossy(uid).to_string());
         offset = start + len;
     }
     Ok(CommonExtended { service_class_uid, related_general_sop_classes: related })
@@ -587,10 +600,13 @@ fn decode_abort(body: &[u8]) -> Result<Abort> {
 // -- encoding ------------------------------------------------------------
 
 /// Encodes a PDU into a complete frame (header included).
-pub fn encode(pdu: &Pdu) -> Vec<u8> {
+///
+/// Fails when an A-ASSOCIATE item value does not fit its 16-bit Item-length
+/// (PS3.8 §9.3.2): writing a wrapped length would corrupt the PDU silently.
+pub fn encode(pdu: &Pdu) -> Result<Vec<u8>> {
     let body = match pdu {
-        Pdu::AssociateRq(a) => encode_associate(a, true),
-        Pdu::AssociateAc(a) => encode_associate(a, false),
+        Pdu::AssociateRq(a) => encode_associate(a, true)?,
+        Pdu::AssociateAc(a) => encode_associate(a, false)?,
         Pdu::AssociateRj(rj) => vec![0, rj.result.code(), rj.source.code(), rj.reason],
         Pdu::PData(p) => encode_pdata(p),
         Pdu::ReleaseRq | Pdu::ReleaseRp => vec![0, 0, 0, 0],
@@ -601,7 +617,7 @@ pub fn encode(pdu: &Pdu) -> Vec<u8> {
     out.push(0);
     out.extend_from_slice(&(body.len() as u32).to_be_bytes());
     out.extend_from_slice(&body);
-    out
+    Ok(out)
 }
 
 /// `type(1) reserved(1) length(2) value`, the item framing used inside A-ASSOCIATE
@@ -609,15 +625,18 @@ pub fn encode(pdu: &Pdu) -> Vec<u8> {
 /// length is 32-bit). Every item value must have even length; an odd value is
 /// padded with a single trailing 0x00 — strict peers (fo-dicom, DCMTK, ...)
 /// reject an A-ASSOCIATE whose item header or value length is wrong.
-fn push_item(out: &mut Vec<u8>, item_type: u8, value: &[u8]) {
+fn push_item(out: &mut Vec<u8>, item_type: u8, value: &[u8]) -> Result<()> {
     let pad = value.len() & 1;
+    let len = u16::try_from(value.len() + pad)
+        .map_err(|_| NetworkError::protocol("A-ASSOCIATE item value exceeds the 16-bit item length"))?;
     out.push(item_type);
     out.push(0); // reserved
-    out.extend_from_slice(&((value.len() + pad) as u16).to_be_bytes());
+    out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(value);
     if pad == 1 {
         out.push(0x00);
     }
+    Ok(())
 }
 
 /// Reads a DICOM UL item header at `at`: type(1) reserved(1) length(2).
@@ -639,7 +658,7 @@ fn decode_string(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).trim_end_matches(['\0', ' ']).to_string()
 }
 
-fn encode_associate(a: &Associate, is_rq: bool) -> Vec<u8> {
+fn encode_associate(a: &Associate, is_rq: bool) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     out.extend_from_slice(&a.protocol_version.to_be_bytes());
     out.extend_from_slice(&[0, 0]);
@@ -647,7 +666,7 @@ fn encode_associate(a: &Associate, is_rq: bool) -> Vec<u8> {
     out.extend_from_slice(&encode_ae(&a.calling_ae));
     out.extend_from_slice(&[0u8; 32]);
 
-    push_item(&mut out, item::APPLICATION_CONTEXT, a.application_context.as_bytes());
+    push_item(&mut out, item::APPLICATION_CONTEXT, a.application_context.as_bytes())?;
 
     for pc in &a.presentation_contexts {
         let mut body = Vec::new();
@@ -657,20 +676,20 @@ fn encode_associate(a: &Associate, is_rq: bool) -> Vec<u8> {
         body.push(if is_rq { 0 } else { pc.result });
         body.push(0);
         if is_rq {
-            push_item(&mut body, item::ABSTRACT_SYNTAX, pc.abstract_syntax.as_bytes());
+            push_item(&mut body, item::ABSTRACT_SYNTAX, pc.abstract_syntax.as_bytes())?;
             for syntax in &pc.transfer_syntaxes {
-                push_item(&mut body, item::TRANSFER_SYNTAX, syntax.as_bytes());
+                push_item(&mut body, item::TRANSFER_SYNTAX, syntax.as_bytes())?;
             }
         } else if let Some(syntax) = pc.transfer_syntaxes.first() {
             // an A-ASSOCIATE-AC carries exactly one accepted transfer syntax and
             // never repeats the abstract syntax (§9.3.3)
-            push_item(&mut body, item::TRANSFER_SYNTAX, syntax.as_bytes());
+            push_item(&mut body, item::TRANSFER_SYNTAX, syntax.as_bytes())?;
         }
         push_item(
             &mut out,
             if is_rq { item::PRESENTATION_CONTEXT_RQ } else { item::PRESENTATION_CONTEXT_AC },
             &body,
-        );
+        )?;
     }
 
     let mut user = Vec::new();
@@ -678,19 +697,19 @@ fn encode_associate(a: &Associate, is_rq: bool) -> Vec<u8> {
         &mut user,
         item::MAX_PDU_LENGTH,
         &clamp_max_pdu_length(a.user_information.max_pdu_length).to_be_bytes(),
-    );
+    )?;
     if let Some(uid) = &a.user_information.implementation_class_uid {
-        push_item(&mut user, item::IMPLEMENTATION_CLASS_UID, uid.as_bytes());
+        push_item(&mut user, item::IMPLEMENTATION_CLASS_UID, uid.as_bytes())?;
     }
     if let Some(version) = &a.user_information.implementation_version_name {
-        push_item(&mut user, item::IMPLEMENTATION_VERSION_NAME, version.as_bytes());
+        push_item(&mut user, item::IMPLEMENTATION_VERSION_NAME, version.as_bytes())?;
     }
     if let Some(async_ops) = a.user_information.async_operations {
         if !async_ops.is_default() {
             let mut value = Vec::with_capacity(4);
             value.extend_from_slice(&async_ops.invoked.to_be_bytes());
             value.extend_from_slice(&async_ops.performed.to_be_bytes());
-            push_item(&mut user, item::ASYNC_OPERATIONS, &value);
+            push_item(&mut user, item::ASYNC_OPERATIONS, &value)?;
         }
     }
     for role in &a.user_information.role_selections {
@@ -700,7 +719,7 @@ fn encode_associate(a: &Associate, is_rq: bool) -> Vec<u8> {
         value.extend_from_slice(role.sop_class.as_bytes());
         value.push(u8::from(role.scu_role));
         value.push(u8::from(role.scp_role));
-        push_item(&mut user, item::ROLE_SELECTION, &value);
+        push_item(&mut user, item::ROLE_SELECTION, &value)?;
     }
     for ext in &a.user_information.extended_negotiations {
         let info = if is_rq { &ext.requested } else { &ext.accepted };
@@ -709,7 +728,7 @@ fn encode_associate(a: &Associate, is_rq: bool) -> Vec<u8> {
         value.extend_from_slice(ext.sop_class.as_bytes());
         // flat Service Class Application Information, one byte per field
         value.extend_from_slice(info);
-        push_item(&mut user, item::SOP_CLASS_EXTENDED_NEGOTIATION, &value);
+        push_item(&mut user, item::SOP_CLASS_EXTENDED_NEGOTIATION, &value)?;
     }
     if let Some(common) = &a.user_information.common_extended {
         if is_rq {
@@ -720,7 +739,7 @@ fn encode_associate(a: &Associate, is_rq: bool) -> Vec<u8> {
                 value.extend_from_slice(&(uid.len() as u16).to_be_bytes());
                 value.extend_from_slice(uid.as_bytes());
             }
-            push_item(&mut user, item::SOP_CLASS_COMMON_EXTENDED, &value);
+            push_item(&mut user, item::SOP_CLASS_COMMON_EXTENDED, &value)?;
         }
     }
     if let Some(identity) = &a.user_information.user_identity {
@@ -734,16 +753,16 @@ fn encode_associate(a: &Associate, is_rq: bool) -> Vec<u8> {
             value.extend_from_slice(&identity.primary);
             value.extend_from_slice(&(identity.secondary.len() as u16).to_be_bytes());
             value.extend_from_slice(&identity.secondary);
-            push_item(&mut user, item::USER_IDENTITY_RQ, &value);
+            push_item(&mut user, item::USER_IDENTITY_RQ, &value)?;
         }
     }
     if let Some(response) = &a.user_information.user_identity_response {
         if !is_rq {
-            push_item(&mut user, item::USER_IDENTITY_AC, response);
+            push_item(&mut user, item::USER_IDENTITY_AC, response)?;
         }
     }
-    push_item(&mut out, item::USER_INFORMATION, &user);
-    out
+    push_item(&mut out, item::USER_INFORMATION, &user)?;
+    Ok(out)
 }
 
 fn encode_pdata(p: &PData) -> Vec<u8> {
@@ -773,6 +792,11 @@ fn encode_pdata(p: &PData) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The encoder, for the tests that expect a well-formed PDU.
+    fn encode(pdu: &Pdu) -> Vec<u8> {
+        super::encode(pdu).expect("encode")
+    }
 
     fn round_trip(pdu: Pdu) -> Pdu {
         let bytes = encode(&pdu);
@@ -918,7 +942,7 @@ mod tests {
         let bytes = encode(&Pdu::AssociateRq(assoc));
         // called AE occupies bytes 6+4 .. 6+20 and must be space padded
         assert_eq!(&bytes[10..26], b"SHORT           ");
-        // calling AE is truncated to 16 characters
+        // calling AE is truncated to 16 *bytes*
         assert_eq!(&bytes[26..42], b"A-VERY-LONG-AE-T");
         match decode(&bytes).unwrap() {
             Pdu::AssociateRq(back) => {
@@ -926,6 +950,46 @@ mod tests {
                 assert_eq!(back.calling_ae, "A-VERY-LONG-AE-T");
             }
             other => panic!("expected AssociateRq, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ae_titles_are_truncated_by_bytes_not_characters() {
+        // PS3.8 §9.3.2: an AE title is 16 bytes. A multi-byte title must be cut
+        // to at most 16 bytes on a character boundary, never to 16 characters
+        // (which could be 48 bytes and would be split mid-sequence on the wire).
+        let wide = "日本語日本語日本語"; // 9 chars, 27 bytes
+        assert_eq!(wide.len(), 27);
+        let assoc = Associate::new(wide, "SCU");
+        assert!(assoc.called_ae.len() <= 16, "got {} bytes", assoc.called_ae.len());
+        assert!(wide.starts_with(&assoc.called_ae), "the cut is a prefix, not a re-encoding");
+
+        let bytes = encode(&Pdu::AssociateRq(assoc));
+        match decode(&bytes).unwrap() {
+            Pdu::AssociateRq(back) => {
+                assert!(!back.called_ae.contains('\u{FFFD}'), "no broken UTF-8 on the wire: {:?}", back.called_ae);
+                assert_eq!(back.called_ae.len(), 15, "five 3-byte characters fit in 16 bytes");
+            }
+            other => panic!("expected AssociateRq, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_oversized_associate_item_is_a_protocol_error() {
+        // An item value that does not fit the 16-bit Item-length must be
+        // refused, not written with a wrapped length (PS3.8 §9.3.2).
+        let mut assoc = Associate::new("SCP", "SCU");
+        let uid = "1.2.840.10008.5.1.4.1.1.7.1.1.1.1.1.1.1.1.1.1.1.1";
+        for _ in 0..2000 {
+            assoc.user_information.role_selections.push(RoleSelection {
+                sop_class: uid.to_string(),
+                scu_role: true,
+                scp_role: false,
+            });
+        }
+        match super::encode(&Pdu::AssociateRq(assoc)) {
+            Err(NetworkError::Protocol(message)) => assert!(message.contains("16-bit item length"), "got {message}"),
+            other => panic!("expected a Protocol error, got {:?}", other.map(|b| b.len())),
         }
     }
 
@@ -1422,5 +1486,62 @@ mod tests {
         let value = item_value(&user_items(&bytes), item::USER_IDENTITY_RQ).expect("identity item");
         let expected = b"\x02\x01\x00\x05alice\x00\x06secret".to_vec();
         assert_eq!(&value[..expected.len()], &expected[..], "type, positive, then each length+value");
+    }
+
+    #[test]
+    fn a_common_extended_length_that_overruns_the_item_is_an_error() {
+        // 0x57: uid_len(2) + service class UID + (len(2) + related UID)*.
+        // A length pointing past the item is malformed input, not a reason to
+        // stop reading and report a partial list.
+        let mut value = Vec::new();
+        value.extend_from_slice(&4u16.to_be_bytes());
+        value.extend_from_slice(b"1.2.");
+        value.extend_from_slice(&9u16.to_be_bytes()); // claims 9 bytes, 5 remain
+        value.extend_from_slice(b"1.2.3");
+        let frame = associate_frame(
+            0x01,
+            &[
+                item(item::APPLICATION_CONTEXT, APPLICATION_CONTEXT.as_bytes()),
+                item(
+                    item::USER_INFORMATION,
+                    &[
+                        item(item::MAX_PDU_LENGTH, &16384u32.to_be_bytes()),
+                        item(item::SOP_CLASS_COMMON_EXTENDED, &value),
+                    ]
+                    .concat(),
+                ),
+            ],
+        );
+        match decode(&frame) {
+            Err(NetworkError::Protocol(message)) => {
+                assert!(message.contains("related SOP class"), "got {message}")
+            }
+            other => panic!("expected a Protocol error, got {other:?}"),
+        }
+
+        // the service class UID length is checked the same way
+        let mut value = Vec::new();
+        value.extend_from_slice(&100u16.to_be_bytes());
+        value.extend_from_slice(b"1.2.3");
+        let frame = associate_frame(
+            0x01,
+            &[
+                item(item::APPLICATION_CONTEXT, APPLICATION_CONTEXT.as_bytes()),
+                item(
+                    item::USER_INFORMATION,
+                    &[
+                        item(item::MAX_PDU_LENGTH, &16384u32.to_be_bytes()),
+                        item(item::SOP_CLASS_COMMON_EXTENDED, &value),
+                    ]
+                    .concat(),
+                ),
+            ],
+        );
+        match decode(&frame) {
+            Err(NetworkError::Protocol(message)) => {
+                assert!(message.contains("service class UID"), "got {message}")
+            }
+            other => panic!("expected a Protocol error, got {other:?}"),
+        }
     }
 }

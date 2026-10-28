@@ -56,3 +56,39 @@ pub use pdu::{
 pub use print_sop::{
     network_identifier_from_mac, parse_mac, try_get_network_identifier, MetaSopClasses,
 };
+
+/// Test-only helpers for asserting wire bytes (not part of the public API).
+#[cfg(test)]
+pub(crate) mod test_wire {
+    use crate::dimse::Command;
+
+    /// Encodes a command set as it travels on the wire (implicit VR LE).
+    pub(crate) fn command_bytes(command: &Command) -> Vec<u8> {
+        crate::server::command_bytes(command).expect("encode command set")
+    }
+
+    /// The value of the implicit-VR element `(group, element)`, when present.
+    pub(crate) fn element_value(bytes: &[u8], group: u16, element: u16) -> Option<Vec<u8>> {
+        let key = [group.to_le_bytes(), element.to_le_bytes()].concat();
+        let mut offset = 0usize;
+        while offset + 8 <= bytes.len() {
+            let len = u32::from_le_bytes([
+                bytes[offset + 4],
+                bytes[offset + 5],
+                bytes[offset + 6],
+                bytes[offset + 7],
+            ]) as usize;
+            if bytes.get(offset..offset + 4) == Some(&key[..]) {
+                return bytes.get(offset + 8..offset + 8 + len).map(<[u8]>::to_vec);
+            }
+            offset += 8 + len;
+        }
+        None
+    }
+
+    /// The text of a string element, with the even-length pad removed.
+    pub(crate) fn element_text(bytes: &[u8], group: u16, element: u16) -> Option<String> {
+        element_value(bytes, group, element)
+            .map(|value| String::from_utf8_lossy(&value).trim_end_matches('\0').to_string())
+    }
+}

@@ -44,30 +44,33 @@ pub mod tag {
 /// `(0000,0800)` value meaning "no dataset follows" (§5.2).
 pub const NO_DATA_SET: u16 = 0x0101;
 
-/// Priority element values; the numeric order is low(0) < high(1) < medium(2)
-/// per the standard, which is not the intuitive order.
+/// Priority element values (PS3.7 Table E.1-1): `MEDIUM = 0`, `HIGH = 1`,
+/// `LOW = 2`. Declaration order follows the numeric order, so the derived `Ord`
+/// means "medium before high before low".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum Priority {
-    Low,
     #[default]
-    High,
     Medium,
+    High,
+    Low,
 }
 
 impl Priority {
     pub fn code(self) -> u16 {
         match self {
-            Priority::Low => 0,
+            Priority::Medium => 0,
             Priority::High => 1,
-            Priority::Medium => 2,
+            Priority::Low => 2,
         }
     }
 
+    /// Parses the `(0000,0700)` value; MEDIUM (0) is also the standard default
+    /// when the element is absent or unknown.
     pub fn from_code(code: u16) -> Self {
         match code {
-            0 => Priority::Low,
-            2 => Priority::Medium,
-            _ => Priority::High,
+            1 => Priority::High,
+            2 => Priority::Low,
+            _ => Priority::Medium,
         }
     }
 }
@@ -161,6 +164,15 @@ impl CommandField {
     pub fn is_request(self) -> bool {
         self.code() & 0x8000 == 0
     }
+
+    /// True when `(0000,0110) Message ID` belongs in this command set.
+    ///
+    /// PS3.7 Table E.1-1 lists Message ID for requests only: responses carry
+    /// `(0000,0120) Message ID Being Responded To` instead, and C-CANCEL names
+    /// the request it cancels with `(0000,0120)` too.
+    pub fn writes_message_id(self) -> bool {
+        self.is_request() && self != CommandField::CCancelRq
+    }
 }
 
 /// A DIMSE command message: the typed view of a command dataset (§6.1).
@@ -246,7 +258,9 @@ impl Command {
         if let Some(uid) = &self.requested_sop_class_uid {
             ds.insert_str(tag::REQUESTED_SOP_CLASS_UID, Vr::Ui, uid);
         }
-        insert_us(&mut ds, tag::MESSAGE_ID, self.message_id);
+        if self.field.writes_message_id() {
+            insert_us(&mut ds, tag::MESSAGE_ID, self.message_id);
+        }
         if let Some(id) = self.message_id_being_responded_to {
             insert_us(&mut ds, tag::MESSAGE_ID_BEING_RESPONDED_TO, id);
         }
@@ -328,7 +342,7 @@ impl Command {
             message_id_being_responded_to: ds.get(tag::MESSAGE_ID_BEING_RESPONDED_TO).ok(),
             status: ds.get(tag::STATUS).ok(),
             error_comment: ds.try_get_str(tag::ERROR_COMMENT).map(|s| s.trim_end().to_string()),
-            priority: Priority::from_code(ds.get_or(tag::PRIORITY, 1u16)),
+            priority: Priority::from_code(ds.get_or(tag::PRIORITY, 0u16)),
             no_dataset: data_set_type == NO_DATA_SET,
             move_destination: ds.try_get_str(tag::MOVE_DESTINATION).map(|s| s.trim().to_string()),
             affected_sop_instance_uid: ds.try_get_str(tag::AFFECTED_SOP_INSTANCE_UID).map(|s| s.trim().to_string()),
@@ -556,16 +570,62 @@ mod tests {
     }
 
     #[test]
-    fn priority_uses_the_standard_numeric_order() {
-        // the standard order is low(0) < high(1) < medium(2), which is not
-        // the intuitive ordering
-        assert_eq!(Priority::Low.code(), 0);
+    fn priority_codes_follow_ps3_7() {
+        // PS3.7 Table E.1-1: MEDIUM = 0, HIGH = 1, LOW = 2 — not the
+        // intuitive order, and MEDIUM is the default.
+        assert_eq!(Priority::Medium.code(), 0);
         assert_eq!(Priority::High.code(), 1);
-        assert_eq!(Priority::Medium.code(), 2);
-        assert_eq!(Priority::from_code(0), Priority::Low);
+        assert_eq!(Priority::Low.code(), 2);
+        assert_eq!(Priority::from_code(0), Priority::Medium);
         assert_eq!(Priority::from_code(1), Priority::High);
-        assert_eq!(Priority::from_code(2), Priority::Medium);
-        assert_eq!(Priority::default(), Priority::High);
+        assert_eq!(Priority::from_code(2), Priority::Low);
+        assert_eq!(Priority::from_code(7), Priority::Medium, "an unknown value reads as the default");
+        assert_eq!(Priority::default(), Priority::Medium);
+        assert!(Priority::Medium < Priority::High && Priority::High < Priority::Low, "Ord follows the codes");
+    }
+
+    #[test]
+    fn priority_lands_in_0000_0700_with_the_standard_value() {
+        use crate::test_wire::{command_bytes, element_value};
+
+        for (priority, code) in [(Priority::Medium, 0u16), (Priority::High, 1), (Priority::Low, 2)] {
+            let mut command = Command::request(CommandField::CFindRq, 1);
+            command.priority = priority;
+            let bytes = command_bytes(&command);
+            assert_eq!(
+                element_value(&bytes, 0x0000, 0x0700),
+                Some(code.to_le_bytes().to_vec()),
+                "{priority:?} must encode as {code} in (0000,0700)"
+            );
+        }
+
+        // an absent (0000,0700) reads as MEDIUM
+        let mut ds = Dataset::new();
+        ds.insert_value(tag::COMMAND_FIELD, CommandField::CFindRq.code());
+        assert_eq!(Command::from_dataset(&ds).unwrap().priority, Priority::Medium);
+    }
+
+    #[test]
+    fn responses_do_not_write_message_id() {
+        use crate::test_wire::{command_bytes, element_value};
+
+        // PS3.7 Table E.1-1: Message ID (0000,0110) is a request element;
+        // responses name the request in (0000,0120).
+        let request = Command::request(CommandField::CEchoRq, 7);
+        let bytes = command_bytes(&request);
+        assert_eq!(element_value(&bytes, 0x0000, 0x0110), Some(7u16.to_le_bytes().to_vec()), "a request keeps it");
+
+        let response = Command::response(&request, status::SUCCESS).expect("C-ECHO has a response");
+        let bytes = command_bytes(&response);
+        assert_eq!(element_value(&bytes, 0x0000, 0x0110), None, "a response must not carry Message ID");
+        assert_eq!(element_value(&bytes, 0x0000, 0x0120), Some(7u16.to_le_bytes().to_vec()));
+
+        // C-CANCEL identifies the cancelled request in (0000,0120) only
+        let mut cancel = Command::request(CommandField::CCancelRq, 7);
+        cancel.message_id_being_responded_to = Some(7);
+        let bytes = command_bytes(&cancel);
+        assert_eq!(element_value(&bytes, 0x0000, 0x0110), None, "C-CANCEL has no Message ID");
+        assert_eq!(element_value(&bytes, 0x0000, 0x0120), Some(7u16.to_le_bytes().to_vec()));
     }
 
     #[test]

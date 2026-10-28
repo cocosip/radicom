@@ -46,16 +46,18 @@ pub enum ContextState {
 
 impl ContextState {
     /// The AC result code; `Accept` is 0.
-    pub fn result_code(self) -> u8 {
-        match self {
+    ///
+    /// `None` for [`ContextState::Proposed`]: a proposed context has no AC
+    /// result, and silently encoding one would report it as accepted.
+    pub fn result_code(self) -> Option<u8> {
+        Some(match self {
             ContextState::Accept => 0,
             ContextState::RejectUser => 1,
             ContextState::RejectNoReason => 2,
             ContextState::RejectAbstractSyntaxNotSupported => 3,
             ContextState::RejectTransferSyntaxesNotSupported => 4,
-            // a proposed context never appears on the wire as an AC result
-            ContextState::Proposed => 0,
-        }
+            ContextState::Proposed => return None,
+        })
     }
 
     pub fn from_result_code(code: u8) -> Self {
@@ -237,7 +239,9 @@ impl NegotiatedContext {
             self.abstract_syntax.clone(),
             vec![self.transfer_syntax.clone()],
         );
-        context.result = self.state.result_code();
+        // a Proposed context cannot be encoded as an AC result: fall back to
+        // "rejected, no reason given" so it is never reported as accepted
+        context.result = self.state.result_code().unwrap_or(2);
         context
     }
 }
@@ -501,7 +505,7 @@ mod tests {
         let proposed = vec![pc(1, "9.9.9", &["1.2.840.10008.1.2"])];
         let negotiated = policy.negotiate(&proposed);
         assert_eq!(negotiated[0].state, ContextState::RejectAbstractSyntaxNotSupported);
-        assert_eq!(negotiated[0].state.result_code(), 3);
+        assert_eq!(negotiated[0].state.result_code(), Some(3));
         assert_eq!(
             negotiated[0].transfer_syntax, "1.2.840.10008.1.2",
             "rejected contexts carry Implicit VR LE as a placeholder"
@@ -514,7 +518,7 @@ mod tests {
         let proposed = vec![pc(1, "1.2.840.10008.1.1", &["9.9.9.9"])];
         let negotiated = policy.negotiate(&proposed);
         assert_eq!(negotiated[0].state, ContextState::RejectTransferSyntaxesNotSupported);
-        assert_eq!(negotiated[0].state.result_code(), 4);
+        assert_eq!(negotiated[0].state.result_code(), Some(4));
     }
 
     #[test]
@@ -611,11 +615,29 @@ mod tests {
             ContextState::RejectAbstractSyntaxNotSupported,
             ContextState::RejectTransferSyntaxesNotSupported,
         ] {
-            assert_eq!(ContextState::from_result_code(state.result_code()), state);
+            assert_eq!(ContextState::from_result_code(state.result_code().expect("an AC result")), state);
         }
-        assert_eq!(ContextState::Accept.result_code(), 0);
+        assert_eq!(ContextState::Accept.result_code(), Some(0));
         assert!(ContextState::Accept.is_accept());
         assert!(!ContextState::RejectUser.is_accept());
+    }
+
+    #[test]
+    fn a_proposed_context_is_never_encoded_as_accepted() {
+        // PS3.8 §9.3.3.2: only an AC result is 0/1..4; "proposed" is not one of
+        // them, and writing 0 would report an unnegotiated context as accepted.
+        assert_eq!(ContextState::Proposed.result_code(), None);
+
+        let context = NegotiatedContext {
+            id: 1,
+            abstract_syntax: "1.2.3".into(),
+            transfer_syntax: "1.2.840.10008.1.2".into(),
+            state: ContextState::Proposed,
+            roles: Vec::new(),
+        };
+        let wire = context.to_wire();
+        assert_eq!(wire.result, 2, "an unnegotiated context falls back to 'rejected, no reason'");
+        assert!(!wire.is_accepted());
     }
 
     #[test]

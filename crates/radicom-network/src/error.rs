@@ -62,13 +62,11 @@ impl RejectSource {
     }
 }
 
-/// A-ABORT source.
+/// A-ABORT source (PS3.8 §9.3.8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AbortSource {
     /// 0 — the service user (DUL user).
     User,
-    /// 1 — reserved / unknown, treated as provider.
-    Unknown,
     /// 2 — the service provider.
     Provider,
 }
@@ -77,15 +75,15 @@ impl AbortSource {
     pub fn code(self) -> u8 {
         match self {
             AbortSource::User => 0,
-            AbortSource::Unknown => 1,
             AbortSource::Provider => 2,
         }
     }
 
+    /// `None` for 1 (reserved) and for anything outside 0/2: a malformed abort
+    /// must not decode as a valid source.
     pub fn from_code(code: u8) -> Option<Self> {
         match code {
             0 => Some(AbortSource::User),
-            1 => Some(AbortSource::Unknown),
             2 => Some(AbortSource::Provider),
             _ => None,
         }
@@ -150,10 +148,14 @@ mod tests {
     }
 
     #[test]
-    fn abort_codes_round_trip() {
-        for source in [AbortSource::User, AbortSource::Unknown, AbortSource::Provider] {
+    fn abort_codes_cover_only_the_defined_sources() {
+        assert_eq!(AbortSource::User.code(), 0);
+        assert_eq!(AbortSource::Provider.code(), 2);
+        for source in [AbortSource::User, AbortSource::Provider] {
             assert_eq!(AbortSource::from_code(source.code()), Some(source));
         }
+        // PS3.8 §9.3.8: 1 is reserved, everything outside 0/2 is malformed
+        assert_eq!(AbortSource::from_code(1), None, "1 is reserved");
         assert_eq!(AbortSource::from_code(9), None);
     }
 

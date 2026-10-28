@@ -57,7 +57,7 @@ pub async fn read_pdu<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Pdu
 
 /// Writes one PDU frame to an async stream.
 pub async fn write_pdu<W: AsyncWrite + Unpin>(writer: &mut W, pdu: &Pdu) -> Result<()> {
-    let bytes = pdu::encode(pdu);
+    let bytes = pdu::encode(pdu)?;
     writer.write_all(&bytes).await.map_err(NetworkError::Io)?;
     writer.flush().await.map_err(NetworkError::Io)?;
     Ok(())

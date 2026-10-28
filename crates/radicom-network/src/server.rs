@@ -1647,16 +1647,17 @@ impl Association {
 
     /// Sends an N-service request and returns its response (§7.6, SRV-07).
     ///
-    /// The presentation context is chosen from the request's affected SOP class.
-    /// A request/response dataset is transferred in the negotiated syntax.
+    /// The presentation context is chosen from the request's SOP class. The
+    /// Requested/Affected tags follow the command field (PS3.7 §10.1). A
+    /// request/response dataset is transferred in the negotiated syntax.
     pub async fn send_n_service(
         &mut self,
         request: &crate::nservice::NServiceRequest,
     ) -> Result<crate::nservice::NServiceResponse> {
         let sop_class = request
-            .affected_sop_class_uid
+            .sop_class_uid
             .as_deref()
-            .ok_or_else(|| NetworkError::protocol("N-service request has no affected SOP class UID"))?;
+            .ok_or_else(|| NetworkError::protocol("N-service request has no SOP class UID"))?;
         let request_syntax = request
             .dataset
             .as_ref()
@@ -2897,8 +2898,8 @@ mod tests {
         .unwrap();
 
         let mut request = crate::nservice::NServiceRequest::new(CommandField::NActionRq, 1);
-        request.affected_sop_class_uid = Some(COMMIT_SOP_CLASS.to_string());
-        request.affected_sop_instance_uid = Some("1.2.3.4".to_string());
+        request.sop_class_uid = Some(COMMIT_SOP_CLASS.to_string());
+        request.sop_instance_uid = Some("1.2.3.4".to_string());
         request.action_type_id = Some(1);
         let mut request_dataset = Dataset::new();
         request_dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4");
@@ -2937,8 +2938,8 @@ mod tests {
         .unwrap();
 
         let mut request = crate::nservice::NServiceRequest::new(CommandField::NDeleteRq, 2);
-        request.affected_sop_class_uid = Some(COMMIT_SOP_CLASS.to_string());
-        request.affected_sop_instance_uid = Some("1.2.3.4".to_string());
+        request.sop_class_uid = Some(COMMIT_SOP_CLASS.to_string());
+        request.sop_instance_uid = Some("1.2.3.4".to_string());
 
         let response = association.send_n_service(&request).await.unwrap();
         assert_eq!(response.field, CommandField::NDeleteRsp);

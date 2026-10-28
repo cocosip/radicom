@@ -238,15 +238,15 @@ impl ExtendedNegotiationPolicy {
     }
 }
 
-/// Applies the SCP's answer to the request's user information in place (§4.3).
+/// Applies the SCP's answer to the request's extended-negotiation items (§4.3).
 ///
-/// The AC carries `accepted`, not `requested`: the encoder already picks the
-/// right side per direction, so this only has to move the values over.
+/// Only the 0x56 items change: the AC carries `accepted`, not `requested`, and
+/// the encoder already picks the right side per direction. Nothing else is
+/// touched — in particular the RQ-only common extended negotiation (0x57) is
+/// the caller's business, because this function cannot know which direction the
+/// `UserInformation` it is given belongs to.
 pub fn apply_answer(user_information: &mut UserInformation, policy: &ExtendedNegotiationPolicy) {
-    let answered = policy.answer(&user_information.extended_negotiations);
-    user_information.extended_negotiations = answered;
-    // common extended negotiation is RQ-only (PS3.7), so the AC never echoes it
-    user_information.common_extended = None;
+    user_information.extended_negotiations = policy.answer(&user_information.extended_negotiations);
 }
 
 /// Validates a common extended negotiation item (§4.3).
@@ -371,16 +371,22 @@ mod tests {
     }
 
     #[test]
-    fn common_extended_is_rq_only() {
+    fn apply_answer_touches_only_the_extended_items() {
+        // The RQ-only common extended negotiation (0x57) is the caller's to
+        // set: applying an answer must not silently drop it, or reusing an RQ's
+        // user information for an AC would lose data the caller still needs.
         let mut user = UserInformation::new(16384);
         user.extended_negotiations = vec![storage_ext("1.2.3", 1, 1)];
         user.common_extended = Some(CommonExtended {
             service_class_uid: "1.2.840.10008.4.2".into(),
             related_general_sop_classes: vec!["1.2.840.10008.5.1.4.1.1.7".into()],
         });
+        user.role_selections.push(RoleSelection { sop_class: "1.2.3".into(), scu_role: true, scp_role: false });
         apply_answer(&mut user, &ExtendedNegotiationPolicy::decline_all());
-        assert!(user.common_extended.is_none(), "the AC does not echo it");
         assert_eq!(user.extended_negotiations.len(), 1, "the SOP class item survives");
+        assert_eq!(user.extended_negotiations[0].accepted, vec![0, 0, 0], "answered with 'not supported'");
+        assert!(user.common_extended.is_some(), "unrelated user information is left alone");
+        assert_eq!(user.role_selections.len(), 1);
     }
 
     #[test]

@@ -25,13 +25,27 @@ pub fn is_n_request(field: CommandField) -> bool {
     N_REQUEST_FIELDS.contains(&field)
 }
 
+/// True when this request names its target with `(0000,0003)/(0000,1001)
+/// Requested` rather than `(0000,0002)/(0000,1000) Affected` (PS3.7 §10.1).
+///
+/// N-CREATE and N-EVENT-REPORT act on an *affected* instance; the other four
+/// services address a *requested* one.
+pub fn uses_requested_uids(field: CommandField) -> bool {
+    matches!(
+        field,
+        CommandField::NGetRq | CommandField::NSetRq | CommandField::NActionRq | CommandField::NDeleteRq
+    )
+}
+
 /// An N-service request (all six services).
 #[derive(Debug, Clone)]
 pub struct NServiceRequest {
     pub field: CommandField,
     pub message_id: u16,
-    pub affected_sop_class_uid: Option<String>,
-    pub affected_sop_instance_uid: Option<String>,
+    /// The SOP class/instance the request addresses. `to_command` places it in
+    /// the Requested or Affected tags that `field` calls for (PS3.7 §10.1).
+    pub sop_class_uid: Option<String>,
+    pub sop_instance_uid: Option<String>,
     pub event_type_id: Option<u16>,
     pub action_type_id: Option<u16>,
     pub dataset: Option<Dataset>,
@@ -43,8 +57,8 @@ impl NServiceRequest {
         NServiceRequest {
             field,
             message_id,
-            affected_sop_class_uid: None,
-            affected_sop_instance_uid: None,
+            sop_class_uid: None,
+            sop_instance_uid: None,
             event_type_id: None,
             action_type_id: None,
             dataset: None,
@@ -54,8 +68,13 @@ impl NServiceRequest {
     /// Builds the wire command (the dataset, if any, is sent separately).
     pub fn to_command(&self) -> Command {
         let mut command = Command::request(self.field, self.message_id);
-        command.affected_sop_class_uid = self.affected_sop_class_uid.clone();
-        command.affected_sop_instance_uid = self.affected_sop_instance_uid.clone();
+        if uses_requested_uids(self.field) {
+            command.requested_sop_class_uid = self.sop_class_uid.clone();
+            command.requested_sop_instance_uid = self.sop_instance_uid.clone();
+        } else {
+            command.affected_sop_class_uid = self.sop_class_uid.clone();
+            command.affected_sop_instance_uid = self.sop_instance_uid.clone();
+        }
         command.event_type_id = self.event_type_id;
         command.action_type_id = self.action_type_id;
         command.no_dataset = self.dataset.is_none();
@@ -64,11 +83,22 @@ impl NServiceRequest {
 
     /// Parses a request from a received command plus its (optional) dataset.
     pub fn from_command(command: &Command, dataset: Option<Dataset>) -> Self {
+        let (sop_class_uid, sop_instance_uid) = if uses_requested_uids(command.field) {
+            (
+                command.requested_sop_class_uid.clone(),
+                command.requested_sop_instance_uid.clone(),
+            )
+        } else {
+            (
+                command.affected_sop_class_uid.clone(),
+                command.affected_sop_instance_uid.clone(),
+            )
+        };
         NServiceRequest {
             field: command.field,
             message_id: command.message_id,
-            affected_sop_class_uid: command.affected_sop_class_uid.clone(),
-            affected_sop_instance_uid: command.affected_sop_instance_uid.clone(),
+            sop_class_uid,
+            sop_instance_uid,
             event_type_id: command.event_type_id,
             action_type_id: command.action_type_id,
             dataset,
@@ -107,8 +137,9 @@ impl NServiceResponse {
             field: crate::dimse::response_field(request.field)
                 .unwrap_or(request.field),
             message_id_being_responded_to: request.message_id,
-            affected_sop_class_uid: request.affected_sop_class_uid.clone(),
-            affected_sop_instance_uid: request.affected_sop_instance_uid.clone(),
+            // PS3.7 §10.1: responses always name the instance as Affected
+            affected_sop_class_uid: request.sop_class_uid.clone(),
+            affected_sop_instance_uid: request.sop_instance_uid.clone(),
             event_type_id: request.event_type_id,
             action_type_id: request.action_type_id,
             status,
@@ -148,6 +179,7 @@ impl NServiceResponse {
 mod tests {
     use super::*;
     use crate::dimse::status;
+    use crate::test_wire::{command_bytes, element_text, element_value};
 
     #[test]
     fn every_n_request_field_is_recognised() {
@@ -160,8 +192,8 @@ mod tests {
     #[test]
     fn a_request_command_round_trips_through_its_dataset() {
         let mut request = NServiceRequest::new(CommandField::NActionRq, 7);
-        request.affected_sop_class_uid = Some("1.2.3".into());
-        request.affected_sop_instance_uid = Some("1.2.3.4".into());
+        request.sop_class_uid = Some("1.2.3".into());
+        request.sop_instance_uid = Some("1.2.3.4".into());
         request.action_type_id = Some(1);
         let command = request.to_command();
         let dataset = command.to_dataset();
@@ -169,10 +201,81 @@ mod tests {
         let back = NServiceRequest::from_command(&parsed, None);
         assert_eq!(back.field, CommandField::NActionRq);
         assert_eq!(back.message_id, 7);
-        assert_eq!(back.affected_sop_instance_uid.as_deref(), Some("1.2.3.4"));
+        assert_eq!(back.sop_instance_uid.as_deref(), Some("1.2.3.4"));
         assert_eq!(back.action_type_id, Some(1));
         assert!(back.dataset.is_none());
         assert!(parsed.no_dataset, "a request without a dataset sets the flag");
+    }
+
+    #[test]
+    fn requested_services_encode_the_requested_tags() {
+        // PS3.7 §10.1 / Table E.1-1: N-GET, N-SET, N-ACTION and N-DELETE name
+        // their target in (0000,0003)/(0000,1001) Requested, not Affected.
+        for field in [CommandField::NGetRq, CommandField::NSetRq, CommandField::NActionRq, CommandField::NDeleteRq] {
+            let mut request = NServiceRequest::new(field, 1);
+            request.sop_class_uid = Some("1.2.840.10008.5.1.4.1.1.88.1".into());
+            request.sop_instance_uid = Some("1.2.3.4".into());
+            let bytes = command_bytes(&request.to_command());
+            assert_eq!(
+                element_text(&bytes, 0x0000, 0x0003).as_deref(), Some("1.2.840.10008.5.1.4.1.1.88.1"),
+                "{field:?} must carry (0000,0003) Requested SOP Class UID"
+            );
+            assert_eq!(
+                element_text(&bytes, 0x0000, 0x1001).as_deref(),
+                Some("1.2.3.4"),
+                "{field:?} must carry (0000,1001) Requested SOP Instance UID"
+            );
+            assert_eq!(element_value(&bytes, 0x0000, 0x0002), None, "{field:?} must not carry Affected SOP Class UID");
+            assert_eq!(
+                element_value(&bytes, 0x0000, 0x1000),
+                None,
+                "{field:?} must not carry Affected SOP Instance UID"
+            );
+        }
+    }
+
+    #[test]
+    fn affected_services_encode_the_affected_tags() {
+        // N-CREATE and N-EVENT-REPORT act on an affected instance (PS3.7 §10.1)
+        for field in [CommandField::NCreateRq, CommandField::NEventReportRq] {
+            let mut request = NServiceRequest::new(field, 1);
+            request.sop_class_uid = Some("1.2.840.10008.5.1.4.1.1.88.1".into());
+            request.sop_instance_uid = Some("1.2.3.4".into());
+            let bytes = command_bytes(&request.to_command());
+            assert_eq!(
+                element_text(&bytes, 0x0000, 0x0002).as_deref(),
+                Some("1.2.840.10008.5.1.4.1.1.88.1"),
+                "{field:?} must carry (0000,0002) Affected SOP Class UID"
+            );
+            assert_eq!(
+                element_text(&bytes, 0x0000, 0x1000).as_deref(),
+                Some("1.2.3.4"),
+                "{field:?} must carry (0000,1000) Affected SOP Instance UID"
+            );
+            assert_eq!(element_value(&bytes, 0x0000, 0x0003), None);
+            assert_eq!(element_value(&bytes, 0x0000, 0x1001), None);
+        }
+    }
+
+    #[test]
+    fn a_parsed_request_reads_the_tags_its_field_uses() {
+        // an N-GET-RQ as a peer encodes it: Requested* only
+        let mut command = Command::request(CommandField::NGetRq, 5);
+        command.requested_sop_class_uid = Some("1.2.3".into());
+        command.requested_sop_instance_uid = Some("1.2.3.4".into());
+        let parsed = Command::from_dataset(&command.to_dataset()).unwrap();
+        let request = NServiceRequest::from_command(&parsed, None);
+        assert_eq!(request.sop_class_uid.as_deref(), Some("1.2.3"));
+        assert_eq!(request.sop_instance_uid.as_deref(), Some("1.2.3.4"));
+
+        // an N-CREATE-RQ carries Affected* instead
+        let mut command = Command::request(CommandField::NCreateRq, 6);
+        command.affected_sop_class_uid = Some("1.2.3".into());
+        command.affected_sop_instance_uid = Some("1.2.3.5".into());
+        let parsed = Command::from_dataset(&command.to_dataset()).unwrap();
+        let request = NServiceRequest::from_command(&parsed, None);
+        assert_eq!(request.sop_class_uid.as_deref(), Some("1.2.3"));
+        assert_eq!(request.sop_instance_uid.as_deref(), Some("1.2.3.5"));
     }
 
     #[test]
@@ -182,6 +285,18 @@ mod tests {
         assert_eq!(response.field, CommandField::NGetRsp);
         assert_eq!(response.message_id_being_responded_to, 3);
         assert_eq!(response.status, status::SUCCESS);
+    }
+
+    #[test]
+    fn a_response_echoes_the_instance_as_affected() {
+        // PS3.7 §10.1: responses name the instance in (0000,0002)/(0000,1000)
+        let mut request = NServiceRequest::new(CommandField::NGetRq, 3);
+        request.sop_class_uid = Some("1.2.3".into());
+        request.sop_instance_uid = Some("1.2.3.4".into());
+        let bytes = command_bytes(&NServiceResponse::success(&request, None).to_command());
+        assert_eq!(element_text(&bytes, 0x0000, 0x0002).as_deref(), Some("1.2.3"));
+        assert_eq!(element_text(&bytes, 0x0000, 0x1000).as_deref(), Some("1.2.3.4"));
+        assert_eq!(element_value(&bytes, 0x0000, 0x0003), None, "a response is not a request");
     }
 
     #[test]
