@@ -12,6 +12,7 @@ use radicom::io::writer::WriteOptions;
 use radicom::model::dataset::Dataset;
 use radicom::model::item::DicomItem;
 use radicom::model::tag::Tag;
+use radicom::sr::StructuredReport;
 
 fn corpus_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests-data")
@@ -120,6 +121,46 @@ fn charset_corpus_decodes_to_real_characters() {
             assert!(name.contains(want), "{rel}: PatientName {name:?} should contain {want:?}");
         }
     }
+}
+
+/// A real SR document walks correctly: the content tree parses into the expected
+/// number of nodes with the expected value types (docs/09, SR-01 §4.1).
+#[test]
+fn a_real_sr_document_walks_its_content_tree() {
+    use radicom::sr::{ContentItem, ValueType};
+
+    fn count(items: &[ContentItem]) -> usize {
+        items.iter().map(|it| 1 + count(&it.children())).sum()
+    }
+
+    let bytes = std::fs::read(corpus_dir().join("sr/test_SR.dcm")).unwrap();
+    let sr = StructuredReport::from_bytes(&bytes).unwrap();
+    let roots = sr.root_items();
+    assert_eq!(roots.len(), 5, "the reference SR has five top-level content items");
+    assert_eq!(count(&roots), 28, "the whole content tree has 28 nodes");
+
+    // The tree mixes CONTAINER / TEXT / COMPOSITE / IMAGE / UIDREF nodes.
+    let mut seen: Vec<ValueType> = Vec::new();
+    fn walk(items: &[ContentItem], seen: &mut Vec<ValueType>) {
+        for it in items {
+            if let Some(vt) = it.value_type() {
+                if !seen.contains(&vt) {
+                    seen.push(vt);
+                }
+            }
+            walk(&it.children(), seen);
+        }
+    }
+    walk(&roots, &mut seen);
+    for expected in [ValueType::Container, ValueType::Text, ValueType::Image] {
+        assert!(seen.contains(&expected), "the tree should contain a {expected:?} node");
+    }
+
+    // One container node carries children (a nested report structure).
+    assert!(
+        roots.iter().any(|r| !r.children().is_empty()),
+        "at least one top-level item has a non-empty subtree"
+    );
 }
 
 /// Recursively removes `(gggg,0000)` group-length elements (redundant on read).
