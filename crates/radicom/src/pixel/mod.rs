@@ -453,12 +453,19 @@ impl<'a> PixelData<'a> {
     /// read from the red descriptor. A PALETTE COLOR input value `v` maps to
     /// entry `v - first` (all three channels share the descriptor's first value).
     pub fn palette_first_mapped(&self) -> Option<i32> {
-        let descriptor = self.dataset.item(&RED_DESCRIPTOR)?.as_element_buffer()?;
+        let DicomItem::Element(element) = self.dataset.item(&RED_DESCRIPTOR)? else {
+            return None;
+        };
+        let descriptor = element.value().as_buffer()?;
         let desc = descriptor.data();
         if desc.len() < 6 {
             return None;
         }
-        Some(u16::from_le_bytes([desc[2], desc[3]]) as i32)
+        let first = [desc[2], desc[3]];
+        Some(match element.vr() {
+            Vr::Ss => i16::from_le_bytes(first) as i32,
+            _ => u16::from_le_bytes(first) as i32,
+        })
     }
 
     /// One LUT channel: descriptor-driven 8-bit expansion, validated against the
@@ -907,6 +914,23 @@ mod tests {
         let data = vec![0u8; 300];
         let mut ds = palette_dataset(300, 8, &data);
         assert!(PixelData::from_dataset(&mut ds).unwrap().palette_color_lut_checked().is_err());
+    }
+
+    #[test]
+    fn palette_descriptor_reads_a_signed_first_mapped_value() {
+        let mut ds = palette_dataset(2, 8, &[10, 20]);
+        let descriptor = [2u16, (-2i16) as u16, 8]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
+            RED_DESCRIPTOR,
+            Vr::Ss,
+            Arc::new(MemoryBuffer::from(descriptor)),
+        )));
+
+        let pixel = PixelData::from_dataset(&mut ds).unwrap();
+        assert_eq!(pixel.palette_first_mapped(), Some(-2));
     }
 
     #[test]

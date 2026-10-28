@@ -201,7 +201,7 @@ fn a_16_bit_voi_lut_scales_its_entries_down_to_a_byte() {
 2. **不区分 VR**：描述符 `(0028,3002)` 的 VR 是 `US\SS`（`radicom-dict` 亦然），`[0]` 在 SS 语境下可以是负数，fo-dicom 取 `Math.Abs`（`VOISequenceLUT.cs:115`：`_nrOfEntries = Math.Abs(LUTDescriptor.Get<int>(0))`，注释写 "Sometimes negative number is defined and this makes no sense"）；数据 `(0028,3006)` 可以是 `OW`/`US`/`SS`，fo-dicom 分别按 `ushort`/`ushort`/`short` 解释。radicom 一律按 `u16::from_le_bytes` 读（:63、:80），SS 数据被当成无符号。
 3. **实测 SS 描述符**：`entries=-3, first=-2`，输入 0/1/2 应得 `10/20/30`，radicom 输出 `0/0/0`（`entries` 被读成 65533，`first_mapped` 被读成 65534，索引全部越界后钳到 0）。
 4. `bits` 用 `>= 16` 判断（:80），而 PS3.3 说第三值只能是 8 或 16；8 当作"取低字节"、16 当作"取两字节"，语义上恰好可用，但缺少对其它值的拒绝。
-5. `pixel/mod.rs:449` 的 `palette_first_mapped` 同样把 `(0028,1101)/(0028,1201)` 描述符 `[1]` 当作 `u16` 再转 `i32`，**永远非负**；PS3.3 允许 SS 语义的负起点，fo-dicom `PaletteColorLUT` 用有符号 `_first` 并在 `(value - _first) > 0` 处钳位。
+5. `pixel/mod.rs:449` 的 `palette_first_mapped` 曾把 `(0028,1101)/(0028,1201)` 描述符 `[1]` 当作 `u16` 再转 `i32`，**永远非负**；现已按描述符 VR 读取，`SS` 使用有符号值，回归测试 `palette_descriptor_reads_a_signed_first_mapped_value` 覆盖 `-2` 起点。PS3.3 允许 SS 语义的负起点，fo-dicom `PaletteColorLUT` 同样保留该符号。
 
 ### 2.4 【高】overlay 的 `ImageFrameOrigin` 与 `OverlayOrigin` 行列顺序都读错
 
