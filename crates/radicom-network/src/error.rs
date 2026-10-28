@@ -1,4 +1,4 @@
-//! Network error type (docs/07-network.md §11).
+//! Network error type (docs/01-architecture.md §11).
 //!
 //! Every failure mode of the protocol engine maps onto this set; nothing
 //! escapes as a generic IO error when a specific variant applies.
@@ -92,7 +92,7 @@ impl AbortSource {
     }
 }
 
-/// All network failures (docs/07-network.md §11).
+/// All network failures (docs/01-architecture.md §11).
 #[derive(Debug, thiserror::Error)]
 pub enum NetworkError {
     #[error("association rejected (result {result}, source {source_code}, reason {reason})")]

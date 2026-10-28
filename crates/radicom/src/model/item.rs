@@ -1,5 +1,5 @@
 //! Dataset items: elements, sequences and fragment sequences
-//! (ELEM-03, ELEM-04; docs/04-data-model.md §7).
+//! (ELEM-03, ELEM-04; docs/01-architecture.md §3).
 
 use crate::model::buffer::SharedBuffer;
 use crate::model::dataset::Dataset;
@@ -96,7 +96,7 @@ impl DicomFragmentSequence {
     /// Appends a fragment and maintains the basic offset table: each entry is
     /// the byte distance from the first fragment's item tag to this
     /// fragment's item tag, i.e. every preceding fragment contributes its
-    /// 8-byte item header plus its padded length (docs/05-file-io.md §5.2).
+    /// 8-byte item header plus its padded length (docs/01-architecture.md §7).
     /// A computed offset beyond `u32::MAX` clears the table (readers then
     /// fall back to the fragment-count == frame-count mapping, spec 06 §1.4).
     pub fn push_fragment(&mut self, fragment: SharedBuffer) {
@@ -192,18 +192,18 @@ use std::sync::Arc;
 
     #[test]
     fn sequence_container() {
-        let mut seq = DicomSequence::new(Tag::new(0x0008, 0x1110));
+        let mut seq = DicomSequence::new(Tag::REFERENCED_STUDY_SEQUENCE);
         seq.push(Dataset::new());
         seq.push(Dataset::new());
         assert_eq!(seq.len(), 2);
-        assert_eq!(seq.tag(), &Tag::new(0x0008, 0x1110));
+        assert_eq!(seq.tag(), &Tag::REFERENCED_STUDY_SEQUENCE);
         let item = DicomItem::Sequence(seq);
         assert_eq!(item.vr(), Vr::Sq);
     }
 
     #[test]
     fn fragment_offset_table_growth() {
-        let mut f = DicomFragmentSequence::new(Tag::new(0x7FE0, 0x0010), Vr::Ob);
+        let mut f = DicomFragmentSequence::new(Tag::PIXEL_DATA, Vr::Ob);
         f.push_fragment(Arc::new(MemoryBuffer::from(vec![1, 2])));
         assert_eq!(f.offset_table(), &[0], "first fragment starts at 0");
         // each preceding fragment contributes its 8-byte item header plus its
@@ -219,11 +219,11 @@ use std::sync::Arc;
 
     #[test]
     fn item_vr_dispatch() {
-        let e = DicomElement::new_str(Tag::new(0x0010, 0x0010), Vr::Pn, "X");
+        let e = DicomElement::new_str(Tag::PATIENT_NAME, Vr::Pn, "X");
         let item = DicomItem::Element(e);
         assert_eq!(item.vr(), Vr::Pn);
         assert!(!item.is_empty_value());
-        let empty = DicomItem::Element(DicomElement::new_empty(Tag::new(0x0010, 0x0020), Vr::Lo));
+        let empty = DicomItem::Element(DicomElement::new_empty(Tag::PATIENT_ID, Vr::Lo));
         assert!(empty.is_empty_value());
     }
 }

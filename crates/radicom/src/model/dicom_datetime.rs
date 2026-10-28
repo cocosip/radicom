@@ -1,5 +1,5 @@
 //! DA / DT / TM parsing and formatting (ELEM-01 date-time family;
-//! docs/04-data-model.md §7.2).
+//! docs/01-architecture.md §3).
 //!
 //! Accepted input shapes mirror fo-dicom's format arrays:
 //! - DA: `YYYY`, `YYYYMM`, `YYYYMMDD`, `YYYY.MM.DD`, `YYYY/MM/DD`

@@ -1,4 +1,4 @@
-//! SR content items (SR-01; docs/08-serialization-media.md §4.1).
+//! SR content items (SR-01; docs/01-architecture.md §12).
 //!
 //! An SR is a tree of content items. Each item is one `Dataset` inside a
 //! `ContentSequence` (0040,A730) carrying a `ConceptNameCodeSequence`
@@ -16,41 +16,41 @@ pub mod tags {
     use crate::model::tag::Tag;
 
     /// (0040,A730) ContentSequence.
-    pub const CONTENT_SEQUENCE: Tag = Tag::new(0x0040, 0xA730);
+    pub const CONTENT_SEQUENCE: Tag = Tag::CONTENT_SEQUENCE;
     /// (0040,A040) ValueType.
-    pub const VALUE_TYPE: Tag = Tag::new(0x0040, 0xA040);
+    pub const VALUE_TYPE: Tag = Tag::VALUE_TYPE;
     /// (0040,A010) RelationshipType.
-    pub const RELATIONSHIP_TYPE: Tag = Tag::new(0x0040, 0xA010);
+    pub const RELATIONSHIP_TYPE: Tag = Tag::RELATIONSHIP_TYPE;
     /// (0040,A043) ConceptNameCodeSequence.
-    pub const CONCEPT_NAME: Tag = Tag::new(0x0040, 0xA043);
+    pub const CONCEPT_NAME: Tag = Tag::CONCEPT_NAME_CODE_SEQUENCE;
     /// (0040,A160) TextValue.
-    pub const TEXT_VALUE: Tag = Tag::new(0x0040, 0xA160);
+    pub const TEXT_VALUE: Tag = Tag::TEXT_VALUE;
     /// (0040,A123) PersonName.
-    pub const PERSON_NAME: Tag = Tag::new(0x0040, 0xA123);
+    pub const PERSON_NAME: Tag = Tag::PERSON_NAME;
     /// (0040,A120) DateTime.
-    pub const DATE_TIME: Tag = Tag::new(0x0040, 0xA120);
+    pub const DATE_TIME: Tag = Tag::DATE_TIME;
     /// (0040,A121) Date.
-    pub const DATE: Tag = Tag::new(0x0040, 0xA121);
+    pub const DATE: Tag = Tag::DATE;
     /// (0040,A122) Time.
-    pub const TIME: Tag = Tag::new(0x0040, 0xA122);
+    pub const TIME: Tag = Tag::TIME;
     /// (0040,A124) UID.
-    pub const UID: Tag = Tag::new(0x0040, 0xA124);
+    pub const UID: Tag = Tag::UID;
     /// (0040,A168) ConceptCodeSequence.
-    pub const CONCEPT_CODE_SEQUENCE: Tag = Tag::new(0x0040, 0xA168);
+    pub const CONCEPT_CODE_SEQUENCE: Tag = Tag::CONCEPT_CODE_SEQUENCE;
     /// (0040,A300) MeasuredValueSequence.
-    pub const MEASURED_VALUE_SEQUENCE: Tag = Tag::new(0x0040, 0xA300);
+    pub const MEASURED_VALUE_SEQUENCE: Tag = Tag::MEASURED_VALUE_SEQUENCE;
     /// (0040,A30A) NumericValue (DS), inside a MeasuredValueSequence item.
-    pub const NUMERIC_VALUE: Tag = Tag::new(0x0040, 0xA30A);
+    pub const NUMERIC_VALUE: Tag = Tag::NUMERIC_VALUE;
     /// (0040,08EA) MeasurementUnitsCodeSequence.
-    pub const MEASUREMENT_UNITS_CODE_SEQUENCE: Tag = Tag::new(0x0040, 0x08EA);
+    pub const MEASUREMENT_UNITS_CODE_SEQUENCE: Tag = Tag::MEASUREMENT_UNITS_CODE_SEQUENCE;
     /// (0008,1199) ReferencedSOPSequence.
-    pub const REFERENCED_SOP_SEQUENCE: Tag = Tag::new(0x0008, 0x1199);
+    pub const REFERENCED_SOP_SEQUENCE: Tag = Tag::REFERENCED_SOP_SEQUENCE;
     /// (0008,1150) ReferencedSOPClassUID.
-    pub const REFERENCED_SOP_CLASS_UID: Tag = Tag::new(0x0008, 0x1150);
+    pub const REFERENCED_SOP_CLASS_UID: Tag = Tag::REFERENCED_SOP_CLASS_UID;
     /// (0008,1155) ReferencedSOPInstanceUID.
-    pub const REFERENCED_SOP_INSTANCE_UID: Tag = Tag::new(0x0008, 0x1155);
+    pub const REFERENCED_SOP_INSTANCE_UID: Tag = Tag::REFERENCED_SOP_INSTANCE_UID;
     /// (0040,A730) also the sequence a container's children live in.
-    pub const CONTINUITY_OF_CONTENT: Tag = Tag::new(0x0040, 0xA050);
+    pub const CONTINUITY_OF_CONTENT: Tag = Tag::CONTINUITY_OF_CONTENT;
 }
 
 /// The 15 SR value types (§4.1, PS3.3 C.18.1).

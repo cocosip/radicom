@@ -9,7 +9,7 @@
 //! ```
 //!
 //! Fragment sequences are deliberately not representable (§1.1 of
-//! docs/08-serialization-media.md): they return an error that suggests
+//! docs/01-architecture.md §12): they return an error that suggests
 //! transcoding, matching fo-dicom.
 
 use base64::Engine as _;
@@ -222,7 +222,7 @@ fn raw_value_array(raw: &SharedBuffer, vr: Vr, _tag: &Tag) -> Vec<Value> {
     let unit = vr.unit_size().max(1);
     match vr {
         Vr::At => bytes
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .map(|chunk| {
                 let group = u16::from_le_bytes([chunk[0], chunk[1]]);
                 let element = u16::from_le_bytes([chunk[2], chunk[3]]);
@@ -561,19 +561,19 @@ mod tests {
 
     fn sample() -> Dataset {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0008, 0x0016), Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
-        ds.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Doe^John");
-        ds.insert_str(Tag::new(0x0010, 0x0020), Vr::Lo, "PID-1");
-        ds.insert_str(Tag::new(0x0008, 0x0060), Vr::Cs, "CT");
-        ds.insert_str(Tag::new(0x0020, 0x0013), Vr::Is, "42");
+        ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+        ds.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID-1");
+        ds.insert_str(Tag::MODALITY, Vr::Cs, "CT");
+        ds.insert_str(Tag::INSTANCE_NUMBER, Vr::Is, "42");
         ds.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
         ds
     }
 
     #[test]
     fn tags_use_eight_hex_digits() {
-        assert_eq!(tag_key(&Tag::new(0x0010, 0x0010)), "00100010");
-        assert_eq!(tag_key(&Tag::new(0x7FE0, 0x0010)), "7FE00010");
+        assert_eq!(tag_key(&Tag::PATIENT_NAME), "00100010");
+        assert_eq!(tag_key(&Tag::PIXEL_DATA), "7FE00010");
     }
 
     #[test]
@@ -598,23 +598,23 @@ mod tests {
         let ds = sample();
         let json = dataset_to_json(&ds, &JsonOptions::default()).unwrap();
         let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
-        assert_eq!(back.get_str(Tag::new(0x0010, 0x0010)).unwrap(), "Doe^John");
-        assert_eq!(back.get_str(Tag::new(0x0010, 0x0020)).unwrap(), "PID-1");
-        assert_eq!(back.get_str(Tag::new(0x0008, 0x0016)).unwrap(), "1.2.840.10008.5.1.4.1.1.7");
-        assert_eq!(back.get_str(Tag::new(0x0020, 0x0013)).unwrap(), "42");
+        assert_eq!(back.get_str(Tag::PATIENT_NAME).unwrap(), "Doe^John");
+        assert_eq!(back.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
+        assert_eq!(back.get_str(Tag::SOP_CLASS_UID).unwrap(), "1.2.840.10008.5.1.4.1.1.7");
+        assert_eq!(back.get_str(Tag::INSTANCE_NUMBER).unwrap(), "42");
         assert_eq!(back.len(), ds.len(), "no element is lost");
     }
 
     #[test]
     fn person_name_groups_round_trip() {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Yamada^Tarou=山田^太郎=やまだ^たろう");
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Yamada^Tarou=山田^太郎=やまだ^たろう");
         let json = dataset_to_json(&ds, &JsonOptions::default()).unwrap();
         let value: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["00100010"]["Value"][0]["Ideographic"], "山田^太郎");
         let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
         assert_eq!(
-            back.get_str(Tag::new(0x0010, 0x0010)).unwrap(),
+            back.get_str(Tag::PATIENT_NAME).unwrap(),
             "Yamada^Tarou=山田^太郎=やまだ^たろう"
         );
     }
@@ -622,32 +622,32 @@ mod tests {
     #[test]
     fn multi_value_strings_split_on_backslash() {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0008, 0x0061), Vr::Cs, "CT\\MR");
+        ds.insert_str(Tag::MODALITIES_IN_STUDY, Vr::Cs, "CT\\MR");
         let json = dataset_to_json(&ds, &JsonOptions::default()).unwrap();
         let value: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["00080061"]["Value"], serde_json::json!(["CT", "MR"]));
         let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
-        assert_eq!(back.get_str(Tag::new(0x0008, 0x0061)).unwrap(), "CT\\MR");
+        assert_eq!(back.get_str(Tag::MODALITIES_IN_STUDY).unwrap(), "CT\\MR");
     }
 
     #[test]
     fn empty_elements_omit_the_value_carrier() {
         let mut ds = Dataset::new();
-        ds.insert_empty(Tag::new(0x0010, 0x0020), Vr::Lo);
+        ds.insert_empty(Tag::PATIENT_ID, Vr::Lo);
         let json = dataset_to_json(&ds, &JsonOptions::default()).unwrap();
         let value: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["00100020"]["vr"], "LO");
         assert!(value["00100020"].get("Value").is_none(), "empty elements carry no Value");
 
         let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
-        assert!(back.get_element(Tag::new(0x0010, 0x0020)).unwrap().is_empty());
+        assert!(back.get_element(Tag::PATIENT_ID).unwrap().is_empty());
     }
 
     #[test]
     fn binary_values_use_inline_binary() {
         let mut ds = Dataset::new();
         ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
-            Tag::new(0x7FE0, 0x0010),
+            Tag::PIXEL_DATA,
             Vr::Ob,
             Arc::new(MemoryBuffer::from(vec![1u8, 2, 3, 4])),
         )));
@@ -657,7 +657,7 @@ mod tests {
         assert_eq!(value["7FE00010"]["InlineBinary"], "AQIDBA==");
 
         let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
-        let bytes = back.get_element(Tag::new(0x7FE0, 0x0010)).unwrap();
+        let bytes = back.get_element(Tag::PIXEL_DATA).unwrap();
         assert_eq!(bytes.value().as_buffer().unwrap().data().to_vec(), vec![1u8, 2, 3, 4]);
     }
 
@@ -666,7 +666,7 @@ mod tests {
         // a US element parsed from the wire is held as bytes
         let mut ds = Dataset::new();
         ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
-            Tag::new(0x0028, 0x0010),
+            Tag::ROWS,
             Vr::Us,
             Arc::new(MemoryBuffer::from(512u16.to_le_bytes().to_vec())),
         )));
@@ -676,7 +676,7 @@ mod tests {
         assert_eq!(value["00280010"]["Value"][0], 512);
 
         let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
-        let element = back.get_element(Tag::new(0x0028, 0x0010)).unwrap();
+        let element = back.get_element(Tag::ROWS).unwrap();
         assert_eq!(
             element.value().as_buffer().unwrap().data().as_ref(),
             512u16.to_le_bytes(),
@@ -690,7 +690,7 @@ mod tests {
         // AT is a binary VR, so it is held as bytes (as the parser builds it)
         let mut ds = Dataset::new();
         ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
-            Tag::new(0x0008, 0x103E),
+            Tag::SERIES_DESCRIPTION,
             Vr::At,
             Arc::new(MemoryBuffer::from(vec![0x10, 0x00, 0x10, 0x00])),
         )));
@@ -700,7 +700,7 @@ mod tests {
 
         let lower = r#"{"0008103E":{"vr":"AT","Value":["00100010"]}}"#;
         let back = json_to_dataset(lower, &JsonOptions::default()).unwrap();
-        let element = back.get_element(Tag::new(0x0008, 0x103E)).unwrap();
+        let element = back.get_element(Tag::SERIES_DESCRIPTION).unwrap();
         let bytes = element.value().as_buffer().unwrap();
         assert_eq!(bytes.data().as_ref(), &[0x10, 0x00, 0x10, 0x00], "AT round-trips as 4-byte pairs");
     }
@@ -709,8 +709,8 @@ mod tests {
     fn sequences_recurse() {
         let mut ds = Dataset::new();
         let mut item = Dataset::new();
-        item.insert_str(Tag::new(0x0008, 0x0100), Vr::Sh, "113100");
-        ds.insert_sequence(Tag::new(0x0040, 0xA730)).push(item);
+        item.insert_str(Tag::CODE_VALUE, Vr::Sh, "113100");
+        ds.insert_sequence(Tag::CONTENT_SEQUENCE).push(item);
 
         let json = dataset_to_json(&ds, &JsonOptions::default()).unwrap();
         let value: Value = serde_json::from_str(&json).unwrap();
@@ -718,15 +718,15 @@ mod tests {
         assert_eq!(value["0040A730"]["Value"][0]["00080100"]["Value"][0], "113100");
 
         let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
-        let sequence = back.get_sequence(Tag::new(0x0040, 0xA730)).unwrap();
+        let sequence = back.get_sequence(Tag::CONTENT_SEQUENCE).unwrap();
         assert_eq!(sequence.items().len(), 1);
-        assert_eq!(sequence.items()[0].get_str(Tag::new(0x0008, 0x0100)).unwrap(), "113100");
+        assert_eq!(sequence.items()[0].get_str(Tag::CODE_VALUE).unwrap(), "113100");
     }
 
     #[test]
     fn fragment_sequences_are_rejected_with_a_hint() {
         let mut ds = Dataset::new();
-        ds.insert_fragments(Tag::new(0x7FE0, 0x0010), Vr::Ob);
+        ds.insert_fragments(Tag::PIXEL_DATA, Vr::Ob);
         let error = dataset_to_json(&ds, &JsonOptions::default()).unwrap_err();
         assert!(matches!(error, JsonError::Fragments));
         assert!(error.to_string().contains("transcode"), "the message suggests transcoding: {error}");
@@ -735,8 +735,8 @@ mod tests {
     #[test]
     fn numeric_modes_control_is_and_ds_rendering() {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0020, 0x0013), Vr::Is, "42");
-        ds.insert_str(Tag::new(0x0018, 0x0050), Vr::Ds, "1.50");
+        ds.insert_str(Tag::INSTANCE_NUMBER, Vr::Is, "42");
+        ds.insert_str(Tag::SLICE_THICKNESS, Vr::Ds, "1.50");
 
         let as_number = JsonOptions { numbers: NumberMode::AsNumber, ..Default::default() };
         let value: Value = serde_json::from_str(&dataset_to_json(&ds, &as_number).unwrap()).unwrap();
@@ -757,7 +757,7 @@ mod tests {
     #[test]
     fn nan_and_infinity_stay_strings() {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0018, 0x0050), Vr::Ds, "NaN");
+        ds.insert_str(Tag::SLICE_THICKNESS, Vr::Ds, "NaN");
         let options = JsonOptions { numbers: NumberMode::AsNumber, ..Default::default() };
         let value: Value = serde_json::from_str(&dataset_to_json(&ds, &options).unwrap()).unwrap();
         assert_eq!(value["00180050"]["Value"][0], "NaN", "NaN can never be a JSON number");
@@ -767,7 +767,7 @@ mod tests {
     fn reading_accepts_numbers_for_numeric_vrs() {
         let json = r#"{"00200013":{"vr":"IS","Value":[42]}}"#;
         let ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
-        assert_eq!(ds.get_str(Tag::new(0x0020, 0x0013)).unwrap(), "42");
+        assert_eq!(ds.get_str(Tag::INSTANCE_NUMBER).unwrap(), "42");
     }
 
     #[test]
@@ -775,7 +775,7 @@ mod tests {
         // "vr" after the value, plus an extra property that must be ignored
         let json = r#"{"00100020":{"Value":["PID-1"],"extra":true,"vr":"LO"}}"#;
         let ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
-        assert_eq!(ds.get_str(Tag::new(0x0010, 0x0020)).unwrap(), "PID-1");
+        assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
     }
 
     #[test]
@@ -818,7 +818,7 @@ mod tests {
         // read: the URI becomes a BulkDataUri buffer, not an error (JSON-02)
         let json = r#"{"7FE00010":{"vr":"OB","BulkDataURI":"http://example/x"}}"#;
         let ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
-        let element = ds.get_element(Tag::new(0x7FE0, 0x0010)).unwrap();
+        let element = ds.get_element(Tag::PIXEL_DATA).unwrap();
         let buffer = element.value().as_buffer().unwrap();
         assert_eq!(buffer.bulk_uri(), Some("http://example/x"));
 
@@ -834,6 +834,6 @@ mod tests {
         // serde_json itself keeps the last duplicate, which is the rule (§1.3)
         let json = r#"{"00100020":{"vr":"LO","Value":["first"]},"00100020":{"vr":"LO","Value":["second"]}}"#;
         let ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
-        assert_eq!(ds.get_str(Tag::new(0x0010, 0x0020)).unwrap(), "second");
+        assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "second");
     }
 }

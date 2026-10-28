@@ -1,4 +1,4 @@
-//! DICOMDIR — the Media Storage Directory (MEDIA-01; docs/08-serialization-media.md §3).
+//! DICOMDIR — the Media Storage Directory (MEDIA-01; docs/01-architecture.md §12).
 //!
 //! A DICOMDIR is a normal DICOM file whose dataset holds a flat
 //! `DirectoryRecordSequence` (0004,1220). The hierarchy is expressed by record
@@ -32,44 +32,44 @@ pub mod tags {
     use crate::model::tag::Tag;
 
     /// (0004,1130) File-set ID.
-    pub const FILE_SET_ID: Tag = Tag::new(0x0004, 0x1130);
+    pub const FILE_SET_ID: Tag = Tag::FILE_SET_ID;
     /// (0004,1200) Offset of the first root directory record.
-    pub const OFFSET_FIRST_ROOT: Tag = Tag::new(0x0004, 0x1200);
+    pub const OFFSET_FIRST_ROOT: Tag = Tag::OFFSET_OF_THE_FIRST_DIRECTORY_RECORD_OF_THE_ROOT_DIRECTORY_ENTITY;
     /// (0004,1202) Offset of the last root directory record.
-    pub const OFFSET_LAST_ROOT: Tag = Tag::new(0x0004, 0x1202);
+    pub const OFFSET_LAST_ROOT: Tag = Tag::OFFSET_OF_THE_LAST_DIRECTORY_RECORD_OF_THE_ROOT_DIRECTORY_ENTITY;
     /// (0004,1212) File-set consistency flag.
-    pub const FILE_SET_CONSISTENCY_FLAG: Tag = Tag::new(0x0004, 0x1212);
+    pub const FILE_SET_CONSISTENCY_FLAG: Tag = Tag::FILE_SET_CONSISTENCY_FLAG;
     /// (0004,1220) Directory record sequence.
-    pub const DIR_RECORD_SEQUENCE: Tag = Tag::new(0x0004, 0x1220);
+    pub const DIR_RECORD_SEQUENCE: Tag = Tag::DIRECTORY_RECORD_SEQUENCE;
     /// (0004,1400) Offset of the next directory record.
-    pub const OFFSET_NEXT: Tag = Tag::new(0x0004, 0x1400);
+    pub const OFFSET_NEXT: Tag = Tag::OFFSET_OF_THE_NEXT_DIRECTORY_RECORD;
     /// (0004,1410) Record in-use flag.
-    pub const RECORD_IN_USE_FLAG: Tag = Tag::new(0x0004, 0x1410);
+    pub const RECORD_IN_USE_FLAG: Tag = Tag::RECORD_IN_USE_FLAG;
     /// (0004,1420) Offset of the referenced lower level entity.
-    pub const OFFSET_LOWER: Tag = Tag::new(0x0004, 0x1420);
+    pub const OFFSET_LOWER: Tag = Tag::OFFSET_OF_REFERENCED_LOWER_LEVEL_DIRECTORY_ENTITY;
     /// (0004,1430) Directory record type.
-    pub const RECORD_TYPE: Tag = Tag::new(0x0004, 0x1430);
+    pub const RECORD_TYPE: Tag = Tag::DIRECTORY_RECORD_TYPE;
     /// (0004,1500) Referenced file ID.
-    pub const REFERENCED_FILE_ID: Tag = Tag::new(0x0004, 0x1500);
+    pub const REFERENCED_FILE_ID: Tag = Tag::REFERENCED_FILE_ID;
     /// (0004,1510) Referenced SOP class UID in file.
-    pub const REFERENCED_SOP_CLASS: Tag = Tag::new(0x0004, 0x1510);
+    pub const REFERENCED_SOP_CLASS: Tag = Tag::REFERENCED_SOP_CLASS_UID_IN_FILE;
     /// (0004,1511) Referenced SOP instance UID in file.
-    pub const REFERENCED_SOP_INSTANCE: Tag = Tag::new(0x0004, 0x1511);
+    pub const REFERENCED_SOP_INSTANCE: Tag = Tag::REFERENCED_SOP_INSTANCE_UID_IN_FILE;
     /// (0004,1512) Referenced transfer syntax UID in file.
-    pub const REFERENCED_TRANSFER_SYNTAX: Tag = Tag::new(0x0004, 0x1512);
+    pub const REFERENCED_TRANSFER_SYNTAX: Tag = Tag::REFERENCED_TRANSFER_SYNTAX_UID_IN_FILE;
 
     /// (0010,0010) Patient's Name.
-    pub const PATIENT_NAME: Tag = Tag::new(0x0010, 0x0010);
+    pub const PATIENT_NAME: Tag = Tag::PATIENT_NAME;
     /// (0010,0020) Patient ID.
-    pub const PATIENT_ID: Tag = Tag::new(0x0010, 0x0020);
+    pub const PATIENT_ID: Tag = Tag::PATIENT_ID;
     /// (0020,000D) Study Instance UID.
-    pub const STUDY_INSTANCE_UID: Tag = Tag::new(0x0020, 0x000D);
+    pub const STUDY_INSTANCE_UID: Tag = Tag::STUDY_INSTANCE_UID;
     /// (0020,000E) Series Instance UID.
-    pub const SERIES_INSTANCE_UID: Tag = Tag::new(0x0020, 0x000E);
+    pub const SERIES_INSTANCE_UID: Tag = Tag::SERIES_INSTANCE_UID;
     /// (0008,0016) SOP Class UID.
-    pub const SOP_CLASS_UID: Tag = Tag::new(0x0008, 0x0016);
+    pub const SOP_CLASS_UID: Tag = Tag::SOP_CLASS_UID;
     /// (0008,0018) SOP Instance UID.
-    pub const SOP_INSTANCE_UID: Tag = Tag::new(0x0008, 0x0018);
+    pub const SOP_INSTANCE_UID: Tag = Tag::SOP_INSTANCE_UID;
 }
 
 /// The SOP class of a media storage directory (§3.1).
@@ -232,7 +232,7 @@ impl DicomDirectory {
         dataset.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
 
         let mut file_meta = Dataset::new();
-        file_meta.insert_str(Tag::new(0x0002, 0x0002), Vr::Ui, MEDIA_STORAGE_DIRECTORY_SOP_CLASS);
+        file_meta.insert_str(Tag::MEDIA_STORAGE_SOP_CLASS_UID, Vr::Ui, MEDIA_STORAGE_DIRECTORY_SOP_CLASS);
         let mut file = DicomFile::from_dataset(dataset);
         file.file_meta = file_meta;
         file.format = FileFormat::Dicom3;
@@ -538,15 +538,15 @@ fn level_record(kind: RecordType, source: &Dataset) -> DirectoryRecord {
 fn identifying_attributes(kind: &RecordType) -> &'static [(Tag, Vr)] {
     const PATIENT: &[(Tag, Vr)] = &[(tags::PATIENT_NAME, Vr::Pn)];
     const STUDY: &[(Tag, Vr)] = &[
-        (Tag::new(0x0008, 0x0020), Vr::Da), // Study Date
-        (Tag::new(0x0008, 0x0030), Vr::Tm), // Study Time
-        (Tag::new(0x0008, 0x0050), Vr::Sh), // Accession Number
-        (Tag::new(0x0008, 0x1030), Vr::Lo), // Study Description
-        (Tag::new(0x0020, 0x0010), Vr::Sh), // Study ID
+        (Tag::STUDY_DATE, Vr::Da), // Study Date
+        (Tag::STUDY_TIME, Vr::Tm), // Study Time
+        (Tag::ACCESSION_NUMBER, Vr::Sh), // Accession Number
+        (Tag::STUDY_DESCRIPTION, Vr::Lo), // Study Description
+        (Tag::STUDY_ID, Vr::Sh), // Study ID
     ];
     const SERIES: &[(Tag, Vr)] = &[
-        (Tag::new(0x0008, 0x0060), Vr::Cs), // Modality
-        (Tag::new(0x0020, 0x0011), Vr::Is), // Series Number
+        (Tag::MODALITY, Vr::Cs), // Modality
+        (Tag::SERIES_NUMBER, Vr::Is), // Series Number
     ];
     match kind {
         RecordType::Patient => PATIENT,
@@ -724,18 +724,18 @@ mod tests {
         dataset.insert_str(tags::SOP_CLASS_UID, Vr::Ui, CT);
         dataset.insert_str(tags::SOP_INSTANCE_UID, Vr::Ui, instance_uid);
         dataset.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
-        dataset.insert_value(Tag::new(0x0028, 0x0002), 1u16);
-        dataset.insert_str(Tag::new(0x0028, 0x0004), Vr::Cs, "MONOCHROME2");
-        dataset.insert_value(Tag::new(0x0028, 0x0010), 8u16);
-        dataset.insert_value(Tag::new(0x0028, 0x0011), 8u16);
-        dataset.insert_value(Tag::new(0x0028, 0x0100), 8u16);
-        dataset.insert_value(Tag::new(0x0028, 0x0101), 8u16);
-        dataset.insert_value(Tag::new(0x0028, 0x0102), 7u16);
-        dataset.insert_value(Tag::new(0x0028, 0x0103), 0u16);
-        dataset.insert_str(Tag::new(0x0028, 0x0008), Vr::Cs, "1");
+        dataset.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16);
+        dataset.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
+        dataset.insert_value(Tag::ROWS, 8u16);
+        dataset.insert_value(Tag::COLUMNS, 8u16);
+        dataset.insert_value(Tag::BITS_ALLOCATED, 8u16);
+        dataset.insert_value(Tag::BITS_STORED, 8u16);
+        dataset.insert_value(Tag::HIGH_BIT, 7u16);
+        dataset.insert_value(Tag::PIXEL_REPRESENTATION, 0u16);
+        dataset.insert_str(Tag::NUMBER_OF_FRAMES, Vr::Cs, "1");
         dataset.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
-                Tag::new(0x7FE0, 0x0010),
+                Tag::PIXEL_DATA,
                 Vr::Ob,
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![128u8; 64])),
             ),
@@ -750,7 +750,7 @@ mod tests {
         assert!(dir.records().is_empty());
         assert!(dir.roots().is_empty());
         assert_eq!(
-            dir.file().file_meta.try_get_str(Tag::new(0x0002, 0x0002)).unwrap(),
+            dir.file().file_meta.try_get_str(Tag::MEDIA_STORAGE_SOP_CLASS_UID).unwrap(),
             MEDIA_STORAGE_DIRECTORY_SOP_CLASS
         );
     }
@@ -939,16 +939,16 @@ mod tests {
 
         // the leaf record carries the icon sequence
         let leaf = &dir.records()[3];
-        let icon_sequence = leaf.dataset.try_get_sequence(Tag::new(0x0088, 0x0200)).unwrap();
+        let icon_sequence = leaf.dataset.try_get_sequence(Tag::ICON_IMAGE_SEQUENCE).unwrap();
         assert_eq!(icon_sequence.items().len(), 1);
         let icon = &icon_sequence.items()[0];
-        assert_eq!(icon.try_get_str(Tag::new(0x0028, 0x0004)).as_deref(), Some("MONOCHROME2"));
+        assert_eq!(icon.try_get_str(Tag::PHOTOMETRIC_INTERPRETATION).as_deref(), Some("MONOCHROME2"));
 
         // and the icon survives a save/open round-trip
         dir.save(&path).unwrap();
         let reopened = DicomDirectory::open(&path).unwrap();
         let leaf = &reopened.records()[3];
-        let icon_sequence = leaf.dataset.try_get_sequence(Tag::new(0x0088, 0x0200)).unwrap();
+        let icon_sequence = leaf.dataset.try_get_sequence(Tag::ICON_IMAGE_SEQUENCE).unwrap();
         assert_eq!(icon_sequence.items().len(), 1, "the icon round-trips");
         let _ = std::fs::remove_file(path);
     }

@@ -1,4 +1,4 @@
-//! Print layout primitives (PRINT-01; docs/08-serialization-media.md §5).
+//! Print layout primitives (PRINT-01; docs/01-architecture.md §12).
 //!
 //! The film-layout maths that PRINT-02's `render_to_image` will consume: how an
 //! `ImageDisplayFormat` turns into a grid of image cells, and how a film size

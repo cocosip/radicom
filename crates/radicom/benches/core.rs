@@ -1,4 +1,4 @@
-//! Dependency-free benchmarks (docs/09-testing.md §8; M8 "benchmarks published").
+//! Dependency-free benchmarks (docs/02-development-guide.md §5 §8; M8 "benchmarks published").
 //!
 //! Criterion is not vendored in this workspace's offline cache, so this suite is a
 //! plain `harness = false` binary that times the core hot paths with
@@ -23,17 +23,17 @@ use std::sync::Arc;
 /// A `frames`-deep 512×512 16-bit MONOCHROME2 grayscale image with metadata.
 fn image_dataset(frames: u32) -> Dataset {
     let mut ds = Dataset::new();
-    ds.insert_value(Tag::new(0x0028, 0x0002), 1u16); // SamplesPerPixel
-    ds.insert_str(Tag::new(0x0028, 0x0004), Vr::Cs, "MONOCHROME2");
-    ds.insert_value(Tag::new(0x0028, 0x0010), 512u16); // Rows
-    ds.insert_value(Tag::new(0x0028, 0x0011), 512u16); // Columns
-    ds.insert_value(Tag::new(0x0028, 0x0100), 16u16); // BitsAllocated
-    ds.insert_value(Tag::new(0x0028, 0x0101), 12u16); // BitsStored
-    ds.insert_value(Tag::new(0x0028, 0x0102), 11u16); // HighBit
-    ds.insert_value(Tag::new(0x0028, 0x0103), 0u16); // PixelRepresentation
-    ds.insert_str(Tag::new(0x0028, 0x0030), Vr::Ds, "0.5\\0.5");
-    ds.insert_str(Tag::new(0x0028, 0x1050), Vr::Ds, "2048"); // WindowCenter
-    ds.insert_str(Tag::new(0x0028, 0x1051), Vr::Ds, "4096"); // WindowWidth
+    ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16); // SamplesPerPixel
+    ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
+    ds.insert_value(Tag::ROWS, 512u16); // Rows
+    ds.insert_value(Tag::COLUMNS, 512u16); // Columns
+    ds.insert_value(Tag::BITS_ALLOCATED, 16u16); // BitsAllocated
+    ds.insert_value(Tag::BITS_STORED, 12u16); // BitsStored
+    ds.insert_value(Tag::HIGH_BIT, 11u16); // HighBit
+    ds.insert_value(Tag::PIXEL_REPRESENTATION, 0u16); // PixelRepresentation
+    ds.insert_str(Tag::PIXEL_SPACING, Vr::Ds, "0.5\\0.5");
+    ds.insert_str(Tag::WINDOW_CENTER, Vr::Ds, "2048"); // WindowCenter
+    ds.insert_str(Tag::WINDOW_WIDTH, Vr::Ds, "4096"); // WindowWidth
     // some metadata to give the parser/encoder real work
     for (i, (group, element, vr, value)) in [
         (0x0008u16, 0x0060u16, Vr::Cs, "CT".to_string()),
@@ -49,7 +49,7 @@ fn image_dataset(frames: u32) -> Dataset {
         let _ = i;
         ds.insert_str(Tag::new(*group, *element), *vr, value.clone());
     }
-    ds.insert_str(Tag::new(0x0028, 0x0008), Vr::Is, frames.to_string()); // NumberOfFrames
+    ds.insert_str(Tag::NUMBER_OF_FRAMES, Vr::Is, frames.to_string()); // NumberOfFrames
 
     let pixels = 512 * 512 * frames as usize;
     let mut bytes = Vec::with_capacity(pixels * 2);
@@ -58,7 +58,7 @@ fn image_dataset(frames: u32) -> Dataset {
     }
     ds.insert_or_update(radicom::model::item::DicomItem::Element(
         radicom::model::element::DicomElement::new_bytes(
-            Tag::new(0x7FE0, 0x0010),
+            Tag::PIXEL_DATA,
             Vr::Ow,
             Arc::new(radicom::model::buffer::MemoryBuffer::from(bytes)),
         ),

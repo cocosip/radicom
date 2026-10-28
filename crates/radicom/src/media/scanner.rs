@@ -1,4 +1,4 @@
-//! Directory scanner feeding a DICOMDIR builder (MEDIA-03; docs/08-serialization-media.md §3.5).
+//! Directory scanner feeding a DICOMDIR builder (MEDIA-03; docs/01-architecture.md §12).
 //!
 //! A recursive directory walk with an optional glob filter, progress/file
 //! events and a configurable depth / error policy. The output feeds a

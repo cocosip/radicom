@@ -1,4 +1,4 @@
-//! DICOM UID: typing, registry and generation (UID-01..03; docs/04-data-model.md §3).
+//! DICOM UID: typing, registry and generation (UID-01..03; docs/01-architecture.md §3).
 
 use crate::error::{DataError, Error};
 use once_cell::sync::Lazy;

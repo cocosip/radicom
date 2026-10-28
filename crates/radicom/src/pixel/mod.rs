@@ -1,4 +1,4 @@
-//! Pixel data facade (PIX-01..03; docs/06-pixel-codec.md §1).
+//! Pixel data facade (PIX-01..03; docs/01-architecture.md §9).
 //!
 //! `PixelData` is the single read/write gate for `(7FE0,0010)`: codecs, the
 //! transcoder and the render module all go through it. It never mutates
@@ -22,34 +22,34 @@ use crate::pixel::photometric::PhotometricInterpretation;
 use std::sync::Arc;
 
 /// `(7FE0,0010)` Pixel Data.
-pub const PIXEL_DATA: Tag = Tag::new(0x7FE0, 0x0010);
+pub const PIXEL_DATA: Tag = Tag::PIXEL_DATA;
 /// `(0028,0002)` Samples per Pixel.
-pub const SAMPLES_PER_PIXEL: Tag = Tag::new(0x0028, 0x0002);
+pub const SAMPLES_PER_PIXEL: Tag = Tag::SAMPLES_PER_PIXEL;
 /// `(0028,0004)` Photometric Interpretation.
-pub const PHOTOMETRIC_INTERPRETATION: Tag = Tag::new(0x0028, 0x0004);
+pub const PHOTOMETRIC_INTERPRETATION: Tag = Tag::PHOTOMETRIC_INTERPRETATION;
 /// `(0028,0006)` Planar Configuration.
-pub const PLANAR_CONFIGURATION: Tag = Tag::new(0x0028, 0x0006);
+pub const PLANAR_CONFIGURATION: Tag = Tag::PLANAR_CONFIGURATION;
 /// `(0028,0008)` Number of Frames.
-pub const NUMBER_OF_FRAMES: Tag = Tag::new(0x0028, 0x0008);
+pub const NUMBER_OF_FRAMES: Tag = Tag::NUMBER_OF_FRAMES;
 /// `(0028,0010)` Rows.
-pub const ROWS: Tag = Tag::new(0x0028, 0x0010);
+pub const ROWS: Tag = Tag::ROWS;
 /// `(0028,0011)` Columns.
-pub const COLUMNS: Tag = Tag::new(0x0028, 0x0011);
+pub const COLUMNS: Tag = Tag::COLUMNS;
 /// `(0028,0100)` Bits Allocated.
-pub const BITS_ALLOCATED: Tag = Tag::new(0x0028, 0x0100);
+pub const BITS_ALLOCATED: Tag = Tag::BITS_ALLOCATED;
 /// `(0028,0101)` Bits Stored.
-pub const BITS_STORED: Tag = Tag::new(0x0028, 0x0101);
+pub const BITS_STORED: Tag = Tag::BITS_STORED;
 /// `(0028,0102)` High Bit.
-pub const HIGH_BIT: Tag = Tag::new(0x0028, 0x0102);
+pub const HIGH_BIT: Tag = Tag::HIGH_BIT;
 /// `(0028,0103)` Pixel Representation.
-pub const PIXEL_REPRESENTATION: Tag = Tag::new(0x0028, 0x0103);
+pub const PIXEL_REPRESENTATION: Tag = Tag::PIXEL_REPRESENTATION;
 /// `(0028,1101..1103)` / `(0028,1201..1203)` / `(0028,1301..1303)` palette LUTs.
-pub const RED_DESCRIPTOR: Tag = Tag::new(0x0028, 0x1101);
-pub const GREEN_DESCRIPTOR: Tag = Tag::new(0x0028, 0x1102);
-pub const BLUE_DESCRIPTOR: Tag = Tag::new(0x0028, 0x1103);
-pub const RED_DATA: Tag = Tag::new(0x0028, 0x1201);
-pub const GREEN_DATA: Tag = Tag::new(0x0028, 0x1202);
-pub const BLUE_DATA: Tag = Tag::new(0x0028, 0x1203);
+pub const RED_DESCRIPTOR: Tag = Tag::RED_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR;
+pub const GREEN_DESCRIPTOR: Tag = Tag::GREEN_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR;
+pub const BLUE_DESCRIPTOR: Tag = Tag::BLUE_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR;
+pub const RED_DATA: Tag = Tag::RED_PALETTE_COLOR_LOOKUP_TABLE_DATA;
+pub const GREEN_DATA: Tag = Tag::GREEN_PALETTE_COLOR_LOOKUP_TABLE_DATA;
+pub const BLUE_DATA: Tag = Tag::BLUE_PALETTE_COLOR_LOOKUP_TABLE_DATA;
 
 /// Storage kind of the pixel data element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -282,7 +282,7 @@ impl<'a> PixelData<'a> {
             // last frame runs to the end of the fragment stream
             f.fragments().iter().map(|b| b.size() + b.size() % 2).sum::<u64>() + 8 * f.fragments().len() as u64
         });
-        if start % 2 != 0 {
+        if !start.is_multiple_of(2) {
             return Err(pixel_err(format!("offset table entry {start} is not even")));
         }
         if end < start {

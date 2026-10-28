@@ -1,4 +1,4 @@
-//! C-FIND (SRV-04; docs/07-network.md §7.3).
+//! C-FIND (SRV-04; docs/01-architecture.md §11).
 //!
 //! A C-FIND carries an Identifier dataset (the query keys) and is answered by
 //! zero or more Pending responses, each with its own Identifier, followed by
@@ -144,7 +144,7 @@ impl CFindRequest {
     /// Builds a query for `level` with the standard return keys.
     pub fn new(level: QueryRetrieveLevel, root: QueryRoot, message_id: u16) -> Self {
         let mut identifier = Dataset::new();
-        identifier.insert_str(Tag::new(0x0008, 0x0052), Vr::Cs, level.as_str());
+        identifier.insert_str(Tag::QUERY_RETRIEVE_LEVEL, Vr::Cs, level.as_str());
         for (group, element, vr) in level_keys(level) {
             identifier.insert_empty(Tag::new(*group, *element), *vr);
         }
@@ -190,7 +190,7 @@ impl CFindRequest {
     /// The query level, when the Identifier states one.
     pub fn level(&self) -> Option<QueryRetrieveLevel> {
         self.identifier
-            .try_get_str(Tag::new(0x0008, 0x0052))
+            .try_get_str(Tag::QUERY_RETRIEVE_LEVEL)
             .and_then(|s| QueryRetrieveLevel::parse(&s))
     }
 
@@ -366,9 +366,9 @@ mod tests {
         assert_eq!(request.sop_class_uid, sop_class::STUDY_ROOT_QR_FIND);
         assert_eq!(request.message_id, 7);
         // the standard study return keys are present and empty
-        assert!(request.identifier.contains(&Tag::new(0x0020, 0x000D)), "Study Instance UID");
-        assert!(request.identifier.contains(&Tag::new(0x0010, 0x0010)), "Patient Name");
-        assert_eq!(request.identifier.get_str(Tag::new(0x0010, 0x0010)).unwrap(), "", "return keys start empty");
+        assert!(request.identifier.contains(&Tag::STUDY_INSTANCE_UID), "Study Instance UID");
+        assert!(request.identifier.contains(&Tag::PATIENT_NAME), "Patient Name");
+        assert_eq!(request.identifier.get_str(Tag::PATIENT_NAME).unwrap(), "", "return keys start empty");
 
         let worklist = CFindRequest::worklist_query(1);
         assert_eq!(worklist.sop_class_uid, sop_class::MODALITY_WORKLIST_FIND);
@@ -380,8 +380,8 @@ mod tests {
         let request = CFindRequest::study_query(3)
             .with_key(0x0010, 0x0020, Vr::Lo, "PID-1")
             .with_key(0x0008, 0x0061, Vr::Cs, "CT");
-        assert_eq!(request.identifier.get_str(Tag::new(0x0010, 0x0020)).unwrap(), "PID-1");
-        assert_eq!(request.identifier.get_str(Tag::new(0x0008, 0x0061)).unwrap(), "CT");
+        assert_eq!(request.identifier.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
+        assert_eq!(request.identifier.get_str(Tag::MODALITIES_IN_STUDY).unwrap(), "CT");
     }
 
     #[test]
@@ -398,7 +398,7 @@ mod tests {
     fn pending_response_carries_one_item() {
         let request = CFindRequest::study_query(2);
         let mut item = Dataset::new();
-        item.insert_str(Tag::new(0x0020, 0x000D), Vr::Ui, "1.2.3");
+        item.insert_str(Tag::STUDY_INSTANCE_UID, Vr::Ui, "1.2.3");
         let response = CFindResponse::pending(&request, item);
         assert!(response.is_pending());
         assert_eq!(response.state(), StatusState::Pending);
@@ -428,7 +428,7 @@ mod tests {
     fn responses_round_trip_through_a_command() {
         let request = CFindRequest::study_query(4);
         let mut item = Dataset::new();
-        item.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Doe^John");
+        item.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
         let pending = CFindResponse::pending(&request, item.clone());
         let back = CFindResponse::from_command(&pending.to_command(), Some(item.clone())).unwrap();
         assert_eq!(back.status, status::PENDING);

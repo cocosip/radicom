@@ -1,4 +1,4 @@
-//! File and directory references, and temporary files (IO-01; docs/05-file-io.md §6).
+//! File and directory references, and temporary files (IO-01; docs/01-architecture.md §7).
 //!
 //! A [`FileRef`] abstracts "a file that can be opened, created, moved, deleted and
 //! range-read", with [`PathFile`] as the default path-backed implementation. A

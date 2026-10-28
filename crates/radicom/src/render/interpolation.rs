@@ -1,5 +1,5 @@
 //! 2D rescaling: bilinear and nearest-neighbour interpolation (REND-06;
-//! docs/10-rendering.md §6).
+//! docs/01-architecture.md §10).
 //!
 //! Mirrors fo-dicom `Imaging/Algorithms`: bilinear for grayscale (any integer
 //! sample type) and 24-bit colour, nearest-neighbour for 1-bit. Both map output

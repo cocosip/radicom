@@ -1,4 +1,4 @@
-//! DICOM XML export (XML-01; docs/08-serialization-media.md §2).
+//! DICOM XML export (XML-01; docs/01-architecture.md §12).
 //!
 //! One-way export to fo-dicom's `NativeDicomModel` shape:
 //!
@@ -268,8 +268,8 @@ mod tests {
 
     fn dataset() -> Dataset {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0010, 0x0020), Vr::Lo, "12345");
-        ds.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Doe^John");
+        ds.insert_str(Tag::PATIENT_ID, Vr::Lo, "12345");
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
         ds
     }
 
@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn a_multi_valued_person_name_becomes_numbered_person_name_elements() {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Doe^John\\Roe^Jane");
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John\\Roe^Jane");
         let xml = dataset_to_xml(&ds);
         assert!(xml.contains("<PersonName number=\"1\">") && xml.contains("<PersonName number=\"2\">"), "{xml}");
         assert!(xml.contains("<FamilyName>Doe</FamilyName>"), "{xml}");
@@ -311,7 +311,7 @@ mod tests {
     #[test]
     fn a_multi_value_element_numbers_each_component() {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0008, 0x0008), Vr::Cs, "ORIGINAL\\PRIMARY\\AXIAL");
+        ds.insert_str(Tag::IMAGE_TYPE, Vr::Cs, "ORIGINAL\\PRIMARY\\AXIAL");
         let xml = dataset_to_xml(&ds);
         assert!(xml.contains("<Value number=\"1\">ORIGINAL</Value>"), "{xml}");
         assert!(xml.contains("<Value number=\"2\">PRIMARY</Value>"), "{xml}");
@@ -322,7 +322,7 @@ mod tests {
     fn a_binary_value_is_inline_base64() {
         let mut ds = Dataset::new();
         ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
-            Tag::new(0x7FE0, 0x0010),
+            Tag::PIXEL_DATA,
             Vr::Ob,
             Arc::new(radicom::model::buffer::MemoryBuffer::from(vec![1u8, 2, 3, 4])),
         )));
@@ -333,9 +333,9 @@ mod tests {
     #[test]
     fn a_sequence_nests_its_items() {
         let mut ds = Dataset::new();
-        let sequence = ds.insert_sequence(Tag::new(0x0008, 0x1140));
+        let sequence = ds.insert_sequence(Tag::REFERENCED_IMAGE_SEQUENCE);
         let mut item = Dataset::new();
-        item.insert_str(Tag::new(0x0008, 0x1150), Vr::Ui, "1.2.840.10008.5.1.4.1.1.2");
+        item.insert_str(Tag::REFERENCED_SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.2");
         sequence.push(item);
 
         let xml = dataset_to_xml(&ds);
@@ -348,7 +348,7 @@ mod tests {
     #[test]
     fn xml_metacharacters_are_escaped() {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0008, 0x0081), Vr::St, "a & b < c > d");
+        ds.insert_str(Tag::INSTITUTION_ADDRESS, Vr::St, "a & b < c > d");
         let xml = dataset_to_xml(&ds);
         assert!(xml.contains("a &amp; b &lt; c &gt; d"), "{xml}");
         assert!(!xml.contains("a & b"), "the raw ampersand must not appear");
@@ -359,7 +359,7 @@ mod tests {
         // a US element parsed from the wire is byte-backed
         let mut ds = Dataset::new();
         ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
-            Tag::new(0x0028, 0x0010),
+            Tag::ROWS,
             Vr::Us,
             Arc::new(radicom::model::buffer::MemoryBuffer::from(512u16.to_le_bytes().to_vec())),
         )));
@@ -370,7 +370,7 @@ mod tests {
     #[test]
     fn an_empty_value_writes_no_value_elements() {
         let mut ds = Dataset::new();
-        ds.insert_empty(Tag::new(0x0010, 0x0030), Vr::Da);
+        ds.insert_empty(Tag::PATIENT_BIRTH_DATE, Vr::Da);
         let xml = dataset_to_xml(&ds);
         assert!(!xml.contains("<Value"), "an empty element carries no Value: {xml}");
         assert!(xml.contains("</DicomAttribute>"));
@@ -385,17 +385,17 @@ mod tests {
 
         // a dataset exercising every carrier: string, multi-value, PN, SQ, binary
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0010, 0x0020), Vr::Lo, "P&<1>");
-        ds.insert_str(Tag::new(0x0008, 0x0008), Vr::Cs, "ORIGINAL\\PRIMARY");
-        ds.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Doe^John");
+        ds.insert_str(Tag::PATIENT_ID, Vr::Lo, "P&<1>");
+        ds.insert_str(Tag::IMAGE_TYPE, Vr::Cs, "ORIGINAL\\PRIMARY");
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
         ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
-            Tag::new(0x7FE0, 0x0010),
+            Tag::PIXEL_DATA,
             Vr::Ob,
             Arc::new(radicom::model::buffer::MemoryBuffer::from(vec![1u8, 2, 3, 4])),
         )));
-        let sequence = ds.insert_sequence(Tag::new(0x0008, 0x1140));
+        let sequence = ds.insert_sequence(Tag::REFERENCED_IMAGE_SEQUENCE);
         let mut item = Dataset::new();
-        item.insert_str(Tag::new(0x0008, 0x1150), Vr::Ui, "1.2.3");
+        item.insert_str(Tag::REFERENCED_SOP_CLASS_UID, Vr::Ui, "1.2.3");
         sequence.push(item);
 
         let xml = dataset_to_xml(&ds);

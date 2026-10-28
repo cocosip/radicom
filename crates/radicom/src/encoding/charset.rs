@@ -1,4 +1,4 @@
-//! Character set handling (ENC-01..04; docs/04-data-model.md §8).
+//! Character set handling (ENC-01..04; docs/01-architecture.md §3).
 //!
 //! Maps Specific Character Set terms to encodings, handles ISO 2022
 //! escape-sequence switching on decode, and per-segment fallback encoding

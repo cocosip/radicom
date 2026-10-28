@@ -4,7 +4,7 @@
 //! `DicomClient` over real TCP on 127.0.0.1 — no external peer required, so
 //! radicom's own network stack is exercised end to end in CI.
 //!
-//! `external_peer_*` runs only when `RADICOM_PEER` is set (see docs/12-interop.md).
+//! `external_peer_*` runs only when `RADICOM_PEER` is set (see docs/04-interop.md).
 
 use async_trait::async_trait;
 use radicom::io::file::DicomFile;
@@ -69,7 +69,7 @@ async fn self_interop_c_store_real_file_round_trips() {
     let file = corpus_file("explicit-le/GH178.dcm");
     let sop = file
         .dataset
-        .try_get_str(Tag::new(0x0008, 0x0016))
+        .try_get_str(Tag::SOP_CLASS_UID)
         .expect("SOP class UID")
         .trim()
         .to_string();

@@ -1,4 +1,4 @@
-//! PDV assembly and PDU fragmentation (NET-05/06; docs/07-network.md §5.2, §5.3).
+//! PDV assembly and PDU fragmentation (NET-05/06; docs/01-architecture.md §11, §5.3).
 //!
 //! Both directions are pure state machines over byte slices, so the wire
 //! behaviour (fragmenting, even padding, command/dataset splitting) is fully

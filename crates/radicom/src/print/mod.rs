@@ -1,5 +1,5 @@
 //! Printing data models and layout rendering (PRINT-01/02;
-//! docs/08-serialization-media.md §5).
+//! docs/01-architecture.md §12).
 //!
 //! This module carries the film-layout maths (`ImageDisplayFormat`, per-cell
 //! layout rectangles, film-size conversion) and, when the `render` feature is

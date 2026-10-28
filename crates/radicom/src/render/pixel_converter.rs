@@ -1,5 +1,5 @@
 //! `PixelDataConverter`: planar/interleaved 24-bit layout conversion and 1-bit
-//! bit reversal (REND-06, docs/10-rendering.md §6). Static helpers mirroring
+//! bit reversal (REND-06, docs/01-architecture.md §10). Static helpers mirroring
 //! fo-dicom `Imaging/PixelDataConverter`.
 
 /// Byte-oriented pixel data converters (REND-06).

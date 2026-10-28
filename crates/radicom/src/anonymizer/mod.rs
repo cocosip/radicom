@@ -1,4 +1,4 @@
-//! PS3.15 de-identification engine (ANON-01; docs/08-serialization-media.md §6.2).
+//! PS3.15 de-identification engine (ANON-01; docs/01-architecture.md §12).
 //!
 //! Applies a `SecurityProfile` to a dataset: walk every element, resolve the
 //! action for its tag under the chosen option, and mutate. UIDs are rewritten
@@ -20,13 +20,13 @@ use std::collections::HashMap;
 pub mod profile;
 
 /// (0010,0010) PatientName.
-const PATIENT_NAME: Tag = Tag::new(0x0010, 0x0010);
+const PATIENT_NAME: Tag = Tag::PATIENT_NAME;
 /// (0010,0020) PatientID.
-const PATIENT_ID: Tag = Tag::new(0x0010, 0x0020);
+const PATIENT_ID: Tag = Tag::PATIENT_ID;
 /// (0008,0018) SOPInstanceUID.
-const SOP_INSTANCE_UID: Tag = Tag::new(0x0008, 0x0018);
+const SOP_INSTANCE_UID: Tag = Tag::SOP_INSTANCE_UID;
 /// (0002,0003) MediaStorageSOPInstanceUID.
-const MEDIA_STORAGE_SOP_INSTANCE_UID: Tag = Tag::new(0x0002, 0x0003);
+const MEDIA_STORAGE_SOP_INSTANCE_UID: Tag = Tag::MEDIA_STORAGE_SOP_INSTANCE_UID;
 
 /// Anonymizer that applies a profile under one option set (§6.2).
 #[derive(Debug, Clone)]
@@ -256,11 +256,11 @@ mod tests {
 
     fn dataset() -> Dataset {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Doe^John");
-        ds.insert_str(Tag::new(0x0010, 0x0020), Vr::Lo, "12345");
-        ds.insert_str(Tag::new(0x0008, 0x0050), Vr::Sh, "ACC-1"); // AccessionNumber: Z
-        ds.insert_str(Tag::new(0x0008, 0x0018), Vr::Ui, "1.2.3.4"); // SOPInstanceUID: U
-        ds.insert_str(Tag::new(0x0008, 0x0060), Vr::Cs, "CT"); // Modality: not in table → keep
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+        ds.insert_str(Tag::PATIENT_ID, Vr::Lo, "12345");
+        ds.insert_str(Tag::ACCESSION_NUMBER, Vr::Sh, "ACC-1"); // AccessionNumber: Z
+        ds.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4"); // SOPInstanceUID: U
+        ds.insert_str(Tag::MODALITY, Vr::Cs, "CT"); // Modality: not in table → keep
         ds
     }
 
@@ -269,17 +269,17 @@ mod tests {
         // fo-dicom's basic profile marks both Z, so they blank (not "ANONYMOUS")
         let mut ds = dataset();
         Anonymizer::basic().anonymize_in_place(&mut ds).unwrap();
-        assert_eq!(ds.try_get_str(Tag::new(0x0010, 0x0010)).as_deref(), Some(""));
-        assert_eq!(ds.try_get_str(Tag::new(0x0010, 0x0020)).as_deref(), Some(""));
+        assert_eq!(ds.try_get_str(Tag::PATIENT_NAME).as_deref(), Some(""));
+        assert_eq!(ds.try_get_str(Tag::PATIENT_ID).as_deref(), Some(""));
     }
 
     #[test]
     fn an_owned_uid_is_replaced_and_consistent() {
         let mut ds = dataset();
-        ds.insert_str(Tag::new(0x0020, 0x000D), Vr::Ui, "1.2.3.4"); // StudyInstanceUID: U
+        ds.insert_str(Tag::STUDY_INSTANCE_UID, Vr::Ui, "1.2.3.4"); // StudyInstanceUID: U
         Anonymizer::basic().anonymize_in_place(&mut ds).unwrap();
-        let sop = ds.try_get_str(Tag::new(0x0008, 0x0018)).unwrap();
-        let study = ds.try_get_str(Tag::new(0x0020, 0x000D)).unwrap();
+        let sop = ds.try_get_str(Tag::SOP_INSTANCE_UID).unwrap();
+        let study = ds.try_get_str(Tag::STUDY_INSTANCE_UID).unwrap();
         assert_ne!(sop, "1.2.3.4", "the SOP instance UID must be replaced");
         assert_eq!(sop, study, "the same source UID maps to the same replacement");
         assert!(!sop.is_empty());
@@ -289,14 +289,14 @@ mod tests {
     fn a_keep_tag_is_untouched() {
         let mut ds = dataset();
         Anonymizer::basic().anonymize_in_place(&mut ds).unwrap();
-        assert_eq!(ds.try_get_str(Tag::new(0x0008, 0x0060)).as_deref(), Some("CT"));
+        assert_eq!(ds.try_get_str(Tag::MODALITY).as_deref(), Some("CT"));
     }
 
     #[test]
     fn a_zero_length_tag_is_blanked() {
         let mut ds = dataset();
         Anonymizer::basic().anonymize_in_place(&mut ds).unwrap();
-        let accession = ds.try_get_str(Tag::new(0x0008, 0x0050));
+        let accession = ds.try_get_str(Tag::ACCESSION_NUMBER);
         assert!(accession.map(|v| v.is_empty()).unwrap_or(true), "AccessionNumber is blanked");
     }
 
@@ -307,8 +307,8 @@ mod tests {
             .with_patient("Alias^Name", "PAT-42")
             .anonymize_in_place(&mut ds)
             .unwrap();
-        assert_eq!(ds.try_get_str(Tag::new(0x0010, 0x0010)).as_deref(), Some("Alias^Name"));
-        assert_eq!(ds.try_get_str(Tag::new(0x0010, 0x0020)).as_deref(), Some("PAT-42"));
+        assert_eq!(ds.try_get_str(Tag::PATIENT_NAME).as_deref(), Some("Alias^Name"));
+        assert_eq!(ds.try_get_str(Tag::PATIENT_ID).as_deref(), Some("PAT-42"));
     }
 
     #[test]
@@ -319,9 +319,9 @@ mod tests {
         let profile = SecurityProfile::parse(csv).unwrap();
         let anon = Anonymizer::with_profile(profile, AnonOption::BasicProfile);
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0018, 0x0088), Vr::Ds, "12.5");
+        ds.insert_str(Tag::SPACING_BETWEEN_SLICES, Vr::Ds, "12.5");
         anon.anonymize_in_place(&mut ds).unwrap();
-        let v = ds.try_get_str(Tag::new(0x0018, 0x0088)).unwrap_or_default();
+        let v = ds.try_get_str(Tag::SPACING_BETWEEN_SLICES).unwrap_or_default();
         assert_ne!(v, "ANONYMOUS", "a DS dummy must be numeric, not the word ANONYMOUS");
         assert!(v.trim().parse::<f64>().is_ok(), "DS dummy must parse as a number, got {v:?}");
     }
@@ -332,12 +332,12 @@ mod tests {
         // the basic option removes the whole sequence (not just its children).
         let mut ds = Dataset::new();
         let mut child = Dataset::new();
-        child.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Nested^Name");
-        ds.insert_sequence(Tag::new(0x0008, 0x1110)).push(child);
+        child.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Nested^Name");
+        ds.insert_sequence(Tag::REFERENCED_STUDY_SEQUENCE).push(child);
 
         Anonymizer::basic().anonymize_in_place(&mut ds).unwrap();
         assert!(
-            ds.try_get_sequence(Tag::new(0x0008, 0x1110)).is_none(),
+            ds.try_get_sequence(Tag::REFERENCED_STUDY_SEQUENCE).is_none(),
             "ReferencedStudySequence is X under the basic profile and must be removed"
         );
     }
@@ -352,13 +352,13 @@ mod tests {
 
         let mut ds = Dataset::new();
         let mut child = Dataset::new();
-        child.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Nested^Name");
-        ds.insert_sequence(Tag::new(0x0008, 0x1110)).push(child);
+        child.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Nested^Name");
+        ds.insert_sequence(Tag::REFERENCED_STUDY_SEQUENCE).push(child);
 
         anon.anonymize_in_place(&mut ds).unwrap();
-        let sequence = ds.try_get_sequence(Tag::new(0x0008, 0x1110)).unwrap();
+        let sequence = ds.try_get_sequence(Tag::REFERENCED_STUDY_SEQUENCE).unwrap();
         assert_eq!(
-            sequence.items()[0].try_get_str(Tag::new(0x0010, 0x0010)).as_deref(),
+            sequence.items()[0].try_get_str(Tag::PATIENT_NAME).as_deref(),
             Some(""),
             "the nested PatientName is blanked"
         );
@@ -368,8 +368,8 @@ mod tests {
     fn the_clone_variant_leaves_the_original_untouched() {
         let ds = dataset();
         let anonymized = Anonymizer::basic().anonymize(&ds).unwrap();
-        assert_eq!(ds.try_get_str(Tag::new(0x0010, 0x0010)).as_deref(), Some("Doe^John"));
-        assert_eq!(anonymized.try_get_str(Tag::new(0x0010, 0x0010)).as_deref(), Some(""));
+        assert_eq!(ds.try_get_str(Tag::PATIENT_NAME).as_deref(), Some("Doe^John"));
+        assert_eq!(anonymized.try_get_str(Tag::PATIENT_NAME).as_deref(), Some(""));
     }
 
     #[test]
@@ -377,23 +377,23 @@ mod tests {
         // cross-checked against fo-dicom's DicomAnonymizerTest:
         // StudyDate (0008,0020)=Z → empty; SeriesDate (0008,0021)=X/D → removed
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0008, 0x0020), Vr::Da, "20260101"); // StudyDate: Z
-        ds.insert_str(Tag::new(0x0008, 0x0021), Vr::Da, "20260102"); // SeriesDate: X/D
+        ds.insert_str(Tag::STUDY_DATE, Vr::Da, "20260101"); // StudyDate: Z
+        ds.insert_str(Tag::SERIES_DATE, Vr::Da, "20260102"); // SeriesDate: X/D
         Anonymizer::basic().anonymize_in_place(&mut ds).unwrap();
 
-        assert_eq!(ds.try_get_str(Tag::new(0x0008, 0x0020)).as_deref(), Some(""), "StudyDate blanked");
-        assert!(ds.try_get_str(Tag::new(0x0008, 0x0021)).is_none(), "SeriesDate removed");
+        assert_eq!(ds.try_get_str(Tag::STUDY_DATE).as_deref(), Some(""), "StudyDate blanked");
+        assert!(ds.try_get_str(Tag::SERIES_DATE).is_none(), "SeriesDate removed");
     }
 
     #[test]
     fn two_identical_source_uids_map_to_one_replacement() {
         // fo-dicom keeps a per-run map so consistency holds even across items
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0008, 0x0018), Vr::Ui, "1.2.3.4"); // SOPInstanceUID
-        ds.insert_str(Tag::new(0x0008, 0x1155), Vr::Ui, "1.2.3.4"); // ReferencedSOPInstanceUID
+        ds.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4"); // SOPInstanceUID
+        ds.insert_str(Tag::REFERENCED_SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4"); // ReferencedSOPInstanceUID
         Anonymizer::basic().anonymize_in_place(&mut ds).unwrap();
-        let a = ds.try_get_str(Tag::new(0x0008, 0x0018)).unwrap();
-        let b = ds.try_get_str(Tag::new(0x0008, 0x1155)).unwrap();
+        let a = ds.try_get_str(Tag::SOP_INSTANCE_UID).unwrap();
+        let b = ds.try_get_str(Tag::REFERENCED_SOP_INSTANCE_UID).unwrap();
         assert_eq!(a, b, "the same UID must map consistently even across different tags");
         assert_ne!(a, "1.2.3.4");
     }
@@ -408,12 +408,12 @@ mod tests {
 
         let mut ds = Dataset::new();
         let mut child = Dataset::new();
-        child.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Nested^Name");
-        ds.insert_sequence(Tag::new(0x0008, 0x1110)).push(child);
+        child.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Nested^Name");
+        ds.insert_sequence(Tag::REFERENCED_STUDY_SEQUENCE).push(child);
 
         anon.anonymize_in_place(&mut ds).unwrap();
         assert!(
-            ds.try_get_sequence(Tag::new(0x0008, 0x1110)).is_none(),
+            ds.try_get_sequence(Tag::REFERENCED_STUDY_SEQUENCE).is_none(),
             "an SQ marked X must be removed entirely"
         );
     }
@@ -427,13 +427,13 @@ mod tests {
 
         let mut ds = Dataset::new();
         let mut child = Dataset::new();
-        child.insert_str(Tag::new(0x0010, 0x0020), Vr::Lo, "PII"); // PatientID: Z under basic
-        ds.insert_sequence(Tag::new(0x0008, 0x1110)).push(child);
+        child.insert_str(Tag::PATIENT_ID, Vr::Lo, "PII"); // PatientID: Z under basic
+        ds.insert_sequence(Tag::REFERENCED_STUDY_SEQUENCE).push(child);
 
         anon.anonymize_in_place(&mut ds).unwrap();
-        let seq = ds.try_get_sequence(Tag::new(0x0008, 0x1110)).expect("sequence is kept");
+        let seq = ds.try_get_sequence(Tag::REFERENCED_STUDY_SEQUENCE).expect("sequence is kept");
         assert_eq!(
-            seq.items()[0].try_get_str(Tag::new(0x0010, 0x0020)).as_deref(),
+            seq.items()[0].try_get_str(Tag::PATIENT_ID).as_deref(),
             Some(""),
             "the child PatientID is still anonymized"
         );
@@ -442,10 +442,10 @@ mod tests {
     #[test]
     fn anonymizing_a_file_syncs_the_media_storage_uid() {
         let mut file = DicomFile::from_dataset(dataset());
-        file.file_meta.insert_str(Tag::new(0x0002, 0x0003), Vr::Ui, "1.2.3.4");
+        file.file_meta.insert_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4");
         Anonymizer::basic().anonymize_file_in_place(&mut file).unwrap();
-        let sop = file.dataset.try_get_str(Tag::new(0x0008, 0x0018)).unwrap();
-        let meta = file.file_meta.try_get_str(Tag::new(0x0002, 0x0003)).unwrap();
+        let sop = file.dataset.try_get_str(Tag::SOP_INSTANCE_UID).unwrap();
+        let meta = file.file_meta.try_get_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID).unwrap();
         assert_eq!(meta, sop, "file meta must track the anonymized instance UID");
     }
 }

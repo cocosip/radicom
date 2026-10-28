@@ -1,4 +1,4 @@
-//! C-STORE receive path (SRV-03; docs/07-network.md §5.2, §7.2).
+//! C-STORE receive path (SRV-03; docs/01-architecture.md §11, §7.2).
 //!
 //! The SCP spools the incoming dataset to a temporary file and opens it as a
 //! [`DicomFile`], so memory stays bounded for large instances. The sink is
@@ -147,9 +147,9 @@ mod tests {
 
     fn dataset_bytes(syntax: &TransferSyntax) -> Vec<u8> {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0008, 0x0016), Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
-        ds.insert_str(Tag::new(0x0008, 0x0018), Vr::Ui, "1.2.3.4.5");
-        ds.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Doe^John");
+        ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        ds.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5");
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
         crate::message::encode_dataset(&ds, syntax).unwrap()
     }
 
@@ -166,7 +166,7 @@ mod tests {
         let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
         let bytes = dataset_bytes(&syntax);
         let instance = StoreSink::Memory.materialize(&bytes, &syntax).unwrap();
-        assert_eq!(instance.file.dataset.get_str(Tag::new(0x0010, 0x0010)).unwrap(), "Doe^John");
+        assert_eq!(instance.file.dataset.get_str(Tag::PATIENT_NAME).unwrap(), "Doe^John");
         assert_eq!(instance.file.dataset.transfer_syntax().uid(), syntax.uid());
         assert!(instance.path.is_none(), "no file kept");
     }
@@ -176,7 +176,7 @@ mod tests {
         let syntax = syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone();
         let bytes = dataset_bytes(&syntax);
         let instance = StoreSink::SpoolToTemp.materialize(&bytes, &syntax).unwrap();
-        assert_eq!(instance.file.dataset.get_str(Tag::new(0x0008, 0x0018)).unwrap(), "1.2.3.4.5");
+        assert_eq!(instance.file.dataset.get_str(Tag::SOP_INSTANCE_UID).unwrap(), "1.2.3.4.5");
         assert!(instance.path.is_none(), "temporary spool files are not reported");
     }
 
@@ -220,7 +220,7 @@ mod tests {
         assert_eq!(request.message_id, 11);
         assert_eq!(request.affected_sop_class_uid, "1.2.840.10008.5.1.4.1.1.7");
         assert_eq!(request.affected_sop_instance_uid, "1.2.3.4.5");
-        assert_eq!(request.file.dataset.get_str(Tag::new(0x0010, 0x0010)).unwrap(), "Doe^John");
+        assert_eq!(request.file.dataset.get_str(Tag::PATIENT_NAME).unwrap(), "Doe^John");
     }
 
     #[test]

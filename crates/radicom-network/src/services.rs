@@ -1,4 +1,4 @@
-//! Services: C-ECHO and C-STORE (SRV-02/03; docs/07-network.md §7.1, §7.2).
+//! Services: C-ECHO and C-STORE (SRV-02/03; docs/01-architecture.md §11, §7.2).
 //!
 //! Providers are the SCP-side hooks. The built-in `VerificationProvider`
 //! answers C-ECHO; everything else is user code.
@@ -324,8 +324,8 @@ mod tests {
 
     fn sample_file() -> DicomFile {
         let mut dataset = Dataset::new();
-        dataset.insert_str(Tag::new(0x0008, 0x0016), Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
-        dataset.insert_str(Tag::new(0x0008, 0x0018), Vr::Ui, "1.2.3.4.5");
+        dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5");
         dataset.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
         DicomFile::from_dataset(dataset)
     }

@@ -1,4 +1,4 @@
-//! Config-driven server hosting helper (HOST-01; docs/07-network.md §8.1).
+//! Config-driven server hosting helper (HOST-01; docs/01-architecture.md §11).
 //!
 //! A thin, framework-agnostic lifecycle wrapper over [`crate::server::DicomServer`]:
 //! it turns a [`HostedServerConfig`] into a bound, running SCP that an application
@@ -25,7 +25,7 @@ use crate::server::{DicomServer, ServerOptions};
 use crate::services::ServiceProvider;
 use crate::store::StoreSink;
 
-/// Configuration for a hosted DICOM server (docs/07-network.md §8.1).
+/// Configuration for a hosted DICOM server (docs/01-architecture.md §11).
 #[derive(Debug, Clone)]
 pub struct HostedServerConfig {
     /// TCP port to listen on (0 = any free port).

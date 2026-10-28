@@ -96,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2) optional C-STORE (own association).
     if let Some(path) = store {
         let file = DicomFile::open(&path)?;
-        let sop = file.dataset.try_get_str(Tag::new(0x0008, 0x0016)).unwrap_or_default();
+        let sop = file.dataset.try_get_str(Tag::SOP_CLASS_UID).unwrap_or_default();
         println!("C-STORE {path} (SOP {sop})");
         let mut store_client = client(&calling, &called, &peer);
         let resp = store_client.send_c_store(&file).await?;
@@ -118,8 +118,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("C-FIND level={level_text} matches={}", matches.len());
         for response in matches {
             if let Some(id) = &response.identifier {
-                let name = id.try_get_str(Tag::new(0x0010, 0x0010)).unwrap_or_default();
-                let study = id.try_get_str(Tag::new(0x0020, 0x000D)).unwrap_or_default();
+                let name = id.try_get_str(Tag::PATIENT_NAME).unwrap_or_default();
+                let study = id.try_get_str(Tag::STUDY_INSTANCE_UID).unwrap_or_default();
                 println!("  - PatientName={name:?} StudyInstanceUID={study:?}");
             }
         }
@@ -148,8 +148,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let received = received.lock().unwrap();
             println!("C-GET level={level_text} received={}", received.len());
             for file in received.iter().take(10) {
-                let sop = file.dataset.try_get_str(Tag::new(0x0008, 0x0016)).unwrap_or_default();
-                let instance = file.dataset.try_get_str(Tag::new(0x0008, 0x0018)).unwrap_or_default();
+                let sop = file.dataset.try_get_str(Tag::SOP_CLASS_UID).unwrap_or_default();
+                let instance = file.dataset.try_get_str(Tag::SOP_INSTANCE_UID).unwrap_or_default();
                 println!("  - SOP={sop} instance={instance}");
             }
         }

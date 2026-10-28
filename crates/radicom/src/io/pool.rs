@@ -1,4 +1,4 @@
-//! Reusable large-buffer pool (MEM-01; docs/05-file-io.md, docs/01-feature-list.md).
+//! Reusable large-buffer pool (MEM-01; docs/01-architecture.md §7, docs/02-development-guide.md §2).
 //!
 //! Parser scratch buffers and chunked copies need temporary byte buffers that are
 //! large but short-lived. Allocating and freeing those repeatedly is wasteful, so

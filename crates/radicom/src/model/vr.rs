@@ -1,4 +1,4 @@
-//! Value Representation (VR-01, VR-02; docs/04-data-model.md §2).
+//! Value Representation (VR-01, VR-02; docs/01-architecture.md §3).
 
 use crate::error::{DataError, Error};
 

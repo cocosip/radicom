@@ -1,4 +1,4 @@
-//! Byte buffer abstraction (BUF-01, BUF-02; docs/05-file-io.md §1).
+//! Byte buffer abstraction (BUF-01, BUF-02; docs/01-architecture.md §7).
 //!
 //! All large values are buffer references, never immediate copies. This
 //! module ships the memory-domain implementations; file/stream windows and
@@ -322,7 +322,7 @@ impl EvenLengthBuffer {
 
     /// Wraps only when the inner size is odd.
     pub fn wrap_if_needed(inner: SharedBuffer) -> SharedBuffer {
-        if inner.size() % 2 == 0 {
+        if inner.size().is_multiple_of(2) {
             inner
         } else {
             Arc::new(EvenLengthBuffer { inner })
@@ -338,7 +338,7 @@ impl ByteBuffer for EvenLengthBuffer {
         self.inner.is_memory()
     }
     fn data(&self) -> std::borrow::Cow<'_, [u8]> {
-        if self.inner.size() % 2 == 0 {
+        if self.inner.size().is_multiple_of(2) {
             return self.inner.data();
         }
         let mut out = self.inner.data().into_owned();

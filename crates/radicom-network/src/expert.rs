@@ -1,4 +1,4 @@
-//! The expert (advanced) client layer (CLI-02; docs/07-network.md §9.2).
+//! The expert (advanced) client layer (CLI-02; docs/01-architecture.md §11).
 //!
 //! One [`Connection`] holds one TCP/TLS connection and at most one open
 //! association — the rule the wire itself imposes: a second A-ASSOCIATE-RQ on

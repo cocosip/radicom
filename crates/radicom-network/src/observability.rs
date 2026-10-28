@@ -1,4 +1,4 @@
-//! Observability instrumentation (OBS-01; docs/07-network.md §10).
+//! Observability instrumentation (OBS-01; docs/01-architecture.md §11).
 //!
 //! A pluggable [`MetricsCollector`] receives byte and lifecycle events. The
 //! server wires one in through [`crate::server::ServerOptions::metrics`]; a

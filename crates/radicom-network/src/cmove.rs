@@ -1,4 +1,4 @@
-//! C-MOVE (SRV-06; docs/07-network.md §7.5).
+//! C-MOVE (SRV-06; docs/01-architecture.md §11).
 //!
 //! A C-MOVE asks the SCP to push instances to a *different* peer. The SCP
 //! answers with Pending progress and one terminal response while it opens its
@@ -86,7 +86,7 @@ impl CMoveRequest {
             .move_sop_class(root)
             .ok_or(NetworkError::protocol("C-MOVE has no worklist information model"))?;
         let mut identifier = Dataset::new();
-        identifier.insert_str(Tag::new(0x0008, 0x0052), Vr::Cs, level.as_str());
+        identifier.insert_str(Tag::QUERY_RETRIEVE_LEVEL, Vr::Cs, level.as_str());
         Ok(CMoveRequest {
             message_id,
             sop_class_uid: sop_class_uid.to_string(),
@@ -168,7 +168,7 @@ impl CMoveRequest {
     /// The retrieve level, when the Identifier states one.
     pub fn level(&self) -> Option<QueryRetrieveLevel> {
         self.identifier
-            .try_get_str(Tag::new(0x0008, 0x0052))
+            .try_get_str(Tag::QUERY_RETRIEVE_LEVEL)
             .and_then(|s| QueryRetrieveLevel::parse(&s))
     }
 
@@ -299,7 +299,7 @@ pub async fn store_to_destination(
     for file in files {
         let sop_class = file
             .dataset
-            .try_get_str(Tag::new(0x0008, 0x0016))
+            .try_get_str(Tag::SOP_CLASS_UID)
             .map(|s| s.trim().to_string())
             .ok_or(NetworkError::protocol("instance has no SOP class UID"))?;
         let syntax = file.dataset.transfer_syntax().uid().to_string();
@@ -326,8 +326,8 @@ mod tests {
 
     fn sample_file(instance_uid: &str) -> DicomFile {
         let mut dataset = Dataset::new();
-        dataset.insert_str(Tag::new(0x0008, 0x0016), Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
-        dataset.insert_str(Tag::new(0x0008, 0x0018), Vr::Ui, instance_uid);
+        dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, instance_uid);
         dataset.set_transfer_syntax(radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
         DicomFile::from_dataset(dataset)
     }
@@ -360,7 +360,7 @@ mod tests {
         let request = CMoveRequest::study("1.2.3", "ARCHIVE", 7);
         assert_eq!(request.level(), Some(QueryRetrieveLevel::Study));
         assert_eq!(request.sop_class_uid, sop_class::STUDY_ROOT_QR_MOVE);
-        assert_eq!(request.identifier.get_str(Tag::new(0x0020, 0x000D)).unwrap(), "1.2.3");
+        assert_eq!(request.identifier.get_str(Tag::STUDY_INSTANCE_UID).unwrap(), "1.2.3");
 
         let command = request.to_command();
         assert_eq!(command.field, CommandField::CMoveRq);
@@ -372,11 +372,11 @@ mod tests {
     fn series_and_image_retrieves_add_their_keys() {
         let series = CMoveRequest::series("1.1", "1.2", "DEST", 1);
         assert_eq!(series.level(), Some(QueryRetrieveLevel::Series));
-        assert_eq!(series.identifier.get_str(Tag::new(0x0020, 0x000E)).unwrap(), "1.2");
+        assert_eq!(series.identifier.get_str(Tag::SERIES_INSTANCE_UID).unwrap(), "1.2");
 
         let image = CMoveRequest::image("1.1", "1.2", "1.3", "DEST", 2);
         assert_eq!(image.level(), Some(QueryRetrieveLevel::Image));
-        assert_eq!(image.identifier.get_str(Tag::new(0x0008, 0x0018)).unwrap(), "1.3");
+        assert_eq!(image.identifier.get_str(Tag::SOP_INSTANCE_UID).unwrap(), "1.3");
         assert_eq!(image.message_id, 2);
     }
 
@@ -465,6 +465,6 @@ mod tests {
     #[test]
     fn sample_file_helper_is_usable() {
         let file = sample_file("1.2.3.4");
-        assert_eq!(file.dataset.get_str(Tag::new(0x0008, 0x0018)).unwrap(), "1.2.3.4");
+        assert_eq!(file.dataset.get_str(Tag::SOP_INSTANCE_UID).unwrap(), "1.2.3.4");
     }
 }

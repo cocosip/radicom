@@ -1,4 +1,4 @@
-//! Dataset writer and length calculator (WR-01..03; docs/05-file-io.md §5).
+//! Dataset writer and length calculator (WR-01..03; docs/01-architecture.md §7).
 //!
 //! Writing and length computation share one set of header/length helpers so
 //! an explicit-length sequence can never disagree with its own byte count.
@@ -16,7 +16,7 @@ use crate::model::transfer_syntax::TransferSyntax;
 use crate::model::vr::Vr;
 use std::io::Write;
 
-/// Writing switches (WR-03, docs/05-file-io.md §5.2).
+/// Writing switches (WR-03, docs/01-architecture.md §7).
 #[derive(Debug, Clone, Default)]
 pub struct WriteOptions {
     /// Emit defined lengths for sequences instead of delimiters.
@@ -37,7 +37,7 @@ impl Charsets {
     /// Reads `(0008,0005)` from `ds`; falls back to the enclosing level.
     fn resolve(ds: &Dataset, inherited: Option<&Charsets>) -> Option<Charsets> {
         let inherit = || inherited.map(|c| Charsets { first: c.first, alternates: c.alternates.clone() });
-        let Some(DicomItem::Element(element)) = ds.item(&Tag::new(0x0008, 0x0005)) else {
+        let Some(DicomItem::Element(element)) = ds.item(&Tag::SPECIFIC_CHARACTER_SET) else {
             return inherit();
         };
         let text = element.string_value();
@@ -528,10 +528,10 @@ mod tests {
 
     fn sample() -> Dataset {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0008, 0x0050), Vr::Sh, "ACC1");
-        ds.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Doe^John");
+        ds.insert_str(Tag::ACCESSION_NUMBER, Vr::Sh, "ACC1");
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
         ds.insert(crate::model::element::DicomElement::new_bytes(
-            Tag::new(0x0028, 0x0010),
+            Tag::ROWS,
             Vr::Us,
             Arc::new(MemoryBuffer::from(vec![0x00, 0x02])),
         ))
@@ -565,8 +565,8 @@ mod tests {
         let ds = sample();
         let bytes = encode(&ds, &le(), WriteOptions::default());
         let back = parse_dataset_bytes(&bytes, &le()).unwrap();
-        assert_eq!(back.get_str(Tag::new(0x0010, 0x0010)).unwrap(), "Doe^John");
-        let rows: u16 = back.get(Tag::new(0x0028, 0x0010)).unwrap();
+        assert_eq!(back.get_str(Tag::PATIENT_NAME).unwrap(), "Doe^John");
+        let rows: u16 = back.get(Tag::ROWS).unwrap();
         assert_eq!(rows, 512);
         assert_eq!(back, ds, "byte round-trip preserves the dataset");
     }
@@ -584,10 +584,10 @@ mod tests {
     #[test]
     fn undefined_sequence_writes_delimiters() {
         let mut ds = Dataset::new();
-        let seq_tag = Tag::new(0x0008, 0x1140);
+        let seq_tag = Tag::REFERENCED_IMAGE_SEQUENCE;
         let seq = ds.insert_sequence(seq_tag.clone());
         let mut item = Dataset::new();
-        item.insert_str(Tag::new(0x0008, 0x1150), Vr::Ui, "1.2.3");
+        item.insert_str(Tag::REFERENCED_SOP_CLASS_UID, Vr::Ui, "1.2.3");
         seq.push(item);
 
         let bytes = encode(&ds, &le(), WriteOptions::default());
@@ -608,9 +608,9 @@ mod tests {
     #[test]
     fn explicit_length_sequence_round_trip() {
         let mut ds = Dataset::new();
-        let seq = ds.insert_sequence(Tag::new(0x0008, 0x1140));
+        let seq = ds.insert_sequence(Tag::REFERENCED_IMAGE_SEQUENCE);
         let mut item = Dataset::new();
-        item.insert_str(Tag::new(0x0008, 0x1150), Vr::Ui, "1.2.3");
+        item.insert_str(Tag::REFERENCED_SOP_CLASS_UID, Vr::Ui, "1.2.3");
         seq.push(item);
 
         let options = WriteOptions {
@@ -644,13 +644,13 @@ mod tests {
     #[test]
     fn fragments_write_offset_table_and_delimiter() {
         let mut ds = Dataset::new();
-        let frags = ds.insert_fragments(Tag::new(0x7FE0, 0x0010), Vr::Ob);
+        let frags = ds.insert_fragments(Tag::PIXEL_DATA, Vr::Ob);
         frags.push_fragment(Arc::new(MemoryBuffer::from(vec![0xAA, 0xBB])));
         frags.push_fragment(Arc::new(MemoryBuffer::from(vec![0xCC])));
 
         let bytes = encode(&ds, &le(), WriteOptions::default());
         let back = parse_dataset_bytes(&bytes, &le()).unwrap();
-        match back.item(&Tag::new(0x7FE0, 0x0010)) {
+        match back.item(&Tag::PIXEL_DATA) {
             Some(DicomItem::Fragments(f)) => {
                 assert_eq!(f.fragments().len(), 2);
                 assert_eq!(f.offset_table(), &[0, 10], "offset table follows item headers + padding");
@@ -666,8 +666,8 @@ mod tests {
     #[test]
     fn group_lengths_are_recalculated_or_removed() {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Doe^John");
-        ds.insert_str(Tag::new(0x0010, 0x0020), Vr::Lo, "PID-1");
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+        ds.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID-1");
 
         // default: no group length element on the wire
         let without = encode(&ds, &le(), WriteOptions::default());
@@ -687,7 +687,7 @@ mod tests {
     fn group_length_uses_target_byte_order() {
         // a big-endian dataset must write its UL group length big-endian too
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Doe^John");
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
         let options = WriteOptions { keep_group_lengths: true, ..Default::default() };
         let bytes = encode(&ds, &be(), options);
         // tag(4) + "UL"(2) + len(2) then the value
@@ -706,7 +706,7 @@ mod tests {
         // CP-1066: a value above 0xFFFE under a 16-bit-length VR becomes UN
         let mut ds = Dataset::new();
         let big = vec![b'A'; 0x10000];
-        ds.insert_str(Tag::new(0x0008, 0x0050), Vr::Sh, String::from_utf8(big).unwrap());
+        ds.insert_str(Tag::ACCESSION_NUMBER, Vr::Sh, String::from_utf8(big).unwrap());
         let bytes = encode(&ds, &le(), WriteOptions::default());
         assert_eq!(&bytes[4..6], b"UN", "demoted to UN");
         assert_eq!(&bytes[6..8], &[0, 0], "UN uses the reserved form");
@@ -717,7 +717,7 @@ mod tests {
     #[test]
     fn odd_length_string_is_padded() {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0010, 0x0020), Vr::Lo, "PID");
+        ds.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID");
         let bytes = encode(&ds, &le(), WriteOptions::default());
         assert_eq!(u16::from_le_bytes([bytes[6], bytes[7]]), 4, "padded to even length");
         assert_eq!(bytes[bytes.len() - 1], b' ', "space padding for string VRs");
@@ -727,10 +727,10 @@ mod tests {
     fn charset_is_used_for_encoding() {
         // (0008,0005) selects the charset for character-encoded VRs
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0008, 0x0005), Vr::Cs, "ISO_IR 192");
-        ds.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "王^小明");
+        ds.insert_str(Tag::SPECIFIC_CHARACTER_SET, Vr::Cs, "ISO_IR 192");
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "王^小明");
         let bytes = encode(&ds, &le(), WriteOptions::default());
         let back = parse_dataset_bytes(&bytes, &le()).unwrap();
-        assert_eq!(back.get_str(Tag::new(0x0010, 0x0010)).unwrap(), "王^小明", "UTF-8 round-trip");
+        assert_eq!(back.get_str(Tag::PATIENT_NAME).unwrap(), "王^小明", "UTF-8 round-trip");
     }
 }

@@ -1,5 +1,5 @@
 //! Protocol engine: pending-request table, timeouts and connection lifecycle
-//! (NET-05..08; docs/07-network.md §5).
+//! (NET-05..08; docs/01-architecture.md §11).
 //!
 //! This module holds the state the engine needs across PDUs: which requests
 //! are awaiting responses, when each was last active, and whether the

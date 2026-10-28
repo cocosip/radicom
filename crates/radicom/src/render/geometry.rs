@@ -1,5 +1,5 @@
 //! Frame geometry: image↔patient transforms and orientation (REND-08;
-//! docs/10-rendering.md §8).
+//! docs/01-architecture.md §10).
 //!
 //! Mirrors fo-dicom `Imaging/FrameGeometry`: derives row/column unit vectors and
 //! the normal (row × column), the four image corners, an image↔patient
@@ -53,20 +53,20 @@ impl FrameGeometry {
     /// Extracts geometry from a dataset (frame 0; enhanced per-frame groups are
     /// not read this round).
     pub fn from_dataset(dataset: &Dataset) -> Result<Self, Error> {
-        let width = dataset.try_get::<u16>(Tag::new(0x0028, 0x0011)).unwrap_or(0) as u32;
-        let height = dataset.try_get::<u16>(Tag::new(0x0028, 0x0010)).unwrap_or(0) as u32;
+        let width = dataset.try_get::<u16>(Tag::COLUMNS).unwrap_or(0) as u32;
+        let height = dataset.try_get::<u16>(Tag::ROWS).unwrap_or(0) as u32;
         let frame_of_reference_uid = dataset
-            .try_get_str(Tag::new(0x0020, 0x0052))
+            .try_get_str(Tag::FRAME_OF_REFERENCE_UID)
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
 
         // spacing: ImagerPixelSpacing, else PixelSpacing (rows, columns)
-        let (spacing_between_rows, spacing_between_columns) = read_pair(dataset, Tag::new(0x0018, 0x1164))
-            .or_else(|| read_pair(dataset, Tag::new(0x0028, 0x0030)))
+        let (spacing_between_rows, spacing_between_columns) = read_pair(dataset, Tag::IMAGER_PIXEL_SPACING)
+            .or_else(|| read_pair(dataset, Tag::PIXEL_SPACING))
             .unwrap_or((0.0, 0.0));
 
-        let position = read_vector(dataset, Tag::new(0x0020, 0x0032));
-        let orientation = read_orientation(dataset, Tag::new(0x0020, 0x0037));
+        let position = read_vector(dataset, Tag::IMAGE_POSITION_PATIENT);
+        let orientation = read_orientation(dataset, Tag::IMAGE_ORIENTATION_PATIENT);
 
         Ok(Self::build(
             frame_of_reference_uid,
@@ -463,12 +463,12 @@ mod tests {
     fn axial_dataset() -> Dataset {
         // classic axial CT: rows along patient X, columns along patient Y, normal = +Z
         let mut ds = Dataset::new();
-        ds.insert_value(Tag::new(0x0028, 0x0010), 512u16); // rows
-        ds.insert_value(Tag::new(0x0028, 0x0011), 512u16); // columns
-        ds.insert_str(Tag::new(0x0028, 0x0030), Vr::Ds, "0.5\\0.5"); // PixelSpacing (row, col)
-        ds.insert_str(Tag::new(0x0020, 0x0032), Vr::Ds, "-100\\-100\\50"); // position
-        ds.insert_str(Tag::new(0x0020, 0x0037), Vr::Ds, "1\\0\\0\\0\\1\\0"); // orientation
-        ds.insert_str(Tag::new(0x0020, 0x0052), Vr::Ui, "1.2.3.4");
+        ds.insert_value(Tag::ROWS, 512u16); // rows
+        ds.insert_value(Tag::COLUMNS, 512u16); // columns
+        ds.insert_str(Tag::PIXEL_SPACING, Vr::Ds, "0.5\\0.5"); // PixelSpacing (row, col)
+        ds.insert_str(Tag::IMAGE_POSITION_PATIENT, Vr::Ds, "-100\\-100\\50"); // position
+        ds.insert_str(Tag::IMAGE_ORIENTATION_PATIENT, Vr::Ds, "1\\0\\0\\0\\1\\0"); // orientation
+        ds.insert_str(Tag::FRAME_OF_REFERENCE_UID, Vr::Ui, "1.2.3.4");
         ds
     }
 
@@ -534,7 +534,7 @@ mod tests {
     fn localizer_is_drawable_only_across_orientations_in_one_frame_of_reference() {
         let axial = FrameGeometry::from_dataset(&axial_dataset()).unwrap();
         let mut sagittal_ds = axial_dataset();
-        sagittal_ds.insert_str(Tag::new(0x0020, 0x0037), Vr::Ds, "0\\1\\0\\0\\0\\1");
+        sagittal_ds.insert_str(Tag::IMAGE_ORIENTATION_PATIENT, Vr::Ds, "0\\1\\0\\0\\0\\1");
         let sagittal = FrameGeometry::from_dataset(&sagittal_ds).unwrap();
 
         assert!(can_draw_localizer(&axial, &sagittal), "different orientations, same frame of reference");

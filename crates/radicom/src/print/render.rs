@@ -1,8 +1,8 @@
-//! Film layout rendering (PRINT-02; docs/08-serialization-media.md §5).
+//! Film layout rendering (PRINT-02; docs/01-architecture.md §12).
 //!
 //! `FilmBox::render_to_image`: fill a background with the EmptyImageDensity,
 //! draw the Trim border, render each ImageBox's first image through the render
-//! pipeline (docs/10-rendering.md §1) and scale it into its layout cell;
+//! pipeline (docs/01-architecture.md §10) and scale it into its layout cell;
 //! Polarity REVERSE inverts the cell. Built on the REND-07 `RawImage` backend, so
 //! it is the cross-platform replacement for fo-dicom's GDI+ print extensions.
 
@@ -161,7 +161,7 @@ fn invert(image: &mut RawImage) {
     // invert by rebuilding through the public API (RawImage is read-only)
     let bytes = image.as_bytes();
     let inverted: Vec<u8> = bytes
-        .chunks_exact(4)
+        .as_chunks::<4>().0.iter()
         .flat_map(|px| [255 - px[0], 255 - px[1], 255 - px[2], px[3]])
         .collect();
     *image = RawImage::new(image.width(), image.height(), inverted);
@@ -170,7 +170,7 @@ fn invert(image: &mut RawImage) {
 fn to_rgb24(image: &RawImage) -> Vec<u8> {
     let bytes = image.as_bytes();
     let mut rgb = Vec::with_capacity((image.width() * image.height() * 3) as usize);
-    for px in bytes.chunks_exact(4) {
+    for px in bytes.as_chunks::<4>().0 {
         rgb.push(px[2]);
         rgb.push(px[1]);
         rgb.push(px[0]);
@@ -188,19 +188,19 @@ mod tests {
 
     fn grayscale_image(fill: u8) -> Dataset {
         let mut ds = Dataset::new();
-        ds.insert_value(Tag::new(0x0028, 0x0002), 1u16);
-        ds.insert_str(Tag::new(0x0028, 0x0004), Vr::Cs, "MONOCHROME2");
-        ds.insert_value(Tag::new(0x0028, 0x0010), 4u16);
-        ds.insert_value(Tag::new(0x0028, 0x0011), 4u16);
-        ds.insert_value(Tag::new(0x0028, 0x0100), 8u16);
-        ds.insert_value(Tag::new(0x0028, 0x0101), 8u16);
-        ds.insert_value(Tag::new(0x0028, 0x0102), 7u16);
-        ds.insert_value(Tag::new(0x0028, 0x0103), 0u16);
-        ds.insert_str(Tag::new(0x0028, 0x1050), Vr::Ds, "128");
-        ds.insert_str(Tag::new(0x0028, 0x1051), Vr::Ds, "256");
+        ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16);
+        ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
+        ds.insert_value(Tag::ROWS, 4u16);
+        ds.insert_value(Tag::COLUMNS, 4u16);
+        ds.insert_value(Tag::BITS_ALLOCATED, 8u16);
+        ds.insert_value(Tag::BITS_STORED, 8u16);
+        ds.insert_value(Tag::HIGH_BIT, 7u16);
+        ds.insert_value(Tag::PIXEL_REPRESENTATION, 0u16);
+        ds.insert_str(Tag::WINDOW_CENTER, Vr::Ds, "128");
+        ds.insert_str(Tag::WINDOW_WIDTH, Vr::Ds, "256");
         ds.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
-                Tag::new(0x7FE0, 0x0010),
+                Tag::PIXEL_DATA,
                 Vr::Ob,
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![fill; 16])),
             ),
@@ -216,7 +216,7 @@ mod tests {
         if !polarity.is_empty() {
             boxed.insert_str(tags::POLARITY, Vr::Cs, polarity);
         }
-        boxed.insert_sequence(Tag::new(0x2020, 0x0110)).push(grayscale_image(fill));
+        boxed.insert_sequence(Tag::BASIC_GRAYSCALE_IMAGE_SEQUENCE).push(grayscale_image(fill));
 
         let mut film = Dataset::new();
         film.insert_str(tags::IMAGE_DISPLAY_FORMAT, Vr::Cs, "STANDARD\\1,1");

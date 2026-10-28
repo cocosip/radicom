@@ -1,8 +1,8 @@
-//! PDU codec (NET-02; docs/07-network.md §3).
+//! PDU codec (NET-02; docs/01-architecture.md §11).
 //!
 //! Every PDU is `type(1) reserved(1) length(4, big endian)` followed by
 //! `length` bytes of body. Decoding is total: any malformed input becomes a
-//! typed error, never a panic (docs/07-network.md §12 fuzz requirement).
+//! typed error, never a panic (docs/01-architecture.md §11 fuzz requirement).
 
 use crate::error::{AbortSource, NetworkError, RejectResult, RejectSource, Result};
 

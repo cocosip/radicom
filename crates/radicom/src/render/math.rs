@@ -1,4 +1,4 @@
-//! Geometry and statistics primitives (REND-11; docs/10-rendering.md §6).
+//! Geometry and statistics primitives (REND-11; docs/01-architecture.md §10).
 //!
 //! Mirrors fo-dicom `Imaging/Mathematics`: `Point2`/`Point3`/`Vector3`, an
 //! integer `Matrix`, `Rect`, `Interval`, `Histogram`, `BitList` and

@@ -1,4 +1,4 @@
-//! Dataset-building parse observer (RD-02; docs/05-file-io.md §3.7).
+//! Dataset-building parse observer (RD-02; docs/01-architecture.md §7).
 
 use crate::encoding::charset::{charset_encoding, decode_multi_charset};
 use crate::error::{DataError, Error, TagRef};
@@ -281,9 +281,9 @@ mod tests {
         bytes.extend_from_slice(&el_header(0x0010, 0x0020, "LO", b"PID-1"));
         bytes.extend_from_slice(&el_header(0x0028, 0x0010, "IS", b"512"));
         let ds = parse(&bytes, &le());
-        assert_eq!(ds.get_str(Tag::new(0x0010, 0x0010)).unwrap(), "Doe^John");
-        assert_eq!(ds.get_str(Tag::new(0x0010, 0x0020)).unwrap(), "PID-1");
-        let rows: u16 = ds.get(Tag::new(0x0028, 0x0010)).unwrap();
+        assert_eq!(ds.get_str(Tag::PATIENT_NAME).unwrap(), "Doe^John");
+        assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
+        let rows: u16 = ds.get(Tag::ROWS).unwrap();
         assert_eq!(rows, 512);
     }
 
@@ -300,7 +300,7 @@ mod tests {
         bytes.extend_from_slice(&4u32.to_le_bytes());
         bytes.extend_from_slice(&12u32.to_le_bytes());
         let ds = parse(&bytes, &implicit());
-        assert_eq!(ds.get_str(Tag::new(0x0010, 0x0020)).unwrap(), "PID-1");
+        assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
         let gl: u32 = ds.get(Tag::new(0x0008, 0x0000)).unwrap();
         assert_eq!(gl, 12, "group length reads as UL (T9 shape)");
     }
@@ -314,7 +314,7 @@ mod tests {
         bytes.extend_from_slice(&5u16.to_le_bytes());
         bytes.extend_from_slice(b"PID-1");
         let ds = parse(&bytes, &le());
-        assert_eq!(ds.get_str(Tag::new(0x0010, 0x0020)).unwrap(), "PID-1", "T1: dictionary VR");
+        assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1", "T1: dictionary VR");
     }
 
     #[test]
@@ -328,7 +328,7 @@ mod tests {
         bytes.extend_from_slice(&5u32.to_le_bytes()); // 05 00 00 00
         bytes.extend_from_slice(b"PID-1");
         let ds = parse(&bytes, &le());
-        assert_eq!(ds.get_str(Tag::new(0x0010, 0x0020)).unwrap(), "PID-1", "T2: implicit fallback");
+        assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1", "T2: implicit fallback");
     }
 
     #[test]
@@ -344,9 +344,9 @@ mod tests {
         bytes.extend_from_slice(&sequence_delimiter());
 
         let ds = parse(&bytes, &le());
-        let seq = ds.get_sequence(Tag::new(0x0008, 0x1140)).unwrap();
+        let seq = ds.get_sequence(Tag::REFERENCED_IMAGE_SEQUENCE).unwrap();
         assert_eq!(seq.len(), 1, "T3: UN + undefined length reads as SQ");
-        assert_eq!(seq.items()[0].get_str(Tag::new(0x0008, 0x1150)).unwrap(), "1.2.3");
+        assert_eq!(seq.items()[0].get_str(Tag::REFERENCED_SOP_CLASS_UID).unwrap(), "1.2.3");
     }
 
     #[test]
@@ -362,10 +362,10 @@ mod tests {
         bytes.extend_from_slice(&item(&inner_sq, true));
 
         let ds = parse(&bytes, &le());
-        let seq = ds.get_sequence(Tag::new(0x0008, 0x1140)).unwrap();
+        let seq = ds.get_sequence(Tag::REFERENCED_IMAGE_SEQUENCE).unwrap();
         assert_eq!(seq.len(), 2);
-        assert_eq!(seq.items()[0].get_str(Tag::new(0x0008, 0x1150)).unwrap(), "1.2.3");
-        assert_eq!(seq.items()[1].get_str(Tag::new(0x0008, 0x1155)).unwrap(), "4.5.6");
+        assert_eq!(seq.items()[0].get_str(Tag::REFERENCED_SOP_CLASS_UID).unwrap(), "1.2.3");
+        assert_eq!(seq.items()[1].get_str(Tag::REFERENCED_SOP_INSTANCE_UID).unwrap(), "4.5.6");
     }
 
     #[test]
@@ -375,11 +375,11 @@ mod tests {
         let mut outer = el_long(0x0008, 0x1115, "SQ", &bytes);
         outer.extend_from_slice(&sequence_delimiter());
         let ds = parse(&outer, &le());
-        let outer_seq = ds.get_sequence(Tag::new(0x0008, 0x1115)).unwrap();
+        let outer_seq = ds.get_sequence(Tag::REFERENCED_SERIES_SEQUENCE).unwrap();
         assert_eq!(outer_seq.len(), 1);
-        let inner_seq = outer_seq.items()[0].get_sequence(Tag::new(0x0008, 0x1140)).unwrap();
+        let inner_seq = outer_seq.items()[0].get_sequence(Tag::REFERENCED_IMAGE_SEQUENCE).unwrap();
         assert_eq!(inner_seq.len(), 1);
-        assert_eq!(inner_seq.items()[0].get_str(Tag::new(0x0008, 0x1150)).unwrap(), "1.2.3");
+        assert_eq!(inner_seq.items()[0].get_str(Tag::REFERENCED_SOP_CLASS_UID).unwrap(), "1.2.3");
     }
 
     #[test]
@@ -390,9 +390,9 @@ mod tests {
         bytes.extend_from_slice(&item(&el_header(0x0008, 0x1150, "UI", b"1.2.3"), true));
         bytes.extend_from_slice(&sequence_delimiter());
         let ds = parse(&bytes, &le());
-        let seq = ds.get_sequence(Tag::new(0x0008, 0x1140)).unwrap();
+        let seq = ds.get_sequence(Tag::REFERENCED_IMAGE_SEQUENCE).unwrap();
         assert_eq!(seq.len(), 1);
-        assert_eq!(seq.items()[0].get_str(Tag::new(0x0008, 0x1150)).unwrap(), "1.2.3");
+        assert_eq!(seq.items()[0].get_str(Tag::REFERENCED_SOP_CLASS_UID).unwrap(), "1.2.3");
     }
 
     #[test]
@@ -416,7 +416,7 @@ mod tests {
         bytes.extend_from_slice(&sequence_delimiter());
 
         let ds = parse(&bytes, &le());
-        let frags = match ds.item(&Tag::new(0x7FE0, 0x0010)) {
+        let frags = match ds.item(&Tag::PIXEL_DATA) {
             Some(DicomItem::Fragments(f)) => f,
             other => panic!("expected fragments, got {other:?}"),
         };
@@ -440,7 +440,7 @@ mod tests {
         let ds = parse(&bytes, &le());
         let seq = ds.get_sequence(Tag::UNKNOWN).expect("T5: orphan item becomes SQ");
         assert_eq!(seq.len(), 1);
-        assert_eq!(seq.items()[0].get_str(Tag::new(0x0008, 0x1150)).unwrap(), "1.2.3");
+        assert_eq!(seq.items()[0].get_str(Tag::REFERENCED_SOP_CLASS_UID).unwrap(), "1.2.3");
     }
 
     #[test]
@@ -462,7 +462,7 @@ mod tests {
         // NO 0xE0DD delimiter — EOF
 
         let ds = parse(&bytes, &le());
-        match ds.item(&Tag::new(0x7FE0, 0x0010)) {
+        match ds.item(&Tag::PIXEL_DATA) {
             Some(DicomItem::Fragments(f)) => {
                 assert_eq!(f.fragments().len(), 1, "T6: offset table is not a fragment");
             }
@@ -487,10 +487,10 @@ mod tests {
         bytes.extend_from_slice(&el_header(0x0010, 0x0020, "LO", b"PID-1"));
 
         let ds = parse(&bytes, &le());
-        let seq = ds.get_sequence(Tag::new(0x0008, 0x1140)).unwrap();
+        let seq = ds.get_sequence(Tag::REFERENCED_IMAGE_SEQUENCE).unwrap();
         assert_eq!(seq.len(), 1, "T7: unterminated item is accepted");
-        assert_eq!(seq.items()[0].get_str(Tag::new(0x0008, 0x1150)).unwrap(), "1.2.3");
-        assert_eq!(ds.get_str(Tag::new(0x0010, 0x0020)).unwrap(), "PID-1");
+        assert_eq!(seq.items()[0].get_str(Tag::REFERENCED_SOP_CLASS_UID).unwrap(), "1.2.3");
+        assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
     }
 
     #[test]
@@ -528,7 +528,7 @@ mod tests {
         bytes.extend_from_slice(b"PID-1");
 
         let ds = parse(&bytes, &implicit());
-        assert_eq!(ds.get_str(Tag::new(0x0010, 0x0020)).unwrap(), "PID-1", "T4: outer mode restored");
+        assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1", "T4: outer mode restored");
         let seq = ds.get_sequence(Tag::new(0x0029, 0x1001)).expect("T4: private SQ parsed");
         assert_eq!(seq.len(), 1);
         assert_eq!(seq.items()[0].get_str(Tag::new(0x0029, 0x1010)).unwrap(), "widget");
@@ -548,7 +548,7 @@ mod tests {
 
         let syntax = syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone();
         let ds = parse(&deflated, &syntax);
-        assert_eq!(ds.get_str(Tag::new(0x0010, 0x0020)).unwrap(), "PID-1", "T10: transparent inflate");
+        assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1", "T10: transparent inflate");
     }
 
     #[test]
@@ -566,7 +566,7 @@ mod tests {
 
         let syntax = syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone();
         let ds = parse(&deflated, &syntax);
-        assert_eq!(ds.get_str(Tag::new(0x0010, 0x0020)).unwrap(), "PID-1", "zlib fallback inflate");
+        assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1", "zlib fallback inflate");
     }
 
     #[test]
@@ -575,7 +575,7 @@ mod tests {
         bytes.extend_from_slice(&el_header(0x0010, 0x0020, "LO", b"PID-1"));
         bytes.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
         let ds = parse(&bytes, &le());
-        assert_eq!(ds.get_str(Tag::new(0x0010, 0x0020)).unwrap(), "PID-1");
+        assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
         assert_eq!(ds.len(), 1, "T8: trailing garbage ignored");
     }
 
@@ -620,9 +620,9 @@ mod tests {
         // everything before the stop tag is built; the stop tag is not
         let ds = builder.into_dataset();
         assert_eq!(ds.len(), 2);
-        assert_eq!(ds.get_str(Tag::new(0x0008, 0x0050)).unwrap(), "ACC1");
-        assert_eq!(ds.get_str(Tag::new(0x0010, 0x0020)).unwrap(), "PID-1");
-        assert!(!ds.contains(&Tag::new(0x0010, 0x0010)));
+        assert_eq!(ds.get_str(Tag::ACCESSION_NUMBER).unwrap(), "ACC1");
+        assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
+        assert!(!ds.contains(&Tag::PATIENT_NAME));
         // the source was rewound to the element start
         assert_eq!(source.position().unwrap(), (bytes.len() - third.len()) as u64);
 
@@ -632,7 +632,7 @@ mod tests {
         assert_eq!(outcome, crate::io::reader::ReadOutcome::Success);
         let resumed = builder2.into_dataset();
         assert_eq!(resumed.len(), 1);
-        assert_eq!(resumed.get_str(Tag::new(0x0010, 0x0010)).unwrap(), "Doe^John");
+        assert_eq!(resumed.get_str(Tag::PATIENT_NAME).unwrap(), "Doe^John");
     }
 
     #[test]
@@ -675,7 +675,7 @@ mod tests {
         bytes.extend_from_slice(&4u16.to_be_bytes());
         bytes.extend_from_slice(b"0072");
         let ds = parse(&bytes, &syntaxes::EXPLICIT_VR_BIG_ENDIAN.clone());
-        let hr: i32 = ds.get(Tag::new(0x0018, 0x0060)).unwrap();
+        let hr: i32 = ds.get(Tag::KVP).unwrap();
         assert_eq!(hr, 72);
     }
 
@@ -688,7 +688,7 @@ mod tests {
         bytes.extend_from_slice(&2u16.to_be_bytes());
         bytes.extend_from_slice(&512u16.to_be_bytes());
         let ds = parse(&bytes, &syntaxes::EXPLICIT_VR_BIG_ENDIAN.clone());
-        let rows: u16 = ds.get(Tag::new(0x0028, 0x0010)).unwrap();
+        let rows: u16 = ds.get(Tag::ROWS).unwrap();
         assert_eq!(rows, 512, "US value is byte-swapped on read");
     }
 

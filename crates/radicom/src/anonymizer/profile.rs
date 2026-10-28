@@ -1,5 +1,5 @@
 //! PS3.15 Basic Profile table and its matching grammar (ANON-01;
-//! docs/08-serialization-media.md §6.1).
+//! docs/01-architecture.md §12).
 //!
 //! The profile is the fo-dicom PS3.15 de-identification map, extracted to
 //! `ps3.15.csv` (MS-PL, see `ATTRIBUTION.md`). Each row is:

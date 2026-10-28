@@ -1,4 +1,4 @@
-//! Structured Report document (SR-01/02; docs/08-serialization-media.md §4.3).
+//! Structured Report document (SR-01/02; docs/01-architecture.md §12).
 //!
 //! A `StructuredReport` wraps a `DicomFile` whose dataset holds the SR content
 //! tree. `open` reads a file, `save` writes it with explicit-length sequences,

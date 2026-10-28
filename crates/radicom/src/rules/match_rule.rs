@@ -1,4 +1,4 @@
-//! Match rule DSL for query filtering (MATCH-01; docs/01-feature-list.md).
+//! Match rule DSL for query filtering (MATCH-01; docs/02-development-guide.md §2).
 //!
 //! Ports fo-dicom `DicomMatchRules`: a [`MatchRule`] tests a dataset against a
 //! tag/value condition. Rules compose with [`MatchRuleSet`] (And/Or) and
@@ -141,36 +141,36 @@ mod tests {
 
     fn dataset() -> Dataset {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Doe^John");
-        ds.insert_str(Tag::new(0x0008, 0x0060), Vr::Cs, "CT");
-        ds.insert_str(Tag::new(0x0008, 0x0050), Vr::Sh, "ACC123");
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+        ds.insert_str(Tag::MODALITY, Vr::Cs, "CT");
+        ds.insert_str(Tag::ACCESSION_NUMBER, Vr::Sh, "ACC123");
         ds
     }
 
     #[test]
     fn exists_and_is_empty() {
-        assert!(MatchRule::Exists(Tag::new(0x0010, 0x0010)).matches(&dataset()));
-        assert!(!MatchRule::Exists(Tag::new(0x0010, 0x0020)).matches(&dataset()));
-        assert!(MatchRule::IsEmpty(Tag::new(0x0010, 0x0020)).matches(&dataset()), "missing is empty");
-        assert!(!MatchRule::IsEmpty(Tag::new(0x0010, 0x0010)).matches(&dataset()));
+        assert!(MatchRule::Exists(Tag::PATIENT_NAME).matches(&dataset()));
+        assert!(!MatchRule::Exists(Tag::PATIENT_ID).matches(&dataset()));
+        assert!(MatchRule::IsEmpty(Tag::PATIENT_ID).matches(&dataset()), "missing is empty");
+        assert!(!MatchRule::IsEmpty(Tag::PATIENT_NAME).matches(&dataset()));
     }
 
     #[test]
     fn string_comparisons() {
         let ds = dataset();
-        assert!(MatchRule::Equals(Tag::new(0x0008, 0x0060), "CT".into()).matches(&ds));
-        assert!(MatchRule::StartsWith(Tag::new(0x0010, 0x0010), "Doe".into()).matches(&ds));
-        assert!(MatchRule::EndsWith(Tag::new(0x0010, 0x0010), "John".into()).matches(&ds));
-        assert!(MatchRule::Contains(Tag::new(0x0008, 0x0050), "ACC".into()).matches(&ds));
-        assert!(!MatchRule::Equals(Tag::new(0x0008, 0x0060), "MR".into()).matches(&ds));
+        assert!(MatchRule::Equals(Tag::MODALITY, "CT".into()).matches(&ds));
+        assert!(MatchRule::StartsWith(Tag::PATIENT_NAME, "Doe".into()).matches(&ds));
+        assert!(MatchRule::EndsWith(Tag::PATIENT_NAME, "John".into()).matches(&ds));
+        assert!(MatchRule::Contains(Tag::ACCESSION_NUMBER, "ACC".into()).matches(&ds));
+        assert!(!MatchRule::Equals(Tag::MODALITY, "MR".into()).matches(&ds));
     }
 
     #[test]
     fn one_of_matches_any_candidate() {
         let ds = dataset();
-        let rule = MatchRule::OneOf(Tag::new(0x0008, 0x0060), vec!["CT".into(), "MR".into()]);
+        let rule = MatchRule::OneOf(Tag::MODALITY, vec!["CT".into(), "MR".into()]);
         assert!(rule.matches(&ds));
-        let miss = MatchRule::OneOf(Tag::new(0x0008, 0x0060), vec!["US".into()]);
+        let miss = MatchRule::OneOf(Tag::MODALITY, vec!["US".into()]);
         assert!(!miss.matches(&ds));
     }
 
@@ -189,16 +189,16 @@ mod tests {
     fn and_or_negate_composition() {
         let ds = dataset();
         let and_set = MatchRuleSet::new(MatchOperator::And)
-            .with(MatchRule::Equals(Tag::new(0x0008, 0x0060), "CT".into()))
-            .with(MatchRule::StartsWith(Tag::new(0x0010, 0x0010), "Doe".into()));
+            .with(MatchRule::Equals(Tag::MODALITY, "CT".into()))
+            .with(MatchRule::StartsWith(Tag::PATIENT_NAME, "Doe".into()));
         assert!(and_set.matches(&ds));
 
         let or_set = MatchRuleSet::new(MatchOperator::Or)
-            .with(MatchRule::Equals(Tag::new(0x0008, 0x0060), "MR".into()))
-            .with(MatchRule::Equals(Tag::new(0x0008, 0x0060), "CT".into()));
+            .with(MatchRule::Equals(Tag::MODALITY, "MR".into()))
+            .with(MatchRule::Equals(Tag::MODALITY, "CT".into()));
         assert!(or_set.matches(&ds));
 
-        let negated = MatchRule::Negate(Box::new(MatchRule::Equals(Tag::new(0x0008, 0x0060), "MR".into())));
+        let negated = MatchRule::Negate(Box::new(MatchRule::Equals(Tag::MODALITY, "MR".into())));
         assert!(negated.matches(&ds));
     }
 
@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn regex_rule_matches() {
         let ds = dataset();
-        assert!(MatchRule::Regex(Tag::new(0x0008, 0x0050), "^ACC\\d+$".into()).matches(&ds));
-        assert!(!MatchRule::Regex(Tag::new(0x0008, 0x0050), "^MR".into()).matches(&ds));
+        assert!(MatchRule::Regex(Tag::ACCESSION_NUMBER, "^ACC\\d+$".into()).matches(&ds));
+        assert!(!MatchRule::Regex(Tag::ACCESSION_NUMBER, "^MR".into()).matches(&ds));
     }
 }

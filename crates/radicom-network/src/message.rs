@@ -1,5 +1,5 @@
 //! DIMSE message encoding: command + dataset as one message (NET-05/06;
-//! docs/07-network.md §5.2, §5.3).
+//! docs/01-architecture.md §11, §5.3).
 //!
 //! A message is a command set followed by an optional dataset. The command
 //! set is always Implicit VR Little Endian; the dataset uses the presentation
@@ -75,8 +75,8 @@ mod tests {
 
     fn sample_dataset() -> Dataset {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0008, 0x0016), Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
-        ds.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Doe^John");
+        ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
         ds
     }
 
@@ -87,7 +87,7 @@ mod tests {
         // (0000,0000) is the first element and must be present
         assert_eq!(&bytes[..4], &[0x00, 0x00, 0x00, 0x00]);
         let ds = decode_command(&bytes).unwrap();
-        assert!(ds.contains(&Tag::new(0x0000, 0x0000)), "command group length kept");
+        assert!(ds.contains(&Tag::COMMAND_GROUP_LENGTH), "command group length kept");
         assert_eq!(Command::from_dataset(&ds).unwrap().field, CommandField::CEchoRq);
     }
 

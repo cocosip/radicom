@@ -1,5 +1,5 @@
 //! Data model: tags, VRs, elements, datasets, UIDs, transfer syntaxes and
-//! dictionaries (docs/04-data-model.md).
+//! dictionaries (docs/01-architecture.md §3).
 
 pub mod buffer;
 pub mod dataset;

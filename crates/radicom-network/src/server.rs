@@ -1,5 +1,5 @@
 //! End-to-end association and C-ECHO over a real TCP socket
-//! (SRV-01/02; docs/07-network.md §5, §8).
+//! (SRV-01/02; docs/01-architecture.md §11, §8).
 //!
 //! The engine here is intentionally small: it drives the association
 //! handshake, routes one command/response exchange, and closes gracefully.
@@ -802,11 +802,11 @@ where
     ) -> Result<StatusState> {
         let dataset = &file.dataset;
         let sop_class = dataset
-            .try_get_str(Tag::new(0x0008, 0x0016))
+            .try_get_str(Tag::SOP_CLASS_UID)
             .map(|s| s.trim().to_string())
             .ok_or(NetworkError::protocol("instance has no SOP class UID"))?;
         let sop_instance = dataset
-            .try_get_str(Tag::new(0x0008, 0x0018))
+            .try_get_str(Tag::SOP_INSTANCE_UID)
             .map(|s| s.trim().to_string())
             .ok_or(NetworkError::protocol("instance has no SOP instance UID"))?;
         let source_syntax = dataset.transfer_syntax();
@@ -1216,11 +1216,11 @@ impl Association {
     ) -> Result<CStoreResponse> {
         let dataset = &file.dataset;
         let sop_class = dataset
-            .try_get_str(radicom::model::tag::Tag::new(0x0008, 0x0016))
+            .try_get_str(radicom::model::tag::Tag::SOP_CLASS_UID)
             .map(|s| s.trim().to_string())
             .ok_or(NetworkError::protocol("instance has no SOP class UID"))?;
         let sop_instance = dataset
-            .try_get_str(radicom::model::tag::Tag::new(0x0008, 0x0018))
+            .try_get_str(radicom::model::tag::Tag::SOP_INSTANCE_UID)
             .map(|s| s.trim().to_string())
             .ok_or(NetworkError::protocol("instance has no SOP instance UID"))?;
 
@@ -1978,10 +1978,10 @@ mod tests {
 
     fn instance_file() -> radicom::io::file::DicomFile {
         let mut dataset = Dataset::new();
-        dataset.insert_str(Tag::new(0x0008, 0x0016), Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
-        dataset.insert_str(Tag::new(0x0008, 0x0018), Vr::Ui, "1.2.3.4.5.6");
-        dataset.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Doe^John");
-        dataset.insert_str(Tag::new(0x0010, 0x0020), Vr::Lo, "PID-1");
+        dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5.6");
+        dataset.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+        dataset.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID-1");
         dataset.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
         radicom::io::file::DicomFile::from_dataset(dataset)
     }
@@ -2138,8 +2138,8 @@ mod tests {
                 .iter()
                 .map(|(study_uid, patient_name)| {
                     let mut item = Dataset::new();
-                    item.insert_str(Tag::new(0x0020, 0x000D), Vr::Ui, study_uid.clone());
-                    item.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, patient_name.clone());
+                    item.insert_str(Tag::STUDY_INSTANCE_UID, Vr::Ui, study_uid.clone());
+                    item.insert_str(Tag::PATIENT_NAME, Vr::Pn, patient_name.clone());
                     Ok(crate::cfind::CFindResponse::pending(request, item))
                 })
                 .collect();
@@ -2190,10 +2190,10 @@ mod tests {
         assert_eq!(responses[2].completed, 2);
 
         let first = responses[0].identifier.as_ref().unwrap();
-        assert_eq!(first.get_str(Tag::new(0x0020, 0x000D)).unwrap(), "1.2.3.1");
-        assert_eq!(first.get_str(Tag::new(0x0010, 0x0010)).unwrap(), "Doe^John");
+        assert_eq!(first.get_str(Tag::STUDY_INSTANCE_UID).unwrap(), "1.2.3.1");
+        assert_eq!(first.get_str(Tag::PATIENT_NAME).unwrap(), "Doe^John");
         let second = responses[1].identifier.as_ref().unwrap();
-        assert_eq!(second.get_str(Tag::new(0x0010, 0x0010)).unwrap(), "Roe^Jane");
+        assert_eq!(second.get_str(Tag::PATIENT_NAME).unwrap(), "Roe^Jane");
 
         association.release().await.unwrap();
         handle.await.unwrap().unwrap();
@@ -2520,7 +2520,7 @@ mod tests {
         let stored = received.lock().unwrap().clone();
         assert_eq!(stored.len(), 1, "the instance came back as a reverse C-STORE");
         assert_eq!(
-            stored[0].dataset.get_str(Tag::new(0x0008, 0x0018)).unwrap(),
+            stored[0].dataset.get_str(Tag::SOP_INSTANCE_UID).unwrap(),
             "1.2.3.4.5.6"
         );
 
@@ -2822,7 +2822,7 @@ mod tests {
         ) -> Result<crate::nservice::NServiceResponse> {
             // storage commitment answers with a Transaction UID in the response dataset
             let mut dataset = Dataset::new();
-            dataset.insert_str(Tag::new(0x0008, 0x1195), Vr::Ui, "1.2.3.4.5.6");
+            dataset.insert_str(Tag::TRANSACTION_UID, Vr::Ui, "1.2.3.4.5.6");
             Ok(crate::nservice::NServiceResponse::success(request, Some(dataset)))
         }
 
@@ -2862,7 +2862,7 @@ mod tests {
         request.affected_sop_instance_uid = Some("1.2.3.4".to_string());
         request.action_type_id = Some(1);
         let mut request_dataset = Dataset::new();
-        request_dataset.insert_str(Tag::new(0x0008, 0x0018), Vr::Ui, "1.2.3.4");
+        request_dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4");
         request.dataset = Some(request_dataset);
 
         let response = association.send_n_service(&request).await.unwrap();
@@ -2870,7 +2870,7 @@ mod tests {
         assert_eq!(response.status, crate::dimse::status::SUCCESS);
         let dataset = response.dataset.expect("N-ACTION response carries a dataset");
         assert_eq!(
-            dataset.try_get_str(Tag::new(0x0008, 0x1195)).as_deref(),
+            dataset.try_get_str(Tag::TRANSACTION_UID).as_deref(),
             Some("1.2.3.4.5.6"),
             "the Transaction UID comes back in the response dataset"
         );

@@ -1,4 +1,4 @@
-//! DIMSE command model and status codes (DIMSE-01; docs/07-network.md §6).
+//! DIMSE command model and status codes (DIMSE-01; docs/01-architecture.md §11).
 //!
 //! Commands always travel as Implicit VR Little Endian datasets. This module
 //! builds and parses the command set; the dataset that follows a command is
@@ -17,28 +17,28 @@ use std::sync::Arc;
 pub mod tag {
     use radicom::model::tag::Tag;
 
-    pub const COMMAND_GROUP_LENGTH: Tag = Tag::new(0x0000, 0x0000);
-    pub const AFFECTED_SOP_CLASS_UID: Tag = Tag::new(0x0000, 0x0002);
-    pub const REQUESTED_SOP_CLASS_UID: Tag = Tag::new(0x0000, 0x0003);
-    pub const COMMAND_FIELD: Tag = Tag::new(0x0000, 0x0100);
-    pub const MESSAGE_ID: Tag = Tag::new(0x0000, 0x0110);
-    pub const MESSAGE_ID_BEING_RESPONDED_TO: Tag = Tag::new(0x0000, 0x0120);
-    pub const MOVE_DESTINATION: Tag = Tag::new(0x0000, 0x0600);
-    pub const PRIORITY: Tag = Tag::new(0x0000, 0x0700);
-    pub const COMMAND_DATA_SET_TYPE: Tag = Tag::new(0x0000, 0x0800);
-    pub const STATUS: Tag = Tag::new(0x0000, 0x0900);
-    pub const ERROR_COMMENT: Tag = Tag::new(0x0000, 0x0902);
-    pub const AFFECTED_SOP_INSTANCE_UID: Tag = Tag::new(0x0000, 0x1000);
-    pub const REQUESTED_SOP_INSTANCE_UID: Tag = Tag::new(0x0000, 0x1001);
-    pub const EVENT_TYPE_ID: Tag = Tag::new(0x0000, 0x1002);
-    pub const ATTRIBUTE_IDENTIFIER_LIST: Tag = Tag::new(0x0000, 0x1005);
-    pub const ACTION_TYPE_ID: Tag = Tag::new(0x0000, 0x1008);
-    pub const NUMBER_OF_REMAINING_SUBOPERATIONS: Tag = Tag::new(0x0000, 0x1020);
-    pub const NUMBER_OF_COMPLETED_SUBOPERATIONS: Tag = Tag::new(0x0000, 0x1021);
-    pub const NUMBER_OF_FAILED_SUBOPERATIONS: Tag = Tag::new(0x0000, 0x1022);
-    pub const NUMBER_OF_WARNING_SUBOPERATIONS: Tag = Tag::new(0x0000, 0x1023);
-    pub const MOVE_ORIGINATOR_APPLICATION_ENTITY_TITLE: Tag = Tag::new(0x0000, 0x1030);
-    pub const MOVE_ORIGINATOR_MESSAGE_ID: Tag = Tag::new(0x0000, 0x1031);
+    pub const COMMAND_GROUP_LENGTH: Tag = Tag::COMMAND_GROUP_LENGTH;
+    pub const AFFECTED_SOP_CLASS_UID: Tag = Tag::AFFECTED_SOP_CLASS_UID;
+    pub const REQUESTED_SOP_CLASS_UID: Tag = Tag::REQUESTED_SOP_CLASS_UID;
+    pub const COMMAND_FIELD: Tag = Tag::COMMAND_FIELD;
+    pub const MESSAGE_ID: Tag = Tag::MESSAGE_ID;
+    pub const MESSAGE_ID_BEING_RESPONDED_TO: Tag = Tag::MESSAGE_ID_BEING_RESPONDED_TO;
+    pub const MOVE_DESTINATION: Tag = Tag::MOVE_DESTINATION;
+    pub const PRIORITY: Tag = Tag::PRIORITY;
+    pub const COMMAND_DATA_SET_TYPE: Tag = Tag::COMMAND_DATA_SET_TYPE;
+    pub const STATUS: Tag = Tag::STATUS;
+    pub const ERROR_COMMENT: Tag = Tag::ERROR_COMMENT;
+    pub const AFFECTED_SOP_INSTANCE_UID: Tag = Tag::AFFECTED_SOP_INSTANCE_UID;
+    pub const REQUESTED_SOP_INSTANCE_UID: Tag = Tag::REQUESTED_SOP_INSTANCE_UID;
+    pub const EVENT_TYPE_ID: Tag = Tag::EVENT_TYPE_ID;
+    pub const ATTRIBUTE_IDENTIFIER_LIST: Tag = Tag::ATTRIBUTE_IDENTIFIER_LIST;
+    pub const ACTION_TYPE_ID: Tag = Tag::ACTION_TYPE_ID;
+    pub const NUMBER_OF_REMAINING_SUBOPERATIONS: Tag = Tag::NUMBER_OF_REMAINING_SUBOPERATIONS;
+    pub const NUMBER_OF_COMPLETED_SUBOPERATIONS: Tag = Tag::NUMBER_OF_COMPLETED_SUBOPERATIONS;
+    pub const NUMBER_OF_FAILED_SUBOPERATIONS: Tag = Tag::NUMBER_OF_FAILED_SUBOPERATIONS;
+    pub const NUMBER_OF_WARNING_SUBOPERATIONS: Tag = Tag::NUMBER_OF_WARNING_SUBOPERATIONS;
+    pub const MOVE_ORIGINATOR_APPLICATION_ENTITY_TITLE: Tag = Tag::MOVE_ORIGINATOR_APPLICATION_ENTITY_TITLE;
+    pub const MOVE_ORIGINATOR_MESSAGE_ID: Tag = Tag::MOVE_ORIGINATOR_MESSAGE_ID;
 }
 
 /// `(0000,0800)` value meaning "no dataset follows" (§5.2).

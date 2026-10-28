@@ -1,4 +1,4 @@
-//! DICOM data element tag (TAG-01, TAG-02; docs/04-data-model.md §1).
+//! DICOM data element tag (TAG-01, TAG-02; docs/01-architecture.md §3).
 
 use crate::error::{DataError, Error, TagRef};
 use crate::model::private_creator::PrivateCreator;
@@ -220,19 +220,19 @@ mod tests {
 
     #[test]
     fn basic_properties() {
-        let t = Tag::new(0x0028, 0x0010);
+        let t = Tag::ROWS;
         assert_eq!(t.group(), 0x0028);
         assert_eq!(t.element(), 0x0010);
         assert!(!t.is_private());
         assert!(Tag::new(0x0029, 0x0010).is_private());
         assert!(Tag::new(0x0029, 0x0010).is_private_creator_slot());
         assert!(!Tag::new(0x0029, 0x0100).is_private_creator_slot());
-        assert_eq!(Tag::UNKNOWN, Tag::new(0xFFFF, 0xFFFF));
+        assert_eq!(Tag::UNKNOWN, Tag::UNKNOWN);
     }
 
     #[test]
     fn u32_round_trip() {
-        let t = Tag::new(0x7FE0, 0x0010);
+        let t = Tag::PIXEL_DATA;
         assert_eq!(t.to_u32(), 0x7FE0_0010);
         assert_eq!(Tag::from_u32(0x7FE0_0010), t);
     }
@@ -241,9 +241,9 @@ mod tests {
 
     #[test]
     fn ordering_public_vs_public() {
-        assert!(Tag::new(0x0008, 0x0050) < Tag::new(0x0008, 0x0060));
-        assert!(Tag::new(0x0008, 0x0060) < Tag::new(0x0010, 0x0010));
-        assert_eq!(Tag::new(0x0010, 0x0010), Tag::new(0x0010, 0x0010));
+        assert!(Tag::ACCESSION_NUMBER < Tag::MODALITY);
+        assert!(Tag::MODALITY < Tag::PATIENT_NAME);
+        assert_eq!(Tag::PATIENT_NAME, Tag::PATIENT_NAME);
     }
 
     #[test]
@@ -282,7 +282,7 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(hash_of(&a), hash_of(&b));
 
-        let p = Tag::new(0x0010, 0x0010);
+        let p = Tag::PATIENT_NAME;
         assert_eq!(hash_of(&p), hash_of(&Tag::from_u32(p.to_u32())));
     }
 
@@ -290,18 +290,18 @@ mod tests {
 
     #[test]
     fn display_formats() {
-        assert_eq!(Tag::new(0x0028, 0x0010).to_string(), "(0028,0010)");
+        assert_eq!(Tag::ROWS.to_string(), "(0028,0010)");
         let priv_tag = Tag::private(0x0029, 0x1001, creator("Vendor X"));
         assert_eq!(priv_tag.to_string(), "(0029,1001:Vendor X)");
-        assert_eq!(Tag::new(0x7FE0, 0x0010).to_json_string(), "7FE00010");
+        assert_eq!(Tag::PIXEL_DATA.to_json_string(), "7FE00010");
     }
 
     #[test]
     fn parse_round_trip_all_formats() {
-        assert_eq!(Tag::parse("(0028,0010)").unwrap(), Tag::new(0x0028, 0x0010));
-        assert_eq!(Tag::parse("0028,0010").unwrap(), Tag::new(0x0028, 0x0010));
-        assert_eq!(Tag::parse("0028,0010 ").unwrap(), Tag::new(0x0028, 0x0010));
-        assert_eq!(Tag::parse("7FE00010").unwrap(), Tag::new(0x7FE0, 0x0010));
+        assert_eq!(Tag::parse("(0028,0010)").unwrap(), Tag::ROWS);
+        assert_eq!(Tag::parse("0028,0010").unwrap(), Tag::ROWS);
+        assert_eq!(Tag::parse("0028,0010 ").unwrap(), Tag::ROWS);
+        assert_eq!(Tag::parse("7FE00010").unwrap(), Tag::PIXEL_DATA);
         let t = Tag::parse("(0029,1001:Vendor X)").unwrap();
         assert_eq!(t, Tag::private(0x0029, 0x1001, creator("Vendor X")));
         assert_eq!(t.to_string(), "(0029,1001:Vendor X)");
@@ -324,10 +324,10 @@ mod tests {
         // the (block-relative) element, so all ACME tags precede BETA.
         let mut tags = [
             Tag::private(0x0029, 0x1202, creator("ACME")),
-            Tag::new(0x0028, 0x0010),
+            Tag::ROWS,
             Tag::private(0x0029, 0x1101, creator("ACME")),
             Tag::private(0x0029, 0x1101, creator("BETA")),
-            Tag::new(0x0008, 0x0050),
+            Tag::ACCESSION_NUMBER,
         ];
         tags.sort();
         let rendered: Vec<String> = tags.iter().map(|t| t.to_string()).collect();

@@ -1,4 +1,4 @@
-//! Transform rule DSL for dataset mutation (XFORM-01; docs/01-feature-list.md).
+//! Transform rule DSL for dataset mutation (XFORM-01; docs/02-development-guide.md §2).
 //!
 //! Ports fo-dicom `DicomTransformRules`: a [`TransformRule`] rewrites one element
 //! (set/map/copy/regex/prefix/append/trim/pad/truncate/upper/lower/generate UID/
@@ -288,9 +288,9 @@ mod tests {
 
     fn dataset() -> Dataset {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Doe^John");
-        ds.insert_str(Tag::new(0x0008, 0x0060), Vr::Cs, "ct");
-        ds.insert_str(Tag::new(0x0010, 0x1000), Vr::Sh, "ACC123");
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+        ds.insert_str(Tag::MODALITY, Vr::Cs, "ct");
+        ds.insert_str(Tag::OTHER_PATIENT_I_DS, Vr::Sh, "ACC123");
         ds
     }
 
@@ -301,63 +301,63 @@ mod tests {
     #[test]
     fn set_and_map_value() {
         let mut ds = dataset();
-        TransformRule::SetValue(Tag::new(0x0008, 0x0060), "MR".into()).apply(&mut ds);
+        TransformRule::SetValue(Tag::MODALITY, "MR".into()).apply(&mut ds);
         assert_eq!(value(&ds, 0x0008, 0x0060).as_deref(), Some("MR"));
 
         let mut ds = dataset();
-        TransformRule::MapValue(Tag::new(0x0008, 0x0060), "ct".into(), "CT".into()).apply(&mut ds);
+        TransformRule::MapValue(Tag::MODALITY, "ct".into(), "CT".into()).apply(&mut ds);
         assert_eq!(value(&ds, 0x0008, 0x0060).as_deref(), Some("CT"));
         // a non-matching map leaves it alone
         let mut ds = dataset();
-        TransformRule::MapValue(Tag::new(0x0008, 0x0060), "zz".into(), "XX".into()).apply(&mut ds);
+        TransformRule::MapValue(Tag::MODALITY, "zz".into(), "XX".into()).apply(&mut ds);
         assert_eq!(value(&ds, 0x0008, 0x0060).as_deref(), Some("ct"));
     }
 
     #[test]
     fn copy_value() {
         let mut ds = dataset();
-        TransformRule::CopyValue(Tag::new(0x0010, 0x1000), Tag::new(0x0010, 0x0020)).apply(&mut ds);
+        TransformRule::CopyValue(Tag::OTHER_PATIENT_I_DS, Tag::PATIENT_ID).apply(&mut ds);
         assert_eq!(value(&ds, 0x0010, 0x0020).as_deref(), Some("ACC123"));
     }
 
     #[test]
     fn prefix_append_and_case() {
         let mut ds = dataset();
-        TransformRule::Prefix(Tag::new(0x0010, 0x1000), "P-".into()).apply(&mut ds);
+        TransformRule::Prefix(Tag::OTHER_PATIENT_I_DS, "P-".into()).apply(&mut ds);
         assert_eq!(value(&ds, 0x0010, 0x1000).as_deref(), Some("P-ACC123"));
 
         let mut ds = dataset();
-        TransformRule::Append(Tag::new(0x0010, 0x1000), "-X".into()).apply(&mut ds);
+        TransformRule::Append(Tag::OTHER_PATIENT_I_DS, "-X".into()).apply(&mut ds);
         assert_eq!(value(&ds, 0x0010, 0x1000).as_deref(), Some("ACC123-X"));
 
         let mut ds = dataset();
-        TransformRule::ToUpper(Tag::new(0x0008, 0x0060)).apply(&mut ds);
+        TransformRule::ToUpper(Tag::MODALITY).apply(&mut ds);
         assert_eq!(value(&ds, 0x0008, 0x0060).as_deref(), Some("CT"));
     }
 
     #[test]
     fn trim_and_pad_and_truncate() {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "xxHelloxx");
-        TransformRule::TrimString(Tag::new(0x0010, 0x0010), TrimPosition::Both, "xx".into()).apply(&mut ds);
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "xxHelloxx");
+        TransformRule::TrimString(Tag::PATIENT_NAME, TrimPosition::Both, "xx".into()).apply(&mut ds);
         assert_eq!(value(&ds, 0x0010, 0x0010).as_deref(), Some("Hello"));
 
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0010, 0x1000), Vr::Sh, "7");
-        TransformRule::PadString(Tag::new(0x0010, 0x1000), 3, '0').apply(&mut ds);
+        ds.insert_str(Tag::OTHER_PATIENT_I_DS, Vr::Sh, "7");
+        TransformRule::PadString(Tag::OTHER_PATIENT_I_DS, 3, '0').apply(&mut ds);
         assert_eq!(value(&ds, 0x0010, 0x1000).as_deref(), Some("700"));
 
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0010, 0x1000), Vr::Sh, "ABCDEF\\GHIJKL");
-        TransformRule::Truncate(Tag::new(0x0010, 0x1000), 3).apply(&mut ds);
+        ds.insert_str(Tag::OTHER_PATIENT_I_DS, Vr::Sh, "ABCDEF\\GHIJKL");
+        TransformRule::Truncate(Tag::OTHER_PATIENT_I_DS, 3).apply(&mut ds);
         assert_eq!(value(&ds, 0x0010, 0x1000).as_deref(), Some("ABC\\GHI"));
     }
 
     #[test]
     fn generate_uid_replaces_the_value() {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0008, 0x0018), Vr::Ui, "1.2.3");
-        TransformRule::GenerateUid(Tag::new(0x0008, 0x0018)).apply(&mut ds);
+        ds.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3");
+        TransformRule::GenerateUid(Tag::SOP_INSTANCE_UID).apply(&mut ds);
         let new_uid = value(&ds, 0x0008, 0x0018).unwrap();
         assert_ne!(new_uid, "1.2.3");
         assert!(Uid::is_valid(&new_uid));
@@ -375,19 +375,19 @@ mod tests {
         };
         ds.insert_or_update(ow(Tag::new(0x6000, 0x3000)));
         ds.insert_or_update(ow(Tag::new(0x6002, 0x3000)));
-        ds.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Doe^John");
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
         let mask = MaskedTag::parse("(60xx,3000)").unwrap();
         TransformRule::RemoveElement(mask).apply(&mut ds);
         assert!(!ds.contains(&Tag::new(0x6000, 0x3000)));
         assert!(!ds.contains(&Tag::new(0x6002, 0x3000)));
-        assert!(ds.contains(&Tag::new(0x0010, 0x0010)), "non-matching tag survives");
+        assert!(ds.contains(&Tag::PATIENT_NAME), "non-matching tag survives");
     }
 
     #[test]
     fn recording_original_values_into_modified_attributes() {
         let mut ds = dataset();
         let mut modified = Dataset::new();
-        TransformRule::ToUpper(Tag::new(0x0008, 0x0060)).apply_recording(&mut ds, &mut modified);
+        TransformRule::ToUpper(Tag::MODALITY).apply_recording(&mut ds, &mut modified);
         // the dataset is transformed, the original is preserved in `modified`
         assert_eq!(value(&ds, 0x0008, 0x0060).as_deref(), Some("CT"));
         assert_eq!(value(&modified, 0x0008, 0x0060).as_deref(), Some("ct"));
@@ -397,10 +397,10 @@ mod tests {
     fn a_condition_set_gates_the_transform() {
         use crate::rules::match_rule::{MatchOperator, MatchRule, MatchRuleSet};
         let conditions = MatchRuleSet::new(MatchOperator::And)
-            .with(MatchRule::Equals(Tag::new(0x0008, 0x0060), "ct".into()));
+            .with(MatchRule::Equals(Tag::MODALITY, "ct".into()));
         let set = TransformRuleSet::new()
             .with_condition(conditions)
-            .with(TransformRule::ToUpper(Tag::new(0x0008, 0x0060)));
+            .with(TransformRule::ToUpper(Tag::MODALITY));
 
         let mut ds = dataset();
         set.apply(&mut ds);
@@ -408,7 +408,7 @@ mod tests {
 
         // a non-matching condition leaves the dataset untouched
         let mut other = Dataset::new();
-        other.insert_str(Tag::new(0x0008, 0x0060), Vr::Cs, "MR");
+        other.insert_str(Tag::MODALITY, Vr::Cs, "MR");
         set.apply(&mut other);
         assert_eq!(value(&other, 0x0008, 0x0060).as_deref(), Some("MR"));
     }
@@ -417,9 +417,9 @@ mod tests {
     #[test]
     fn regex_transform_replaces_and_records() {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0010, 0x1000), Vr::Sh, "ACC-123-XYZ");
+        ds.insert_str(Tag::OTHER_PATIENT_I_DS, Vr::Sh, "ACC-123-XYZ");
         let mut modified = Dataset::new();
-        TransformRule::Regex(Tag::new(0x0010, 0x1000), "\\d+".into(), "###".into())
+        TransformRule::Regex(Tag::OTHER_PATIENT_I_DS, "\\d+".into(), "###".into())
             .apply_recording(&mut ds, &mut modified);
         assert_eq!(value(&ds, 0x0010, 0x1000).as_deref(), Some("ACC-###-XYZ"));
         assert_eq!(value(&modified, 0x0010, 0x1000).as_deref(), Some("ACC-123-XYZ"), "original recorded");

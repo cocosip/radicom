@@ -1,4 +1,4 @@
-//! Data dictionary (DICT-01, DICT-02, DICT-03; docs/04-data-model.md §5).
+//! Data dictionary (DICT-01, DICT-02, DICT-03; docs/01-architecture.md §3).
 
 use crate::error::{DataError, Error};
 use crate::model::private_creator::PrivateCreator;
@@ -478,7 +478,7 @@ mod tests {
     #[test]
     fn keyword_reverse_lookup() {
         let dict = Dictionary::with_generated().unwrap();
-        assert_eq!(dict.tag_by_keyword("PatientID"), Some(Tag::new(0x0010, 0x0020)));
+        assert_eq!(dict.tag_by_keyword("PatientID"), Some(Tag::PATIENT_ID));
         assert_eq!(dict.tag_by_keyword("PixelData"), Some(Tag::PIXEL_DATA));
         assert_eq!(dict.tag_by_keyword("NoSuchKeyword"), None);
     }

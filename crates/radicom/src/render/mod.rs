@@ -1,5 +1,5 @@
 //! Grayscale rendering and a zero-dependency PNG writer (REND-01/03/04/07;
-//! docs/10-rendering.md §1, §3, §4, §7).
+//! docs/01-architecture.md §10, §3, §4, §7).
 //!
 //! This round delivers the smallest vertical slice that satisfies the milestone
 //! acceptance test — "render a 16-bit CT frame to PNG correctly":
@@ -56,7 +56,7 @@ impl LutTable {
     /// Builds from a LUT-sequence item's `(0028,3002)` descriptor and
     /// `(0028,3006)` data. Returns `None` when either is missing or malformed.
     pub fn from_item(item: &Dataset) -> Option<LutTable> {
-        let desc = element_bytes(item, Tag::new(0x0028, 0x3002))?;
+        let desc = element_bytes(item, Tag::LUT_DESCRIPTOR)?;
         if desc.len() < 6 {
             return None;
         }
@@ -65,7 +65,7 @@ impl LutTable {
         // first mapped pixel value is SS (signed) per PS3.3; keep its bit pattern
         let first_mapped = u16::from_le_bytes([desc[2], desc[3]]) as i16 as i32;
         let bits = u16::from_le_bytes([desc[4], desc[5]]);
-        let data = element_bytes(item, Tag::new(0x0028, 0x3006))?;
+        let data = element_bytes(item, Tag::LUT_DATA)?;
 
         let mut out = Vec::with_capacity(count);
         if data.len() == count {
@@ -201,13 +201,13 @@ impl GrayscaleRenderOptions {
     /// from a `(0028,3000)` modality LUT Sequence when present, else
     /// `(0028,1053)`/`(0028,1052)`.
     pub fn from_dataset_frame(dataset: &Dataset, frame: u32) -> Result<Self, Error> {
-        let rescale_intercept = dataset.try_get::<String>(Tag::new(0x0028, 0x1052)).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
-        let rescale_slope = dataset.try_get::<String>(Tag::new(0x0028, 0x1053)).and_then(|s| s.trim().parse().ok()).unwrap_or(1.0);
+        let rescale_intercept = dataset.try_get::<String>(Tag::RESCALE_INTERCEPT).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
+        let rescale_slope = dataset.try_get::<String>(Tag::RESCALE_SLOPE).and_then(|s| s.trim().parse().ok()).unwrap_or(1.0);
 
         // A VOI LUT Sequence takes precedence over WindowCenter/Width (docs §4):
         // when its first item is usable, no window is required.
         let voi_lut = dataset
-            .try_get_sequence(Tag::new(0x0028, 0x3010))
+            .try_get_sequence(Tag::VOILUT_SEQUENCE)
             .and_then(|seq| seq.items().first())
             .and_then(VoiLut::from_item);
         let (window_center, window_width) = if voi_lut.is_some() {
@@ -232,7 +232,7 @@ impl GrayscaleRenderOptions {
 
         let use_voi_lut = voi_lut.is_some();
         let invert = dataset
-            .try_get_str(Tag::new(0x0028, 0x0004))
+            .try_get_str(Tag::PHOTOMETRIC_INTERPRETATION)
             .map(|pi| pi.trim() == "MONOCHROME1")
             .unwrap_or(false);
 
@@ -243,7 +243,7 @@ impl GrayscaleRenderOptions {
             None
         } else {
             dataset
-                .try_get_sequence(Tag::new(0x0028, 0x3000))
+                .try_get_sequence(Tag::MODALITY_LUT_SEQUENCE)
                 .and_then(|seq| seq.items().first())
                 .and_then(ModalityLut::from_item)
         };
@@ -303,7 +303,7 @@ impl GrayscaleRenderOptions {
 
         let mut values = frame_stored_values(dataset, frame)?;
         // filter padding pixels (both the signed and unsigned readings of the tag)
-        if let Some(pad) = first_number(dataset, Tag::new(0x0028, 0x0120)) {
+        if let Some(pad) = first_number(dataset, Tag::PIXEL_PADDING_VALUE) {
             values.retain(|&v| v != pad);
         }
         let (min, max) = match (values.iter().copied().reduce(f64::min), values.iter().copied().reduce(f64::max)) {
@@ -328,8 +328,8 @@ impl GrayscaleRenderOptions {
     /// Errors when either tag is absent.
     pub fn from_image_pixel_value_tags(dataset: &Dataset) -> Result<Self, Error> {
         let (smallest, largest) = match (
-            first_number(dataset, Tag::new(0x0028, 0x0106)),
-            first_number(dataset, Tag::new(0x0028, 0x0107)),
+            first_number(dataset, Tag::SMALLEST_IMAGE_PIXEL_VALUE),
+            first_number(dataset, Tag::LARGEST_IMAGE_PIXEL_VALUE),
         ) {
             (Some(lo), Some(hi)) => (lo, hi),
             _ => return Err(unsupported("no Smallest/LargestImagePixelValue tags")),
@@ -370,11 +370,11 @@ impl GrayscaleRenderOptions {
     pub fn from_functional_window_level(dataset: &Dataset, frame: u32) -> Result<(f64, f64), Error> {
         let fg = dataset.functional_groups(frame)?;
         // (0028,9132) FrameVOILUTSequence item carries the per-frame window
-        if let Some(seq) = fg.try_get_sequence(Tag::new(0x0028, 0x9132)) {
+        if let Some(seq) = fg.try_get_sequence(Tag::FRAME_VOILUT_SEQUENCE) {
             if let Some(item) = seq.items().first() {
                 if let (Some(center), Some(width)) = (
-                    first_number(item, Tag::new(0x0028, 0x1050)),
-                    first_number(item, Tag::new(0x0028, 0x1051)),
+                    first_number(item, Tag::WINDOW_CENTER),
+                    first_number(item, Tag::WINDOW_WIDTH),
                 ) {
                     return Ok((center, width));
                 }
@@ -382,8 +382,8 @@ impl GrayscaleRenderOptions {
         }
         // some encoders leave the window directly in the flattened set
         match (
-            first_number(&fg, Tag::new(0x0028, 0x1050)),
-            first_number(&fg, Tag::new(0x0028, 0x1051)),
+            first_number(&fg, Tag::WINDOW_CENTER),
+            first_number(&fg, Tag::WINDOW_WIDTH),
         ) {
             (Some(center), Some(width)) => Ok((center, width)),
             _ => Err(unsupported("no functional-group window for this frame")),
@@ -394,16 +394,16 @@ impl GrayscaleRenderOptions {
     /// dataset-driven factories (docs §4).
     fn apply_dataset_modality_and_invert(&mut self, dataset: &Dataset) {
         self.rescale_slope = dataset
-            .try_get::<String>(Tag::new(0x0028, 0x1053))
+            .try_get::<String>(Tag::RESCALE_SLOPE)
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(1.0);
         self.rescale_intercept = dataset
-            .try_get::<String>(Tag::new(0x0028, 0x1052))
+            .try_get::<String>(Tag::RESCALE_INTERCEPT)
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(0.0);
         if !is_xa_xrf(dataset) {
             self.modality_lut = dataset
-                .try_get_sequence(Tag::new(0x0028, 0x3000))
+                .try_get_sequence(Tag::MODALITY_LUT_SEQUENCE)
                 .and_then(|seq| seq.items().first())
                 .and_then(ModalityLut::from_item);
             if self.modality_lut.is_some() {
@@ -412,7 +412,7 @@ impl GrayscaleRenderOptions {
             }
         }
         self.invert = dataset
-            .try_get_str(Tag::new(0x0028, 0x0004))
+            .try_get_str(Tag::PHOTOMETRIC_INTERPRETATION)
             .map(|pi| pi.trim() == "MONOCHROME1")
             .unwrap_or(false);
         self.voi_lut_function = voi_function_from_dataset(dataset);
@@ -484,7 +484,7 @@ impl GrayscaleRenderOptions {
 /// The `(0028,1056)` VOILUTFunction selector (CS). Missing/unknown → LINEAR.
 /// fo-dicom `DicomImage.VOILUTFunction` mapping: SIGMOID / LINEAR_EXACT / LINEAR.
 fn voi_function_from_dataset(dataset: &Dataset) -> VoiFunction {
-    match dataset.try_get_str(Tag::new(0x0028, 0x1056)).as_deref().map(str::trim) {
+    match dataset.try_get_str(Tag::VOILUT_FUNCTION).as_deref().map(str::trim) {
         Some(v) if v.eq_ignore_ascii_case("SIGMOID") => VoiFunction::Sigmoid,
         Some(v) if v.eq_ignore_ascii_case("LINEAR_EXACT") => VoiFunction::LinearExact,
         _ => VoiFunction::Linear,
@@ -504,7 +504,7 @@ fn is_xa_xrf(dataset: &Dataset) -> bool {
     const XA: &str = "1.2.840.10008.5.1.4.1.1.12.1";
     const XRF: &str = "1.2.840.10008.5.1.4.1.1.12.2";
     dataset
-        .try_get_str(Tag::new(0x0008, 0x0016))
+        .try_get_str(Tag::SOP_CLASS_UID)
         .map(|uid| {
             let uid = uid.trim();
             uid == XA || uid == XRF
@@ -516,15 +516,15 @@ fn is_xa_xrf(dataset: &Dataset) -> bool {
 fn resolve_window(dataset: &Dataset) -> Result<(f64, f64), Error> {
     // 1. top-level WindowCenter/WindowWidth, first pair of a possible multi-value
     if let (Some(center), Some(width)) = (
-        first_number(dataset, Tag::new(0x0028, 0x1050)),
-        first_number(dataset, Tag::new(0x0028, 0x1051)),
+        first_number(dataset, Tag::WINDOW_CENTER),
+        first_number(dataset, Tag::WINDOW_WIDTH),
     ) {
         return Ok((center, width));
     }
     // 3. Smallest/LargestImagePixelValue → a min/max window
     if let (Some(smallest), Some(largest)) = (
-        first_number(dataset, Tag::new(0x0028, 0x0106)),
-        first_number(dataset, Tag::new(0x0028, 0x0107)),
+        first_number(dataset, Tag::SMALLEST_IMAGE_PIXEL_VALUE),
+        first_number(dataset, Tag::LARGEST_IMAGE_PIXEL_VALUE),
     ) {
         let center = (smallest + largest) / 2.0;
         let width = (largest - smallest).max(1.0);
@@ -538,6 +538,12 @@ fn resolve_window(dataset: &Dataset) -> Result<(f64, f64), Error> {
 /// Parses the first value of a numeric (DS/IS) attribute, tolerating the
 /// backslash-separated multi-value form.
 fn first_number(dataset: &Dataset, tag: Tag) -> Option<f64> {
+    // Numeric VRs (US/SS/UL/SL/FL/FD) are byte-backed; string VRs (IS/DS) hold
+    // text. Read numeric first so US attributes like PixelPaddingValue work, then
+    // fall back to the textual form.
+    if let Some(v) = dataset.try_get::<f64>(&tag) {
+        return Some(v);
+    }
     let text = dataset.try_get_str(tag)?;
     text.split('\\').next()?.trim().parse::<f64>().ok()
 }
@@ -559,7 +565,7 @@ fn frame_stored_values(dataset: &Dataset, frame: u32) -> Result<Vec<f64>, Error>
         Ok(raw.iter().map(|b| if signed { (*b as i8) as f64 } else { *b as f64 }).collect())
     } else {
         Ok(raw
-            .chunks_exact(2)
+            .as_chunks::<2>().0.iter()
             .map(|c| {
                 let v = u16::from_le_bytes([c[0], c[1]]);
                 if signed { (v as i16) as f64 } else { v as f64 }
@@ -599,7 +605,7 @@ impl RawImage {
     /// The BGRA pixels as `u32` (0xAARRGGBB, matching fo-dicom's Image).
     pub fn pixels(&self) -> Vec<u32> {
         self.bytes
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .map(|p| u32::from_le_bytes([p[0], p[1], p[2], p[3]]))
             .collect()
     }
@@ -607,7 +613,7 @@ impl RawImage {
     /// Remaps each pixel's grey level through `table` (REND-02 OutputLUT /
     /// REND-06 `ColorTable`). The blue channel carries the 8-bit grey value.
     pub fn apply_colormap(&mut self, table: &ColorTable) {
-        for px in self.bytes.chunks_exact_mut(4) {
+        for px in self.bytes.as_chunks_mut::<4>().0 {
             let c = table.get(px[0]);
             px[0] = c.b;
             px[1] = c.g;
@@ -632,7 +638,7 @@ impl RawImage {
             return self.clone();
         }
         let mut rgb = Vec::with_capacity((self.width * self.height * 3) as usize);
-        for p in self.bytes.chunks_exact(4) {
+        for p in self.bytes.as_chunks::<4>().0 {
             rgb.extend_from_slice(&[p[2], p[1], p[0]]); // B,G,R → R,G,B
         }
         let resampled = interpolation::bilinear_color24(
@@ -643,7 +649,7 @@ impl RawImage {
             out_h as usize,
         );
         let mut out = Vec::with_capacity((out_w * out_h * 4) as usize);
-        for p in resampled.chunks_exact(3) {
+        for p in resampled.as_chunks::<3>().0 {
             out.extend_from_slice(&[p[2], p[1], p[0], 0xFF]); // R,G,B → B,G,R,A
         }
         RawImage::new(out_w, out_h, out)
@@ -752,7 +758,7 @@ impl RawImage {
 
     /// True when every pixel has equal R, G and B (so grayscale PNG is lossless).
     fn pixels_are_gray(&self) -> bool {
-        self.bytes.chunks_exact(4).all(|p| p[0] == p[1] && p[1] == p[2])
+        self.bytes.as_chunks::<4>().0.iter().all(|p| p[0] == p[1] && p[1] == p[2])
     }
 
     /// Wraps filtered scanlines in the PNG container with the given colour type.
@@ -939,7 +945,7 @@ fn unsupported(message: &str) -> Error {
 /// YBR_PARTIAL_422 → YCbCr→RGB conversion. Other PIs error.
 pub fn render_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error> {
     use crate::pixel::photometric::PhotometricInterpretation as Pi;
-    let pi = match dataset.try_get_str(Tag::new(0x0028, 0x0004)) {
+    let pi = match dataset.try_get_str(Tag::PHOTOMETRIC_INTERPRETATION) {
         Some(s) => Pi::parse(&s),
         // ACR-NEMA files may omit PI; infer from samples + palette (docs §1.1).
         None => Pi::infer_from_dataset(dataset),
@@ -1120,7 +1126,7 @@ impl DicomImage {
     /// scale in order.
     pub fn render_frame(&self, frame: u32) -> Result<RawImage, Error> {
         use crate::pixel::photometric::PhotometricInterpretation as Pi;
-        let pi = match self.dataset.try_get_str(Tag::new(0x0028, 0x0004)) {
+        let pi = match self.dataset.try_get_str(Tag::PHOTOMETRIC_INTERPRETATION) {
             Some(s) => Pi::parse(&s),
             None => Pi::infer_from_dataset(&self.dataset),
         };
@@ -1192,7 +1198,7 @@ fn read_frame_samples(
     let samples = if bits == 8 {
         raw.iter().map(|b| *b as u16).collect()
     } else {
-        raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
+        raw.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
     };
     Ok((samples, width, height))
 }
@@ -1387,19 +1393,19 @@ mod tests {
 
     fn gray_image(width: u16, height: u16, bits: u16, samples: &[u16], center: Option<f64>, width_ds: Option<f64>) -> Dataset {
         let mut ds = Dataset::new();
-        ds.insert_value(Tag::new(0x0028, 0x0002), 1u16);
-        ds.insert_str(Tag::new(0x0028, 0x0004), Vr::Cs, "MONOCHROME2");
-        ds.insert_value(Tag::new(0x0028, 0x0010), height);
-        ds.insert_value(Tag::new(0x0028, 0x0011), width);
-        ds.insert_value(Tag::new(0x0028, 0x0100), bits);
-        ds.insert_value(Tag::new(0x0028, 0x0101), bits);
-        ds.insert_value(Tag::new(0x0028, 0x0102), bits - 1);
-        ds.insert_value(Tag::new(0x0028, 0x0103), 0u16);
+        ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16);
+        ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
+        ds.insert_value(Tag::ROWS, height);
+        ds.insert_value(Tag::COLUMNS, width);
+        ds.insert_value(Tag::BITS_ALLOCATED, bits);
+        ds.insert_value(Tag::BITS_STORED, bits);
+        ds.insert_value(Tag::HIGH_BIT, bits - 1);
+        ds.insert_value(Tag::PIXEL_REPRESENTATION, 0u16);
         if let Some(center) = center {
-            ds.insert_str(Tag::new(0x0028, 0x1050), Vr::Ds, format!("{center}"));
+            ds.insert_str(Tag::WINDOW_CENTER, Vr::Ds, format!("{center}"));
         }
         if let Some(width_ds) = width_ds {
-            ds.insert_str(Tag::new(0x0028, 0x1051), Vr::Ds, format!("{width_ds}"));
+            ds.insert_str(Tag::WINDOW_WIDTH, Vr::Ds, format!("{width_ds}"));
         }
         let mut bytes = Vec::new();
         for &s in samples {
@@ -1411,7 +1417,7 @@ mod tests {
         }
         ds.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
-                Tag::new(0x7FE0, 0x0010),
+                Tag::PIXEL_DATA,
                 Vr::Ob,
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(bytes)),
             ),
@@ -1425,7 +1431,7 @@ mod tests {
         // Same pixels + window, differing PI: MONOCHROME1 must invert (docs §184).
         let m2 = gray_image(1, 2, 8, &[0, 255], Some(127.5), Some(255.0));
         let mut m1 = m2.clone();
-        m1.insert_str(Tag::new(0x0028, 0x0004), Vr::Cs, "MONOCHROME1");
+        m1.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME1");
         let a = render_frame(&m2, 0).unwrap();
         let b = render_frame(&m1, 0).unwrap();
         assert_eq!(a.as_bytes()[0], 0, "MONOCHROME2: value 0 → black");
@@ -1465,14 +1471,14 @@ mod tests {
         desc.extend_from_slice(&8u16.to_le_bytes()); // bits per entry
         item.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
-                Tag::new(0x0028, 0x3002),
+                Tag::LUT_DESCRIPTOR,
                 Vr::Us,
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(desc)),
             ),
         ));
         item.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
-                Tag::new(0x0028, 0x3006),
+                Tag::LUT_DATA,
                 Vr::Ow,
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(data.to_vec())),
             ),
@@ -1481,16 +1487,16 @@ mod tests {
     }
 
     fn put_voi_lut(ds: &mut Dataset, first: i16, data: &[u8]) {
-        put_lut_seq(ds, Tag::new(0x0028, 0x3010), first, data);
+        put_lut_seq(ds, Tag::VOILUT_SEQUENCE, first, data);
     }
 
     fn put_modality_lut(ds: &mut Dataset, first: i16, data: &[u8]) {
-        put_lut_seq(ds, Tag::new(0x0028, 0x3000), first, data);
+        put_lut_seq(ds, Tag::MODALITY_LUT_SEQUENCE, first, data);
     }
 
     /// Inserts a 16-bit-entry VOI LUT Sequence mapping `[first ..)` through `data`.
     fn put_voi_lut_16(ds: &mut Dataset, first: i16, data: &[u16]) {
-        let seq = ds.insert_sequence(Tag::new(0x0028, 0x3010));
+        let seq = ds.insert_sequence(Tag::VOILUT_SEQUENCE);
         let mut item = Dataset::new();
         let mut desc = Vec::new();
         desc.extend_from_slice(&(data.len() as u16).to_le_bytes());
@@ -1498,7 +1504,7 @@ mod tests {
         desc.extend_from_slice(&16u16.to_le_bytes()); // 16 bits per entry
         item.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
-                Tag::new(0x0028, 0x3002),
+                Tag::LUT_DESCRIPTOR,
                 Vr::Us,
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(desc)),
             ),
@@ -1509,7 +1515,7 @@ mod tests {
         }
         item.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
-                Tag::new(0x0028, 0x3006),
+                Tag::LUT_DATA,
                 Vr::Ow,
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(bytes)),
             ),
@@ -1560,8 +1566,8 @@ mod tests {
         // slope/intercept is also present and must be ignored; a window centred
         // on 200 then maps the 200 to mid grey.
         let mut ds = gray_image(1, 1, 8, &[5], Some(200.0), Some(400.0));
-        ds.insert_str(Tag::new(0x0028, 0x1053), Vr::Ds, "2"); // slope (ignored)
-        ds.insert_str(Tag::new(0x0028, 0x1052), Vr::Ds, "0"); // intercept
+        ds.insert_str(Tag::RESCALE_SLOPE, Vr::Ds, "2"); // slope (ignored)
+        ds.insert_str(Tag::RESCALE_INTERCEPT, Vr::Ds, "0"); // intercept
         put_modality_lut(&mut ds, 5, &[200]);
 
         let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
@@ -1590,16 +1596,16 @@ mod tests {
         // An XA image with a modality LUT that would map 5→200. Display must
         // ignore it (Clunie guidance) and use the rescale slope/intercept.
         let mut ds = gray_image(1, 1, 8, &[5], Some(10.0), Some(1.0));
-        ds.insert_str(Tag::new(0x0008, 0x0016), Vr::Ui, "1.2.840.10008.5.1.4.1.1.12.1"); // XA
-        ds.insert_str(Tag::new(0x0028, 0x1053), Vr::Ds, "3");
-        ds.insert_str(Tag::new(0x0028, 0x1052), Vr::Ds, "0");
+        ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.12.1"); // XA
+        ds.insert_str(Tag::RESCALE_SLOPE, Vr::Ds, "3");
+        ds.insert_str(Tag::RESCALE_INTERCEPT, Vr::Ds, "0");
         put_modality_lut(&mut ds, 5, &[200]);
         let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
         assert!(o.modality_lut.is_none(), "XA display ignores the modality LUT");
         assert_eq!((o.rescale_slope, o.rescale_intercept), (3.0, 0.0), "rescale kept");
 
         // The same dataset as a CT class does apply the modality LUT.
-        ds.insert_str(Tag::new(0x0008, 0x0016), Vr::Ui, "1.2.840.10008.5.1.4.1.1.2");
+        ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.2");
         let ct = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
         assert!(ct.modality_lut.is_some(), "CT applies the modality LUT");
     }
@@ -1635,7 +1641,7 @@ mod tests {
     fn voilut_function_is_read_from_the_dataset() {
         // (0028,1056) SIGMOID must select the sigmoid window formula.
         let mut ds = gray_image(1, 1, 16, &[0], Some(40.0), Some(400.0));
-        ds.insert_str(Tag::new(0x0028, 0x1056), Vr::Cs, "SIGMOID");
+        ds.insert_str(Tag::VOILUT_FUNCTION, Vr::Cs, "SIGMOID");
         let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
         assert_eq!(o.voi_lut_function, VoiFunction::Sigmoid);
         // value 140 = center + 100 → sigmoid ≈ 186 (linear-exact would be 191)
@@ -1643,7 +1649,7 @@ mod tests {
 
         // LINEAR_EXACT is honoured too.
         let mut ds2 = gray_image(1, 1, 16, &[0], Some(40.0), Some(400.0));
-        ds2.insert_str(Tag::new(0x0028, 0x1056), Vr::Cs, "LINEAR_EXACT");
+        ds2.insert_str(Tag::VOILUT_FUNCTION, Vr::Cs, "LINEAR_EXACT");
         assert_eq!(
             GrayscaleRenderOptions::from_dataset(&ds2).unwrap().voi_lut_function,
             VoiFunction::LinearExact
@@ -1700,8 +1706,8 @@ mod tests {
     #[test]
     fn from_dataset_reads_window_and_rescale() {
         let mut ds = gray_image(1, 1, 16, &[100], Some(40.0), Some(400.0));
-        ds.insert_str(Tag::new(0x0028, 0x1052), Vr::Ds, "-1024");
-        ds.insert_str(Tag::new(0x0028, 0x1053), Vr::Ds, "1");
+        ds.insert_str(Tag::RESCALE_INTERCEPT, Vr::Ds, "-1024");
+        ds.insert_str(Tag::RESCALE_SLOPE, Vr::Ds, "1");
         let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
         assert_eq!(o.window_center, 40.0);
         assert_eq!(o.window_width, 400.0);
@@ -1723,7 +1729,7 @@ mod tests {
     fn from_min_max_filters_the_pixel_padding_value() {
         // Padding value 200 must be excluded, leaving 10..30 → centre 20, width 20.
         let mut ds = gray_image(4, 1, 8, &[10, 20, 30, 200], None, None);
-        ds.insert_value(Tag::new(0x0028, 0x0120), 200u16);
+        ds.insert_value(Tag::PIXEL_PADDING_VALUE, 200u16);
         let o = GrayscaleRenderOptions::from_min_max(&ds, 0).unwrap();
         assert_eq!(o.window_center, 20.0);
         assert_eq!(o.window_width, 20.0);
@@ -1736,10 +1742,10 @@ mod tests {
         for &(center, width) in windows {
             let mut fg = Dataset::new();
             {
-                let vois = fg.insert_sequence(Tag::new(0x0028, 0x9132));
+                let vois = fg.insert_sequence(Tag::FRAME_VOILUT_SEQUENCE);
                 let mut item = Dataset::new();
-                item.insert_str(Tag::new(0x0028, 0x1050), Vr::Ds, format!("{center}"));
-                item.insert_str(Tag::new(0x0028, 0x1051), Vr::Ds, format!("{width}"));
+                item.insert_str(Tag::WINDOW_CENTER, Vr::Ds, format!("{center}"));
+                item.insert_str(Tag::WINDOW_WIDTH, Vr::Ds, format!("{width}"));
                 vois.push(item);
             }
             per.push(fg);
@@ -1767,7 +1773,7 @@ mod tests {
         // Two frames with the SAME stored value (100) but each carrying its own
         // window: only a per-frame end-to-end render can honour that (§190).
         let mut ds = gray_image(1, 1, 8, &[100, 100], None, None);
-        ds.insert_str(Tag::new(0x0028, 0x0008), Vr::Is, "2"); // NumberOfFrames
+        ds.insert_str(Tag::NUMBER_OF_FRAMES, Vr::Is, "2"); // NumberOfFrames
         put_per_frame_windows(&mut ds, &[(100.0, 2.0), (0.0, 400.0)]);
         let f0 = render_frame(&ds, 0).unwrap();
         let f1 = render_frame(&ds, 1).unwrap();
@@ -1792,7 +1798,7 @@ mod tests {
 
         // 16-bit signed: [-32768, 32767] → centre -0.5, width 65535.
         let mut ds = gray_image(1, 1, 16, &[0], None, None);
-        ds.insert_value(Tag::new(0x0028, 0x0103), 1u16); // PixelRepresentation signed
+        ds.insert_value(Tag::PIXEL_REPRESENTATION, 1u16); // PixelRepresentation signed
         let o = GrayscaleRenderOptions::from_bit_range(&ds).unwrap();
         assert_eq!(o.window_center, -0.5);
         assert_eq!(o.window_width, 65535.0);
@@ -1800,8 +1806,8 @@ mod tests {
 
     #[test]
     fn from_image_pixel_value_tags_uses_smallest_and_largest() {        let mut ds = gray_image(1, 1, 16, &[0], None, None);
-        ds.insert_value(Tag::new(0x0028, 0x0106), 0u16); // SmallestImagePixelValue
-        ds.insert_value(Tag::new(0x0028, 0x0107), 1000u16); // LargestImagePixelValue
+        ds.insert_value(Tag::SMALLEST_IMAGE_PIXEL_VALUE, 0u16); // SmallestImagePixelValue
+        ds.insert_value(Tag::LARGEST_IMAGE_PIXEL_VALUE, 1000u16); // LargestImagePixelValue
         let o = GrayscaleRenderOptions::from_image_pixel_value_tags(&ds).unwrap();
         assert_eq!(o.window_center, 500.0);
         assert_eq!(o.window_width, 1000.0);
@@ -1817,10 +1823,10 @@ mod tests {
         // bits_stored=12, high_bit=15). Stored 0x7FF0 must normalise to 2047 and
         // map to mid grey through a [0..4095] window.
         let mut ds = gray_image(1, 1, 16, &[0x7FF0], None, None);
-        ds.insert_value(Tag::new(0x0028, 0x0101), 12u16); // BitsStored
-        ds.insert_value(Tag::new(0x0028, 0x0102), 15u16); // HighBit
-        ds.insert_str(Tag::new(0x0028, 0x1050), Vr::Ds, "2047.5"); // centre of 12-bit range
-        ds.insert_str(Tag::new(0x0028, 0x1051), Vr::Ds, "4095"); // full 12-bit width
+        ds.insert_value(Tag::BITS_STORED, 12u16); // BitsStored
+        ds.insert_value(Tag::HIGH_BIT, 15u16); // HighBit
+        ds.insert_str(Tag::WINDOW_CENTER, Vr::Ds, "2047.5"); // centre of 12-bit range
+        ds.insert_str(Tag::WINDOW_WIDTH, Vr::Ds, "4095"); // full 12-bit width
         let image = render_frame(&ds, 0).unwrap();
         let g = image.as_bytes()[0];
         assert!(g.abs_diff(128) <= 1, "0x7FF0 normalises to 2047 → mid grey: {g}");
@@ -1837,17 +1843,17 @@ mod tests {
     fn color_image(pi: &str, samples_per_pixel: u16, bits: u16, samples: &[u16], planar: u16) -> Dataset {
         let count = samples.len() as u16 / samples_per_pixel.max(1);
         let mut ds = Dataset::new();
-        ds.insert_value(Tag::new(0x0028, 0x0002), samples_per_pixel);
-        ds.insert_str(Tag::new(0x0028, 0x0004), Vr::Cs, pi);
+        ds.insert_value(Tag::SAMPLES_PER_PIXEL, samples_per_pixel);
+        ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, pi);
         // square-ish frames for the test sizes used below
-        ds.insert_value(Tag::new(0x0028, 0x0010), 1u16);
-        ds.insert_value(Tag::new(0x0028, 0x0011), count);
-        ds.insert_value(Tag::new(0x0028, 0x0100), bits);
-        ds.insert_value(Tag::new(0x0028, 0x0101), bits);
-        ds.insert_value(Tag::new(0x0028, 0x0102), bits - 1);
-        ds.insert_value(Tag::new(0x0028, 0x0103), 0u16);
+        ds.insert_value(Tag::ROWS, 1u16);
+        ds.insert_value(Tag::COLUMNS, count);
+        ds.insert_value(Tag::BITS_ALLOCATED, bits);
+        ds.insert_value(Tag::BITS_STORED, bits);
+        ds.insert_value(Tag::HIGH_BIT, bits - 1);
+        ds.insert_value(Tag::PIXEL_REPRESENTATION, 0u16);
         if samples_per_pixel > 1 {
-            ds.insert_value(Tag::new(0x0028, 0x0006), planar);
+            ds.insert_value(Tag::PLANAR_CONFIGURATION, planar);
         }
         let mut bytes = Vec::new();
         for &s in samples {
@@ -1859,7 +1865,7 @@ mod tests {
         }
         ds.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
-                Tag::new(0x7FE0, 0x0010),
+                Tag::PIXEL_DATA,
                 Vr::Ob,
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(bytes)),
             ),
@@ -1909,18 +1915,18 @@ mod tests {
     /// Builds a 4:2:2 YBR image of `width`×1 with explicit stored bytes.
     fn ybr422_image(pi: &str, width: u16, bytes: &[u8]) -> Dataset {
         let mut ds = Dataset::new();
-        ds.insert_value(Tag::new(0x0028, 0x0002), 3u16);
-        ds.insert_str(Tag::new(0x0028, 0x0004), Vr::Cs, pi);
-        ds.insert_value(Tag::new(0x0028, 0x0010), 1u16);
-        ds.insert_value(Tag::new(0x0028, 0x0011), width);
-        ds.insert_value(Tag::new(0x0028, 0x0100), 8u16);
-        ds.insert_value(Tag::new(0x0028, 0x0101), 8u16);
-        ds.insert_value(Tag::new(0x0028, 0x0102), 7u16);
-        ds.insert_value(Tag::new(0x0028, 0x0103), 0u16);
-        ds.insert_value(Tag::new(0x0028, 0x0006), 0u16);
+        ds.insert_value(Tag::SAMPLES_PER_PIXEL, 3u16);
+        ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, pi);
+        ds.insert_value(Tag::ROWS, 1u16);
+        ds.insert_value(Tag::COLUMNS, width);
+        ds.insert_value(Tag::BITS_ALLOCATED, 8u16);
+        ds.insert_value(Tag::BITS_STORED, 8u16);
+        ds.insert_value(Tag::HIGH_BIT, 7u16);
+        ds.insert_value(Tag::PIXEL_REPRESENTATION, 0u16);
+        ds.insert_value(Tag::PLANAR_CONFIGURATION, 0u16);
         ds.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
-                Tag::new(0x7FE0, 0x0010),
+                Tag::PIXEL_DATA,
                 Vr::Ob,
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(bytes.to_vec())),
             ),
@@ -1934,7 +1940,7 @@ mod tests {
         // PS3.3 / docs §5: YBR_FULL_422 is planar-configuration 0; planar 1 is an
         // error, not a different byte layout to guess at.
         let mut ds = ybr422_image("YBR_FULL_422", 2, &[76, 76, 85, 255]);
-        ds.insert_value(Tag::new(0x0028, 0x0006), 1u16); // PlanarConfiguration = 1
+        ds.insert_value(Tag::PLANAR_CONFIGURATION, 1u16); // PlanarConfiguration = 1
         let err = render_frame(&ds, 0).unwrap_err();
         assert!(format!("{err}").to_lowercase().contains("planar"), "expected a planar error, got: {err}");
     }
@@ -1984,8 +1990,8 @@ mod tests {
         // 16-bit RGB carrying 12 significant bits low-aligned (high bit 11):
         // stored 4095 must render as 255, not (4095 >> 8) = 15.
         let mut ds = color_image("RGB", 3, 16, &[4095, 4095, 4095], 0);
-        ds.insert_value(Tag::new(0x0028, 0x0101), 12u16); // BitsStored
-        ds.insert_value(Tag::new(0x0028, 0x0102), 11u16); // HighBit
+        ds.insert_value(Tag::BITS_STORED, 12u16); // BitsStored
+        ds.insert_value(Tag::HIGH_BIT, 11u16); // HighBit
         let img = render_frame(&ds, 0).unwrap();
         assert_eq!(&img.as_bytes()[0..4], &[255, 255, 255, 255], "low-aligned 12-bit RGB → white");
     }
@@ -2017,24 +2023,24 @@ mod tests {
         // 6-byte descriptor: [count=2, first=0, bits=8]
         let desc = || us_bytes(&[2, 0, 8]);
         ds.insert_or_update(crate::model::item::DicomItem::Element(
-            crate::model::element::DicomElement::new_bytes(Tag::new(0x0028, 0x1101), Vr::Us, desc()),
+            crate::model::element::DicomElement::new_bytes(Tag::RED_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR, Vr::Us, desc()),
         ));
         ds.insert_or_update(crate::model::item::DicomItem::Element(
-            crate::model::element::DicomElement::new_bytes(Tag::new(0x0028, 0x1102), Vr::Us, desc()),
+            crate::model::element::DicomElement::new_bytes(Tag::GREEN_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR, Vr::Us, desc()),
         ));
         ds.insert_or_update(crate::model::item::DicomItem::Element(
-            crate::model::element::DicomElement::new_bytes(Tag::new(0x0028, 0x1103), Vr::Us, desc()),
+            crate::model::element::DicomElement::new_bytes(Tag::BLUE_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR, Vr::Us, desc()),
         ));
         // 8-bit data: index 0 → red (255,0,0), index 1 → blue (0,0,255)
         let data = |vals: [u8; 2]| std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vals.to_vec())) as crate::model::buffer::SharedBuffer;
         ds.insert_or_update(crate::model::item::DicomItem::Element(
-            crate::model::element::DicomElement::new_bytes(Tag::new(0x0028, 0x1201), Vr::Ow, data([255, 0])),
+            crate::model::element::DicomElement::new_bytes(Tag::RED_PALETTE_COLOR_LOOKUP_TABLE_DATA, Vr::Ow, data([255, 0])),
         ));
         ds.insert_or_update(crate::model::item::DicomItem::Element(
-            crate::model::element::DicomElement::new_bytes(Tag::new(0x0028, 0x1202), Vr::Ow, data([0, 0])),
+            crate::model::element::DicomElement::new_bytes(Tag::GREEN_PALETTE_COLOR_LOOKUP_TABLE_DATA, Vr::Ow, data([0, 0])),
         ));
         ds.insert_or_update(crate::model::item::DicomItem::Element(
-            crate::model::element::DicomElement::new_bytes(Tag::new(0x0028, 0x1203), Vr::Ow, data([0, 255])),
+            crate::model::element::DicomElement::new_bytes(Tag::BLUE_PALETTE_COLOR_LOOKUP_TABLE_DATA, Vr::Ow, data([0, 255])),
         ));
         let image = render_frame(&ds, 0).unwrap();
         let b = image.as_bytes();
@@ -2179,7 +2185,7 @@ mod tests {
         // An all-red colormap paints every pixel red (BGRA [0,0,255,255]).
         img.set_colormap(Some(ColorTable::from_entries([crate::pixel::Color32::new(255, 0, 0); 256])));
         let red = img.render().unwrap();
-        for px in red.as_bytes().chunks_exact(4) {
+        for px in red.as_bytes().as_chunks::<4>().0 {
             assert_eq!(&px[..3], &[0, 0, 255], "BGRA red");
             assert_eq!(px[3], 255);
         }
@@ -2218,7 +2224,7 @@ mod tests {
     fn render_frame_infers_rgb_when_pi_is_absent() {
         // Legacy file: no (0028,0004), 3 samples per pixel → inferred RGB.
         let mut ds = color_image("RGB", 3, 8, &[255, 0, 0, 0, 255, 0], 0);
-        ds.remove(Tag::new(0x0028, 0x0004));
+        ds.remove(Tag::PHOTOMETRIC_INTERPRETATION);
         let img = render_frame(&ds, 0).unwrap();
         assert_eq!(img.width(), 2);
         assert_eq!(&img.as_bytes()[0..4], &[0, 0, 255, 255], "first pixel red");
@@ -2282,17 +2288,17 @@ mod tests {
         // 4x4 8-bit MONOCHROME2 image, all mid-grey (128)
         let (w, h) = (4u16, 4u16);
         let mut ds = Dataset::new();
-        ds.insert_value(Tag::new(0x0028, 0x0002), 1u16);
-        ds.insert_str(Tag::new(0x0028, 0x0004), Vr::Cs, "MONOCHROME2");
-        ds.insert_value(Tag::new(0x0028, 0x0010), h);
-        ds.insert_value(Tag::new(0x0028, 0x0011), w);
-        ds.insert_value(Tag::new(0x0028, 0x0100), 16u16); // 16-bit so a spare overlay bit exists
-        ds.insert_value(Tag::new(0x0028, 0x0101), 8u16); // 8 bits stored → overlay bit at 8
-        ds.insert_value(Tag::new(0x0028, 0x0102), 7u16);
-        ds.insert_value(Tag::new(0x0028, 0x0103), 0u16);
+        ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16);
+        ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
+        ds.insert_value(Tag::ROWS, h);
+        ds.insert_value(Tag::COLUMNS, w);
+        ds.insert_value(Tag::BITS_ALLOCATED, 16u16); // 16-bit so a spare overlay bit exists
+        ds.insert_value(Tag::BITS_STORED, 8u16); // 8 bits stored → overlay bit at 8
+        ds.insert_value(Tag::HIGH_BIT, 7u16);
+        ds.insert_value(Tag::PIXEL_REPRESENTATION, 0u16);
         // window via DS strings (center 128, width 256)
-        ds.insert_str(Tag::new(0x0028, 0x1050), Vr::Ds, "128");
-        ds.insert_str(Tag::new(0x0028, 0x1051), Vr::Ds, "256");
+        ds.insert_str(Tag::WINDOW_CENTER, Vr::Ds, "128");
+        ds.insert_str(Tag::WINDOW_WIDTH, Vr::Ds, "256");
         // overlay group 0x6000 covering the whole image, bit position 8
         ds.insert_value(Tag::new(0x6000, 0x0010), h); // rows
         ds.insert_value(Tag::new(0x6000, 0x0011), w); // columns
@@ -2314,7 +2320,7 @@ mod tests {
         }
         ds.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
-                Tag::new(0x7FE0, 0x0010),
+                Tag::PIXEL_DATA,
                 Vr::Ob,
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(bytes)),
             ),

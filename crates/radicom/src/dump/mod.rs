@@ -1,4 +1,4 @@
-//! Dataset dump formatting (INF-04; docs/01-feature-list.md INF-04, INF-07).
+//! Dataset dump formatting (INF-04; docs/02-development-guide.md §2 INF-04, INF-07).
 //!
 //! Renders a `Dataset` as indented text — tag, VR, dictionary keyword and value
 //! — with truncation controls. This is the library half of the `radicom-dump`
@@ -143,15 +143,15 @@ impl PixelSummary {
 
 /// Reads the pixel-data summary from a dataset, if it carries pixel data (INF-07).
 pub fn pixel_summary(dataset: &Dataset) -> Option<PixelSummary> {
-    let rows = dataset.try_get::<u16>(Tag::new(0x0028, 0x0010))?;
-    let columns = dataset.try_get::<u16>(Tag::new(0x0028, 0x0011))?;
-    let bits_allocated = dataset.try_get::<u16>(Tag::new(0x0028, 0x0100)).unwrap_or(0);
-    let samples_per_pixel = dataset.try_get::<u16>(Tag::new(0x0028, 0x0002)).unwrap_or(1);
+    let rows = dataset.try_get::<u16>(Tag::ROWS)?;
+    let columns = dataset.try_get::<u16>(Tag::COLUMNS)?;
+    let bits_allocated = dataset.try_get::<u16>(Tag::BITS_ALLOCATED).unwrap_or(0);
+    let samples_per_pixel = dataset.try_get::<u16>(Tag::SAMPLES_PER_PIXEL).unwrap_or(1);
     let frames = dataset
-        .try_get_str(Tag::new(0x0028, 0x0008))
+        .try_get_str(Tag::NUMBER_OF_FRAMES)
         .and_then(|s| s.trim().parse::<u32>().ok())
         .unwrap_or(1);
-    let photometric = dataset.try_get_str(Tag::new(0x0028, 0x0004)).unwrap_or_else(|| "?".to_string());
+    let photometric = dataset.try_get_str(Tag::PHOTOMETRIC_INTERPRETATION).unwrap_or_else(|| "?".to_string());
     Some(PixelSummary {
         rows,
         columns,
@@ -170,11 +170,11 @@ mod tests {
 
     fn sample_dataset() -> Dataset {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "DOE^JOHN");
-        ds.insert_str(Tag::new(0x0008, 0x0060), Vr::Cs, "CT");
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "DOE^JOHN");
+        ds.insert_str(Tag::MODALITY, Vr::Cs, "CT");
         let mut item = Dataset::new();
-        item.insert_str(Tag::new(0x0008, 0x0100), Vr::Sh, "1");
-        ds.insert_sequence(Tag::new(0x0008, 0x1140)).push(item);
+        item.insert_str(Tag::CODE_VALUE, Vr::Sh, "1");
+        ds.insert_sequence(Tag::REFERENCED_IMAGE_SEQUENCE).push(item);
         ds
     }
 
@@ -199,7 +199,7 @@ mod tests {
     fn long_values_are_truncated_to_the_limit() {
         let mut ds = Dataset::new();
         let long = "A".repeat(100);
-        ds.insert_str(Tag::new(0x0008, 0x0008), Vr::Cs, long);
+        ds.insert_str(Tag::IMAGE_TYPE, Vr::Cs, long);
         let options = DumpOptions { max_value_chars: 10, ..Default::default() };
         let out = dump_dataset(&ds, &options);
         assert!(out.contains("…"), "long value is elided");
@@ -211,7 +211,7 @@ mod tests {
         let mut ds = Dataset::new();
         let bytes: Vec<u8> = (0u8..32).collect();
         ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
-            Tag::new(0x7FE0, 0x0010),
+            Tag::PIXEL_DATA,
             Vr::Ob,
             Arc::new(crate::model::buffer::MemoryBuffer::from(bytes)),
         )));
@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn an_empty_value_is_labelled() {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0008, 0x0060), Vr::Cs, "");
+        ds.insert_str(Tag::MODALITY, Vr::Cs, "");
         let out = dump_dataset(&ds, &DumpOptions::default());
         assert!(out.contains("(empty)"), "empty values are labelled");
     }
@@ -242,11 +242,11 @@ mod tests {
     #[test]
     fn a_pixel_summary_reports_the_image_shape() {
         let mut ds = Dataset::new();
-        ds.insert_value(Tag::new(0x0028, 0x0010), 512u16);
-        ds.insert_value(Tag::new(0x0028, 0x0011), 256u16);
-        ds.insert_value(Tag::new(0x0028, 0x0100), 16u16);
-        ds.insert_value(Tag::new(0x0028, 0x0002), 1u16);
-        ds.insert_str(Tag::new(0x0028, 0x0004), Vr::Cs, "MONOCHROME2");
+        ds.insert_value(Tag::ROWS, 512u16);
+        ds.insert_value(Tag::COLUMNS, 256u16);
+        ds.insert_value(Tag::BITS_ALLOCATED, 16u16);
+        ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16);
+        ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
         let summary = pixel_summary(&ds).unwrap();
         assert_eq!(summary.rows, 512);
         assert_eq!(summary.columns, 256);

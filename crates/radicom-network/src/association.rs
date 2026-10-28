@@ -1,5 +1,5 @@
 //! Association model and presentation-context negotiation
-//! (NET-03/04; docs/07-network.md §4).
+//! (NET-03/04; docs/01-architecture.md §11).
 //!
 //! This module is pure logic: it decides which presentation contexts an SCP
 //! accepts and which one a message should travel on. No IO happens here, so
@@ -89,7 +89,7 @@ impl Default for ContextIdAllocator {
 impl ContextIdAllocator {
     /// The next free odd ID, or `None` when all 128 are taken.
     pub fn next_id(&mut self) -> Option<u8> {
-        if self.next == 0 || self.next % 2 == 0 {
+        if self.next == 0 || self.next.is_multiple_of(2) {
             return None;
         }
         let id = self.next;

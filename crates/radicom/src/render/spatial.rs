@@ -1,4 +1,4 @@
-//! Spatial 2D transform for the output stage (REND-11; docs/10-rendering.md §6).
+//! Spatial 2D transform for the output stage (REND-11; docs/01-architecture.md §10).
 //!
 //! Mirrors fo-dicom `SpatialTransform`: scale / rotation (90° steps) / flip_x /
 //! flip_y / pan / reset. Rendering applies rotation first, then flips (fo-dicom
@@ -107,7 +107,7 @@ impl SpatialTransform {
 fn pad_rgb(image: &RawImage) -> Vec<u32> {
     let bytes = image.as_bytes();
     bytes
-        .chunks_exact(4)
+        .as_chunks::<4>().0.iter()
         .map(|p| (p[2] as u32) << 16 | (p[1] as u32) << 8 | p[0] as u32)
         .collect()
 }

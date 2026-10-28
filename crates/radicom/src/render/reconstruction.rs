@@ -1,4 +1,4 @@
-//! Multi-planar reconstruction core (REND-09; docs/10-rendering.md §9).
+//! Multi-planar reconstruction core (REND-09; docs/01-architecture.md §10).
 //!
 //! Stacks native grayscale slices into a [`VolumeData`] and resamples an
 //! arbitrary plane through it with trilinear interpolation (bilinear in-plane,
@@ -44,7 +44,7 @@ impl ImageData {
         if pixels.len() as u32 != width * height {
             return Err(invalid("pixel count does not match width*height"));
         }
-        let instance_number = dataset.try_get::<i32>(crate::model::tag::Tag::new(0x0020, 0x0013)).unwrap_or(0);
+        let instance_number = dataset.try_get::<i32>(crate::model::tag::Tag::INSTANCE_NUMBER).unwrap_or(0);
         let sorting_value = dot(&geometry.direction_normal(), &point_to_vector(&geometry.point_top_left()));
         Ok(ImageData { geometry, pixels, width, height, instance_number, sorting_value })
     }
@@ -348,7 +348,7 @@ fn read_grayscale(dataset: &Dataset) -> Result<Vec<f64>, Error> {
     let raw: Vec<f64> = match bits {
         8 => bytes.iter().take(slots).map(|&b| normalise_sample(b as u16, &depth)).collect(),
         16 => bytes
-            .chunks_exact(2)
+            .as_chunks::<2>().0.iter()
             .take(slots)
             .map(|c| normalise_sample(u16::from_le_bytes([c[0], c[1]]), &depth))
             .collect(),
@@ -357,11 +357,11 @@ fn read_grayscale(dataset: &Dataset) -> Result<Vec<f64>, Error> {
 
     // apply rescale slope/intercept so stacked slices are comparable
     let slope = dataset
-        .try_get_str(crate::model::tag::Tag::new(0x0028, 0x1053))
+        .try_get_str(crate::model::tag::Tag::RESCALE_SLOPE)
         .and_then(|s| s.trim().parse::<f64>().ok())
         .unwrap_or(1.0);
     let intercept = dataset
-        .try_get_str(crate::model::tag::Tag::new(0x0028, 0x1052))
+        .try_get_str(crate::model::tag::Tag::RESCALE_INTERCEPT)
         .and_then(|s| s.trim().parse::<f64>().ok())
         .unwrap_or(0.0);
     Ok(raw.into_iter().map(|v| v * slope + intercept).collect())
@@ -493,24 +493,24 @@ impl DicomGenerator {
             let rows = slice.rows() as u16;
             let cols = slice.columns() as u16;
 
-            ds.insert_str(Tag::new(0x0008, 0x103E), Vr::Lo, new_series_description);
-            ds.insert_str(Tag::new(0x0020, 0x000E), Vr::Ui, new_series_uid.clone());
-            ds.insert_str(Tag::new(0x0008, 0x0018), Vr::Ui, Uid::generate_value());
-            ds.insert_value(Tag::new(0x0020, 0x0013), (index + 1) as i32);
+            ds.insert_str(Tag::SERIES_DESCRIPTION, Vr::Lo, new_series_description);
+            ds.insert_str(Tag::SERIES_INSTANCE_UID, Vr::Ui, new_series_uid.clone());
+            ds.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, Uid::generate_value());
+            ds.insert_value(Tag::INSTANCE_NUMBER, (index + 1) as i32);
 
-            ds.insert_value(Tag::new(0x0028, 0x0010), rows);
-            ds.insert_value(Tag::new(0x0028, 0x0011), cols);
+            ds.insert_value(Tag::ROWS, rows);
+            ds.insert_value(Tag::COLUMNS, cols);
             let tl = slice.top_left();
-            ds.insert_str(Tag::new(0x0020, 0x0032), Vr::Ds, format!("{}\\{}\\{}", tl.x, tl.y, tl.z));
+            ds.insert_str(Tag::IMAGE_POSITION_PATIENT, Vr::Ds, format!("{}\\{}\\{}", tl.x, tl.y, tl.z));
             let rd = slice.row_direction();
             let cd = slice.column_direction();
             ds.insert_str(
-                Tag::new(0x0020, 0x0037),
+                Tag::IMAGE_ORIENTATION_PATIENT,
                 Vr::Ds,
                 format!("{}\\{}\\{}\\{}\\{}\\{}", rd.x, rd.y, rd.z, cd.x, cd.y, cd.z),
             );
-            ds.insert_str(Tag::new(0x0028, 0x0030), Vr::Ds, format!("{}\\{}", slice.spacing(), slice.spacing()));
-            ds.insert_str(Tag::new(0x0018, 0x0050), Vr::Ds, format!("{}", stack.slice_distance()));
+            ds.insert_str(Tag::PIXEL_SPACING, Vr::Ds, format!("{}\\{}", slice.spacing(), slice.spacing()));
+            ds.insert_str(Tag::SLICE_THICKNESS, Vr::Ds, format!("{}", stack.slice_distance()));
 
             // infer the smallest storage width from the observed maximum
             let (_, max_value) = slice.min_max();
@@ -519,13 +519,13 @@ impl DicomGenerator {
             } else {
                 16
             };
-            ds.insert_value(Tag::new(0x0028, 0x0100), bits_stored); // BitsAllocated
-            ds.insert_value(Tag::new(0x0028, 0x0101), bits_stored); // BitsStored
-            ds.insert_value(Tag::new(0x0028, 0x0102), bits_stored - 1); // HighBit
-            ds.insert_value(Tag::new(0x0028, 0x0103), 0u16); // PixelRepresentation unsigned
-            ds.insert_value(Tag::new(0x0028, 0x0002), 1u16); // SamplesPerPixel
-            if !ds.contains(&Tag::new(0x0028, 0x0004)) {
-                ds.insert_str(Tag::new(0x0028, 0x0004), Vr::Cs, "MONOCHROME2");
+            ds.insert_value(Tag::BITS_ALLOCATED, bits_stored); // BitsAllocated
+            ds.insert_value(Tag::BITS_STORED, bits_stored); // BitsStored
+            ds.insert_value(Tag::HIGH_BIT, bits_stored - 1); // HighBit
+            ds.insert_value(Tag::PIXEL_REPRESENTATION, 0u16); // PixelRepresentation unsigned
+            ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16); // SamplesPerPixel
+            if !ds.contains(&Tag::PHOTOMETRIC_INTERPRETATION) {
+                ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
             }
 
             let bytes_per_pixel = if bits_stored <= 8 { 1u8 } else { 2u8 };
@@ -551,27 +551,27 @@ mod tests {
     /// An axial slice at a given patient z, 4x4, filled with `fill`.
     fn axial_slice(z: f64, fill: u16) -> Dataset {
         let mut ds = Dataset::new();
-        ds.insert_value(Tag::new(0x0028, 0x0002), 1u16); // samples
-        ds.insert_str(Tag::new(0x0028, 0x0004), Vr::Cs, "MONOCHROME2");
-        ds.insert_value(Tag::new(0x0028, 0x0010), 4u16); // rows
-        ds.insert_value(Tag::new(0x0028, 0x0011), 4u16); // cols
-        ds.insert_value(Tag::new(0x0028, 0x0100), 16u16); // bits allocated
-        ds.insert_value(Tag::new(0x0028, 0x0101), 16u16); // bits stored
-        ds.insert_value(Tag::new(0x0028, 0x0102), 15u16); // high bit
-        ds.insert_value(Tag::new(0x0028, 0x0103), 0u16); // unsigned
-        ds.insert_str(Tag::new(0x0028, 0x0030), Vr::Ds, "1\\1"); // pixel spacing
+        ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16); // samples
+        ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
+        ds.insert_value(Tag::ROWS, 4u16); // rows
+        ds.insert_value(Tag::COLUMNS, 4u16); // cols
+        ds.insert_value(Tag::BITS_ALLOCATED, 16u16); // bits allocated
+        ds.insert_value(Tag::BITS_STORED, 16u16); // bits stored
+        ds.insert_value(Tag::HIGH_BIT, 15u16); // high bit
+        ds.insert_value(Tag::PIXEL_REPRESENTATION, 0u16); // unsigned
+        ds.insert_str(Tag::PIXEL_SPACING, Vr::Ds, "1\\1"); // pixel spacing
         // image orientation: rows=+y, cols=+x, normal=+z
-        ds.insert_str(Tag::new(0x0020, 0x0037), Vr::Ds, "1\\0\\0\\0\\1\\0");
-        ds.insert_str(Tag::new(0x0020, 0x0032), Vr::Ds, format!("0\\0\\{z}"));
-        ds.insert_str(Tag::new(0x0020, 0x0052), Vr::Ui, "1.2.3.4");
-        ds.insert_value(Tag::new(0x0020, 0x0013), 1i32);
+        ds.insert_str(Tag::IMAGE_ORIENTATION_PATIENT, Vr::Ds, "1\\0\\0\\0\\1\\0");
+        ds.insert_str(Tag::IMAGE_POSITION_PATIENT, Vr::Ds, format!("0\\0\\{z}"));
+        ds.insert_str(Tag::FRAME_OF_REFERENCE_UID, Vr::Ui, "1.2.3.4");
+        ds.insert_value(Tag::INSTANCE_NUMBER, 1i32);
         let mut bytes = Vec::new();
         for _ in 0..16 {
             bytes.extend_from_slice(&fill.to_le_bytes());
         }
         ds.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
-                Tag::new(0x7FE0, 0x0010),
+                Tag::PIXEL_DATA,
                 Vr::Ow,
                 Arc::new(crate::model::buffer::MemoryBuffer::from(bytes)),
             ),
@@ -594,7 +594,7 @@ mod tests {
     fn mixing_frame_of_reference_is_rejected() {
         let mut a = axial_slice(0.0, 1);
         let mut b = axial_slice(1.0, 2);
-        b.insert_str(Tag::new(0x0020, 0x0052), Vr::Ui, "9.9.9");
+        b.insert_str(Tag::FRAME_OF_REFERENCE_UID, Vr::Ui, "9.9.9");
         let slices = [a.clone(), b];
         assert!(VolumeData::from_datasets(&slices).is_err());
         let _ = &mut a; // silence unused-mut if any
@@ -641,9 +641,9 @@ mod tests {
         // Sixteen-bit storage carrying 12 significant bits left-aligned (high bit
         // 15): stored 0xFFF0 must normalise to 4095, not be read as 65520.
         let mut s0 = axial_slice(0.0, 0xFFF0);
-        s0.insert_value(Tag::new(0x0028, 0x0101), 12u16); // BitsStored (high bit stays 15)
+        s0.insert_value(Tag::BITS_STORED, 12u16); // BitsStored (high bit stays 15)
         let mut s1 = axial_slice(1.0, 0xFFF0);
-        s1.insert_value(Tag::new(0x0028, 0x0101), 12u16);
+        s1.insert_value(Tag::BITS_STORED, 12u16);
         let volume = VolumeData::from_datasets(&[s0, s1]).unwrap();
         let cut = volume.get_cut(
             Point3::new(0.5, 0.5, 0.0),
@@ -679,8 +679,8 @@ mod tests {
     #[test]
     fn a_slice_without_geometry_is_skipped() {
         let mut flat = Dataset::new();
-        flat.insert_value(Tag::new(0x0028, 0x0010), 4u16);
-        flat.insert_value(Tag::new(0x0028, 0x0011), 4u16);
+        flat.insert_value(Tag::ROWS, 4u16);
+        flat.insert_value(Tag::COLUMNS, 4u16);
         let good = [axial_slice(0.0, 10), axial_slice(1.0, 20)];
         let mut all = good.to_vec();
         all.push(flat);
@@ -715,13 +715,13 @@ mod tests {
         let mut sops = std::collections::HashSet::new();
         for (i, ds) in outputs.iter().enumerate() {
             // fresh SOP Instance UID per slice
-            let sop = ds.try_get_str(Tag::new(0x0008, 0x0018)).unwrap();
+            let sop = ds.try_get_str(Tag::SOP_INSTANCE_UID).unwrap();
             assert!(Uid::is_valid(&sop));
             assert!(sops.insert(sop), "SOP Instance UIDs are unique");
             // geometry + pixel tags present
-            assert!(ds.get::<u16>(Tag::new(0x0028, 0x0010)).is_ok(), "Rows set");
-            assert!(ds.get::<u16>(Tag::new(0x0028, 0x0011)).is_ok(), "Columns set");
-            assert_eq!(ds.get::<i32>(Tag::new(0x0020, 0x0013)).unwrap(), (i + 1) as i32);
+            assert!(ds.get::<u16>(Tag::ROWS).is_ok(), "Rows set");
+            assert!(ds.get::<u16>(Tag::COLUMNS).is_ok(), "Columns set");
+            assert_eq!(ds.get::<i32>(Tag::INSTANCE_NUMBER).unwrap(), (i + 1) as i32);
             // the pixel data decodes back through the facade
             let mut owned = ds.clone();
             let pixel = PixelData::from_dataset(&mut owned).unwrap();

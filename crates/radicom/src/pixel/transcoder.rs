@@ -1,4 +1,4 @@
-//! Transcoder (TR-01..03; docs/06-pixel-codec.md §5).
+//! Transcoder (TR-01..03; docs/01-architecture.md §9).
 //!
 //! Decides how to move pixel data between transfer syntaxes, resolves codecs
 //! lazily through the global registry, and keeps the lossy-compression
@@ -16,11 +16,11 @@ use crate::pixel::{PixelData, PIXEL_DATA};
 use std::sync::Arc;
 
 /// `(0028,2110)` Lossy Image Compression.
-pub const LOSSY_IMAGE_COMPRESSION: Tag = Tag::new(0x0028, 0x2110);
+pub const LOSSY_IMAGE_COMPRESSION: Tag = Tag::LOSSY_IMAGE_COMPRESSION;
 /// `(0028,2112)` Lossy Image Compression Ratio.
-pub const LOSSY_IMAGE_COMPRESSION_RATIO: Tag = Tag::new(0x0028, 0x2112);
+pub const LOSSY_IMAGE_COMPRESSION_RATIO: Tag = Tag::LOSSY_IMAGE_COMPRESSION_RATIO;
 /// `(0028,2114)` Lossy Image Compression Method.
-pub const LOSSY_IMAGE_COMPRESSION_METHOD: Tag = Tag::new(0x0028, 0x2114);
+pub const LOSSY_IMAGE_COMPRESSION_METHOD: Tag = Tag::LOSSY_IMAGE_COMPRESSION_METHOD;
 
 /// Moves pixel data from one transfer syntax to another (TR-01).
 #[derive(Debug, Clone)]
@@ -94,7 +94,7 @@ impl Transcoder {
         };
 
         out.remove(PIXEL_DATA);
-        out.remove(Tag::new(0x0028, 0x0008));
+        out.remove(Tag::NUMBER_OF_FRAMES);
         {
             let mut pd = PixelData::from_dataset(&mut out)?;
             for frame in frames {
@@ -111,7 +111,7 @@ impl Transcoder {
         let mut out = file.clone();
         out.dataset = dataset;
         // the meta group's transfer syntax is refreshed on save
-        out.file_meta.insert_str(Tag::new(0x0002, 0x0010), Vr::Ui, self.to.uid());
+        out.file_meta.insert_str(Tag::TRANSFER_SYNTAX_UID, Vr::Ui, self.to.uid());
         Ok(out)
     }
 
@@ -128,7 +128,7 @@ impl Transcoder {
         let mut target = ds.clone();
         target.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
         target.remove(PIXEL_DATA);
-        target.remove(Tag::new(0x0028, 0x0008));
+        target.remove(Tag::NUMBER_OF_FRAMES);
         {
             let mut dst = PixelData::from_dataset(&mut target)?;
             dst.add_frame(&bytes)?;
@@ -221,7 +221,7 @@ impl Transcoder {
         let mut out = ds.clone();
         out.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
         out.remove(PIXEL_DATA);
-        out.remove(Tag::new(0x0028, 0x0008));
+        out.remove(Tag::NUMBER_OF_FRAMES);
         {
             let mut pd = PixelData::from_dataset(&mut out)?;
             for frame in frames {
@@ -537,7 +537,7 @@ mod tests {
         set_codec_registry(Arc::new(MockRegistry { syntaxes: vec![&syntaxes::JPEG_2000_LOSSLESS] }));
         let mut ds = dataset(8, 2, 2);
         ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
-        ds.insert_str(Tag::new(0x0028, 0x0008), Vr::Is, "2");
+        ds.insert_str(Tag::NUMBER_OF_FRAMES, Vr::Is, "2");
         {
             let frags = ds.insert_fragments(PIXEL_DATA, Vr::Ob);
             frags.push_fragment(Arc::new(MemoryBuffer::from(vec![0xFEu8, 0xFD, 0xFC, 0xFB])));
@@ -621,7 +621,7 @@ mod tests {
         let _guard = crate::pixel::codec::lock_registry();
         set_codec_registry(Arc::new(MockRegistry { syntaxes: vec![&syntaxes::JPEG_2000_LOSSLESS] }));
         let mut file = crate::io::file::DicomFile::from_dataset(with_pixels(8, 2, 2, &[&[1, 2, 3, 4]]));
-        file.file_meta.insert_str(Tag::new(0x0002, 0x0010), Vr::Ui, "1.2.840.10008.1.2.1");
+        file.file_meta.insert_str(Tag::TRANSFER_SYNTAX_UID, Vr::Ui, "1.2.840.10008.1.2.1");
         let tr = Transcoder::new(
             syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
             syntaxes::JPEG_2000_LOSSLESS.clone(),
@@ -631,7 +631,7 @@ mod tests {
         let out = tr.transcode_file(&file).unwrap();
         assert_eq!(out.dataset.transfer_syntax().uid(), "1.2.840.10008.1.2.4.90");
         assert_eq!(
-            out.file_meta.get_str(Tag::new(0x0002, 0x0010)).unwrap(),
+            out.file_meta.get_str(Tag::TRANSFER_SYNTAX_UID).unwrap(),
             "1.2.840.10008.1.2.4.90",
             "meta group transfer syntax follows the dataset"
         );
@@ -650,9 +650,9 @@ mod tests {
     #[test]
     fn file_clone_with_syntax_updates_the_meta_group() {
         let mut file = crate::io::file::DicomFile::from_dataset(with_pixels(8, 2, 2, &[&[1, 2, 3, 4]]));
-        file.file_meta.insert_str(Tag::new(0x0002, 0x0010), Vr::Ui, "1.2.840.10008.1.2.1");
+        file.file_meta.insert_str(Tag::TRANSFER_SYNTAX_UID, Vr::Ui, "1.2.840.10008.1.2.1");
         let out = file.clone_with_syntax(syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone(), None).unwrap();
         assert_eq!(out.dataset.transfer_syntax().uid(), "1.2.840.10008.1.2");
-        assert_eq!(out.file_meta.get_str(Tag::new(0x0002, 0x0010)).unwrap(), "1.2.840.10008.1.2");
+        assert_eq!(out.file_meta.get_str(Tag::TRANSFER_SYNTAX_UID).unwrap(), "1.2.840.10008.1.2");
     }
 }

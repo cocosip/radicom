@@ -1,4 +1,4 @@
-//! Photometric interpretation values (PIX-01; docs/06-pixel-codec.md §1).
+//! Photometric interpretation values (PIX-01; docs/01-architecture.md §9).
 //!
 //! Only the well-known values are typed; anything else round-trips as the
 //! raw string so unknown vendor values never fail a read.
@@ -160,11 +160,11 @@ impl PhotometricInterpretation {
     /// LUT (`(0028,1101/1102/1103)`) with ≤1 sample ⇒ PALETTE COLOR, other
     /// single-sample data ⇒ MONOCHROME2, and multi-sample data ⇒ RGB.
     pub fn infer_from_dataset(dataset: &Dataset) -> Self {
-        let samples = dataset.try_get::<u16>(Tag::new(0x0028, 0x0002)).unwrap_or(1);
+        let samples = dataset.try_get::<u16>(Tag::SAMPLES_PER_PIXEL).unwrap_or(1);
         if samples <= 1 {
-            let palette = dataset.contains(&Tag::new(0x0028, 0x1101))
-                && dataset.contains(&Tag::new(0x0028, 0x1102))
-                && dataset.contains(&Tag::new(0x0028, 0x1103));
+            let palette = dataset.contains(&Tag::RED_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR)
+                && dataset.contains(&Tag::GREEN_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR)
+                && dataset.contains(&Tag::BLUE_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR);
             if palette {
                 Self::PaletteColor
             } else {
@@ -258,7 +258,7 @@ mod tests {
     fn infer_photometric_for_legacy_files() {
         // no PI, single sample, no palette → MONOCHROME2
         let mut ds = Dataset::new();
-        ds.insert_value(Tag::new(0x0028, 0x0002), 1u16);
+        ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16);
         assert_eq!(
             PhotometricInterpretation::infer_from_dataset(&ds),
             PhotometricInterpretation::Monochrome2
@@ -273,7 +273,7 @@ mod tests {
         );
         // multi-sample → RGB
         let mut rgb = Dataset::new();
-        rgb.insert_value(Tag::new(0x0028, 0x0002), 3u16);
+        rgb.insert_value(Tag::SAMPLES_PER_PIXEL, 3u16);
         assert_eq!(PhotometricInterpretation::infer_from_dataset(&rgb), PhotometricInterpretation::Rgb);
     }
 }

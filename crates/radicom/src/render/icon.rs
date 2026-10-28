@@ -1,5 +1,5 @@
 //! DICOM icon image from an Icon Image Sequence item (REND-10;
-//! docs/10-rendering.md §1.4).
+//! docs/01-architecture.md §10).
 //!
 //! `(0000,9113)` IconImageSequence items carry a small preview whose pixel data
 //! is stored native even when the parent image is compressed. This module parses
@@ -17,9 +17,9 @@ use crate::model::tag::Tag;
 /// `(0000,9113) Icon Image Sequence`.
 const ICON_IMAGE_SEQUENCE: Tag = Tag::new(0x0000, 0x9113);
 /// `(0028,0004) Photometric Interpretation`.
-const PHOTOMETRIC_INTERPRETATION: Tag = Tag::new(0x0028, 0x0004);
+const PHOTOMETRIC_INTERPRETATION: Tag = Tag::PHOTOMETRIC_INTERPRETATION;
 /// `(0028,0008) Number of Frames`.
-const NUMBER_OF_FRAMES: Tag = Tag::new(0x0028, 0x0008);
+const NUMBER_OF_FRAMES: Tag = Tag::NUMBER_OF_FRAMES;
 
 /// A renderable DICOM icon (fo-dicom `DicomIconImage`).
 #[derive(Debug, Clone)]
@@ -77,12 +77,12 @@ impl IconImage {
 
     /// The icon's width in pixels.
     pub fn width(&self) -> u32 {
-        self.dataset.try_get::<u16>(Tag::new(0x0028, 0x0011)).unwrap_or(0) as u32
+        self.dataset.try_get::<u16>(Tag::COLUMNS).unwrap_or(0) as u32
     }
 
     /// The icon's height in pixels.
     pub fn height(&self) -> u32 {
-        self.dataset.try_get::<u16>(Tag::new(0x0028, 0x0010)).unwrap_or(0) as u32
+        self.dataset.try_get::<u16>(Tag::ROWS).unwrap_or(0) as u32
     }
 
     /// Renders the icon to a [`RawImage`] via the shared pipeline selection.
@@ -102,19 +102,19 @@ mod tests {
 
     fn icon_item(pi: &str, fill: u8) -> Dataset {
         let mut ds = Dataset::new();
-        ds.insert_value(Tag::new(0x0028, 0x0002), 1u16);
+        ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16);
         ds.insert_str(PHOTOMETRIC_INTERPRETATION, Vr::Cs, pi);
-        ds.insert_value(Tag::new(0x0028, 0x0010), 4u16); // rows
-        ds.insert_value(Tag::new(0x0028, 0x0011), 4u16); // columns
-        ds.insert_value(Tag::new(0x0028, 0x0100), 8u16);
-        ds.insert_value(Tag::new(0x0028, 0x0101), 8u16);
-        ds.insert_value(Tag::new(0x0028, 0x0102), 7u16);
-        ds.insert_value(Tag::new(0x0028, 0x0103), 0u16);
-        ds.insert_str(Tag::new(0x0028, 0x1050), Vr::Ds, "128");
-        ds.insert_str(Tag::new(0x0028, 0x1051), Vr::Ds, "256");
+        ds.insert_value(Tag::ROWS, 4u16); // rows
+        ds.insert_value(Tag::COLUMNS, 4u16); // columns
+        ds.insert_value(Tag::BITS_ALLOCATED, 8u16);
+        ds.insert_value(Tag::BITS_STORED, 8u16);
+        ds.insert_value(Tag::HIGH_BIT, 7u16);
+        ds.insert_value(Tag::PIXEL_REPRESENTATION, 0u16);
+        ds.insert_str(Tag::WINDOW_CENTER, Vr::Ds, "128");
+        ds.insert_str(Tag::WINDOW_WIDTH, Vr::Ds, "256");
         ds.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
-                Tag::new(0x7FE0, 0x0010),
+                Tag::PIXEL_DATA,
                 Vr::Ob,
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![fill; 16])),
             ),

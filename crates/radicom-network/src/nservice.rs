@@ -1,4 +1,4 @@
-//! N-service message types (SRV-07; docs/07-network.md §7.6).
+//! N-service message types (SRV-07; docs/01-architecture.md §11).
 //!
 //! The six DIMSE-N services — N-EVENT-REPORT, N-GET, N-SET, N-ACTION, N-CREATE,
 //! N-DELETE — share one command shape: affected/requested SOP class and instance

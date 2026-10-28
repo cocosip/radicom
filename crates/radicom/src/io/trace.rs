@@ -1,4 +1,4 @@
-//! Parser trace observer (INF-03; docs/08-serialization-media.md §7).
+//! Parser trace observer (INF-03; docs/01-architecture.md §12).
 //!
 //! [`TraceObserver`] implements [`ParseObserver`] and logs every parse event at
 //! debug level on the `radicom::io` target, so a subscriber like

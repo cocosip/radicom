@@ -1,4 +1,4 @@
-//! Structured Reports (SR-01/02; docs/08-serialization-media.md §4).
+//! Structured Reports (SR-01/02; docs/01-architecture.md §12).
 //!
 //! An SR is a tree of content items over a `DicomFile`. This module builds and
 //! reads that tree with the value type checked at construction time, and

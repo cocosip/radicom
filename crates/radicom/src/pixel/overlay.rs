@@ -1,4 +1,4 @@
-//! Overlay data access (PIX-05; docs/06-pixel-codec.md §1.7).
+//! Overlay data access (PIX-05; docs/01-architecture.md §9).
 
 use crate::error::{Error, ImagingError};
 use crate::model::buffer::{MemoryBuffer, SharedBuffer};

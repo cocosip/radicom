@@ -1,4 +1,4 @@
-//! SR support types (SR-02; docs/08-serialization-media.md §4.2).
+//! SR support types (SR-02; docs/01-architecture.md §12).
 //!
 //! `CodeItem` is the coded-entry triple that SR (and many other IODs) reuse.
 //! DICOM splits it across three tag pairs by value length: the "short" form
@@ -21,7 +21,7 @@ pub struct CodeTags {
 
 /// Short form: `CodeValue` ≤ 16 bytes (`(0018,0090)` family).
 pub static SHORT: CodeTags = CodeTags {
-    value: Tag::new(0x0018, 0x0090),
+    value: Tag::DATA_COLLECTION_DIAMETER,
     scheme: Tag::new(0x0018, 0x0100),
     meaning: Tag::new(0x0018, 0x0102),
     scheme_version: Tag::new(0x0018, 0x0104),
@@ -29,10 +29,10 @@ pub static SHORT: CodeTags = CodeTags {
 
 /// Long form: `CodeValue` > 16 bytes (`(0008,0100)` family).
 pub static LONG: CodeTags = CodeTags {
-    value: Tag::new(0x0008, 0x0100),
-    scheme: Tag::new(0x0008, 0x0102),
-    meaning: Tag::new(0x0008, 0x0104),
-    scheme_version: Tag::new(0x0008, 0x0106),
+    value: Tag::CODE_VALUE,
+    scheme: Tag::CODING_SCHEME_DESIGNATOR,
+    meaning: Tag::CODE_MEANING,
+    scheme_version: Tag::CONTEXT_GROUP_VERSION,
 };
 
 /// A coded entry: value + coding scheme (+ optional meaning/version) (§4.2).
@@ -172,8 +172,8 @@ mod tests {
     #[test]
     fn a_code_wraps_into_a_sequence_item() {
         let code = CodeItem::new("T-A0100", "SRT");
-        let holder = code.to_sequence(Tag::new(0x0040, 0xA043));
-        let sequence = holder.try_get_sequence(Tag::new(0x0040, 0xA043)).unwrap();
+        let holder = code.to_sequence(Tag::CONCEPT_NAME_CODE_SEQUENCE);
+        let sequence = holder.try_get_sequence(Tag::CONCEPT_NAME_CODE_SEQUENCE).unwrap();
         assert_eq!(sequence.items().len(), 1);
         assert_eq!(CodeItem::read_from(&sequence.items()[0]).unwrap(), code);
     }

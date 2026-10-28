@@ -1,5 +1,5 @@
 //! DICOM file container: format detection, file meta, open and save
-//! (FILE-01..06; docs/05-file-io.md §4, §5.3).
+//! (FILE-01..06; docs/01-architecture.md §7, §5.3).
 
 use crate::error::{Error, FileError};
 use crate::io::byte_source::{ByteSourceReader, WindowSource};
@@ -141,7 +141,7 @@ impl DicomFile {
 
         let dataset_offset = meta_start + meta_len;
         let syntax = file_meta
-            .try_get_str(Tag::new(0x0002, 0x0010))
+            .try_get_str(Tag::TRANSFER_SYNTAX_UID)
             .and_then(|uid| crate::model::transfer_syntax::parse(uid.trim()).ok())
             .unwrap_or_else(|| {
                 let probe = read_probe(&mut file, dataset_offset, file_len);
@@ -171,7 +171,7 @@ impl DicomFile {
         dataset.set_transfer_syntax(syntax.clone());
 
         // the ACR-NEMA recognition code lives in the *dataset* (0008,0010)
-        let format = match dataset.try_get_str(Tag::new(0x0008, 0x0010)) {
+        let format = match dataset.try_get_str(Tag::RECOGNITION_CODE) {
             Some(code) => match code.trim() {
                 "ACR-NEMA 1.0" => FileFormat::AcrNema1,
                 "ACR-NEMA 2.0" => FileFormat::AcrNema2,
@@ -211,14 +211,14 @@ impl DicomFile {
         };
 
         let syntax = file_meta
-            .try_get_str(Tag::new(0x0002, 0x0010))
+            .try_get_str(Tag::TRANSFER_SYNTAX_UID)
             .and_then(|uid| crate::model::transfer_syntax::parse(uid.trim()).ok())
             .unwrap_or_else(|| dataset_syntax(format, dataset_bytes));
 
         let mut dataset = parse_dataset_with(dataset_bytes, &syntax, options)?;
         dataset.set_transfer_syntax(syntax);
         // the ACR-NEMA recognition code lives in the *dataset* (0008,0010)
-        let format = match dataset.try_get_str(Tag::new(0x0008, 0x0010)) {
+        let format = match dataset.try_get_str(Tag::RECOGNITION_CODE) {
             Some(code) => match code.trim() {
                 "ACR-NEMA 1.0" => FileFormat::AcrNema1,
                 "ACR-NEMA 2.0" => FileFormat::AcrNema2,
@@ -246,7 +246,7 @@ impl DicomFile {
             None => Dataset::new(),
         };
         let syntax = file_meta
-            .try_get_str(Tag::new(0x0002, 0x0010))
+            .try_get_str(Tag::TRANSFER_SYNTAX_UID)
             .and_then(|uid| crate::model::transfer_syntax::parse(uid.trim()).ok())
             .unwrap_or_else(|| dataset_syntax(format, dataset_bytes));
 
@@ -322,21 +322,21 @@ impl DicomFile {
     fn refreshed_meta(&self) -> Result<Dataset, Error> {
         let mut meta = self.file_meta.clone();
         let syntax = self.dataset.transfer_syntax();
-        meta.insert_str(Tag::new(0x0002, 0x0010), Vr::Ui, syntax.uid());
-        meta.insert_str(Tag::new(0x0002, 0x0012), Vr::Ui, IMPLEMENTATION_CLASS_UID);
-        meta.insert_str(Tag::new(0x0002, 0x0013), Vr::Sh, IMPLEMENTATION_VERSION_NAME);
-        if !meta.contains(&Tag::new(0x0002, 0x0002)) {
-            meta.insert_str(Tag::new(0x0002, 0x0002), Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        meta.insert_str(Tag::TRANSFER_SYNTAX_UID, Vr::Ui, syntax.uid());
+        meta.insert_str(Tag::IMPLEMENTATION_CLASS_UID, Vr::Ui, IMPLEMENTATION_CLASS_UID);
+        meta.insert_str(Tag::IMPLEMENTATION_VERSION_NAME, Vr::Sh, IMPLEMENTATION_VERSION_NAME);
+        if !meta.contains(&Tag::MEDIA_STORAGE_SOP_CLASS_UID) {
+            meta.insert_str(Tag::MEDIA_STORAGE_SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
         }
-        if !meta.contains(&Tag::new(0x0002, 0x0003)) {
+        if !meta.contains(&Tag::MEDIA_STORAGE_SOP_INSTANCE_UID) {
             let uid = self
                 .dataset
-                .try_get_str(Tag::new(0x0008, 0x0018))
+                .try_get_str(Tag::SOP_INSTANCE_UID)
                 .unwrap_or_else(Uid::generate_value);
-            meta.insert_str(Tag::new(0x0002, 0x0003), Vr::Ui, uid);
+            meta.insert_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID, Vr::Ui, uid);
         }
         // the file meta group is always Explicit VR LE; drop stale lengths
-        meta.remove(Tag::new(0x0002, 0x0000));
+        meta.remove(Tag::FILE_META_INFORMATION_GROUP_LENGTH);
         Ok(meta)
     }
 }
@@ -613,10 +613,10 @@ mod tests {
 
     fn sample_file() -> DicomFile {
         let mut dataset = Dataset::new();
-        dataset.insert_str(Tag::new(0x0008, 0x0016), Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
-        dataset.insert_str(Tag::new(0x0008, 0x0018), Vr::Ui, "1.2.3.4.5");
-        dataset.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Doe^John");
-        dataset.insert_str(Tag::new(0x0010, 0x0020), Vr::Lo, "PID-1");
+        dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5");
+        dataset.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+        dataset.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID-1");
         DicomFile {
             file_meta: Dataset::new(),
             dataset,
@@ -633,19 +633,19 @@ mod tests {
         assert_eq!(&bytes[128..132], b"DICM", "preamble + magic");
         let back = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
         assert_eq!(back.format, FileFormat::Dicom3);
-        assert_eq!(back.get_str(Tag::new(0x0010, 0x0010)), "Doe^John");
-        assert_eq!(back.get_str(Tag::new(0x0010, 0x0020)), "PID-1");
+        assert_eq!(back.get_str(Tag::PATIENT_NAME), "Doe^John");
+        assert_eq!(back.get_str(Tag::PATIENT_ID), "PID-1");
     }
 
     #[test]
     fn meta_group_is_refreshed_on_save() {
         let bytes = sample_file().to_bytes(&WriteOptions::default()).unwrap();
         let back = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
-        assert_eq!(back.file_meta.get_str(Tag::new(0x0002, 0x0010)).unwrap(), "1.2.840.10008.1.2.1");
-        assert_eq!(back.file_meta.get_str(Tag::new(0x0002, 0x0012)).unwrap(), IMPLEMENTATION_CLASS_UID);
-        assert_eq!(back.file_meta.get_str(Tag::new(0x0002, 0x0013)).unwrap(), IMPLEMENTATION_VERSION_NAME);
+        assert_eq!(back.file_meta.get_str(Tag::TRANSFER_SYNTAX_UID).unwrap(), "1.2.840.10008.1.2.1");
+        assert_eq!(back.file_meta.get_str(Tag::IMPLEMENTATION_CLASS_UID).unwrap(), IMPLEMENTATION_CLASS_UID);
+        assert_eq!(back.file_meta.get_str(Tag::IMPLEMENTATION_VERSION_NAME).unwrap(), IMPLEMENTATION_VERSION_NAME);
         assert_eq!(
-            back.file_meta.get_str(Tag::new(0x0002, 0x0003)).unwrap(),
+            back.file_meta.get_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID).unwrap(),
             "1.2.3.4.5",
             "media storage instance UID comes from the dataset"
         );
@@ -674,46 +674,46 @@ mod tests {
         let body = &bytes[132..];
         let back = DicomFile::from_bytes(body, &ReadOptions::default()).unwrap();
         assert_eq!(back.format, FileFormat::Dicom3NoPreamble);
-        assert_eq!(back.get_str(Tag::new(0x0010, 0x0010)), "Doe^John");
+        assert_eq!(back.get_str(Tag::PATIENT_NAME), "Doe^John");
     }
 
     #[test]
     fn dataset_only_file_falls_back_to_explicit_le() {
         // a bare dataset with no meta group at all
         let mut dataset = Dataset::new();
-        dataset.insert_str(Tag::new(0x0010, 0x0020), Vr::Lo, "PID-1");
+        dataset.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID-1");
         let mut bytes = Vec::new();
         DicomWriter::new(WriteOptions::default())
             .write_dataset(&dataset, &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN, &mut bytes)
             .unwrap();
         let back = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
         assert_eq!(back.format, FileFormat::Dicom3NoFileMetaInfo);
-        assert_eq!(back.get_str(Tag::new(0x0010, 0x0020)), "PID-1");
+        assert_eq!(back.get_str(Tag::PATIENT_ID), "PID-1");
     }
 
     #[test]
     fn implicit_dataset_without_meta_is_detected() {
         let mut dataset = Dataset::new();
-        dataset.insert_str(Tag::new(0x0010, 0x0020), Vr::Lo, "PID-1");
+        dataset.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID-1");
         let mut bytes = Vec::new();
         DicomWriter::new(WriteOptions::default())
             .write_dataset(&dataset, &syntaxes::IMPLICIT_VR_LITTLE_ENDIAN, &mut bytes)
             .unwrap();
         let back = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
-        assert_eq!(back.get_str(Tag::new(0x0010, 0x0020)), "PID-1");
+        assert_eq!(back.get_str(Tag::PATIENT_ID), "PID-1");
         assert_eq!(back.dataset.transfer_syntax().uid(), "1.2.840.10008.1.2");
     }
 
     #[test]
     fn big_endian_dataset_without_meta_is_detected() {
         let mut dataset = Dataset::new();
-        dataset.insert_str(Tag::new(0x0010, 0x0020), Vr::Lo, "PID-1");
+        dataset.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID-1");
         let mut bytes = Vec::new();
         DicomWriter::new(WriteOptions::default())
             .write_dataset(&dataset, &syntaxes::EXPLICIT_VR_BIG_ENDIAN, &mut bytes)
             .unwrap();
         let back = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
-        assert_eq!(back.get_str(Tag::new(0x0010, 0x0020)), "PID-1");
+        assert_eq!(back.get_str(Tag::PATIENT_ID), "PID-1");
         assert_eq!(back.dataset.transfer_syntax().uid(), "1.2.840.10008.1.2.2");
     }
 
@@ -722,25 +722,25 @@ mod tests {
         // Full Part-10 file (preamble + ELE meta + BE dataset): numeric US values
         // must survive the reader's byte swap and the writer's target-endian swap.
         let mut dataset = Dataset::new();
-        dataset.insert_str(Tag::new(0x0010, 0x0020), Vr::Lo, "PID-1");
-        dataset.insert_value(Tag::new(0x0028, 0x0010), 512u16); // Rows (US)
-        dataset.insert_value(Tag::new(0x0028, 0x0011), 256u16); // Columns (US)
+        dataset.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID-1");
+        dataset.insert_value(Tag::ROWS, 512u16); // Rows (US)
+        dataset.insert_value(Tag::COLUMNS, 256u16); // Columns (US)
         dataset.set_transfer_syntax(syntaxes::EXPLICIT_VR_BIG_ENDIAN.clone());
         let bytes = DicomFile::from_dataset(dataset).to_bytes(&WriteOptions::default()).unwrap();
 
         let back = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
         assert_eq!(back.dataset.transfer_syntax().uid(), "1.2.840.10008.1.2.2");
-        assert_eq!(back.get_str(Tag::new(0x0010, 0x0020)), "PID-1");
-        let rows: u16 = back.dataset.get(Tag::new(0x0028, 0x0010)).unwrap();
-        let cols: u16 = back.dataset.get(Tag::new(0x0028, 0x0011)).unwrap();
+        assert_eq!(back.get_str(Tag::PATIENT_ID), "PID-1");
+        let rows: u16 = back.dataset.get(Tag::ROWS).unwrap();
+        let cols: u16 = back.dataset.get(Tag::COLUMNS).unwrap();
         assert_eq!((rows, cols), (512, 256), "US values survive the big-endian file round-trip");
     }
 
     #[test]
     fn acr_nema_recognition_code_marks_unsaveable() {
         let mut dataset = Dataset::new();
-        dataset.insert_str(Tag::new(0x0008, 0x0010), Vr::Sh, "ACR-NEMA 2.0");
-        dataset.insert_str(Tag::new(0x0010, 0x0020), Vr::Lo, "PID-1");
+        dataset.insert_str(Tag::RECOGNITION_CODE, Vr::Sh, "ACR-NEMA 2.0");
+        dataset.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID-1");
         let mut bytes = Vec::new();
         DicomWriter::new(WriteOptions::default())
             .write_dataset(&dataset, &syntaxes::EXPLICIT_VR_BIG_ENDIAN, &mut bytes)
@@ -803,18 +803,18 @@ mod tests {
         file.dataset.set_transfer_syntax(syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone());
         let bytes = file.to_bytes(&WriteOptions::default()).unwrap();
         let back = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
-        assert_eq!(back.get_str(Tag::new(0x0010, 0x0010)), "Doe^John");
+        assert_eq!(back.get_str(Tag::PATIENT_NAME), "Doe^John");
         assert!(back.dataset.transfer_syntax().is_deflate());
     }
 
     #[test]
     fn sequences_and_fragments_survive_a_file_round_trip() {
         let mut file = sample_file();
-        let seq = file.dataset.insert_sequence(Tag::new(0x0008, 0x1140));
+        let seq = file.dataset.insert_sequence(Tag::REFERENCED_IMAGE_SEQUENCE);
         let mut item = Dataset::new();
-        item.insert_str(Tag::new(0x0008, 0x1150), Vr::Ui, "1.2.3");
+        item.insert_str(Tag::REFERENCED_SOP_CLASS_UID, Vr::Ui, "1.2.3");
         seq.push(item);
-        let frags = file.dataset.insert_fragments(Tag::new(0x7FE0, 0x0010), Vr::Ob);
+        let frags = file.dataset.insert_fragments(Tag::PIXEL_DATA, Vr::Ob);
         frags.push_fragment(std::sync::Arc::new(MemoryBuffer::from(vec![1, 2, 3, 4])));
 
         let bytes = file.to_bytes(&WriteOptions::default()).unwrap();
@@ -843,8 +843,8 @@ mod tests {
         let path = dir.join("sample.dcm");
         sample_file().save(&path).unwrap();
         let back = DicomFile::open(&path).unwrap();
-        assert_eq!(back.get_str(Tag::new(0x0010, 0x0020)), "PID-1");
-        assert_eq!(read_file_meta(&path).unwrap().get_str(Tag::new(0x0002, 0x0010)).unwrap(), "1.2.840.10008.1.2.1");
+        assert_eq!(back.get_str(Tag::PATIENT_ID), "PID-1");
+        assert_eq!(read_file_meta(&path).unwrap().get_str(Tag::TRANSFER_SYNTAX_UID).unwrap(), "1.2.840.10008.1.2.1");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -858,9 +858,9 @@ mod tests {
         let stop = |state: &crate::io::reader::ParseState| state.tag == (0x0010, 0x0010);
         let file = DicomFile::open_partial(&path, &stop).unwrap();
         assert!(file.is_partial, "FILE-01: is_partial set when stopped");
-        assert!(file.dataset.contains(&Tag::new(0x0008, 0x0016)), "elements before the stop tag");
-        assert!(!file.dataset.contains(&Tag::new(0x0010, 0x0010)), "stop tag not read");
-        assert!(!file.dataset.contains(&Tag::new(0x0010, 0x0020)), "nothing past the stop tag");
+        assert!(file.dataset.contains(&Tag::SOP_CLASS_UID), "elements before the stop tag");
+        assert!(!file.dataset.contains(&Tag::PATIENT_NAME), "stop tag not read");
+        assert!(!file.dataset.contains(&Tag::PATIENT_ID), "nothing past the stop tag");
         std::fs::remove_dir_all(&dir).ok();
     }
     #[test]
@@ -900,7 +900,7 @@ mod tests {
             Vr::Ob,
             std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(big.clone())),
         ));
-        ds.insert_str(Tag::new(0x0010, 0x0020), Vr::Lo, "PID-1");
+        ds.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID-1");
         let file = DicomFile::from_dataset(ds);
         let path = temp_file("large");
         file.save(&path).unwrap();
@@ -924,7 +924,7 @@ mod tests {
             assert_eq!(buffer.size(), 5000);
             assert!(!buffer.is_memory(), "large value must stay a file window, not in memory");
             assert_eq!(&*buffer.data(), &big[..], "window reads the real bytes");
-            assert_eq!(file.dataset.get_str(Tag::new(0x0010, 0x0020)).unwrap(), "PID-1");
+            assert_eq!(file.dataset.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
         }
         std::fs::remove_file(&path).ok();
     }
@@ -953,7 +953,7 @@ mod tests {
             assert_eq!(buffer.size(), 0, "skipped value is an empty placeholder");
             assert!(buffer.data().is_empty());
             // the parser still advanced past the skipped value to the next element
-            assert_eq!(file.dataset.get_str(Tag::new(0x0010, 0x0020)).unwrap(), "PID-1");
+            assert_eq!(file.dataset.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
         }
         std::fs::remove_file(&path).ok();
     }

@@ -1,4 +1,4 @@
-//! Printing data models (PRINT-01; docs/08-serialization-media.md §5).
+//! Printing data models (PRINT-01; docs/01-architecture.md §12).
 //!
 //! `FilmSession`, `FilmBox`, `ImageBox` and `PresentationLut` wrap a `Dataset`
 //! each, exposing the common attributes and the film-box layout maths. They are
@@ -16,35 +16,35 @@ pub mod tags {
     use crate::model::tag::Tag;
 
     /// (2000,0010) Number of Copies.
-    pub const NUMBER_OF_COPIES: Tag = Tag::new(0x2000, 0x0010);
+    pub const NUMBER_OF_COPIES: Tag = Tag::NUMBER_OF_COPIES;
     /// (2000,0020) Print Priority.
-    pub const PRINT_PRIORITY: Tag = Tag::new(0x2000, 0x0020);
+    pub const PRINT_PRIORITY: Tag = Tag::PRINT_PRIORITY;
     /// (2000,0030) Medium Type.
-    pub const MEDIUM_TYPE: Tag = Tag::new(0x2000, 0x0030);
+    pub const MEDIUM_TYPE: Tag = Tag::MEDIUM_TYPE;
     /// (2000,0040) Film Destination.
-    pub const FILM_DESTINATION: Tag = Tag::new(0x2000, 0x0040);
+    pub const FILM_DESTINATION: Tag = Tag::FILM_DESTINATION;
     /// (2000,0050) Film Session Label.
-    pub const FILM_SESSION_LABEL: Tag = Tag::new(0x2000, 0x0050);
+    pub const FILM_SESSION_LABEL: Tag = Tag::FILM_SESSION_LABEL;
     /// (2010,0010) Image Display Format.
-    pub const IMAGE_DISPLAY_FORMAT: Tag = Tag::new(0x2010, 0x0010);
+    pub const IMAGE_DISPLAY_FORMAT: Tag = Tag::IMAGE_DISPLAY_FORMAT;
     /// (2010,0040) Film Orientation.
-    pub const FILM_ORIENTATION: Tag = Tag::new(0x2010, 0x0040);
+    pub const FILM_ORIENTATION: Tag = Tag::FILM_ORIENTATION;
     /// (2010,0050) Film Size ID.
-    pub const FILM_SIZE_ID: Tag = Tag::new(0x2010, 0x0050);
+    pub const FILM_SIZE_ID: Tag = Tag::FILM_SIZE_ID;
     /// (2010,0060) Magnification Type.
-    pub const MAGNIFICATION_TYPE: Tag = Tag::new(0x2010, 0x0060);
+    pub const MAGNIFICATION_TYPE: Tag = Tag::MAGNIFICATION_TYPE;
     /// (2010,0100) Border Density.
-    pub const BORDER_DENSITY: Tag = Tag::new(0x2010, 0x0100);
+    pub const BORDER_DENSITY: Tag = Tag::BORDER_DENSITY;
     /// (2010,0120) Empty Image Density.
-    pub const EMPTY_IMAGE_DENSITY: Tag = Tag::new(0x2010, 0x0120);
+    pub const EMPTY_IMAGE_DENSITY: Tag = Tag::MIN_DENSITY;
     /// (2010,0140) Trim.
-    pub const TRIM: Tag = Tag::new(0x2010, 0x0140);
+    pub const TRIM: Tag = Tag::TRIM;
     /// (2010,0300) Medium Type (in FilmBox).
-    pub const REFERENCED_IMAGE_BOX_SEQUENCE: Tag = Tag::new(0x2010, 0x0500);
+    pub const REFERENCED_IMAGE_BOX_SEQUENCE: Tag = Tag::REFERENCED_FILM_SESSION_SEQUENCE;
     /// (2020,0010) Image Position.
-    pub const IMAGE_POSITION: Tag = Tag::new(0x2020, 0x0010);
+    pub const IMAGE_POSITION: Tag = Tag::IMAGE_BOX_POSITION;
     /// (2020,0020) Polarity.
-    pub const POLARITY: Tag = Tag::new(0x2020, 0x0020);
+    pub const POLARITY: Tag = Tag::POLARITY;
 }
 
 /// A print film session (§5): film destination/label/medium/priority/copies.
@@ -237,14 +237,14 @@ impl ImageBox {
     /// Attaches one image (a dataset holding pixel data) to the image sequence.
     pub fn push_image(&mut self, image: Dataset) -> &mut Self {
         self.dataset
-            .insert_sequence(Tag::new(0x2020, 0x0110))
+            .insert_sequence(Tag::BASIC_GRAYSCALE_IMAGE_SEQUENCE)
             .push(image);
         self
     }
 
     pub fn image_count(&self) -> usize {
         self.dataset
-            .try_get_sequence(Tag::new(0x2020, 0x0110))
+            .try_get_sequence(Tag::BASIC_GRAYSCALE_IMAGE_SEQUENCE)
             .map(|sequence| sequence.items().len())
             .unwrap_or(0)
     }
@@ -252,7 +252,7 @@ impl ImageBox {
     /// The image datasets attached to this box (its ImageSequence items).
     pub fn images(&self) -> &[Dataset] {
         self.dataset
-            .try_get_sequence(Tag::new(0x2020, 0x0110))
+            .try_get_sequence(Tag::BASIC_GRAYSCALE_IMAGE_SEQUENCE)
             .map(|sequence| sequence.items())
             .unwrap_or(&[])
     }

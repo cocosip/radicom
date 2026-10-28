@@ -1,4 +1,4 @@
-//! Golden snapshot baselines (docs/09-testing.md §4).
+//! Golden snapshot baselines (docs/02-development-guide.md §5 §4).
 //!
 //! The golden files under `tests-data/goldens/` are produced by
 //! `cargo xtask regen-goldens` from deterministic corpus files. These tests fail

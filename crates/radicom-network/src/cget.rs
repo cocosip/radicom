@@ -1,4 +1,4 @@
-//! C-GET (SRV-05; docs/07-network.md §7.4).
+//! C-GET (SRV-05; docs/01-architecture.md §11).
 //!
 //! A C-GET asks the SCP to send instances back on the *same* association. The
 //! SCP issues C-STORE sub-operations there, so the SCU must answer them while
@@ -36,7 +36,7 @@ impl CGetRequest {
             .get_sop_class(root)
             .ok_or(NetworkError::protocol("C-GET has no worklist information model"))?;
         let mut identifier = Dataset::new();
-        identifier.insert_str(Tag::new(0x0008, 0x0052), Vr::Cs, level.as_str());
+        identifier.insert_str(Tag::QUERY_RETRIEVE_LEVEL, Vr::Cs, level.as_str());
         Ok(CGetRequest {
             message_id,
             sop_class_uid: sop_class_uid.to_string(),
@@ -110,7 +110,7 @@ impl CGetRequest {
     /// The retrieve level, when the Identifier states one.
     pub fn level(&self) -> Option<QueryRetrieveLevel> {
         self.identifier
-            .try_get_str(Tag::new(0x0008, 0x0052))
+            .try_get_str(Tag::QUERY_RETRIEVE_LEVEL)
             .and_then(|s| QueryRetrieveLevel::parse(&s))
     }
 
@@ -265,7 +265,7 @@ mod tests {
         let request = CGetRequest::study("1.2.3", 5);
         assert_eq!(request.level(), Some(QueryRetrieveLevel::Study));
         assert_eq!(request.sop_class_uid, sop_class::STUDY_ROOT_QR_GET);
-        assert_eq!(request.identifier.get_str(Tag::new(0x0020, 0x000D)).unwrap(), "1.2.3");
+        assert_eq!(request.identifier.get_str(Tag::STUDY_INSTANCE_UID).unwrap(), "1.2.3");
 
         let command = request.to_command();
         assert_eq!(command.field, CommandField::CGetRq);
@@ -278,7 +278,7 @@ mod tests {
         assert_eq!(series.level(), Some(QueryRetrieveLevel::Series));
         let image = CGetRequest::image("1.1", "1.2", "1.3", 2);
         assert_eq!(image.level(), Some(QueryRetrieveLevel::Image));
-        assert_eq!(image.identifier.get_str(Tag::new(0x0008, 0x0018)).unwrap(), "1.3");
+        assert_eq!(image.identifier.get_str(Tag::SOP_INSTANCE_UID).unwrap(), "1.3");
     }
 
     #[test]

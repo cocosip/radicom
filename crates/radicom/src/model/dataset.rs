@@ -1,4 +1,4 @@
-//! The dataset container (DS-01..05, DS-09; docs/04-data-model.md §6).
+//! The dataset container (DS-01..05, DS-09; docs/01-architecture.md §3).
 
 use crate::error::{DataError, Error, TagRef};
 use crate::model::buffer::SharedBuffer;
@@ -227,9 +227,7 @@ impl Dataset {
         self
     }
 
-    /// Typed insert with dictionary VR resolution (DS-03 dispatch): the
-    /// dictionary entry's VR list picks the first VR that accepts the
-    /// value kind; the value's own preference wins when compatible.
+    /// Typed insert with dictionary VR resolution (DS-03 dispatch).
     pub fn insert_value<V: IntoElement>(&mut self, tag: Tag, value: V) -> &mut Self {
         let vr = self.resolve_vr(&tag, value.preferred_vr());
         self.insert_or_update(value.into_element(tag, vr))
@@ -429,14 +427,20 @@ impl Dataset {
     // -- internals ---------------------------------------------------------------
 
     fn resolve_vr(&self, tag: &Tag, preferred: Option<Vr>) -> Vr {
-        if let Some(v) = preferred {
-            return v;
-        }
-        // dictionary resolution: first entry VR that accepts the value kind
-        // is decided by the caller's IntoElement mapping; here we take the
-        // entry's first VR for string-ish values (spec §6.3 without-VR path).
+        // The dictionary is authoritative for known tags. The value's own
+        // preference is only a hint: a `u16` written to ROWS must produce US
+        // (the standard VR), not IS. Letting the preference always win wrote
+        // non-conformant bytes that still round-tripped because reader and
+        // writer shared the same mistake.
         let entry = crate::model::dictionary::default_dictionary().entry(tag);
-        entry.vrs.first().copied().unwrap_or(Vr::Un)
+        let Some(dict_vr) = entry.vrs.first().copied() else {
+            return preferred.unwrap_or(Vr::Un);
+        };
+        match preferred {
+            Some(p) if p == dict_vr || numeric_hint_fits(p, dict_vr) => dict_vr,
+            Some(p) => p,
+            None => dict_vr,
+        }
     }
 
     /// Write-side normalization: dictionary-style private tags (element
@@ -444,6 +448,21 @@ impl Dataset {
     /// resolution fails with `create = true` the creator block is claimed.
     fn resolve_private_write(&mut self, tag: Tag, create: bool) -> Option<Tag> {
         self.get_private_tag(tag, create)
+    }
+}
+
+/// Whether a numeric value hint (`IS`/`DS`) may be replaced by the dictionary's
+/// numeric VR.
+///
+/// Only numeric hints are interchangeable with numeric VRs. A string hint on a
+/// binary tag (`OB`, `OW`, `AT`, ...) must stay the caller's choice, because the
+/// value cannot be silently re-encoded.
+fn numeric_hint_fits(hint: Vr, dict_vr: Vr) -> bool {
+    use Vr::*;
+    match hint {
+        Is => matches!(dict_vr, Is | Us | Ss | Ul | Sl | Uv | Sv),
+        Ds => matches!(dict_vr, Ds | Fl | Fd),
+        _ => false,
     }
 }
 
@@ -464,9 +483,10 @@ mod tests {
     use super::*;
     use crate::model::buffer::MemoryBuffer;
 
-    const PATIENT_NAME: Tag = Tag::new(0x0010, 0x0010);
-    const PATIENT_ID: Tag = Tag::new(0x0010, 0x0020);
-    const ROWS: Tag = Tag::new(0x0028, 0x0010);
+    const PATIENT_NAME: Tag = Tag::PATIENT_NAME;
+    const PATIENT_ID: Tag = Tag::PATIENT_ID;
+    const ROWS: Tag = Tag::ROWS;
+    const COLUMNS: Tag = Tag::COLUMNS;
 
     #[test]
     fn three_tier_reads() {
@@ -475,11 +495,11 @@ mod tests {
         ds.insert_str(ROWS, Vr::Is, "512");
 
         // tier 1: Err on missing
-        assert!(ds.get::<String>(Tag::new(0x0008, 0x0060)).is_err());
+        assert!(ds.get::<String>(Tag::MODALITY).is_err());
         // tier 2: None
-        assert_eq!(ds.try_get::<String>(Tag::new(0x0008, 0x0060)), None);
+        assert_eq!(ds.try_get::<String>(Tag::MODALITY), None);
         // tier 3: default
-        assert_eq!(ds.get_or(Tag::new(0x0008, 0x0060), "none".to_string()), "none");
+        assert_eq!(ds.get_or(Tag::MODALITY, "none".to_string()), "none");
 
         assert_eq!(ds.get_str(PATIENT_ID).unwrap(), "PID-1");
         let rows: u16 = ds.get(ROWS).unwrap();
@@ -516,23 +536,23 @@ mod tests {
         ds.validate().expect("valid dataset");
 
         // an invalid AE (>16 chars) fails with a ValidationFailure naming the tag
-        ds.insert_str(Tag::new(0x0008, 0x0050), Vr::Ae, "SEVENTEEN_CHARS_X");
+        ds.insert_str(Tag::ACCESSION_NUMBER, Vr::Ae, "SEVENTEEN_CHARS_X");
         let err = ds.validate().unwrap_err();
         assert!(matches!(err, Error::Validation(_)), "{err}");
         assert!(err.to_string().contains("(0008,0050)"), "{err}");
 
         // recursion: a bad value inside a sequence item is caught
         let mut inner = Dataset::new();
-        inner.insert_str(Tag::new(0x0008, 0x0050), Vr::Ae, "SEVENTEEN_CHARS_X");
+        inner.insert_str(Tag::ACCESSION_NUMBER, Vr::Ae, "SEVENTEEN_CHARS_X");
         let mut outer = Dataset::new();
-        let seq = outer.insert_sequence(Tag::new(0x0008, 0x1110));
+        let seq = outer.insert_sequence(Tag::REFERENCED_STUDY_SEQUENCE);
         seq.push(inner);
         assert!(outer.validate().is_err(), "invalid nested item is detected");
 
         // the per-dataset switch disables validation entirely
         let mut off = Dataset::new();
         off.set_validation(false);
-        off.insert_str(Tag::new(0x0008, 0x0050), Vr::Ae, "SEVENTEEN_CHARS_X");
+        off.insert_str(Tag::ACCESSION_NUMBER, Vr::Ae, "SEVENTEEN_CHARS_X");
         off.validate().expect("validation disabled ignores bad values");
     }
 
@@ -549,23 +569,139 @@ mod tests {
     fn insert_dispatch_matrix() {
         let mut ds = Dataset::new();
         ds.insert_value(PATIENT_NAME, "Doe^John");
-        ds.insert_value(Tag::new(0x0020, 0x000D), crate::model::uid::Uid::new("1.2.3"));
+        ds.insert_value(Tag::STUDY_INSTANCE_UID, crate::model::uid::Uid::new("1.2.3"));
         ds.insert_value(ROWS, 512_i32);
-        ds.insert_value(Tag::new(0x0018, 0x0050), 2.5_f64); // slice thickness DS
-        ds.insert_value(Tag::new(0x7FE0, 0x0010), vec![1u8, 2, 3]);
+        ds.insert_value(Tag::SLICE_THICKNESS, 2.5_f64); // slice thickness DS
+        ds.insert_value(Tag::PIXEL_DATA, vec![1u8, 2, 3]);
 
         let name = ds.get_element(PATIENT_NAME).unwrap();
         assert_eq!(name.vr(), Vr::Pn, "dictionary VR for (0010,0010)");
-        let uid_el = ds.get_element(Tag::new(0x0020, 0x000D)).unwrap();
+        let uid_el = ds.get_element(Tag::STUDY_INSTANCE_UID).unwrap();
         assert_eq!(uid_el.vr(), Vr::Ui);
         let rows_el = ds.get_element(ROWS).unwrap();
-        assert_eq!(rows_el.vr(), Vr::Is);
-        let thick = ds.get_element(Tag::new(0x0018, 0x0050)).unwrap();
+        assert_eq!(rows_el.vr(), Vr::Us, "dictionary VR for (0028,0010) must win over the IS value hint");
+        let thick = ds.get_element(Tag::SLICE_THICKNESS).unwrap();
         assert_eq!(thick.vr(), Vr::Ds);
-        let th: f64 = ds.get(Tag::new(0x0018, 0x0050)).unwrap();
+        let th: f64 = ds.get(Tag::SLICE_THICKNESS).unwrap();
         assert_eq!(th, 2.5);
-        let pixels: SharedBuffer = ds.get(Tag::new(0x7FE0, 0x0010)).unwrap();
+        let pixels: SharedBuffer = ds.get(Tag::PIXEL_DATA).unwrap();
         assert_eq!(&*pixels.data(), &[1, 2, 3]);
+    }
+
+    /// The dictionary VR must win over a numeric value hint. Writing a `u16` to
+    /// ROWS used to yield IS (a string VR), producing non-conformant bytes that
+    /// only round-tripped because the reader shared the same mistake.
+    #[test]
+    fn dictionary_vr_beats_the_numeric_value_hint() {
+        let mut ds = Dataset::new();
+        ds.insert_value(ROWS, 512u16);
+        ds.insert_value(COLUMNS, 256u16);
+        ds.insert_value(Tag::NUMBER_OF_FRAMES, 3u16);
+        ds.insert_value(Tag::RESCALE_INTERCEPT, 1.5f64);
+
+        assert_eq!(ds.get_element(ROWS).unwrap().vr(), Vr::Us, "ROWS is US");
+        assert_eq!(ds.get_element(COLUMNS).unwrap().vr(), Vr::Us, "COLUMNS is US");
+        assert_eq!(
+            ds.get_element(Tag::NUMBER_OF_FRAMES).unwrap().vr(),
+            Vr::Is,
+            "NumberOfFrames is IS, so IS stays IS"
+        );
+        assert_eq!(
+            ds.get_element(Tag::RESCALE_INTERCEPT).unwrap().vr(),
+            Vr::Ds,
+            "RescaleIntercept is DS"
+        );
+
+        // Values survive the VR switch in both directions.
+        assert_eq!(ds.get::<u16>(ROWS).unwrap(), 512);
+        assert_eq!(ds.get::<u32>(COLUMNS).unwrap(), 256, "widening read of US");
+        assert_eq!(ds.get::<f64>(Tag::RESCALE_INTERCEPT).unwrap(), 1.5);
+
+        // And the wire bytes carry US, not IS.
+        let file = crate::io::file::DicomFile::from_dataset(ds);
+        let bytes = file.to_bytes(&crate::io::writer::WriteOptions::default()).unwrap();
+        let pos = bytes
+            .windows(4)
+            .position(|w| w == [0x28, 0x00, 0x10, 0x00])
+            .expect("ROWS element present");
+        assert_eq!(&bytes[pos + 4..pos + 6], b"US", "encoded VR is US");
+    }
+
+    /// A hint that cannot be re-encoded must be preserved. An explicit VR on a
+    /// binary-only tag (e.g. UN for a private tag) is the caller's decision and
+    /// must not be silently rewritten.
+    #[test]
+    fn an_explicit_vr_on_a_binary_tag_is_preserved() {
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomElement::new_bytes(
+            Tag::PIXEL_DATA,
+            Vr::Ob,
+            std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![1u8, 2, 3])),
+        ));
+        assert_eq!(ds.get_element(Tag::PIXEL_DATA).unwrap().vr(), Vr::Ob);
+    }
+
+    /// An unknown (private/unregistered) tag has no dictionary entry, so the
+    /// value's own preference wins; with no preference it falls back to UN.
+    #[test]
+    fn unknown_tags_keep_the_value_preference() {
+        let mut ds = Dataset::new();
+        let private = Tag::new(0x0009, 0x1001);
+        ds.insert_value(private.clone(), 7u16);
+        assert_eq!(
+            ds.get_element(&private).unwrap().vr(),
+            Vr::Is,
+            "no dictionary entry → the integer hint (IS) is kept"
+        );
+    }
+
+    /// Every numeric VR may be written with the IS hint and read back.
+    #[test]
+    fn numeric_hint_covers_every_numeric_vr() {
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::ROWS, 7u16);                        // US
+        ds.insert_value(Tag::NUMBER_OF_FRAMES, 3u16);            // IS
+        ds.insert_value(Tag::SMALLEST_IMAGE_PIXEL_VALUE, -5i32); // SS-capable dictionary VR
+        ds.insert_value(Tag::RESCALE_INTERCEPT, -1.25f64);       // DS
+
+        assert_eq!(ds.get_element(ROWS).unwrap().vr(), Vr::Us);
+        assert_eq!(ds.get_element(Tag::NUMBER_OF_FRAMES).unwrap().vr(), Vr::Is);
+        assert_eq!(ds.get_element(Tag::RESCALE_INTERCEPT).unwrap().vr(), Vr::Ds);
+
+        // The SS case keeps its sign through the IS hint.
+        let smallest = ds.get_element(Tag::SMALLEST_IMAGE_PIXEL_VALUE).unwrap().vr();
+        assert!(matches!(smallest, Vr::Ss | Vr::Us | Vr::Is), "got {smallest:?}");
+        assert_eq!(ds.get::<i32>(Tag::SMALLEST_IMAGE_PIXEL_VALUE).unwrap(), -5);
+    }
+
+    /// The encoded bytes must carry the dictionary VR, and re-parsing must
+    /// recover it. This is the end-to-end guard against writing ROWS as IS.
+    #[test]
+    fn numeric_vr_survives_a_byte_round_trip() {
+        use crate::io::writer::{DicomWriter, WriteOptions};
+        let syntax = super::super::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let mut ds = Dataset::new();
+        ds.set_transfer_syntax(syntax.clone());
+        ds.insert_value(Tag::ROWS, 512u16);
+        ds.insert_value(Tag::COLUMNS, 256u16);
+
+        let mut out = Vec::new();
+        DicomWriter::new(WriteOptions::default())
+            .write_dataset(&ds, &syntax, &mut out)
+            .unwrap();
+
+        // Raw bytes carry "US", not "IS".
+        let pos = out
+            .windows(4)
+            .position(|w| w == [0x28, 0x00, 0x10, 0x00])
+            .expect("ROWS element present");
+        assert_eq!(&out[pos + 4..pos + 6], b"US", "encoded VR is US");
+
+        // And the decoder reads it back as US with the right value.
+        let reparsed = crate::io::dataset_builder::parse_dataset_bytes(&out, &syntax).unwrap();
+        assert_eq!(reparsed.get_element(ROWS).unwrap().vr(), Vr::Us);
+        assert_eq!(reparsed.get::<u16>(ROWS).unwrap(), 512);
+        assert_eq!(reparsed.get::<u16>(COLUMNS).unwrap(), 256);
     }
 
     #[test]
@@ -582,24 +718,24 @@ mod tests {
     fn sequences_nested_and_counts() {
         let mut ds = Dataset::new();
         {
-            let seq = ds.insert_sequence(Tag::new(0x0008, 0x1140));
+            let seq = ds.insert_sequence(Tag::REFERENCED_IMAGE_SEQUENCE);
             let mut item = Dataset::new();
-            item.insert_str(Tag::new(0x0008, 0x1150), Vr::Ui, "1.2.3");
+            item.insert_str(Tag::REFERENCED_SOP_CLASS_UID, Vr::Ui, "1.2.3");
             seq.push(item);
             seq.push(Dataset::new());
         }
-        let seq = ds.get_sequence(Tag::new(0x0008, 0x1140)).unwrap();
+        let seq = ds.get_sequence(Tag::REFERENCED_IMAGE_SEQUENCE).unwrap();
         assert_eq!(seq.len(), 2);
-        assert_eq!(ds.value_count(Tag::new(0x0008, 0x1140)).unwrap(), 2);
+        assert_eq!(ds.value_count(Tag::REFERENCED_IMAGE_SEQUENCE).unwrap(), 2);
         assert_eq!(
-            seq.items()[0].get_str(Tag::new(0x0008, 0x1150)).unwrap(),
+            seq.items()[0].get_str(Tag::REFERENCED_SOP_CLASS_UID).unwrap(),
             "1.2.3",
             "nested dataset reads"
         );
-        assert!(ds.get::<String>(Tag::new(0x0008, 0x1140)).is_err(), "SQ is not an element");
+        assert!(ds.get::<String>(Tag::REFERENCED_IMAGE_SEQUENCE).is_err(), "SQ is not an element");
         // cascade: setting the outer syntax reaches nested items
         ds.set_transfer_syntax(syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone());
-        let nested_ts = ds.get_sequence(Tag::new(0x0008, 0x1140)).unwrap().items()[0].transfer_syntax();
+        let nested_ts = ds.get_sequence(Tag::REFERENCED_IMAGE_SEQUENCE).unwrap().items()[0].transfer_syntax();
         assert_eq!(nested_ts.uid(), "1.2.840.10008.1.2");
     }
 
@@ -627,7 +763,7 @@ mod tests {
         assert_eq!(ds.get_str(dict_style).unwrap(), "widget", "block-relative reads");
 
         // non-private and block tags pass through unchanged
-        assert_eq!(ds.get_private_tag(Tag::new(0x0010, 0x0010), false), Some(Tag::new(0x0010, 0x0010)));
+        assert_eq!(ds.get_private_tag(Tag::PATIENT_NAME, false), Some(Tag::PATIENT_NAME));
     }
 
     #[test]
@@ -668,16 +804,16 @@ mod tests {
     #[test]
     fn walker_traverses_in_tag_order() {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Doe^John");
-        ds.insert_str(Tag::new(0x0008, 0x0050), Vr::Sh, "ACC1");
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+        ds.insert_str(Tag::ACCESSION_NUMBER, Vr::Sh, "ACC1");
         {
-            let seq = ds.insert_sequence(Tag::new(0x0008, 0x1140));
+            let seq = ds.insert_sequence(Tag::REFERENCED_IMAGE_SEQUENCE);
             let mut item = Dataset::new();
-            item.insert_str(Tag::new(0x0008, 0x1150), Vr::Ui, "1.2.3");
+            item.insert_str(Tag::REFERENCED_SOP_CLASS_UID, Vr::Ui, "1.2.3");
             seq.push(item);
         }
-        ds.insert_value(Tag::new(0x7FE0, 0x0010), vec![1u8, 2]);
-        ds.insert_fragments(Tag::new(0x7FE0, 0x0008), Vr::Ob)
+        ds.insert_value(Tag::PIXEL_DATA, vec![1u8, 2]);
+        ds.insert_fragments(Tag::FLOAT_PIXEL_DATA, Vr::Ob)
             .push_fragment(Arc::new(MemoryBuffer::from(vec![9, 9])));
 
         #[derive(Default)]
@@ -735,13 +871,13 @@ mod tests {
     #[test]
     fn empty_insert_and_raw_reads() {
         let mut ds = Dataset::new();
-        ds.insert_empty(Tag::new(0x0010, 0x1030), Vr::Ds);
-        assert_eq!(ds.value_count(Tag::new(0x0010, 0x1030)).unwrap(), 0);
-        assert_eq!(ds.try_get_str(Tag::new(0x0010, 0x1030)).unwrap(), "");
+        ds.insert_empty(Tag::PATIENT_WEIGHT, Vr::Ds);
+        assert_eq!(ds.value_count(Tag::PATIENT_WEIGHT).unwrap(), 0);
+        assert_eq!(ds.try_get_str(Tag::PATIENT_WEIGHT).unwrap(), "");
 
         let mut src = Dataset::new();
-        src.insert_value(Tag::new(0x0028, 0x0008), vec![9u8]);
-        let buf: SharedBuffer = src.get(Tag::new(0x0028, 0x0008)).unwrap();
+        src.insert_value(Tag::NUMBER_OF_FRAMES, vec![9u8]);
+        let buf: SharedBuffer = src.get(Tag::NUMBER_OF_FRAMES).unwrap();
         assert_eq!(buf.size(), 1);
     }
 }
@@ -761,11 +897,11 @@ impl PartialEq for Dataset {
 impl Eq for Dataset {}
 
 /// Shared functional groups sequence (0020,9116).
-pub const SHARED_FUNCTIONAL_GROUPS: Tag = Tag::new(0x0020, 0x9116);
+pub const SHARED_FUNCTIONAL_GROUPS: Tag = Tag::PLANE_ORIENTATION_SEQUENCE;
 /// Per-frame functional groups sequence (0020,9111).
-pub const PER_FRAME_FUNCTIONAL_GROUPS: Tag = Tag::new(0x0020, 0x9111);
+pub const PER_FRAME_FUNCTIONAL_GROUPS: Tag = Tag::FRAME_CONTENT_SEQUENCE;
 /// Timezone offset from UTC (0008,0201), `±hhmm`.
-pub const TIMEZONE_OFFSET_FROM_UTC: Tag = Tag::new(0x0008, 0x0201);
+pub const TIMEZONE_OFFSET_FROM_UTC: Tag = Tag::TIMEZONE_OFFSET_FROM_UTC;
 
 impl Dataset {
     /// Flattens enhanced-multiframe functional groups for one frame into a
@@ -865,24 +1001,24 @@ impl Dataset {
 #[cfg(test)]
 mod derived_tests {
     use super::*;
-    const PATIENT_ID: Tag = Tag::new(0x0010, 0x0020);
+    const PATIENT_ID: Tag = Tag::PATIENT_ID;
 
     fn enhanced_dataset() -> Dataset {
         let mut ds = Dataset::new();
         {
             let shared = ds.insert_sequence(SHARED_FUNCTIONAL_GROUPS);
             let mut item = Dataset::new();
-            item.insert_str(Tag::new(0x0018, 0x0050), Vr::Ds, "2.5"); // SliceThickness
-            item.insert_sequence(Tag::new(0x0020, 0x9113)); // empty sequence: skipped
+            item.insert_str(Tag::SLICE_THICKNESS, Vr::Ds, "2.5"); // SliceThickness
+            item.insert_sequence(Tag::PLANE_POSITION_SEQUENCE); // empty sequence: skipped
             shared.push(item);
         }
         {
             let per = ds.insert_sequence(PER_FRAME_FUNCTIONAL_GROUPS);
             let mut f0 = Dataset::new();
-            f0.insert_str(Tag::new(0x0020, 0x1041), Vr::Ds, "-5.0"); // SliceLocation
+            f0.insert_str(Tag::SLICE_LOCATION, Vr::Ds, "-5.0"); // SliceLocation
             per.push(f0);
             let mut f1 = Dataset::new();
-            f1.insert_str(Tag::new(0x0020, 0x1041), Vr::Ds, "-2.5");
+            f1.insert_str(Tag::SLICE_LOCATION, Vr::Ds, "-2.5");
             per.push(f1);
         }
         ds
@@ -892,13 +1028,13 @@ mod derived_tests {
     fn functional_groups_flatten() {
         let ds = enhanced_dataset();
         let f0 = ds.functional_groups(0).unwrap();
-        assert_eq!(f0.get_str(Tag::new(0x0018, 0x0050)).unwrap(), "2.5", "shared contributes");
-        assert_eq!(f0.get_str(Tag::new(0x0020, 0x1041)).unwrap(), "-5.0", "frame 0 location");
+        assert_eq!(f0.get_str(Tag::SLICE_THICKNESS).unwrap(), "2.5", "shared contributes");
+        assert_eq!(f0.get_str(Tag::SLICE_LOCATION).unwrap(), "-5.0", "frame 0 location");
         let f1 = ds.functional_groups(1).unwrap();
-        assert_eq!(f1.get_str(Tag::new(0x0020, 0x1041)).unwrap(), "-2.5");
+        assert_eq!(f1.get_str(Tag::SLICE_LOCATION).unwrap(), "-2.5");
 
         // empty sequences are not carried over
-        assert!(f0.try_get_sequence(Tag::new(0x0020, 0x9113)).is_none());
+        assert!(f0.try_get_sequence(Tag::PLANE_POSITION_SEQUENCE).is_none());
 
         // out-of-range frame errors
         assert!(ds.functional_groups(7).is_err());
@@ -909,17 +1045,17 @@ mod derived_tests {
         let mut a = Dataset::new();
         a.insert_str(PATIENT_ID, Vr::Lo, "X");
         {
-            let seq = a.insert_sequence(Tag::new(0x0008, 0x1140));
+            let seq = a.insert_sequence(Tag::REFERENCED_IMAGE_SEQUENCE);
             let mut item = Dataset::new();
-            item.insert_str(Tag::new(0x0008, 0x1150), Vr::Ui, "1.2.3");
+            item.insert_str(Tag::REFERENCED_SOP_CLASS_UID, Vr::Ui, "1.2.3");
             seq.push(item);
         }
         let mut b = Dataset::new();
         b.insert_str(PATIENT_ID, Vr::Lo, "X");
         {
-            let seq = b.insert_sequence(Tag::new(0x0008, 0x1140));
+            let seq = b.insert_sequence(Tag::REFERENCED_IMAGE_SEQUENCE);
             let mut item = Dataset::new();
-            item.insert_str(Tag::new(0x0008, 0x1150), Vr::Ui, "1.2.3");
+            item.insert_str(Tag::REFERENCED_SOP_CLASS_UID, Vr::Ui, "1.2.3");
             seq.push(item);
         }
         assert_eq!(a, b, "identical content compares equal");
@@ -936,26 +1072,26 @@ mod derived_tests {
     #[test]
     fn datetime_composition() {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0008, 0x0022), Vr::Da, "20240305"); // AcquisitionDate
-        ds.insert_str(Tag::new(0x0008, 0x0032), Vr::Tm, "103015"); // AcquisitionTime
+        ds.insert_str(Tag::ACQUISITION_DATE, Vr::Da, "20240305"); // AcquisitionDate
+        ds.insert_str(Tag::ACQUISITION_TIME, Vr::Tm, "103015"); // AcquisitionTime
 
         let dt = ds
-            .get_datetime(Tag::new(0x0008, 0x0022), Tag::new(0x0008, 0x0032))
+            .get_datetime(Tag::ACQUISITION_DATE, Tag::ACQUISITION_TIME)
             .unwrap();
         assert_eq!(dt.to_string(), "2024-03-05 10:30:15");
 
         // missing time -> midnight
         let mut no_time = Dataset::new();
-        no_time.insert_str(Tag::new(0x0008, 0x0022), Vr::Da, "20240305");
+        no_time.insert_str(Tag::ACQUISITION_DATE, Vr::Da, "20240305");
         let dt = no_time
-            .get_datetime(Tag::new(0x0008, 0x0022), Tag::new(0x0008, 0x0032))
+            .get_datetime(Tag::ACQUISITION_DATE, Tag::ACQUISITION_TIME)
             .unwrap();
         assert_eq!(dt.to_string(), "2024-03-05 00:00:00");
 
         // with timezone offset
         ds.insert_str(TIMEZONE_OFFSET_FROM_UTC, Vr::Sh, "+0530");
         let tz = ds
-            .get_datetime_with_offset(Tag::new(0x0008, 0x0022), Tag::new(0x0008, 0x0032))
+            .get_datetime_with_offset(Tag::ACQUISITION_DATE, Tag::ACQUISITION_TIME)
             .unwrap();
         assert_eq!(tz.offset().local_minus_utc(), 5 * 3600 + 30 * 60);
         assert_eq!(tz.to_rfc3339(), "2024-03-05T10:30:15+05:30");
@@ -963,7 +1099,7 @@ mod derived_tests {
         // invalid offset errors
         ds.insert_str(TIMEZONE_OFFSET_FROM_UTC, Vr::Sh, "0530");
         assert!(ds
-            .get_datetime_with_offset(Tag::new(0x0008, 0x0022), Tag::new(0x0008, 0x0032))
+            .get_datetime_with_offset(Tag::ACQUISITION_DATE, Tag::ACQUISITION_TIME)
             .is_err());
     }
 }

@@ -1,4 +1,4 @@
-//! Extended negotiation (NET-04; docs/07-network.md §4.3).
+//! Extended negotiation (NET-04; docs/01-architecture.md §11).
 //!
 //! SOP Class Extended Negotiation carries an ordered `(field, bytes)` set per
 //! SOP class; the AC echoes back the field's agreed value, or a field with

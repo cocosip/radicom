@@ -11,18 +11,18 @@ use radicom::model::vr::Vr;
 
 fn write_sample(path: &std::path::Path) {
     let mut ds = Dataset::new();
-    ds.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "DOE^JANE");
-    ds.insert_str(Tag::new(0x0008, 0x0060), Vr::Cs, "CT");
-    ds.insert_value(Tag::new(0x0028, 0x0010), 4u16);
-    ds.insert_value(Tag::new(0x0028, 0x0011), 4u16);
-    ds.insert_value(Tag::new(0x0028, 0x0100), 16u16);
-    ds.insert_value(Tag::new(0x0028, 0x0101), 16u16);
-    ds.insert_value(Tag::new(0x0028, 0x0102), 15u16);
-    ds.insert_value(Tag::new(0x0028, 0x0002), 1u16);
-    ds.insert_str(Tag::new(0x0028, 0x0004), Vr::Cs, "MONOCHROME2");
+    ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "DOE^JANE");
+    ds.insert_str(Tag::MODALITY, Vr::Cs, "CT");
+    ds.insert_value(Tag::ROWS, 4u16);
+    ds.insert_value(Tag::COLUMNS, 4u16);
+    ds.insert_value(Tag::BITS_ALLOCATED, 16u16);
+    ds.insert_value(Tag::BITS_STORED, 16u16);
+    ds.insert_value(Tag::HIGH_BIT, 15u16);
+    ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16);
+    ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
     ds.insert_or_update(radicom::model::item::DicomItem::Element(
         radicom::model::element::DicomElement::new_bytes(
-            Tag::new(0x7FE0, 0x0010),
+            Tag::PIXEL_DATA,
             Vr::Ob,
             std::sync::Arc::new(radicom::model::buffer::MemoryBuffer::from(vec![0u8; 4 * 4 * 2])),
         ),

@@ -3,7 +3,7 @@
 //! The files live under `tests-data/` at the repo root (see its README for
 //! provenance — a minimal set imported from fo-dicom's MS-PL test data). Each
 //! entry below is parsed, re-written with identical options, re-parsed, and the
-//! datasets compared for semantic equality (docs/09-testing.md §4).
+//! datasets compared for semantic equality (docs/02-development-guide.md §5 §4).
 
 use std::path::PathBuf;
 
@@ -115,7 +115,7 @@ fn charset_corpus_decodes_to_real_characters() {
     for (rel, expected) in cases {
         let bytes = std::fs::read(corpus_dir().join(rel)).unwrap();
         let file = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
-        let name = file.dataset.try_get_str(Tag::new(0x0010, 0x0010)).unwrap_or_default();
+        let name = file.dataset.try_get_str(Tag::PATIENT_NAME).unwrap_or_default();
         assert!(!name.contains('\u{FFFD}'), "{rel}: PatientName has replacement chars: {name:?}");
         for want in expected {
             assert!(name.contains(want), "{rel}: PatientName {name:?} should contain {want:?}");

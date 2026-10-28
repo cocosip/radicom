@@ -1,5 +1,5 @@
 //! `BitDepth`: allocated/stored/high-bit/signedness description (REND-06,
-//! docs/10-rendering.md §6). Mirrors fo-dicom `Imaging.BitDepth`.
+//! docs/01-architecture.md §10). Mirrors fo-dicom `Imaging.BitDepth`.
 
 /// Describes how a pixel value is bit-packed (REND-06 `BitDepth`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

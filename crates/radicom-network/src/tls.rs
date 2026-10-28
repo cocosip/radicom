@@ -1,4 +1,4 @@
-//! TLS transport (NET-01; docs/07-network.md §2.4).
+//! TLS transport (NET-01; docs/01-architecture.md §11).
 //!
 //! TLS wraps the same async byte stream the plain path uses, so the protocol
 //! engine is unchanged: only the connection setup differs. The feature is

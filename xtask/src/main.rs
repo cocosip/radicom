@@ -429,7 +429,7 @@ fn gen_dict() {
 }
 
 /// Regenerates the golden snapshot files under `tests-data/goldens/`
-/// (docs/09-testing.md §4). Sources are deterministic corpus files, so the
+/// (docs/02-development-guide.md §5 §4). Sources are deterministic corpus files, so the
 /// outputs are reproducible; the integration tests in `radicom`/`radicom-json`
 /// fail when they drift.
 fn regen_goldens() {
@@ -457,7 +457,7 @@ fn regen_goldens() {
     let json = radicom_json::dataset_to_json(&file.dataset, &Default::default()).expect("encode json");
     fs::write(golden_dir.join("GH178.json"), json).expect("write GH178.json");
 
-    // PDU byte-stream goldens (docs/09-testing.md §3 "Network … hex fixtures").
+    // PDU byte-stream goldens (docs/02-development-guide.md §5 §3 "Network … hex fixtures").
     // Keep the fixtures below in sync with crates/radicom-network/tests/goldens.rs.
     let pdu_cases = [("associate_rq.hex", fixture_associate_rq()), ("pdata_cecho.hex", fixture_pdata_cecho())];
     for (name, bytes) in pdu_cases {

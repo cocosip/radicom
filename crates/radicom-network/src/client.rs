@@ -1,4 +1,4 @@
-//! The high-level DICOM client (CLI-01; docs/07-network.md §9.1).
+//! The high-level DICOM client (CLI-01; docs/01-architecture.md §11).
 //!
 //! The client owns a request queue, decides how many requests share one
 //! association, and transparently rolls over to a new association when the
@@ -227,7 +227,7 @@ impl DicomClient {
     pub async fn send_c_store(&mut self, file: &DicomFile) -> Result<CStoreResponse> {
         let sop_class = file
             .dataset
-            .try_get_str(radicom::model::tag::Tag::new(0x0008, 0x0016))
+            .try_get_str(radicom::model::tag::Tag::SOP_CLASS_UID)
             .map(|s| s.trim().to_string())
             .ok_or(NetworkError::protocol("instance has no SOP class UID"))?;
         let syntax = file.dataset.transfer_syntax().uid().to_string();
@@ -446,8 +446,8 @@ mod tests {
         let handle = tokio::spawn(async move { server.accept_one().await });
 
         let mut dataset = radicom::model::dataset::Dataset::new();
-        dataset.insert_str(radicom::model::tag::Tag::new(0x0008, 0x0016), radicom::model::vr::Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
-        dataset.insert_str(radicom::model::tag::Tag::new(0x0008, 0x0018), radicom::model::vr::Vr::Ui, "1.2.3");
+        dataset.insert_str(radicom::model::tag::Tag::SOP_CLASS_UID, radicom::model::vr::Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        dataset.insert_str(radicom::model::tag::Tag::SOP_INSTANCE_UID, radicom::model::vr::Vr::Ui, "1.2.3");
         dataset.set_transfer_syntax(radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
         let file = DicomFile::from_dataset(dataset);
 
@@ -476,12 +476,12 @@ mod tests {
                 let _ = request;
                 let mut dataset = radicom::model::dataset::Dataset::new();
                 dataset.insert_str(
-                    radicom::model::tag::Tag::new(0x0008, 0x0016),
+                    radicom::model::tag::Tag::SOP_CLASS_UID,
                     radicom::model::vr::Vr::Ui,
                     "1.2.840.10008.5.1.4.1.1.7",
                 );
                 dataset.insert_str(
-                    radicom::model::tag::Tag::new(0x0008, 0x0018),
+                    radicom::model::tag::Tag::SOP_INSTANCE_UID,
                     radicom::model::vr::Vr::Ui,
                     "1.2.3.4.5",
                 );

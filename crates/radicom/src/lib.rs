@@ -47,3 +47,19 @@ pub use model::transfer_syntax::{self as transfer_syntax_registry, TransferSynta
 pub use model::uid::{StorageCategory, Uid, UidGenerator, UidType};
 pub use model::vm::Vm;
 pub use model::vr::Vr;
+
+/// Generated DICOM UID constants: `uids::CT_IMAGE_STORAGE`.
+///
+/// These are `&'static str`, so they can be passed straight to
+/// [`Uid::parse`] or any API taking an implementation of `Into<String>`.
+///
+/// Tag constants are inherent associated constants on [`Tag`]
+/// (`Tag::PATIENT_NAME`, `Tag::ROWS`, ...) and need no import.
+pub mod uids {
+    pub use radicom_dict::generated::uids::consts::*;
+}
+
+/// Built-in transfer syntaxes: `syntaxes::EXPLICIT_VR_LITTLE_ENDIAN`.
+pub mod syntaxes {
+    pub use crate::model::transfer_syntax::syntaxes::*;
+}

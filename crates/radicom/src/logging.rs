@@ -1,4 +1,4 @@
-//! Logging facade (INF-03; docs/08-serialization-media.md §7).
+//! Logging facade (INF-03; docs/01-architecture.md §12).
 //!
 //! A thin `tracing` facade so the whole library logs through one dependency with
 //! consistent, categorized targets. Subscribers filter by target
@@ -63,8 +63,8 @@ mod tests {
 
     fn sample() -> Dataset {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Doe^John");
-        ds.insert_str(Tag::new(0x0008, 0x0060), Vr::Cs, "CT");
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+        ds.insert_str(Tag::MODALITY, Vr::Cs, "CT");
         ds
     }
 
@@ -78,7 +78,7 @@ mod tests {
     #[test]
     fn to_dump_string_with_options_respects_truncation() {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::new(0x0010, 0x0010), Vr::Pn, "Averyveryverylongvalue");
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Averyveryverylongvalue");
         let options = DumpOptions { max_value_chars: 4, ..Default::default() };
         let text = ds.to_dump_string_with(&options);
         assert!(!text.contains("Averyveryverylongvalue"), "value must be elided: {text}");

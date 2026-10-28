@@ -1,4 +1,4 @@
-//! 256-entry colour tables (REND-06, docs/10-rendering.md §6).
+//! 256-entry colour tables (REND-06, docs/01-architecture.md §10).
 //!
 //! Mirrors fo-dicom `ColorTable`: a 256-entry `Color32` lookup that maps an
 //! 8-bit grey level to a display colour. MONOCHROME2 is the ascending grey ramp,

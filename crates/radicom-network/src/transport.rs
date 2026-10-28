@@ -1,4 +1,4 @@
-//! Transport layer (NET-01; docs/07-network.md §2).
+//! Transport layer (NET-01; docs/01-architecture.md §11).
 //!
 //! The protocol engine sees only an async byte stream, so TLS and plain TCP
 //! share one code path. PDU framing lives here: read a 6-byte header, then

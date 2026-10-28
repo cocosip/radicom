@@ -1,4 +1,4 @@
-//! Value validation (VAL-01..03; docs/04-data-model.md §9).
+//! Value validation (VAL-01..03; docs/01-architecture.md §3).
 //!
 //! Layering: global switch × per-dataset flag × RAII scope guard. File
 //! parsing runs with validation off (read-tolerant policy).
@@ -263,7 +263,7 @@ mod tests {
     use crate::model::tag::Tag;
 
     fn el(vr: Vr, text: &str) -> DicomElement {
-        DicomElement::new_str(Tag::new(0x0010, 0x0010), vr, text)
+        DicomElement::new_str(Tag::PATIENT_NAME, vr, text)
     }
 
     #[test]
@@ -367,7 +367,7 @@ mod tests {
         assert!(validate_vm(&priv_el).is_ok(), "private tags exempt");
 
         // Other family exempt
-        let ob = DicomElement::new_bytes(Tag::new(0x7FE0, 0x0010), Vr::Ob, std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![1, 2, 3])));
+        let ob = DicomElement::new_bytes(Tag::PIXEL_DATA, Vr::Ob, std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![1, 2, 3])));
         assert!(validate_vm(&ob).is_ok());
 
         // empty exempt

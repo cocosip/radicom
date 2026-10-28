@@ -1,4 +1,4 @@
-//! Dependency-free network benchmark (docs/09-testing.md §8: `network_throughput`).
+//! Dependency-free network benchmark (docs/02-development-guide.md §5 §8: `network_throughput`).
 //!
 //! Criterion is not vendored offline, so this is a `harness = false` binary that
 //! drives a loopback C-STORE of a multi-frame file against an in-process SCP and
@@ -37,16 +37,16 @@ impl ServiceProvider for StoreProvider {
 fn multiframe_file(frames: u32) -> (DicomFile, u64) {
     let (rows, cols) = (256u16, 256u16);
     let mut ds = Dataset::new();
-    ds.insert_str(Tag::new(0x0008, 0x0016), Vr::Ui, SOP_CLASS);
-    ds.insert_str(Tag::new(0x0008, 0x0018), Vr::Ui, "1.2.3.4.5.6.7.8.9");
-    ds.insert_value(Tag::new(0x0028, 0x0002), 1u16); // SamplesPerPixel
-    ds.insert_str(Tag::new(0x0028, 0x0004), Vr::Cs, "MONOCHROME2");
-    ds.insert_value(Tag::new(0x0028, 0x0010), rows);
-    ds.insert_value(Tag::new(0x0028, 0x0011), cols);
-    ds.insert_value(Tag::new(0x0028, 0x0100), 16u16); // BitsAllocated
-    ds.insert_value(Tag::new(0x0028, 0x0101), 16u16); // BitsStored
-    ds.insert_value(Tag::new(0x0028, 0x0102), 15u16); // HighBit
-    ds.insert_value(Tag::new(0x0028, 0x0103), 0u16); // PixelRepresentation
+    ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, SOP_CLASS);
+    ds.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5.6.7.8.9");
+    ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16); // SamplesPerPixel
+    ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
+    ds.insert_value(Tag::ROWS, rows);
+    ds.insert_value(Tag::COLUMNS, cols);
+    ds.insert_value(Tag::BITS_ALLOCATED, 16u16); // BitsAllocated
+    ds.insert_value(Tag::BITS_STORED, 16u16); // BitsStored
+    ds.insert_value(Tag::HIGH_BIT, 15u16); // HighBit
+    ds.insert_value(Tag::PIXEL_REPRESENTATION, 0u16); // PixelRepresentation
     ds.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
 
     let frame_bytes = (rows as usize) * (cols as usize) * 2;

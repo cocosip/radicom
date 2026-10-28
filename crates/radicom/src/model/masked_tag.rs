@@ -1,4 +1,4 @@
-//! Masked (repeating-group) tags (TAG-05; docs/04-data-model.md §1.4).
+//! Masked (repeating-group) tags (TAG-05; docs/01-architecture.md §3).
 
 use crate::error::{DataError, Error};
 

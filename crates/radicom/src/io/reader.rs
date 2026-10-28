@@ -1,14 +1,14 @@
-//! Recursive-descent DICOM parser (RD-01..05; docs/05-file-io.md §3).
+//! Recursive-descent DICOM parser (RD-01..05; docs/01-architecture.md §7).
 //!
 //! The parser emits observer events; building, DICOMDIR stitching, dumps
 //! and JSON all reuse it. Tolerance rows T1–T10 map to the behaviors in
-//! docs/05-file-io.md §3.8.
+//! docs/01-architecture.md §7.
 //!
 //! Recursion happens only in `Parser::parse_level`, whose stack frame
 //! holds nothing but a `Step` value; the per-element work lives in
 //! `Parser::step`, which returns before any nested level starts. That
 //! keeps the `max_depth = 256` guard meaningful on the default 2 MiB thread
-//! stack (docs/05-file-io.md §3.1).
+//! stack (docs/01-architecture.md §7).
 
 use crate::error::{Error, ReaderError};
 use crate::io::byte_source::ByteSourceReader;
@@ -651,7 +651,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
 /// Basic offset table entries follow the transfer syntax byte order.
 fn decode_offset_table(buffer: &SharedBuffer, big_endian: bool) -> Vec<u32> {
     let data = buffer.data();
-    data.chunks_exact(4)
+    data.as_chunks::<4>().0.iter()
         .map(|c| {
             let raw = [c[0], c[1], c[2], c[3]];
             if big_endian {

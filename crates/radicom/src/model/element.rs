@@ -1,5 +1,5 @@
 //! DICOM element value model and typed access (ELEM-01, ELEM-02;
-//! docs/04-data-model.md §7).
+//! docs/01-architecture.md §3).
 
 use crate::error::{DataError, Error};
 use crate::model::buffer::{MemoryBuffer, SharedBuffer};
@@ -190,29 +190,35 @@ fn select(e: &DicomElement, index: Option<usize>) -> Result<String, Error> {
 /// little-endian integer/float (spec: byte order is fixed at parse time via
 /// EndianBuffer wrapping; in-memory values are native LE).
 fn read_le_unit<T: FromLeBytes>(e: &DicomElement, b: &SharedBuffer, index: Option<usize>) -> Result<T, Error> {
-    let unit = e.vr().unit_size().max(T::SIZE);
+    // Read at the VR's natural unit size, then widen to T. Using
+    // `unit_size().max(T::SIZE)` forced a 4-byte stride for a `u32` read of a
+    // US element (2-byte stride), so every such read landed out of range and
+    // silently produced 0 — this is why Rows/Columns read as 0 on real files.
+    let unit = e.vr().unit_size();
     let i = index.unwrap_or(0);
     let start = i * unit;
     let data = b.data();
-    let end = start + unit;
-    if end > data.len() {
+    if start + unit > data.len() {
         return Err(Error::Data(DataError::IndexOutOfRange {
             tag: (&e.tag).into(),
             index: i,
-            count: data.len() / unit,
+            count: data.len() / unit.max(1),
         }));
     }
-    Ok(T::from_le(&data[start..start + T::SIZE]))
+    Ok(T::from_le_widened(&data[start..start + unit]))
 }
 
 /// Little-endian construction for numeric element reads.
 pub trait FromLeBytes: Sized {
     const SIZE: usize;
     fn from_le(bytes: &[u8]) -> Self;
+    /// Interpret `bytes` (the VR's natural unit, `bytes.len()` >= `SIZE` or
+    /// smaller) as this type, widening and sign-extending as needed.
+    fn from_le_widened(bytes: &[u8]) -> Self;
 }
 
 macro_rules! impl_le {
-    ($t:ty) => {
+    ($t:ty, $signed:expr) => {
         impl FromLeBytes for $t {
             const SIZE: usize = std::mem::size_of::<$t>();
             fn from_le(bytes: &[u8]) -> Self {
@@ -220,17 +226,30 @@ macro_rules! impl_le {
                 arr.copy_from_slice(&bytes[..std::mem::size_of::<$t>()]);
                 <$t>::from_le_bytes(arr)
             }
+            fn from_le_widened(bytes: &[u8]) -> Self {
+                let mut arr = [0u8; std::mem::size_of::<$t>()];
+                let n = bytes.len().min(arr.len());
+                arr[..n].copy_from_slice(&bytes[..n]);
+                // Sign-extend when the source is narrower and its top bit is set,
+                // so a signed SS value read as i32 keeps its sign.
+                if $signed && n > 0 && n < arr.len() && (bytes[n - 1] & 0x80) != 0 {
+                    for b in &mut arr[n..] {
+                        *b = 0xFF;
+                    }
+                }
+                <$t>::from_le_bytes(arr)
+            }
         }
     };
 }
-impl_le!(i16);
-impl_le!(u16);
-impl_le!(i32);
-impl_le!(u32);
-impl_le!(i64);
-impl_le!(u64);
-impl_le!(f32);
-impl_le!(f64);
+impl_le!(i16, true);
+impl_le!(u16, false);
+impl_le!(i32, true);
+impl_le!(u32, false);
+impl_le!(i64, true);
+impl_le!(u64, false);
+impl_le!(f32, true);
+impl_le!(f64, true);
 
 macro_rules! impl_from_int {
     ($t:ty) => {
@@ -278,7 +297,19 @@ impl FromElement for f32 {
 impl FromElement for f64 {
     fn from_element(e: &DicomElement, index: Option<usize>) -> Result<Self, Error> {
         if let ElementValue::Bytes(b) = e.value() {
-            return read_le_unit::<f64>(e, b, index);
+            // Integer VRs must be widened numerically, not reinterpreted as an
+            // f64 bit pattern.
+            return match e.vr() {
+                Vr::Fl => read_le_unit::<f32>(e, b, index).map(f64::from),
+                Vr::Fd => read_le_unit::<f64>(e, b, index),
+                Vr::Us => read_le_unit::<u16>(e, b, index).map(f64::from),
+                Vr::Ss => read_le_unit::<i16>(e, b, index).map(f64::from),
+                Vr::Ul => read_le_unit::<u32>(e, b, index).map(f64::from),
+                Vr::Sl => read_le_unit::<i32>(e, b, index).map(f64::from),
+                Vr::Uv => read_le_unit::<u64>(e, b, index).map(|v| v as f64),
+                Vr::Sv => read_le_unit::<i64>(e, b, index).map(|v| v as f64),
+                _ => read_le_unit::<f64>(e, b, index),
+            };
         }
         let s = select(e, index)?;
         match e.vr() {
@@ -367,7 +398,7 @@ mod tests {
     use super::*;
 
     fn el(vr: Vr, text: &str) -> DicomElement {
-        DicomElement::new_str(Tag::new(0x0010, 0x0010), vr, text)
+        DicomElement::new_str(Tag::PATIENT_NAME, vr, text)
     }
 
     #[test]
@@ -404,7 +435,7 @@ mod tests {
         assert_eq!(vals, vec![1.5, 2.5]);
 
         let us = DicomElement::new_bytes(
-            Tag::new(0x0028, 0x0010),
+            Tag::ROWS,
             Vr::Us,
             Arc::new(MemoryBuffer::from(vec![1, 0, 2, 0])),
         );
@@ -412,9 +443,74 @@ mod tests {
         assert_eq!(vals, vec![1, 2], "little-endian unit reads");
     }
 
+    /// A `US` element read into a wider type must stride by 2 bytes, not by the
+    /// destination width. The old `unit_size().max(T::SIZE)` made every such read
+    /// fall out of range and return 0, which is why Rows/Columns were 0 on real
+    /// files and rendering produced empty frames.
     #[test]
-    fn get_uid_and_transfer_syntax() {
-        let ui = el(Vr::Ui, "1.2.840.10008.1.2");
+    fn width_widening_reads_stride_by_the_vr_size() {
+        // 3 US values: 300, 512, 65535
+        let us = DicomElement::new_bytes(
+            Tag::ROWS,
+            Vr::Us,
+            Arc::new(MemoryBuffer::from(vec![
+                0x2C, 0x01, // 300
+                0x00, 0x02, // 512
+                0xFF, 0xFF, // 65535
+            ])),
+        );
+
+        assert_eq!(us.first::<u16>().unwrap(), 300);
+        assert_eq!(us.first::<u32>().unwrap(), 300, "u32 widening read");
+        assert_eq!(us.first::<u64>().unwrap(), 300, "u64 widening read");
+        assert_eq!(us.first::<f64>().unwrap(), 300.0, "f64 widening read");
+
+        // Index 1 must land on the second 2-byte unit.
+        assert_eq!(us.get::<u32>(Some(1)).unwrap(), 512, "index strides by 2");
+        let all: Vec<u32> = us.get(None).unwrap();
+        assert_eq!(all, vec![300, 512, 65535], "all values widened");
+    }
+
+    /// A signed `SS` element widened to a wider type must sign-extend.
+    #[test]
+    fn signed_widening_reads_sign_extend() {
+        let ss = DicomElement::new_bytes(
+            Tag::new(0x0028, 0x0106),
+            Vr::Ss,
+            Arc::new(MemoryBuffer::from(vec![0xFF, 0xFF, 0x0A, 0x00])), // -1, 10
+        );
+        assert_eq!(ss.first::<i16>().unwrap(), -1);
+        assert_eq!(ss.first::<i32>().unwrap(), -1, "sign-extended to i32");
+        assert_eq!(ss.first::<i64>().unwrap(), -1, "sign-extended to i64");
+        assert_eq!(ss.first::<f64>().unwrap(), -1.0);
+        assert_eq!(ss.get::<i32>(Some(1)).unwrap(), 10);
+    }
+
+    /// Reading past the last unit must be an error, not a silent zero.
+    #[test]
+    fn reading_past_the_last_unit_errors() {
+        let us = DicomElement::new_bytes(
+            Tag::ROWS,
+            Vr::Us,
+            Arc::new(MemoryBuffer::from(vec![0x2C, 0x01])),
+        );
+        assert_eq!(us.first::<u32>().unwrap(), 300, "index 0 is in range");
+        assert!(us.get::<u32>(Some(1)).is_err(), "index 1 is out of range");
+    }
+
+    /// An empty element must report an error rather than a bogus zero.
+    #[test]
+    fn empty_numeric_element_errors() {
+        let empty = DicomElement::new_bytes(
+            Tag::ROWS,
+            Vr::Us,
+            Arc::new(MemoryBuffer::from(Vec::new())),
+        );
+        assert!(empty.get::<u16>(None).is_err());
+    }
+
+    #[test]
+    fn get_uid_and_transfer_syntax() {        let ui = el(Vr::Ui, "1.2.840.10008.1.2");
         let uid: Uid = ui.first().unwrap();
         assert_eq!(uid.uid_type(), crate::model::uid::UidType::TransferSyntax);
         let ts: Arc<TransferSyntax> = ui.first().unwrap();

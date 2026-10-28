@@ -1,4 +1,4 @@
-//! Value Multiplicity (VM-01; docs/04-data-model.md §5.1).
+//! Value Multiplicity (VM-01; docs/01-architecture.md §3).
 
 use crate::error::{DataError, Error};
 
