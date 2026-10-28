@@ -770,15 +770,29 @@ pub fn render_grayscale_frame(dataset: &Dataset, frame: u32) -> Result<RawImage,
     let raw: &[u8] = raw.as_ref();
 
     let signed = pixel.pixel_representation() != 0;
+    // Normalise to the low `bits_stored` bits (docs §5): left-align on the high
+    // bit, then drop the sub-bit padding. `high_bit + 1 == bits_stored` (the
+    // common low-aligned case) leaves the value unchanged.
+    let bits_stored = pixel.bits_stored();
+    let high_bit = pixel.high_bit();
+    let normalize = |v: u16| -> u16 {
+        if bits_stored == 0 || bits_stored > bits || high_bit >= bits {
+            return v;
+        }
+        let up = bits - high_bit - 1;
+        let down = bits - bits_stored;
+        v.checked_shl(up as u32).unwrap_or(0).wrapping_shr(down as u32)
+    };
     let count = (width as usize) * (height as usize);
     let mut bytes = Vec::with_capacity(count * 4);
     for i in 0..count {
         let stored = if bits == 8 {
-            raw.get(i).copied().unwrap_or(0) as f64
+            let v = normalize(raw.get(i).copied().unwrap_or(0) as u16);
+            if signed { (v as i8) as f64 } else { v as f64 }
         } else {
             let lo = raw.get(i * 2).copied().unwrap_or(0);
             let hi = raw.get(i * 2 + 1).copied().unwrap_or(0);
-            let v = u16::from_le_bytes([lo, hi]);
+            let v = normalize(u16::from_le_bytes([lo, hi]));
             if signed { (v as i16) as f64 } else { v as f64 }
         };
         let gray = options.map(stored);
@@ -1387,8 +1401,7 @@ mod tests {
     }
 
     #[test]
-    fn from_image_pixel_value_tags_uses_smallest_and_largest() {
-        let mut ds = gray_image(1, 1, 16, &[0], None, None);
+    fn from_image_pixel_value_tags_uses_smallest_and_largest() {        let mut ds = gray_image(1, 1, 16, &[0], None, None);
         ds.insert_value(Tag::new(0x0028, 0x0106), 0u16); // SmallestImagePixelValue
         ds.insert_value(Tag::new(0x0028, 0x0107), 1000u16); // LargestImagePixelValue
         let o = GrayscaleRenderOptions::from_image_pixel_value_tags(&ds).unwrap();
@@ -1398,6 +1411,21 @@ mod tests {
         // absent tags → error
         let bare = gray_image(1, 1, 8, &[0], None, None);
         assert!(GrayscaleRenderOptions::from_image_pixel_value_tags(&bare).is_err());
+    }
+
+    #[test]
+    fn grayscale_normalises_high_bit_padding_before_windowing() {
+        // 12-bit values stored left-aligned in a 16-bit word (bits_allocated=16,
+        // bits_stored=12, high_bit=15). Stored 0x7FF0 must normalise to 2047 and
+        // map to mid grey through a [0..4095] window.
+        let mut ds = gray_image(1, 1, 16, &[0x7FF0], None, None);
+        ds.insert_value(Tag::new(0x0028, 0x0101), 12u16); // BitsStored
+        ds.insert_value(Tag::new(0x0028, 0x0102), 15u16); // HighBit
+        ds.insert_str(Tag::new(0x0028, 0x1050), Vr::Ds, "2047.5"); // centre of 12-bit range
+        ds.insert_str(Tag::new(0x0028, 0x1051), Vr::Ds, "4095"); // full 12-bit width
+        let image = render_frame(&ds, 0).unwrap();
+        let g = image.as_bytes()[0];
+        assert!(g.abs_diff(128) <= 1, "0x7FF0 normalises to 2047 → mid grey: {g}");
     }
 
     #[test]
