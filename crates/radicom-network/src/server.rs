@@ -131,6 +131,7 @@ pub struct DicomServer<P: ServiceProvider> {
     provider: Arc<P>,
     options: ServerOptions,
     local_addr: std::net::SocketAddr,
+    _registration: crate::registry::DicomServerRegistration,
     connected_clients: Arc<AtomicUsize>,
 }
 
@@ -143,11 +144,13 @@ impl<P: ServiceProvider + 'static> DicomServer<P> {
     ) -> Result<Self> {
         let listener = TcpListener::bind(addr).await.map_err(NetworkError::Io)?;
         let local_addr = listener.local_addr().map_err(NetworkError::Io)?;
+        let registration = crate::registry::DicomServerRegistry::register(local_addr)?;
         Ok(DicomServer {
             listener,
             provider,
             options,
             local_addr,
+            _registration: registration,
             connected_clients: Arc::new(AtomicUsize::new(0)),
         })
     }
@@ -3798,5 +3801,18 @@ mod tests {
             other => panic!("expected a release timeout, got {other:?}"),
         }
         peer.abort();
+    }
+
+    #[tokio::test]
+    async fn bound_server_reserves_and_releases_its_address() {
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), ServerOptions::default())
+            .await
+            .unwrap();
+        let address = server.local_addr();
+        assert!(!crate::registry::DicomServerRegistry::is_available(address));
+        let duplicate = DicomServer::bind(address, Arc::new(VerificationProvider), ServerOptions::default()).await;
+        assert!(duplicate.is_err(), "the registry and OS both reject a duplicate bind");
+        drop(server);
+        assert!(crate::registry::DicomServerRegistry::is_available(address));
     }
 }

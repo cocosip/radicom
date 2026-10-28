@@ -20,6 +20,7 @@ pub mod message;
 pub mod nservice;
 pub mod observability;
 pub mod pdu;
+pub mod registry;
 pub mod print_sop;
 pub mod server;
 pub mod services;
@@ -42,6 +43,7 @@ pub use error::{AbortSource, NetworkError, RejectResult, RejectSource, Result};
 pub use expert::{send as send_expert, Connection, ConnectionEvent, ExpertRequest, ExpertResponse, ResponseStream};
 pub use hosting::{HostedDicomServer, HostedServerConfig, ServerHealth};
 pub use observability::{CountingMetrics, MetricsCollector, MetricsSnapshot, NoopMetrics};
+pub use registry::{DicomServerRegistration, DicomServerRegistry};
 #[cfg(feature = "otel")]
 pub use observability::TracingMetrics;
 pub use nservice::{is_n_request, NServiceRequest, NServiceResponse, N_REQUEST_FIELDS};

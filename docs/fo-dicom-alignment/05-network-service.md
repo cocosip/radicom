@@ -52,7 +52,7 @@
 | N-ACTION / N-CREATE SCP | `IDicomNServiceProvider` | 已实现 | `services.rs:255-263`、`server.rs:411-416` | N-ACTION 有测试（`server.rs:2843`），N-CREATE 无 |
 | N-DELETE SCP | `IDicomNServiceProvider` | 已实现 | `server.rs:419-421` | 有测试（`server.rs:2883`） |
 | 每服务可插拔 provider | `IDicomC*Provider` 全套接口 | 部分实现 | `services.rs:184-268` `ServiceProvider` | 是**单一 trait**聚合所有服务，不是 fo-dicom 的每服务接口；一个 provider 必须实现全部服务（默认实现为"不支持"）。可插拔粒度更粗，但可用 |
-| 服务注册表 `(port, ip)` | `DicomServerRegistry` / `IDicomServerRegistry`（`DicomServerRegistry.cs:12-40`） | **缺失** | grep `Registry`/`IsAvailable` 仅命中 `server.rs:1201` 注释 | 无法查询/复用"该端口已有服务"，重复 bind 只能靠 OS 报错 |
+| 服务注册表 `(port, ip)` | `DicomServerRegistry` / `IDicomServerRegistry`（`DicomServerRegistry.cs:12-40`） | **已实现** | `registry.rs` `DicomServerRegistry`；`server.rs:146` 绑定时登记、释放时自动注销 | 进程内可查询地址占用；操作系统仍负责最终 bind 校验 |
 | `max_clients` 限流 | `DicomServer.cs:185-188` `SemaphoreSlim(MaxClientsAllowed)`、`:279-289` 等待配额 | **缺失（字段存在但从不生效）** | `server.rs:33` 定义、`server.rs:84` 默认 0；`run` `server.rs:125-147` 直接 `tokio::spawn`，全仓无 `Semaphore` | 实测：`max_clients=1` + 8 并发客户端 → 8 个全部成功，provider 峰值并发 8，见 §2.1 附实测 |
 | 已连接客户端数 | `DicomServer.cs:201-204` `GetNumberOfConnectedClients` | 缺失 | 无 | `hosting.rs:10-14` 文档自认未提供 |
 | 服务端 A-ASSOCIATE-RQ 读超时 | `DicomService.cs` ACSE 阶段超时 | **缺失** | `server.rs:177` 直接 `read_pdu` 无 timeout；`ServerOptions.association_timeout`（`server.rs:37`）只在客户端 `server.rs:1059` 使用 | 静默 TCP 连接可长期占用一个 task，见 §2.5 |
