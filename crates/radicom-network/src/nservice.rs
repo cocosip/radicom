@@ -134,6 +134,18 @@ impl NServiceResponse {
         response
     }
 
+    /// A successful N-CREATE response carrying the instance UID assigned by
+    /// the SCP. The request may omit an instance UID because the SCP creates it.
+    pub fn success_with_new_instance(
+        request: &NServiceRequest,
+        sop_instance_uid: impl Into<String>,
+        dataset: Option<Dataset>,
+    ) -> Self {
+        let mut response = NServiceResponse::success(request, dataset);
+        response.affected_sop_instance_uid = Some(sop_instance_uid.into());
+        response
+    }
+
     /// A failure response to `request` with `status`.
     pub fn failure(request: &NServiceRequest, status: u16) -> Self {
         NServiceResponse::from_request(request, status)
@@ -323,6 +335,17 @@ mod tests {
         assert_eq!(element_text(&bytes, 0x0000, 0x0002).as_deref(), Some("1.2.3"));
         assert_eq!(element_text(&bytes, 0x0000, 0x1000).as_deref(), Some("1.2.3.4"));
         assert_eq!(element_value(&bytes, 0x0000, 0x0003), None, "a response is not a request");
+    }
+
+    #[test]
+    fn an_n_create_success_can_return_the_new_instance_uid() {
+        let mut request = NServiceRequest::new(CommandField::NCreateRq, 3);
+        request.sop_class_uid = Some("1.2.3".into());
+        let response = NServiceResponse::success_with_new_instance(&request, "1.2.3.4", None);
+        let bytes = command_bytes(&response.to_command());
+
+        assert_eq!(element_text(&bytes, 0x0000, 0x0002).as_deref(), Some("1.2.3"));
+        assert_eq!(element_text(&bytes, 0x0000, 0x1000).as_deref(), Some("1.2.3.4"));
     }
 
     #[test]

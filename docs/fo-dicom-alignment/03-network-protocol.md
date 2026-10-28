@@ -104,7 +104,7 @@
 | N-SET 的 Modification List | PS3.7 §10.1.2 | **缺失** | — | grep 确认无实现（注意：ModificationList 实际走 Dataset，不强制） |
 | N 响应回显 Affected SOP Instance UID | `DicomNGetResponse.cs` 等 | 已实现 | `nservice.rs:110-111`、`nservice.rs:124-125` | — |
 | N 响应回显 Event/Action Type ID | `DicomNEventReportResponse.cs`、`DicomNActionResponse.cs` | 已实现 | `nservice.rs:112-113`、`nservice.rs:126-127` | — |
-| N-CREATE-RSP 返回新建实例 UID | `DicomNCreateResponse.cs` | 部分实现 | `nservice.rs:105-117` `from_request` | 仅复制请求侧值，无法携带服务端新建的实例 UID |
+| N-CREATE-RSP 返回新建实例 UID | `DicomNCreateResponse.cs` | **已实现** | `nservice.rs` `NServiceResponse::success_with_new_instance` | 可携带 SCP 分配的新实例 UID；普通响应仍回显请求值 |
 
 ### 1.6 传输 / TLS / 平台
 
