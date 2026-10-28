@@ -7,11 +7,9 @@
 //! loop on the caller's tokio runtime and [`stop`](HostedDicomServer::stop) drains
 //! it.
 //!
-//! Divergence from the doc sketch: `connected_clients` is not reported, because
-//! the SCP accept loop does not currently expose a per-connection hook; a fake
-//! zero would be worse than an honest omission. `ae_title` is validated (a real
-//! trust-boundary check) but the SCP negotiates by SOP class rather than filtering
-//! the called AE.
+//! `connected_clients` reports the number of live accepted connection tasks.
+//! `ae_title` is validated (a real trust-boundary check) and used to filter the
+//! called AE during association negotiation.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -21,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
 
 use crate::error::{NetworkError, Result};
-use crate::server::{DicomServer, ServerOptions};
+use crate::server::{ConnectedClients, DicomServer, ServerOptions};
 use crate::services::ServiceProvider;
 use crate::store::StoreSink;
 
@@ -100,6 +98,7 @@ pub struct ServerHealth {
 struct State {
     addr: Option<SocketAddr>,
     task: Option<JoinHandle<()>>,
+    connected_clients: Option<ConnectedClients>,
 }
 
 /// A lifecycle wrapper around a running DICOM server (fo-dicom AspNetCore package
@@ -119,7 +118,7 @@ impl<P: ServiceProvider + 'static> HostedDicomServer<P> {
         HostedDicomServer {
             config,
             provider: Arc::new(provider),
-            state: Mutex::new(State { addr: None, task: None }),
+            state: Mutex::new(State { addr: None, task: None, connected_clients: None }),
             listening: AtomicBool::new(false),
             last_error: Arc::new(Mutex::new(None)),
         }
@@ -150,6 +149,7 @@ impl<P: ServiceProvider + 'static> HostedDicomServer<P> {
         )
         .await?;
         let addr = server.local_addr();
+        let connected_clients = server.connected_clients();
 
         let error_slot = self.last_error.clone();
         let task = tokio::spawn(async move {
@@ -161,6 +161,7 @@ impl<P: ServiceProvider + 'static> HostedDicomServer<P> {
         let mut state = self.state.lock().expect("state lock");
         state.addr = Some(addr);
         state.task = Some(task);
+        state.connected_clients = Some(connected_clients);
         *self.last_error.lock().expect("error lock") = None;
         self.listening.store(true, Ordering::SeqCst);
         Ok(())
@@ -179,7 +180,19 @@ impl<P: ServiceProvider + 'static> HostedDicomServer<P> {
             let _ = task.await;
         }
         self.listening.store(false, Ordering::SeqCst);
+        self.state.lock().expect("state lock").connected_clients = None;
         Ok(())
+    }
+
+    /// Returns the number of live connection tasks, or zero while stopped.
+    pub fn connected_clients(&self) -> usize {
+        self.state
+            .lock()
+            .expect("state lock")
+            .connected_clients
+            .as_ref()
+            .map(ConnectedClients::count)
+            .unwrap_or(0)
     }
 
     /// Current health snapshot.
@@ -241,6 +254,35 @@ mod tests {
         server.stop().await.unwrap();
         assert!(!server.health().listening);
         assert!(server.local_addr().is_none());
+    }
+
+    #[tokio::test]
+    async fn connected_clients_reports_live_hosted_connections() {
+        let server = HostedDicomServer::new(HostedServerConfig::default(), EchoOnly);
+        server.start().await.unwrap();
+        let bound = server.local_addr().unwrap();
+        let addr = SocketAddr::from(([127, 0, 0, 1], bound.port()));
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while server.connected_clients() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("hosted server reports the accepted connection");
+
+        drop(client);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while server.connected_clients() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("hosted server removes closed connections");
+
+        server.stop().await.unwrap();
+        assert_eq!(server.connected_clients(), 0);
     }
 
     #[tokio::test]

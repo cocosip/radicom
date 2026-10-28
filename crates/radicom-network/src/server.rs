@@ -19,6 +19,7 @@ use radicom::model::dataset::Dataset;
 use radicom::model::tag::Tag;
 use radicom::model::transfer_syntax::syntaxes;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 
@@ -50,6 +51,30 @@ pub struct ServerOptions {
     pub tls: Option<crate::tls::TlsOptions>,
     /// Optional metrics collector (OBS-01); `None` disables instrumentation.
     pub metrics: Option<std::sync::Arc<dyn crate::observability::MetricsCollector>>,
+}
+
+/// A snapshot handle for the number of accepted connections that are still
+/// being served by an SCP.
+#[derive(Clone, Debug)]
+pub struct ConnectedClients {
+    count: Arc<AtomicUsize>,
+}
+
+impl ConnectedClients {
+    /// Returns the current number of live connection tasks.
+    pub fn count(&self) -> usize {
+        self.count.load(Ordering::Acquire)
+    }
+}
+
+struct ConnectionCountGuard {
+    count: Arc<AtomicUsize>,
+}
+
+impl Drop for ConnectionCountGuard {
+    fn drop(&mut self) {
+        self.count.fetch_sub(1, Ordering::Release);
+    }
 }
 
 /// How an SCP handles User Identity negotiation (§4.3).
@@ -106,6 +131,7 @@ pub struct DicomServer<P: ServiceProvider> {
     provider: Arc<P>,
     options: ServerOptions,
     local_addr: std::net::SocketAddr,
+    connected_clients: Arc<AtomicUsize>,
 }
 
 impl<P: ServiceProvider + 'static> DicomServer<P> {
@@ -117,12 +143,24 @@ impl<P: ServiceProvider + 'static> DicomServer<P> {
     ) -> Result<Self> {
         let listener = TcpListener::bind(addr).await.map_err(NetworkError::Io)?;
         let local_addr = listener.local_addr().map_err(NetworkError::Io)?;
-        Ok(DicomServer { listener, provider, options, local_addr })
+        Ok(DicomServer {
+            listener,
+            provider,
+            options,
+            local_addr,
+            connected_clients: Arc::new(AtomicUsize::new(0)),
+        })
     }
 
     /// The bound address, useful when binding to port 0.
     pub fn local_addr(&self) -> std::net::SocketAddr {
         self.local_addr
+    }
+
+    /// Returns a handle that observes live connection tasks after `run` moves
+    /// the server into its accept loop.
+    pub fn connected_clients(&self) -> ConnectedClients {
+        ConnectedClients { count: self.connected_clients.clone() }
     }
 
     /// Serves connections until the listener errors (§8).
@@ -133,6 +171,7 @@ impl<P: ServiceProvider + 'static> DicomServer<P> {
     pub async fn run(self) -> Result<()> {
         let provider = self.provider.clone();
         let options = self.options.clone();
+        let connected_clients = self.connected_clients.clone();
         // 0 = unlimited (a semaphore with no permits would block forever)
         let slots = (options.max_clients > 0)
             .then(|| Arc::new(tokio::sync::Semaphore::new(options.max_clients)));
@@ -155,9 +194,12 @@ impl<P: ServiceProvider + 'static> DicomServer<P> {
             };
             let provider = provider.clone();
             let options = options.clone();
+            connected_clients.fetch_add(1, Ordering::AcqRel);
+            let count_guard = ConnectionCountGuard { count: connected_clients.clone() };
             tokio::spawn(async move {
                 // the slot is released when the connection task ends
                 let _permit = permit;
+                let _count_guard = count_guard;
                 #[cfg(feature = "tls")]
                 if let Some(tls) = options.tls.clone() {
                     // a failed handshake ends this connection only
@@ -175,6 +217,8 @@ impl<P: ServiceProvider + 'static> DicomServer<P> {
     pub async fn accept_one(&self) -> Result<()> {
         let (stream, _peer) = self.listener.accept().await.map_err(NetworkError::Io)?;
         crate::transport::apply_options(&stream, &self.options.tcp)?;
+        self.connected_clients.fetch_add(1, Ordering::AcqRel);
+        let _count_guard = ConnectionCountGuard { count: self.connected_clients.clone() };
         #[cfg(feature = "tls")]
         if let Some(tls) = self.options.tls.clone() {
             let stream = tls.accept(stream).await?;
@@ -3433,6 +3477,32 @@ mod tests {
         first.release().await.unwrap();
         let third = Association::open(addr, "SCU", "SCP", vec![echo_context()], ClientOptions::default()).await;
         third.expect("the slot is released when the association ends").release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connected_client_handle_tracks_live_connections() {
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let clients = server.connected_clients();
+        tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+
+        let association = Association::open(addr, "SCU", "SCP", vec![echo_context()], ClientOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(clients.count(), 1);
+
+        association.release().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while clients.count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("released association leaves the connected client count");
     }
 
     #[tokio::test]
