@@ -1,0 +1,98 @@
+//! External-peer interop smoke tool (联调).
+//!
+//! Runs against a real DICOM peer (e.g. a fo-dicom C-STORE SCP or a Q/R SCP):
+//! a C-ECHO always, plus optional C-STORE of a file and optional C-FIND.
+//!
+//! Usage:
+//!   cargo run -p radicom-network --example peer_interop -- \
+//!     --peer 127.0.0.1:11112 --calling RADICOM --called DCM4CHE \
+//!     [--store tests-data\explicit-le\GH178.dcm] \
+//!     [--find STUDY --patient-name "Doe*" --study-uid 1.2.3]
+//!
+//! Levels for --find: PATIENT | STUDY | SERIES | IMAGE. Filters are optional.
+//! The process exits non-zero when C-ECHO or C-STORE returns a failure status.
+
+use radicom::io::file::DicomFile;
+use radicom::model::tag::Tag;
+use radicom::model::vr::Vr;
+use radicom_network::association::sop_class;
+use radicom_network::cfind::{CFindRequest, QueryRetrieveLevel, QueryRoot};
+use radicom_network::client::DicomClient;
+
+fn arg(args: &[String], name: &str) -> Option<String> {
+    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+    let peer = arg(&args, "--peer").unwrap_or_else(|| "127.0.0.1:11112".into());
+    let calling = arg(&args, "--calling").unwrap_or_else(|| "RADICOM".into());
+    let called = arg(&args, "--called").unwrap_or_else(|| "ANY-SCP".into());
+    println!("peer={peer} calling={calling} called={called}");
+
+    let mut client = DicomClient::new(calling.clone(), called.clone(), peer.clone());
+
+    // 1) C-ECHO (Verification)
+    let echo = client.send_c_echo(sop_class::VERIFICATION).await?;
+    println!("C-ECHO status=0x{:04X} {}", echo.status, ok(echo.status));
+    let mut failed = echo.status != 0;
+
+    // 2) optional C-STORE
+    if let Some(path) = arg(&args, "--store").or_else(|| std::env::var("RADICOM_STORE_FILE").ok()) {
+        let file = DicomFile::open(&path)?;
+        let sop = file
+            .dataset
+            .try_get_str(Tag::new(0x0008, 0x0016))
+            .unwrap_or_default();
+        println!("C-STORE {path} (SOP {sop})");
+        let resp = client.send_c_store(&file).await?;
+        println!("C-STORE status=0x{:04X} {}", resp.status, ok(resp.status));
+        failed |= resp.status != 0;
+    }
+
+    // 3) optional C-FIND
+    if let Some(level_text) = arg(&args, "--find").or_else(|| std::env::var("RADICOM_FIND_LEVEL").ok()) {
+        let level = QueryRetrieveLevel::parse(&level_text)
+            .ok_or("bad --find level (PATIENT|STUDY|SERIES|IMAGE)")?;
+        let mut request = CFindRequest::new(level, QueryRoot::Study, 1);
+        if let Some(v) = arg(&args, "--patient-name") {
+            request = request.with_key(0x0010, 0x0010, Vr::Pn, v);
+        }
+        if let Some(v) = arg(&args, "--patient-id") {
+            request = request.with_key(0x0010, 0x0020, Vr::Lo, v);
+        }
+        if let Some(v) = arg(&args, "--study-uid") {
+            request = request.with_key(0x0020, 0x000D, Vr::Ui, v);
+        }
+        if let Some(v) = arg(&args, "--accession") {
+            request = request.with_key(0x0008, 0x0050, Vr::Sh, v);
+        }
+        let responses = client.send_c_find(&request).await?;
+        let matches: Vec<_> = responses.iter().filter(|r| r.is_pending()).collect();
+        println!("C-FIND level={level_text} matches={}", matches.len());
+        for response in matches {
+            if let Some(id) = &response.identifier {
+                let name = id.try_get_str(Tag::new(0x0010, 0x0010)).unwrap_or_default();
+                let study = id.try_get_str(Tag::new(0x0020, 0x000D)).unwrap_or_default();
+                println!("  - PatientName={name:?} StudyInstanceUID={study:?}");
+            }
+        }
+        let final_status = responses.last().map(|r| r.status).unwrap_or(0xFFFF);
+        println!("C-FIND final status=0x{final_status:04X}");
+    }
+
+    client.release().await;
+    if failed {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn ok(status: u16) -> &'static str {
+    if status == 0x0000 {
+        "OK"
+    } else {
+        "FAIL"
+    }
+}
