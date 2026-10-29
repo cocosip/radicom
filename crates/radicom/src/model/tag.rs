@@ -172,19 +172,19 @@ impl PartialOrd for Tag {
 
 impl Ord for Tag {
     fn cmp(&self, other: &Self) -> Ordering {
+        // fo-dicom `DicomTag.CompareTo`: group, then element, then (only when
+        // equal) the private creator. Ordering by the full element keeps tags
+        // from different private blocks distinct; the old `element & 0xFF` form
+        // made `(gggg,1101:C)` and `(gggg,1201:C)` compare equal and one could
+        // overwrite the other in a dataset.
         self.group
             .cmp(&other.group)
+            .then_with(|| self.element.cmp(&other.element))
             .then_with(|| match (&self.private_creator, &other.private_creator) {
-                (None, None) => self.element.cmp(&other.element),
-                (Some(a), Some(b)) => {
-                    a.cmp(b).then_with(|| (self.element & 0xFF).cmp(&(other.element & 0xFF)))
-                }
-                // Public elements sort before private ones within a group
-                // (matches ascending numeric order: even groups < odd groups
-                // is false in general, so this only orders mixed tags that
-                // share a group number — a malformed corner kept total).
+                (None, None) => Ordering::Equal,
                 (None, Some(_)) => Ordering::Less,
                 (Some(_), None) => Ordering::Greater,
+                (Some(a), Some(b)) => a.cmp(b),
             })
     }
 }
@@ -192,13 +192,8 @@ impl Ord for Tag {
 impl std::hash::Hash for Tag {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.group.hash(state);
-        match &self.private_creator {
-            None => self.element.hash(state),
-            Some(c) => {
-                (self.element & 0xFF).hash(state);
-                c.hash(state);
-            }
-        }
+        self.element.hash(state);
+        self.private_creator.hash(state);
     }
 }
 
@@ -272,11 +267,13 @@ mod tests {
 
     #[test]
     fn ordering_private_block_relative() {
-        // Same group + same creator: only the low 8 bits matter.
+        // Same group + same creator: the full element decides, so tags in
+        // different private blocks are distinct (they must not collide).
         let c = creator("ACME");
         let a = Tag::private(0x0029, 0x1101, c.clone());
         let b = Tag::private(0x0029, 0x1201, c.clone());
-        assert_eq!(a, b, "same creator, same low byte, different blocks");
+        assert_ne!(a, b, "different blocks are different tags");
+        assert!(a < b, "0x1101 < 0x1201 by full element");
         let c2 = Tag::private(0x0029, 0x1102, c);
         assert!(a < c2, "low byte 0x01 < 0x02");
     }
@@ -302,9 +299,13 @@ mod tests {
         let c1 = creator("ACME");
         let c2 = PrivateCreator::new("ACME");
         let a = Tag::private(0x0029, 0x1101, c1);
-        let b = Tag::private(0x0029, 0x1201, Arc::new(c2));
-        assert_eq!(a, b);
+        let b = Tag::private(0x0029, 0x1101, Arc::new(c2));
+        assert_eq!(a, b, "same group, element and creator content");
         assert_eq!(hash_of(&a), hash_of(&b));
+
+        // different private blocks are different tags (full element compares)
+        let other_block = Tag::private(0x0029, 0x1201, Arc::new(PrivateCreator::new("ACME")));
+        assert_ne!(a, other_block);
 
         let p = Tag::PATIENT_NAME;
         assert_eq!(hash_of(&p), hash_of(&Tag::from_u32(p.to_u32())));
@@ -361,8 +362,8 @@ mod tests {
 
     #[test]
     fn sorted_collection_is_stable() {
-        // Spec §1.2 ordering: within a group, creator string orders before
-        // the (block-relative) element, so all ACME tags precede BETA.
+        // Spec §1.2 ordering (fo-dicom CompareTo): group, then full element,
+        // then the private creator only when the element ties.
         let mut tags = [
             Tag::private(0x0029, 0x1202, creator("ACME")),
             Tag::ROWS,
@@ -378,8 +379,8 @@ mod tests {
                 "(0008,0050)",
                 "(0028,0010)",
                 "(0029,1101:ACME)",
-                "(0029,1202:ACME)",
-                "(0029,1101:BETA)"
+                "(0029,1101:BETA)",
+                "(0029,1202:ACME)"
             ]
         );
     }

@@ -73,7 +73,7 @@
 | Modality LUT Sequence（`(0028,3000)`） | ✅ | `ModalityLut`（`render/mod.rs`） | 描述符长度/位数校验、VR=SS 有符号处理已修复 |
 | Rescale Slope/Intercept | ✅ | `render/mod.rs:204-205,317-318` | |
 | VOI LUT Sequence（`(0028,3010)`） | ✅ | `VoiLut`（`render/mod.rs`） | 长度/VR/位数缩放与负数描述符取绝对值已覆盖（`a_negative_voi_lut_entry_count_uses_its_absolute_value`、`a_voi_lut_descriptor_first_mapped_is_signed_ss`） |
-| VOI LINEAR / LINEAR_EXACT / SIGMOID | 🟡 | `map_rescaled`（:447-475） | 公式基本对齐；`WindowWidth==1` 边界与 fo-dicom 不同，见 §2.13 |
+| VOI LINEAR / LINEAR_EXACT / SIGMOID | ✅ | `map_rescaled`（`render/mod.rs`） | 公式对齐；`WindowWidth==1` 已按 fo-dicom 阈值特判，`w<1` 走 `linear_exact`，无除零 |
 | `OutputLUT`（ColorMap） | 🟡 | `apply_colormap`（:609-619）、`ColorTable` | 只作用于灰度；索引取 `px[0]`（蓝色通道），灰度三通道相等所以可用但语义脆弱 |
 | `InvertLUT`（MONOCHROME1） | ✅ | `render/mod.rs:234-237,451-453,471-473` | |
 | `PrecalculatedLUT`（整数预计算表） | ✅ | `render/mod.rs` 预计算窗口表 | 窗口按存储值区间一次性预算成表再查表（`the_precalculated_window_matches_per_pixel_mapping`） |
@@ -90,7 +90,7 @@
 | PNG / BMP 导出 | ✅ | `to_png`（:657）、`to_bmp`（:693）、`save`（:736） | 自实现 CRCs，无外部依赖 |
 | `DicomImage`：帧/窗口/缩放/colormap/overlay 开关 | ✅ | `render/mod.rs:997-1163` | |
 | `DicomImage.Scale` | ✅ | `scaled`（:625-650） | |
-| `SpatialTransform`（旋转/翻转/pan） | 🟡 | `render/spatial.rs:14-19,53-103` | 非直角旋转被静默取整，见 §2.14 |
+| `SpatialTransform`（旋转/翻转/pan） | ✅ | `render/spatial.rs` | 与 fo-dicom 一致：只有 90/180/270 有意义，其余角度忽略并 `warn!`（不静默取整）；flip/pan 正确 |
 | `FrameGeometry`：ImagerPixelSpacing / PixelSpacing | ✅ | `render/geometry.rs:55-80` | |
 | `FrameGeometry`：`NominalScannedPixelSpacing` `(0018,2010)` | ✅ | `render/geometry.rs:82` | 作为 PixelSpacing/ImagerPixelSpacing 之后的第三优先级 |
 | enhanced multi-frame 的 per-frame 几何（Functional Group） | ✅ | `render/geometry.rs:59-101` `from_dataset_frame` | 读 Per-Frame `(5200,9230)`→Pixel Measures `(0028,9110)`，回退 Shared `(5200,9229)` |
@@ -107,7 +107,7 @@
 | `ImageDisplayFormat` STANDARD/ROW/COL/SLIDE/SUPERSLIDE/CUSTOM | 🟡 | `print/layout.rs:81-134` | 解析齐全；CUSTOM 的布局返回空（:126-162），SLIDE/SUPERSLIDE 恒 1 格 |
 | `ImageBox`（position/polarity/magnification/smoothing/min-max density/requested size） | 🟡 | `print/models.rs:266-340` | 所有属性均有读写方法；胶片渲染已应用 `REPLICATE` 最近邻放大和 RequestedImageSize 宽度约束，其余 magnification/smoothing/density 仍待接入 |
 | `PresentationLut` / `PresentationLUTShape` | ✅ | `print/presentation_lut.rs:20-183` | 已支持 Shape、Sequence、Descriptor/Data 解析与输出映射；Descriptor entry count 按 VR 解码 |
-| `FilmBox.Initialize()` 默认值填充 | 🟡 | `initialize_image_boxes`（`print/models.rs:178-187`） | 只填 position，且写的是**错误的 tag**，见 §2.6 |
+| `FilmBox.Initialize()` 默认值填充 | ✅ | `initialize_image_boxes`（`print/models.rs`） | tag 常量委托 `Tag::*` 生成表（`(2010,0510)` 正确），不再写错序列；见 §2.6 |
 | 胶片渲染（`FilmBoxExtensions.Print`） | 🟡 | `print/render.rs:51-86` | 画布/裁切/极性可用；`REPLICATE` 使用最近邻缩放，RequestedImageSize 控制请求宽度，smoothing/其它 magnification/border density 仍待接入 |
 | `Save` / `Load` / `Print` / 打印 SCU | ⛔ | 无 | 网络打印不在范围，视为有意不实现 |
 
@@ -259,7 +259,7 @@ out[o + x / 8] |= 0x80 >> (x % 8);
 
 `render/mod.rs:804` 的读取端 `bits[...] & (0x80 >> (ox % 8))` 与打包端**自洽**，所以两侧一起错，测试看不出来；但和任何符合标准的文件（以及 fo-dicom）都不兼容。
 
-### 2.6 【高】print 模块两个 tag 常量取值错误，image box 序列永远为空
+### 2.6 【已修复】print 模块 tag 常量已委托生成表
 
 **位置**：`print/models.rs:39`、`:43`；消费方 `:178-203`、`print/render.rs:70`。
 
@@ -352,13 +352,13 @@ fo-dicom `OverlayGraphic.cs:93` 是 `pixels[p] |= _color`（按位 OR 合成，�
 - bit-position 合法性判据已改为 fo-dicom 的 `BitPosition <= HighBit && BitPosition > HighBit - BitsStored`
   （见本节上文代码与 `bit_position_inside_stored_bits_is_rejected`）。
 
-### 2.13 【低】`WindowWidth == 1` 的边界与 fo-dicom 不同
+### 2.13 【已修复】`WindowWidth == 1` 已按 fo-dicom 阈值特判
 
 **位置**：`render/mod.rs:458-463`。
 
 fo-dicom `VOILinearLUT`（`VOILUT.cs:129-141`）对 `WindowWidth == 1` 特判：`value < WindowCenterMin05 ? MinimumOutputValue : MaximumOutputValue`。radicom 只在 `w < 1.0` 时切到 `linear_exact`，`w == 1.0` 落入通用公式 `(v-(c-0.5))/(w-1.0)`，分母为 0。整数输入时靠 `±inf` 被 clamp 侥幸得到正确结果（实测像素 0/99/100/200 → `[0,0,255,255]`，与 fo-dicom 一致），但 `v == c-0.5` 时得到 `NaN` → `0`（实测 `map(39.5)` 且 `c=40,w=1` → `0`，fo-dicom 为 `255`）。属边界缺陷，非常见路径。另 `Sigmoid` 在 `w == 0` 时用 `1.0` 顶替（:467），fo-dicom 会除以 0 得 `inf`；两者都不是好行为，但契约不同。
 
-### 2.14 【低】`SpatialTransform` 把任意 `(0,90]` 旋转静默取成 90°
+### 2.14 【已修复】非 90° 倍数的旋转被忽略并告警（与 fo-dicom 一致）
 
 **位置**：`render/spatial.rs:58-75`。
 

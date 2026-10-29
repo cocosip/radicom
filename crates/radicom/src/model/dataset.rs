@@ -842,6 +842,21 @@ mod tests {
     }
 
     #[test]
+    fn distinct_private_blocks_do_not_overwrite_each_other() {
+        // Two elements of the same creator in different private blocks must stay
+        // distinct; masking the element low byte used to make them collide.
+        let mut ds = Dataset::new();
+        let creator = Arc::new(crate::model::private_creator::PrivateCreator::new("ACME"));
+        let a = Tag::private(0x0029, 0x1101, creator.clone());
+        let b = Tag::private(0x0029, 0x1201, creator);
+        ds.insert_value(a.clone(), 1u16);
+        ds.insert_value(b.clone(), 2u16);
+        assert_eq!(ds.try_get::<u16>(a), Some(1));
+        assert_eq!(ds.try_get::<u16>(b), Some(2));
+        assert_eq!(ds.len(), 2);
+    }
+
+    #[test]
     fn copy_clone_and_retain() {
         let mut ds = Dataset::new();
         ds.insert_str(PATIENT_ID, Vr::Lo, "X");

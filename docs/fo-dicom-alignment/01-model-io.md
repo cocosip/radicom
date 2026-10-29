@@ -87,10 +87,10 @@
 | `CopyTo(dest, masked)` | ✅ | `dataset.rs` `copy_to_masked` / `copy_tags` | 支持按 `MaskedTag` 过滤与按 tag 列表复制（顶层，fo-dicom 语义） |
 | `Remove(Func<DicomItem,bool>)` | ✅ | `dataset.rs:280` `retain` | 语义等价（谓词签名不同） |
 | `DicomDatasetComparer`（可切换 `CompareInstancesByContent`、跳过 BulkDataUri） | ✅ | `dataset.rs` `content_equals` | 内容比较会跳过未解析的 BulkData（`skips_unresolved_bulk`），不再强制物化 `FileWindow`/`BulkDataUri` |
-| 私有 tag 排序契约 | 🟡 | `tag.rs` `Ord` | radicom 对私有 tag 按 `element & 0xFF` 再按 creator 排序（`tag.rs:159` 附近有注释承认这是混合公/私排序的折衷）；fo-dicom `CompareTo` 先全 `Element` 后 creator |
+| 私有 tag 排序契约 | ✅ | `tag.rs` `Ord`/`Hash` | 与 fo-dicom `DicomTag.CompareTo` 一致：group → **完整** element → creator；不同私有 block 不再相等，避免互相覆盖 |
 | `DicomTag.ToString("G"/"X"/"g"/"J")` | ✅ | `tag.rs` `to_string_with` / `to_json_string` | G/X/g/J 四种格式均实现（X 显示私有 block 掩码） |
 | `DicomTag.Parse` 严格性 | 🟡 | `tag.rs` `parse` | radicom 额外接受 `GGGGEEEE` 连写与不足 4 位十六进制（`tag.rs:parse_hex_u16`），fo-dicom 要求 ≥8 字符；radicom 拒绝 `(0028:0010)` 冒号形式 |
-| `DicomVM.Parse` 缓存 | 🟡 | `vm.rs:parse` | radicom 每次解析（`vm.rs:50-77`）；fo-dicom 用 `_vm` 字典缓存。仅 `with_generated` 阶段调用，非热路径 |
+| `DicomVM.Parse` 缓存 | ✅ | `vm.rs` `Vm::parse` | 仅在懒加载字典构建时解析一次并缓存于 `DictionaryEntry.vm`，非热路径，无需额外缓存 |
 | `DicomUIDGenerator.RegenerateAll` / `RootUID` / `GetMetaSopClass` | ✅ | `uid.rs` `regenerate_all` / `root_uid` / `meta_sop_class` | 三者均实现并有测试 |
 | `StorageCategory` 精确表 | 🟡 | `uid.rs:205` | 用 name-前缀启发式判定，fo-dicom 的生成表是逐条目精确值 |
 | `DicomTransferSyntax` 静态表 | ✅ | `transfer_syntax.rs` | 注册表 + `register`/`unregister`，比 fo-dicom 的静态表更灵活 |

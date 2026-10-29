@@ -177,6 +177,8 @@
 - **网络 / PdvAssembler**：内部缓冲改 `BytesMut`，`MessageUnit.bytes` 改 `bytes::Bytes`；单 PDV 消息
   直接共享 `Pdv.data`（零拷贝），分片消息 `freeze()` 一次。新增 `a_single_pdv_message_is_shared_not_copied`。
 - **内存 / CompositeBuffer**：`data()` 已缓存（`OnceCell<Bytes>`），文档旧描述已更正。
+- **模型 / 私有 tag 排序**：`Tag` 的 `Ord`/`Hash` 改为 fo-dicom 语义（group → 完整 element → creator）。
+  修复旧实现用 `element & 0xFF` 导致不同私有 block 的 tag 相等、可能互相覆盖的数据丢失隐患；更新排序/哈希测试并新增数据集层防覆盖测试。
 - .NET 专属抽象，Rust 不适用（按能力已覆盖）→ `INetworkManager`、`DicomTimeout`、`NetworkStreamCreationOptions`、
   `IImage`/`IImageManager`、`IPixelData` 接口、每服务独立 provider 接口、`DirectoryRecord` 指针、`CacheType`、`ArrayPool`。
 
