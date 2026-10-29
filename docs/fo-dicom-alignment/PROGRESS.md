@@ -243,3 +243,5 @@
 - **媒体 / DICOMDIR**：`rebuild()` 由“写两遍布局（两次克隆记录）”改为“写一次 + 原地 patch offsets”，新增 `Dataset::sequence_mut` 支持原地改序列项；偏移/图标测试全过。04 §3.5 标【已修复】。
 
 - **IO / 私有 creator**：`PrivateCreators` 由 `HashMap<(u16,u8), String>` 改为 `HashMap<u16, Box<[Option<Arc<PrivateCreator>>;256]>>`，私有元素解析不再哈希元组、也不为每个元素新建 `PrivateCreator`（改为 clone Arc）。01 §3.10 标【已修复】。
+
+- **媒体 / DICOMDIR（续）**：`record_positions` 不再 `to_bytes()` 做整文件序列化，也不再对整份 dataset 求长度；新增 `DicomFile::encoded_prefix_len` 直接按 preamble+DICM+meta 计算前缀长度。

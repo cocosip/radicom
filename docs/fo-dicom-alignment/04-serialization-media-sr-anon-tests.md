@@ -468,7 +468,7 @@ fo-dicom 的 `DicomJsonConverter` 有 `autoValidate`（`JsonDicomConverter.cs:69
 
 ### 3.5 【已修复】`rebuild()` 反复整文件序列化直到 offsets 收敛
 
-**现状**：只写一次布局（记录只克隆一次），随后按测得的绝对位置**原地 patch** 每条记录的 `(0004,1400)/(0004,1420)` 与序列副本中的对应值；不再第二遍重建序列。保留一次整文件序列化用于测量文件头长度。偏移方向测试（含嵌套 IconImageSequence）全过。
+**现状**：只写一次布局（记录只克隆一次），随后按测得的绝对位置**原地 patch** 每条记录的 `(0004,1400)/(0004,1420)` 与序列副本中的对应值；不再第二遍重建序列。文件头长度由 `DicomFile::encoded_prefix_len` 直接按 preamble+DICM+meta 计算，**不再整文件序列化**。偏移方向测试（含嵌套 IconImageSequence）全过。
 
 `media/mod.rs:447-456`：`loop { write_layout; to_bytes; item_offsets; if measured == positions return }`。每次迭代是**一次完整文件序列化**，最少 2 次（初始 `positions` 全 0 → 测出真值 → 再写一次），每次 `item_offsets` 又扫全文件每个字节。
 
