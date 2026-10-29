@@ -204,7 +204,7 @@ pub fn parse_dataset_bytes(bytes: &[u8], syntax: &TransferSyntax) -> Result<Data
         bytes
     };
     let mut source =
-        crate::io::byte_source::ByteSourceReader::new(std::io::Cursor::new(bytes.to_vec()), syntax.endian());
+        crate::io::byte_source::ByteSourceReader::new(std::io::Cursor::new(bytes), syntax.endian());
     let reader = crate::io::reader::DicomReader::default();
     let mut builder = DatasetBuilder::with_transfer_syntax(Arc::new(syntax.clone()));
     reader.read(&mut source, syntax, &mut builder, None)?;
