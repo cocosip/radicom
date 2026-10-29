@@ -77,7 +77,7 @@
 | 能力 | fo-dicom 参照 | 状态 | radicom 符号（file:line） | 说明 |
 | --- | --- | --- | --- | --- |
 | 内容树（15 ValueType / 7 Relationship / Continuity） | `StructuredReport/DicomContentItem.cs` | 已实现 | `sr/content_item.rs:38` `ValueType`、`:186` `Relationship`、`:150` `ContentItem` | 数量与 fo-dicom 一致 |
-| `StructuredReport` 打开/保存 | `StructuredReport/DicomStructuredReport.cs:33` `Open`/`:70` `Save` | 部分实现 | `sr/structured_report.rs:32` `open`、`:97` `save` | 只接受路径；**无 `SaveAsync`、无 `Stream` 重载**（fo-dicom 两者都有） |
+| `StructuredReport` 打开/保存 | `StructuredReport/DicomStructuredReport.cs:33` `Open`/`:70` `Save` | 已实现 | `sr/structured_report.rs` `open`/`open_reader`/`save`/`write_to` | 支持路径与 `Read+Seek`/`Write` 流重载（fo-dicom 的 Stream 形态）；`SaveAsync` 不适用（核心 crate 无 async） |
 | `StructuredReport` 继承 `DicomContentItem`（自身即根节点） | `DicomStructuredReport.cs:15`（`: DicomContentItem`） | 有意不实现 | `sr/structured_report.rs:16`（包一层 `DicomFile`） | radicom 用 `root_items()` 暴露根，组合优于继承，合理 |
 | 单根 CONTAINER 校验 | `DicomStructuredReport.cs`（`AutoValidate`） | 已实现 | `sr/structured_report.rs:81` `validate` | 显式调用，非自动 |
 | `CodeItem` 三段自动分派（short/long/URN） | `StructuredReport/DicomCodeItem.cs:24`（`CodeValue`/`LongCodeValue`/`URNCodeValue` 三选一） | **实现错误** | `sr/code_item.rs:23` `SHORT`、`:31` `LONG`、`:114` `needs_long` | 见 §2.2：模块的"短/长 tag 族"前提本身不成立；`SHORT` 整族非法，`LONG` 的 version tag 错，`LongCodeValue`/`URNCodeValue` 从未实现 |

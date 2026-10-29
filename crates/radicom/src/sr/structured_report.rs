@@ -33,6 +33,13 @@ impl StructuredReport {
         Ok(StructuredReport { file: DicomFile::open(path)? })
     }
 
+    /// Opens an SR from any seekable reader (fo-dicom's `Stream` overload).
+    pub fn open_reader<R: std::io::Read + std::io::Seek>(reader: &mut R) -> Result<Self, Error> {
+        Ok(StructuredReport {
+            file: DicomFile::from_reader(reader, &crate::io::file::ReadOptions::default())?,
+        })
+    }
+
     /// Reads an SR from bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         Ok(StructuredReport { file: DicomFile::from_bytes(bytes, &crate::io::file::ReadOptions::default())? })
@@ -93,17 +100,27 @@ impl StructuredReport {
         Ok(())
     }
 
-    /// Saves with explicit-length sequences/items (§4.3, fo-dicom behaviour).
-    pub fn save(&self, path: impl AsRef<Path>) -> Result<(), Error> {
-        let options = WriteOptions {
+    /// The write options matching fo-dicom's SR behaviour (§4.3).
+    fn write_options() -> WriteOptions {
+        WriteOptions {
             explicit_length_sequences: true,
             explicit_length_sequence_items: true,
             keep_group_lengths: false,
             ..Default::default()
-        };
-        let bytes = self.file.to_bytes(&options)?;
+        }
+    }
+
+    /// Saves with explicit-length sequences/items (§4.3, fo-dicom behaviour).
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<(), Error> {
+        let bytes = self.file.to_bytes(&Self::write_options())?;
         std::fs::write(path, bytes)
             .map_err(|e| Error::File(crate::error::FileError::Other(format!("write: {e}"))))
+    }
+
+    /// Writes the SR to any writer (fo-dicom's `Stream` overload), using the
+    /// same explicit-length options as [`Self::save`].
+    pub fn write_to<W: std::io::Write>(&self, writer: &mut W) -> Result<(), Error> {
+        self.file.write(writer, &Self::write_options())
     }
 }
 
@@ -184,5 +201,20 @@ mod tests {
         reopened.validate().unwrap();
         assert_eq!(reopened.root_items()[0].children().len(), 1);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_report_round_trips_through_a_writer_and_reader() {
+        let mut root = container();
+        root.add_child(ContentItem::text(CodeItem::new("121071", "DCM"), Relationship::Contains, "stream"));
+        let mut report = StructuredReport::from_dataset(Dataset::new());
+        report.set_root_items(vec![root]);
+
+        let mut bytes = Vec::new();
+        report.write_to(&mut bytes).unwrap();
+        let mut cursor = std::io::Cursor::new(bytes);
+        let reopened = StructuredReport::open_reader(&mut cursor).unwrap();
+        reopened.validate().unwrap();
+        assert_eq!(reopened.root_items()[0].children()[0].text_value().as_deref(), Some("stream"));
     }
 }
