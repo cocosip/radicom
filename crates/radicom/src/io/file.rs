@@ -107,7 +107,7 @@ impl DicomFile {
     ///
     /// The header and meta group are read with a bounded scan; the dataset is
     /// then parsed directly from the file so large values stay as lazy
-    /// [`FileWindow`]s instead of being copied into memory. A window serves
+    /// [`crate::model::buffer::FileWindow`]s instead of being copied into memory. A window serves
     /// range reads and `copy_to` streaming straight from disk; only `data()`
     /// materializes the value, once, because the buffer API returns `&[u8]`.
     pub fn open_with_options(path: impl AsRef<Path>, options: &ReadOptions) -> Result<Self, Error> {
@@ -413,7 +413,7 @@ fn parse_slice(
     Ok((builder.into_dataset(), outcome))
 }
 
-/// Builds lazy [`FileWindow`]s over a file for the parser (FILE-02).
+/// Builds lazy [`crate::model::buffer::FileWindow`]s over a file for the parser (FILE-02).
 ///
 /// Holds one shared `Arc<File>`; every window clone-references it and reads
 /// with positional I/O, so a file with many large values still holds one fd.
