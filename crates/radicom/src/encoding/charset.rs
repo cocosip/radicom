@@ -142,7 +142,7 @@ pub fn charset_for_encoding(encoding: &'static Encoding) -> Option<&'static str>
 pub fn decode_multi_charset(bytes: &[u8], first: &'static Encoding, pn: bool) -> String {
     // Pure 7-bit ASCII decodes to itself in every DICOM character set — ASCII is
     // invariant everywhere these tables reach — so skip the segment scan and the
-    // per-segment decoder calls (docs/fo-dicom-alignment/01 §3.9). The 0x1B check
+    // per-segment decoder calls. The 0x1B check
     // matters: an ISO 2022 escape designator is itself 7-bit, so a run full of
     // them must still go through the stateful path.
     if bytes.iter().all(|b| *b < 0x80 && *b != 0x1B) {

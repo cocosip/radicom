@@ -131,7 +131,7 @@ fn main() {
     }
 
     // file vs memory parsing of a many-element dataset: the file path must not
-    // pay per-element syscalls (docs/fo-dicom-alignment/05 §3.4)
+    // pay per-element syscalls
     let many = many_element_dataset(800);
     let many_file = DicomFile::from_dataset(many);
     let many_bytes = many_file.to_bytes(&WriteOptions::default()).unwrap();

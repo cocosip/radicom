@@ -12,8 +12,7 @@ use std::sync::Arc;
 /// The total length is measured once and the current position is tracked here,
 /// so `require`/`position`/`is_eof` cost no syscalls. Asking a `File` for
 /// `stream_position` + `seek(End)` + `seek(Start)` on every element made file
-/// parsing an order of magnitude slower than parsing from memory
-/// (docs/fo-dicom-alignment/05 §3.4).
+/// parsing an order of magnitude slower than parsing from memory.
 pub struct ByteSourceReader<R: Read + Seek> {
     inner: R,
     pub endian: Endian,
@@ -296,7 +295,7 @@ mod tests {
     #[test]
     fn position_tracking_matches_the_underlying_stream() {
         // the length is measured once and the position is tracked, so require
-        // and position cost no syscalls (docs/fo-dicom-alignment/05 §3.4)
+        // and position cost no syscalls
         let mut src = ByteSourceReader::new(io::Cursor::new(vec![1u8; 10]), Endian::Little);
         assert_eq!(src.position().unwrap(), 0);
         src.skip(3).unwrap();

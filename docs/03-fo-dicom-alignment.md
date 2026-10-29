@@ -67,5 +67,4 @@ cargo clippy --workspace --all-features --all-targets
 integration suites), 0 failures; clippy clean.
 
 > Caveat: this audit checks feature presence and code paths. It is **not** an adversarial correctness
-> review against real-world data. The differential review against fo-dicom found defects that these tests
-> do not catch — see [superpowers/00-executive-summary.md](superpowers/00-executive-summary.md).
+> review against real-world data; use the corpus and interoperability suites for that.

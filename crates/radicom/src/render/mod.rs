@@ -9,7 +9,7 @@
 //! transforms and the optional `image` crate backend are later REND work.
 //!
 //! fo-dicom's three-tier `CacheType` (None/PixelData/LookupTables/Display) is a
-//! deliberate non-goal here (docs/fo-dicom-alignment/02-pixel-render.md §1). A
+//! deliberate non-goal here. A
 //! render is per-frame and short-lived, `DicomImage` already parses the LUTs and
 //! geometry once into `Arc`s and reuses them across frames, and the caller owns
 //! the returned `RawImage`. A cache would add eviction/state for no measured win.
@@ -1139,7 +1139,7 @@ fn render_grayscale_with_threshold(
 
     // Precalculate the window: the mapping is a pure function of the stored
     // value, so evaluate it once per distinct value instead of once per pixel
-    // (docs/fo-dicom-alignment/02 §3.2). The table spans only the range that
+    // The table spans only the range that
     // actually occurs, so a 12-bit frame builds 4096 entries, not 65536.
     // Two streaming passes over the sample bytes find min/max and emit output,
     // instead of holding the whole frame in a `Vec<u16>` (§3.9).

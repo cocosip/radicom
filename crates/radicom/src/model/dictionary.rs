@@ -285,8 +285,7 @@ static GENERATED: Lazy<Arc<Dictionary>> = Lazy::new(|| {
 /// The active default dictionary, borrowed from a process-lifetime static.
 ///
 /// Lock-free and allocation-free: the hot path resolves one VR per element and
-/// a shared `RwLock` there serializes every parsing thread
-/// (docs/fo-dicom-alignment/05 §3.3).
+/// a shared `RwLock` there serializes every parsing thread.
 pub fn dictionary() -> &'static Dictionary {
     match DEFAULT.get() {
         Some(d) => d,

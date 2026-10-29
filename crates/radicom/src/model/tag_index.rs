@@ -10,8 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 // The table is built once and never mutated (unknown tags are not inserted), so
-// it needs no lock: a read is a plain load, not a shared cache-line write
-// (docs/fo-dicom-alignment/05 §3.3).
+// it needs no lock: a read is a plain load, not a shared cache-line write.
 static INDEX: Lazy<HashMap<u32, Arc<Tag>>> = Lazy::new(|| {
     // Seed from the generated constant table: ~5259 entries, built once.
     let mut m = HashMap::with_capacity(8192);

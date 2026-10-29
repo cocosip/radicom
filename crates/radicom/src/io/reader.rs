@@ -109,8 +109,7 @@ impl Default for DicomReader {
 ///
 /// A flat 256-slot table per group avoids hashing a `(u16, u8)` key for every
 /// private element, and the creator is stored as a shared `Arc` so resolving a
-/// private tag clones a pointer instead of allocating a fresh creator
-/// (docs/fo-dicom-alignment/01 §3.10).
+/// private tag clones a pointer instead of allocating a fresh creator.
 type PrivateCreators = HashMap<u16, Box<[Option<Arc<crate::model::private_creator::PrivateCreator>>; 256]>>;
 
 /// What ends one nesting level.

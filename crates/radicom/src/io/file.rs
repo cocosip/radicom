@@ -160,7 +160,7 @@ impl DicomFile {
             // Buffered reads: the parser issues several small reads per element,
             // and each one used to be its own syscall. This is safe now that the
             // source tracks its own position instead of asking the stream, so the
-            // buffer is never consulted for offsets (docs/fo-dicom-alignment/05 §3.4).
+            // buffer is never consulted for offsets.
             let buffered = std::io::BufReader::with_capacity(64 * 1024, file);
             // one shared handle for every lazy window over this file, rather
             // than one fd per large value

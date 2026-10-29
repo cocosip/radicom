@@ -96,8 +96,7 @@ pub fn bilinear_color24(
 ///
 /// The colour channels are resampled exactly like [`bilinear_color24`]; alpha is
 /// written opaque. Scaling straight from the render buffer avoids converting to
-/// RGB and back, which cost two extra full-image passes
-/// (docs/fo-dicom-alignment/02 §3.6).
+/// RGB and back, which cost two extra full-image passes.
 pub fn bilinear_bgra32(
     input: &[u8],
     input_width: usize,

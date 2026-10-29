@@ -442,7 +442,7 @@ macro_rules! pixel_read_methods {
 ///
 /// PixelData takes &mut Dataset because it can append frames; a renderer or
 /// transcoder that only reads can use this view and skip the per-call dataset
-/// clone (docs/fo-dicom-alignment/02 §3.4). It exposes the same accessors.
+/// clone. It exposes the same accessors.
 pub struct PixelDataRef<'a> {
     dataset: &'a Dataset,
     kind: PixelDataKind,

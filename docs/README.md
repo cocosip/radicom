@@ -20,8 +20,7 @@ docs/
 ├── 01-architecture.md           ← what the code must obey
 ├── 02-development-guide.md      ← features, progress, risks, testing
 ├── 03-fo-dicom-alignment.md     ← parity audit verdict
-├── 04-interop.md                ← real-peer testing procedure
-└── superpowers/                 ← temporary code-review reports (not a deliverable)
+└── 04-interop.md                ← real-peer testing procedure
 ```
 
 ## Authority
@@ -110,17 +109,3 @@ defined in [02-development-guide.md](02-development-guide.md) §2.
 - Source comments reference sections as `docs/<file>.md §N`. Moving or renumbering a document means
   updating those references; `grep -r "docs/" crates xtask` finds them all.
 - Historical day-by-day records live in `git log`, not in these documents.
-
-## Temporary Material (`superpowers/`)
-
-Development-time code-review reports produced by a differential walkthrough against fo-dicom. **Not a
-deliverable** — safe to delete or archive. The directory is git-ignored.
-
-| Document | Scope |
-|---|---|
-| `00-executive-summary.md` | Consolidated: missing features, correctness defects, performance, test quality |
-| `01-model-io.md` | `model/`, `io/`, `encoding/`, `validation/` |
-| `02-pixel-render.md` | `pixel/`, `render/` (excluding codec implementations) |
-| `03-network-protocol.md` | PDU, transport, TLS, association, DIMSE command model |
-| `04-serialization-media-sr-anon-tests.md` | `media/`, `sr/`, `anonymizer/`, `rules/`, `dump/`, `radicom-json`, plus the workspace-wide test audit |
-| `05-network-service.md` | Server, client, engine, C-FIND/GET/MOVE, store, hosting |
