@@ -201,9 +201,11 @@ impl DicomFile {
 
 
     /// Parses from a byte slice.
+    ///
+    /// The slice is parsed in place: it is not copied into a `Vec` first, which
+    /// matters for the C-STORE sink that already holds the dataset in memory.
     pub fn from_bytes(bytes: &[u8], options: &ReadOptions) -> Result<Self, Error> {
-        let mut cursor = Cursor::new(bytes);
-        Self::from_reader(&mut cursor, options)
+        Self::parse_raw(bytes, options)
     }
 
     /// Parses from any seekable reader (FILE-01).
@@ -212,7 +214,12 @@ impl DicomFile {
         reader
             .read_to_end(&mut raw)
             .map_err(|e| Error::File(FileError::Other(format!("read: {e}"))))?;
-        let (format, meta_bytes, dataset_bytes) = detect(&raw)?;
+        Self::parse_raw(&raw, options)
+    }
+
+    /// Parses a complete file image already in memory.
+    fn parse_raw(raw: &[u8], options: &ReadOptions) -> Result<Self, Error> {
+        let (format, meta_bytes, dataset_bytes) = detect(raw)?;
 
         // file meta is always Explicit VR Little Endian
         let file_meta = match meta_bytes {
@@ -260,7 +267,7 @@ impl DicomFile {
             .and_then(|uid| crate::model::transfer_syntax::parse(uid.trim()).ok())
             .unwrap_or_else(|| dataset_syntax(format, dataset_bytes));
 
-        let mut source = ByteSourceReader::new(Cursor::new(dataset_bytes.to_vec()), syntax.endian());
+        let mut source = ByteSourceReader::new(Cursor::new(dataset_bytes), syntax.endian());
         let mut builder = DatasetBuilder::with_transfer_syntax(syntax.clone());
         let outcome = DicomReader::default().read(&mut source, &syntax, &mut builder, Some(stop))?;
         Ok(DicomFile {
