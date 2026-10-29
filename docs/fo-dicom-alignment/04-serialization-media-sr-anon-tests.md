@@ -1,5 +1,9 @@
 # 序列化 / 介质 / SR / 匿名化 评审，以及全 workspace 测试质量审计
 
+> 状态提示：本文件是**走查当时的快照**，其中多数“高”缺陷此后已修复。逐条当前处置与证据见
+> [`PROGRESS.md`](PROGRESS.md) 与源码/测试；本文正文保留原始结论用于追溯。
+
+
 评审对象：
 
 - `crates/radicom/src/media/{mod,scanner,icon}.rs`（DICOMDIR、扫描器、缩略图）
@@ -50,25 +54,25 @@
 | 读记录树 + offset 拼接 | `DicomDirectory.cs`、`DicomDirectoryReaderObserver.cs:44` | 部分实现 | `media/mod.rs:583` `stitch`、`media/mod.rs:673` `item_offsets` | 用"扫描字节找 `FFFE,E000`"代替观察者的 `(uint)Position-8` 键；容忍度靠 `roots.is_empty()` 兜底，而非 `ParseDirectoryRecordNotExact` 的最近 offset |
 | 写两遍 offset | `DicomDirectory.cs:399` `CalculateOffsets`/`SetOffsets` | 部分实现 | `media/mod.rs:438` `rebuild`、`media/mod.rs:460` `write_layout` | **带 icon 时 first/last root offset 写错**，见 §2.1 |
 | `AddFile` 四层去重链 | `DicomDirectory.cs:474` `AddFile` / `CreateImageRecord` | 已实现 | `media/mod.rs:324` `add_file`、`:389` `find_or_create_child` | Patient→Study→Series→Instance，按 UID 复用层级记录 |
-| `DicomDirectoryEntry`（四层记录打包返回） | `DicomDirectory.cs:474`（返回 `DicomDirectoryEntry`） | 缺失 | — | `add_file` 返回 `&mut Self`，调用方拿不到"这次新建/复用了哪四条记录" |
+| `DicomDirectoryEntry`（四层记录打包返回） | `DicomDirectory.cs:474`（返回 `DicomDirectoryEntry`） | 已实现 | `media/mod.rs` `DicomDirectoryEntry`；`add_file_entry` | 返回本次新建/复用的四条记录索引 |
 | `RootDirectoryRecordCollection` / 每级遍历集合 | `DicomDirectory.cs`（`RootDirectoryRecordCollection` 等） | 部分实现 | `media/mod.rs:283` `walk`、`:276` `children` | 只给出 `(index, depth)` 与索引，没有强类型的层集合/迭代器 |
 | `DirectoryRecord` 作为对象（`NextDirectoryRecord` / `LowerLevelDirectoryRecord` / `Key`） | `DicomDirectory.cs:62` `DicomDirectoryRecord` | 部分实现 | `media/mod.rs:158` `DirectoryRecord{dataset,parent}` | 用 `parent: Option<usize>` + 索引重建树，没有 `next`/`lower` 指针字段，也没有 `Key` |
-| `DicomDirectoryRecord::ToString()` | `DicomDirectory.cs` | 缺失 | — | — |
+| `DicomDirectoryRecord::ToString()` | `DicomDirectory.cs` | 已实现 | `Display for DirectoryRecord`（`b41359f`） | 渲染记录 dataset 的 dump |
 | `FileSetID` 空值校验 | `DicomDirectory.cs`（`FileSetID` setter 校验空串） | 缺失 | `media/mod.rs:224` `new` | `DicomDirectory::new("")` 被接受，写出 `(0004,1130)` 空值 |
 | `AutoValidate` | `DicomDirectory.cs:44` | 缺失 | — | 无校验开关 |
 | 图标生成（`IconImageSequence`） | `Media/DicomIconImageSequenceBuilder.cs:28` | 部分实现 | `media/icon.rs:44` `build_icon`、`:292` `attach_icon` | 只支持 8-bit MONOCHROME2 灰度、无 colour（`:285` 测试显式断言"彩色图不产生 icon"）；`MAX_ICON_SIZE=128` 一致 |
 | 图标失败的静默容忍 | `DicomDirectory.cs`（`AddIconSequence` 内 `catch { }`） | 已实现 | `media/mod.rs:377-382` | 走 `generator.generate(...)?`，**错误会上抛**，比 fo-dicom 更严格；行为差异见 §2.8 |
-| `IIconGenerator(frameIndex)` 显式帧号参数 | `Media/IIconGenerator.cs` | 缺失 | `media/icon.rs:41` `IconGenerator::generate(&self, dataset)` | trait 无 `frame_index` 参数，帧选择在内部按 `RepresentativeFrameNumber`/中点算（`:105` `representative_frame`），调用方无法指定帧 |
+| `IIconGenerator(frameIndex)` 显式帧号参数 | `Media/IIconGenerator.cs` | 已实现 | `media/icon.rs` `generate_frame`（`c9091b4`） | trait 提供显式帧号；`explicit_frame_index_selects_the_requested_frame` 覆盖 |
 
 ### 1.2 文件扫描器（`media/scanner.rs`）
 
 | 能力 | fo-dicom 参照 | 状态 | radicom 符号（file:line） | 说明 |
 | --- | --- | --- | --- | --- |
 | 目录递归 + glob | `Media/DicomFileScanner.cs:26` | 已实现 | `media/scanner.rs:88` `scan_directory`、`:218` `Glob` | `*`/`?`/`**` 均支持，深度可限 |
-| 进度/发现事件 | `DicomFileScanner.cs`（`Progress`/`FileFound`/`Complete`） | 部分实现 | `media/scanner.rs:60` `ScanEvent::{Progress,File}` | 只有两个事件；**无 `Complete`**，无扫描总会话事件 |
-| `Stop()` 取消 | `DicomFileScanner.cs:97` | 缺失 | — | 只能靠 `|path| Err(...)` 从回调里硬中断，没有显式 `Stop()` |
+| 进度/发现事件 | `DicomFileScanner.cs`（`Progress`/`FileFound`/`Complete`） | 已实现 | `media/scanner.rs` `ScanEvent::{Progress,File,Complete}`（`dad8d74`） | 含扫描完成事件与 `ScanSummary` |
+| `Stop()` 取消 | `DicomFileScanner.cs:97` | 已实现 | `media/scanner.rs` `ScanControl::stop`（`ecc51ac`） | 显式取消控制 |
 | `ProgressFilesCount`（预先统计文件总数） | `DicomFileScanner.cs:48` | 缺失 | — | `Progress` 只带 `scanned`/`matched` 计数，没有总数 |
-| `CheckForValidHeader`（只读 DICM 头快速过滤） | `DicomFileScanner.cs:158` | 缺失 | — | `scan_directory` 只要 glob 匹配就回调，不预判是否 DICOM |
+| `CheckForValidHeader`（只读 DICM 头快速过滤） | `DicomFileScanner.cs:158` | 已实现 | `ScanOptions::check_for_valid_header`（`fbf1f9e`） | 打开前先校验 PS3.10 头 |
 | 异步（`Task.Run` + `IProgress`） | `DicomFileScanner.cs:26` | 有意不实现 | `media/scanner.rs:7-11`（模块注释说明理由） | 核心 crate 不带 async 依赖，由调用方放到阻塞线程；理由已在文档写明，可接受 |
 | `DicomDirectoryBuilder` | `DicomFileScanner.cs:188` | 已实现 | `media/scanner.rs:281` | — |
 
@@ -81,7 +85,7 @@
 | `StructuredReport` 继承 `DicomContentItem`（自身即根节点） | `DicomStructuredReport.cs:15`（`: DicomContentItem`） | 有意不实现 | `sr/structured_report.rs:16`（包一层 `DicomFile`） | radicom 用 `root_items()` 暴露根，组合优于继承，合理 |
 | 单根 CONTAINER 校验 | `DicomStructuredReport.cs`（`AutoValidate`） | 已实现 | `sr/structured_report.rs:81` `validate` | 显式调用，非自动 |
 | `CodeItem` 三段自动分派（short/long/URN） | `StructuredReport/DicomCodeItem.cs:24`（`CodeValue`/`LongCodeValue`/`URNCodeValue` 三选一） | **实现错误** | `sr/code_item.rs:23` `SHORT`、`:31` `LONG`、`:114` `needs_long` | 见 §2.2：模块的"短/长 tag 族"前提本身不成立；`SHORT` 整族非法，`LONG` 的 version tag 错，`LongCodeValue`/`URNCodeValue` 从未实现 |
-| `DicomCodeItem::FromUrn` | `DicomCodeItem.cs:50` | 缺失 | — | 无 URN → CodeItem 的解析入口（`needs_long` 只是按前缀选 tag） |
+| `DicomCodeItem::FromUrn` | `DicomCodeItem.cs:50` | 已实现 | `sr/code_item.rs` `from_urn`（`2ec3a5d`） | URN → CodeItem 入口 |
 | `DicomCodeItem` 相等语义（Value+Scheme+Version） | `DicomCodeItem.cs:110` `Equals` | 已实现 | `sr/code_item.rs:39` `#[derive(PartialEq, Eq)]` | 字段含 `value`/`scheme`/`meaning`/`scheme_version`；`meaning` 也参与相等，比 fo-dicom 更严（fo-dicom 不比 meaning） |
 | `DicomMeasuredValue`（decimal + units） | `StructuredReport/DicomMeasuredValue.cs` | 部分实现 | `sr/content_item.rs:200` `MeasuredValue` | 有无单位 code 支持；精度见 §2.6 |
 | `DicomReferencedSOP` | `StructuredReport/DicomReferencedSOP.cs` | 已实现 | `sr/content_item.rs:236` `ReferencedSop` | — |
@@ -100,7 +104,7 @@
 | PatientName/ID 替换值 | `DicomAnonymizer.cs:60` | 已实现 | `anonymizer/mod.rs:57` `with_patient` | — |
 | 文件级 meta 同步 | `DicomAnonymizer.cs:170` | 已实现 | `anonymizer/mod.rs:70` `anonymize_file_in_place` | — |
 | 自定义 profile / 注册 | `DicomAnonymizer.cs:29`（可 `Add` 行） | 部分实现 | `anonymizer/profile.rs:232` `parse`、`:52` `with_profile` | 可整体替换 CSV，但不能像 fo-dicom 那样往已有 profile 里增删单行 |
-| 公开 `ReplacedUIDs` 访问器 | `DicomAnonymizer.cs:74` | 缺失 | — | 无 |
+| 公开 `ReplacedUIDs` 访问器 | `DicomAnonymizer.cs:74` | 已实现 | `anonymizer/mod.rs` `replaced_uids()` | 每个 anonymizer 一份替换表 |
 
 ### 1.5 匹配/变换 DSL（`rules/`）
 
@@ -117,8 +121,8 @@
 | --- | --- | --- | --- | --- |
 | 单 dataset → JSON | `Serialization/DicomJson.cs:24` | 已实现 | `radicom-json/src/lib.rs:99` `dataset_to_json` | — |
 | JSON → 单 dataset | `DicomJson.cs:48` | 已实现 | `lib.rs:~360` `json_to_dataset` | — |
-| dataset 集合 → JSON 数组 | `DicomJson.cs:31` `ConvertDicomToJson(IEnumerable)` | 缺失 | — | 无数组形态（QIDO-RS 多结果） |
-| JSON 数组 → dataset 集合 | `DicomJson.cs:56` `ConvertJsonToDicomArray` | 缺失 | — | 同上 |
+| dataset 集合 → JSON 数组 | `DicomJson.cs:31` `ConvertDicomToJson(IEnumerable)` | 已实现 | `radicom-json/src/lib.rs` `datasets_to_json`（`ccb9468`） | QIDO-RS 多结果数组 |
+| JSON 数组 → dataset 集合 | `DicomJson.cs:56` `ConvertJsonToDicomArray` | 已实现 | `radicom-json/src/lib.rs` `json_to_datasets`（`ccb9468`） | 同上 |
 | group length 写出时剥离 | `JsonDicomConverter.cs` | **未实现** | `lib.rs:109-123` `dataset_to_value` | 见 §2.3 |
 | 空 SQ 不写 `Value` | `JsonDicomConverter.cs` | **不一致** | `lib.rs:135-144`、`:172-176` | radicom 写 `"Value":[]`，fo-dicom 不写 |
 | 空值组件写 `null` | `JsonDicomConverter.cs` | **不一致** | `lib.rs:214`、`:503-509` | radicom 写 `""`，fo-dicom 写 `null`（见 §2.7） |

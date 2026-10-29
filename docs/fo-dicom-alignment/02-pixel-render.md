@@ -1,5 +1,9 @@
 # 02 — pixel / render / print 审查报告
 
+> 状态提示：本文件是**走查当时的快照**，其中多数“高”缺陷此后已修复。逐条当前处置与证据见
+> [`PROGRESS.md`](PROGRESS.md) 与源码/测试；本文正文保留原始结论用于追溯。
+
+
 审查范围：`crates/radicom/src/pixel/`（`mod.rs`、`codec.rs`、`overlay.rs`、`photometric.rs`、`transcoder.rs`）、`crates/radicom/src/render/`（`mod.rs`、`bit_depth.rs`、`color_table.rs`、`geometry.rs`、`icon.rs`、`interpolation.rs`、`math.rs`、`pixel_converter.rs`、`reconstruction.rs`、`spatial.rs`）、`crates/radicom/src/print/`（`mod.rs`、`models.rs`、`layout.rs`、`render.rs`）。
 
 参照实现：`D:\Code\dotnet-source\fo-dicom\FO-DICOM.Core\Imaging\`、`FO-DICOM.Core\Printing\`、`Platform\FO-DICOM.Imaging.Desktop\`。

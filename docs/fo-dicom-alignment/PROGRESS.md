@@ -60,31 +60,32 @@
 | 05 §3.3/§3.4 全局锁 / seek | 已修复 | `94619fe`、`dd8bac1` |
 | 05 §1 取消模式 `DicomClientCancellationMode` | 已实现 | `1115692`；`DicomClient::shutdown` |
 | 05 `expert.rs` `RELEASE_TIMEOUT` 死常量 | 已删除 | `f894cc2` |
+| 02 §2.12 嵌入式 overlay 多帧/Origin | 已修复 | `af20450`；`embedded_overlay_extracts_the_plane_from_the_requested_frame` |
+| 04 §1 `StructuredReport` Stream 重载 | 已实现 | `15e36b5`；`open_reader`/`write_to` |
+| 03 §1/§3.7 网络标识两套语义 | 已统一 | `3e085f1`；`transport::network_identifier` 委托 MAC 形式 |
 
 ## 待办（按价值排序）
 
 1. **文档状态同步**：01/02/04 报告正文仍保留走查时的“缺失/部分实现”措辞，尚未逐条改成“已修复”。
    完成一个模块的实现后应顺手更新对应行，避免误导后续评审。
-2. **02 §2.12 嵌入式 overlay 多帧**：`OverlayData::extract_embedded`/`load` 仍只取第 0 帧且不按
-   `ImageFrameOrigin` 选帧；`render` 的 `composite_overlay` 未把当前帧传入。需要给 load 增加
-   frame 参数并用 `PixelData` 的按帧窗口切图。
-3. **03 §3.2 `write_pdu` 每 PDU 重编码**：代码已用注释标注为已知上限（无调用方可传入复用缓冲）；
+2. **03 §3.2 `write_pdu` 每 PDU 重编码**：代码已用注释标注为已知上限（无调用方可传入复用缓冲）；
    若要消除需把编码缓冲穿过 engine，属较大改动。
-4. **03 网络标识统一**：`transport.rs` 用主机名 FNV 哈希、`print_sop.rs` 用 MAC 拼接两套语义，
-   缺统一抽象（03 §1、§3.7）。
-5. **03/05 命令/数据缓冲上限**：`PduSplitter` 只有单一 `max_pdu`，未区分 fo-dicom 的
-   `MaxCommandBuffer`/`MaxDataBuffer`。
-6. **04 §1 其余形态项**：`DicomDirectory::AutoValidate`、`ProgressFilesCount`、
-   `StructuredReport` 的 Stream/`SaveAsync` 重载、自定义 profile 增删单行、`rules` 的 Regex
-   在默认 feature 下可用、图标彩色支持（fo-dicom 只做灰度，可视为设计取舍）。
-7. **05 其余**：监听式 linger（同步 API 无队列，属设计偏差，已在代码注释说明）、多请求
+3. **03/05 命令/数据缓冲上限**：fo-dicom 的 `MaxCommandBuffer`/`MaxDataBuffer` 是**发送侧批处理**
+   阈值（攒够多少字节再发一个 P-DATA），而 radicom 是"一条消息一个 P-DATA 序列"，
+   `PduSplitter` 只有 `max_pdu`/`max_pdvs`。这是吞吐形态差异，不是接收上限缺失；如要做需在
+   engine 跨消息批量发送，属较大改动。
+4. **04 §1 其余形态项**：`DicomDirectory::AutoValidate`（现仅有构造期 FileSetID 校验）、
+   `ProgressFilesCount`（扫描前预统计总数）、自定义 profile 增删单行（现只能整体替换 CSV）、
+   `rules` 的 Regex 在默认 feature 下可用、图标彩色支持（fo-dicom 也只做灰度，可视为设计取舍）、
+   `DirectoryRecord` 的 `next`/`lower`/`Key` 强类型指针（现用 parent 索引重建）。
+5. **05 其余**：监听式 linger（同步 API 无队列，属设计偏差，已在代码注释说明）、多请求
    watchdog 扫描、Expert 层真正流式、C-MOVE 逐实例串行流水线、C-GET 每实例重建 Transcoder。
-8. **01 其余低项**：`CopyTo` masked 重载、`ReadLargeOnDemand` 每元素一个 fd、`io_err` 保留
+6. **01 其余低项**：`CopyTo` masked 重载、`ReadLargeOnDemand` 每元素一个 fd、`io_err` 保留
    `needed`、读侧 `EvenLengthBuffer`、`BufferPool` 无消费者（形态项）、`Tag::parse` 宽容度。
-9. **P3 测试体系**：fo-dicom 全量语料已大量引入（`tests-data/` 34 个文件含失败样本与字符集），
+7. **P3 测试体系**：fo-dicom 全量语料已大量引入（`tests-data/` 34 个文件含失败样本与字符集），
    golden 仍多由自身生成；可继续把关键 golden 换成外部 oracle 并补齐标准字节用例。
 
-## 本轮（2026-10-29）新增
+## 本轮（2026-10-29，第 1 轮）新增
 
 - `3028af1` 默认 C-STORE sink 改为内存解析（去掉临时文件往返）。
 - `2ff0e69` `Dataset::content_equals`（fo-dicom `DicomDatasetComparer` 语义）。
@@ -93,3 +94,9 @@
 - `f894cc2` 删除死常量 `RELEASE_TIMEOUT`。
 - `1115692` `DicomClientCancellationMode` + `shutdown`。
 - `4aeadd8` 清理 print 测试的 clippy 警告。
+
+## 本轮（2026-10-29，第 2 轮）新增
+
+- `af20450` 嵌入式 overlay 按渲染帧切取位平面（`load_frame`/`composite_overlay_at_frame`）。
+- `15e36b5` `StructuredReport::open_reader`/`write_to` 流重载。
+- `3e085f1` `transport::network_identifier` 统一为 MAC 形式。

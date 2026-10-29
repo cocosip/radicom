@@ -1,5 +1,9 @@
 # 01 — model / io / encoding / validation 审查报告
 
+> 状态提示：本文件是**走查当时的快照**，其中多数“高”缺陷此后已修复。逐条当前处置与证据见
+> [`PROGRESS.md`](PROGRESS.md) 与源码/测试；本文正文保留原始结论用于追溯。
+
+
 审查范围：`crates/radicom/src/model/`、`io/`、`encoding/`、`validation/`、`error.rs`、`logging.rs`、`generated/mod.rs`。
 参照实现：`D:\Code\dotnet-source\fo-dicom\FO-DICOM.Core`。
 按要求排除：具体图像编解码实现（JPEG / JPEG-LS / J2K / HTJ2K / RLE 的编解码），本文不涉及。
