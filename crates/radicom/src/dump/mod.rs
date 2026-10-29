@@ -249,6 +249,33 @@ mod tests {
     }
 
     #[test]
+    fn byte_strings_and_fragments_are_rendered() {
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
+            Tag::OTHER_PATIENT_I_DS,
+            Vr::Lo,
+            Arc::new(crate::model::buffer::MemoryBuffer::from(b"HELLO".to_vec())),
+        )));
+        let out = dump_dataset(&ds, &DumpOptions::default());
+        assert!(out.contains("HELLO"), "printable byte strings render as text");
+
+        let mut empty = Dataset::new();
+        empty.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
+            Tag::OTHER_PATIENT_I_DS,
+            Vr::Lo,
+            Arc::new(crate::model::buffer::MemoryBuffer::from(Vec::<u8>::new())),
+        )));
+        assert!(dump_dataset(&empty, &DumpOptions::default()).contains("(empty)"));
+
+        let mut fragments = Dataset::new();
+        fragments
+            .insert_fragments(Tag::FLOAT_PIXEL_DATA, Vr::Ob)
+            .push_fragment(Arc::new(crate::model::buffer::MemoryBuffer::from(vec![1, 2])));
+        let out = dump_dataset(&fragments, &DumpOptions::default());
+        assert!(out.contains("fragment(s)"), "fragment sequence is rendered: {out}");
+    }
+
+    #[test]
     fn a_pixel_summary_reports_the_image_shape() {
         let mut ds = Dataset::new();
         ds.insert_value(Tag::ROWS, 512u16);

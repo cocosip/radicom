@@ -91,6 +91,20 @@ mod tests {
     }
 
     #[test]
+    fn write_to_log_covers_every_level() {
+        let ds = sample();
+        for level in [
+            LogLevel::Trace,
+            LogLevel::Debug,
+            LogLevel::Info,
+            LogLevel::Warn,
+            LogLevel::Error,
+        ] {
+            ds.write_to_log(level);
+        }
+    }
+
+    #[test]
     fn target_constants_are_stable() {
         assert_eq!(targets::NETWORK, "radicom::network");
         assert_eq!(targets::CODEC, "radicom::codec");

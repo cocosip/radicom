@@ -429,6 +429,30 @@ mod tests {
     }
 
     #[test]
+    fn uid_traits_and_remaining_storage_categories() {
+        use std::collections::HashSet;
+
+        let uid = Uid::parse("1.2.840.10008.1.2.1");
+        assert!(format!("{uid:?}").contains("Uid"));
+        assert_eq!(uid.to_string(), uid.value());
+        assert_eq!(<Uid as AsRef<str>>::as_ref(&uid), uid.value());
+        assert!(!uid.is_retired());
+        let mut set = HashSet::new();
+        set.insert(uid.clone());
+        assert!(set.contains(&Uid::new(uid.value())));
+
+        let volume = Uid::register("1.2.840.10008.9.1", "Volume Storage", UidType::SopClass, false);
+        assert_eq!(volume.storage_category(), StorageCategory::Volume);
+        assert!(volume.is_volume_storage());
+        let presentation = Uid::register("1.2.840.10008.9.2", "Presentation State Storage", UidType::SopClass, false);
+        assert_eq!(presentation.storage_category(), StorageCategory::PresentationState);
+        let waveform = Uid::register("1.2.840.10008.9.3", "Waveform Storage", UidType::SopClass, false);
+        assert_eq!(waveform.storage_category(), StorageCategory::Waveform);
+        let image = Uid::register("1.2.840.10008.9.4", "Image Storage", UidType::SopClass, false);
+        assert!(image.is_image_storage());
+    }
+
+    #[test]
     fn equality_by_value_only() {
         let a = Uid::register("1.2.840.10008.1.2", "Implicit VR LE", UidType::TransferSyntax, false);
         let b = Uid::parse("1.2.840.10008.1.2");

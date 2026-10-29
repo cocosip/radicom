@@ -394,6 +394,50 @@ mod tests {
     }
 
     #[test]
+    fn trim_split_case_and_pad_variants() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "xxHelloxx");
+        TransformRule::TrimCharacters(Tag::PATIENT_NAME, TrimPosition::Start, Some(vec!['x'])).apply(&mut ds);
+        assert_eq!(value(&ds, 0x0010, 0x0010).as_deref(), Some("Helloxx"));
+        TransformRule::TrimCharacters(Tag::PATIENT_NAME, TrimPosition::End, Some(vec!['x'])).apply(&mut ds);
+        assert_eq!(value(&ds, 0x0010, 0x0010).as_deref(), Some("Hello"));
+
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "  Doe  ");
+        TransformRule::TrimCharacters(Tag::PATIENT_NAME, TrimPosition::Both, None).apply(&mut ds);
+        assert_eq!(value(&ds, 0x0010, 0x0010).as_deref(), Some("Doe"));
+
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::OTHER_PATIENT_I_DS, Vr::Sh, "a,b;c");
+        TransformRule::SplitFormat(Tag::OTHER_PATIENT_I_DS, vec![',', ';'], "[{0}]".into()).apply(&mut ds);
+        assert_eq!(value(&ds, 0x0010, 0x1000).as_deref(), Some("[a/b/c]"));
+
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::OTHER_PATIENT_I_DS, Vr::Sh, "AbC");
+        TransformRule::ToLower(Tag::OTHER_PATIENT_I_DS).apply(&mut ds);
+        assert_eq!(value(&ds, 0x0010, 0x1000).as_deref(), Some("abc"));
+        TransformRule::PadString(Tag::OTHER_PATIENT_I_DS, -5, '0').apply(&mut ds);
+        assert_eq!(value(&ds, 0x0010, 0x1000).as_deref(), Some("00abc"));
+    }
+
+    #[test]
+    fn absent_tags_and_generate_uid_are_no_ops() {
+        let mut ds = Dataset::new();
+        TransformRule::Prefix(Tag::MODALITY, "P-".into()).apply(&mut ds);
+        TransformRule::Append(Tag::MODALITY, "-X".into()).apply(&mut ds);
+        TransformRule::TrimString(Tag::MODALITY, TrimPosition::Both, "x".into()).apply(&mut ds);
+        TransformRule::TrimCharacters(Tag::MODALITY, TrimPosition::Both, None).apply(&mut ds);
+        TransformRule::PadString(Tag::MODALITY, 4, '0').apply(&mut ds);
+        TransformRule::Truncate(Tag::MODALITY, 2).apply(&mut ds);
+        TransformRule::SplitFormat(Tag::MODALITY, vec![','], "{0}".into()).apply(&mut ds);
+        TransformRule::ToUpper(Tag::MODALITY).apply(&mut ds);
+        TransformRule::ToLower(Tag::MODALITY).apply(&mut ds);
+        TransformRule::GenerateUid(Tag::SOP_INSTANCE_UID).apply(&mut ds);
+        TransformRule::CopyValue(Tag::MODALITY, Tag::PATIENT_ID).apply(&mut ds);
+        assert!(ds.items().next().is_none(), "rules on absent tags do nothing");
+    }
+
+    #[test]
     fn a_condition_set_gates_the_transform() {
         use crate::rules::match_rule::{MatchOperator, MatchRule, MatchRuleSet};
         let conditions = MatchRuleSet::new(MatchOperator::And)

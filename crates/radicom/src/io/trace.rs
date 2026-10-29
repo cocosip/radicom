@@ -180,6 +180,26 @@ mod tests {
     }
 
     #[test]
+    fn trace_visits_sequences_and_fragments() {
+        use crate::model::dataset::Dataset;
+        use crate::model::vr::Vr;
+
+        let mut ds = Dataset::new();
+        let mut item = Dataset::new();
+        item.insert_str(Tag::PATIENT_NAME, Vr::Pn, "DOE^JOHN");
+        ds.insert_sequence(Tag::REFERENCED_IMAGE_SEQUENCE).push(item);
+        ds.insert_fragments(Tag::FLOAT_PIXEL_DATA, Vr::Ob)
+            .push_fragment(std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![1, 2, 3])));
+
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let mut bytes = Vec::new();
+        crate::io::writer::DicomWriter::new(crate::io::writer::WriteOptions::default())
+            .write_dataset(&ds, &syntax, &mut bytes)
+            .expect("encode");
+        trace(&bytes, &syntax).expect("trace parses sequences and fragments");
+    }
+
+    #[test]
     fn trace_reports_malformed_input() {
         let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
         // tag promises a 9999-byte value but no bytes follow
