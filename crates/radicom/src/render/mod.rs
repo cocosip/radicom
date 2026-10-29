@@ -279,7 +279,7 @@ impl GrayscaleRenderOptions {
 
         let use_voi_lut = voi_lut.is_some();
         let invert = dataset
-            .try_get_str(Tag::PHOTOMETRIC_INTERPRETATION)
+            .try_get_str_ref(Tag::PHOTOMETRIC_INTERPRETATION)
             .map(|pi| pi.trim() == "MONOCHROME1")
             .unwrap_or(false);
 
@@ -477,7 +477,7 @@ impl GrayscaleRenderOptions {
             self.rescale_intercept = 0.0;
         }
         self.invert = dataset
-            .try_get_str(Tag::PHOTOMETRIC_INTERPRETATION)
+            .try_get_str_ref(Tag::PHOTOMETRIC_INTERPRETATION)
             .map(|pi| pi.trim() == "MONOCHROME1")
             .unwrap_or(false);
         self.voi_lut_function = voi_function_from_dataset(dataset);
@@ -580,7 +580,7 @@ fn parse_modality_lut(dataset: &Dataset) -> Option<Arc<ModalityLut>> {
 /// The `(0028,1056)` VOILUTFunction selector (CS). Missing/unknown → LINEAR.
 /// fo-dicom `DicomImage.VOILUTFunction` mapping: SIGMOID / LINEAR_EXACT / LINEAR.
 fn voi_function_from_dataset(dataset: &Dataset) -> VoiFunction {
-    match dataset.try_get_str(Tag::VOILUT_FUNCTION).as_deref().map(str::trim) {
+    match dataset.try_get_str_ref(Tag::VOILUT_FUNCTION).map(str::trim) {
         Some(v) if v.eq_ignore_ascii_case("SIGMOID") => VoiFunction::Sigmoid,
         Some(v) if v.eq_ignore_ascii_case("LINEAR_EXACT") => VoiFunction::LinearExact,
         _ => VoiFunction::Linear,
@@ -600,7 +600,7 @@ fn is_xa_xrf(dataset: &Dataset) -> bool {
     const XA: &str = "1.2.840.10008.5.1.4.1.1.12.1";
     const XRF: &str = "1.2.840.10008.5.1.4.1.1.12.2";
     dataset
-        .try_get_str(Tag::SOP_CLASS_UID)
+        .try_get_str_ref(Tag::SOP_CLASS_UID)
         .map(|uid| {
             let uid = uid.trim();
             uid == XA || uid == XRF
@@ -640,7 +640,7 @@ fn first_number(dataset: &Dataset, tag: Tag) -> Option<f64> {
     if let Some(v) = dataset.try_get::<f64>(&tag) {
         return Some(v);
     }
-    let text = dataset.try_get_str(tag)?;
+    let text = dataset.try_get_str_ref(tag)?;
     text.split('\\').next()?.trim().parse::<f64>().ok()
 }
 
@@ -1315,8 +1315,8 @@ fn ycbcr_to_rgb(y: f64, cb: f64, cr: f64) -> (u8, u8, u8) {
 /// YBR_PARTIAL_422 → YCbCr→RGB conversion. Other PIs error.
 pub fn render_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error> {
     use crate::pixel::photometric::PhotometricInterpretation as Pi;
-    let pi = match dataset.try_get_str(Tag::PHOTOMETRIC_INTERPRETATION) {
-        Some(s) => Pi::parse(&s),
+    let pi = match dataset.try_get_str_ref(Tag::PHOTOMETRIC_INTERPRETATION) {
+        Some(s) => Pi::parse(s),
         // ACR-NEMA files may omit PI; infer from samples + palette (docs §1.1).
         None => Pi::infer_from_dataset(dataset),
     };
@@ -1514,8 +1514,8 @@ impl DicomImage {
     /// scale in order.
     pub fn render_frame(&self, frame: u32) -> Result<RawImage, Error> {
         use crate::pixel::photometric::PhotometricInterpretation as Pi;
-        let pi = match self.dataset.try_get_str(Tag::PHOTOMETRIC_INTERPRETATION) {
-            Some(s) => Pi::parse(&s),
+        let pi = match self.dataset.try_get_str_ref(Tag::PHOTOMETRIC_INTERPRETATION) {
+            Some(s) => Pi::parse(s),
             None => Pi::infer_from_dataset(&self.dataset),
         };
         // Only true monochrome goes through the window pipeline; palettes are

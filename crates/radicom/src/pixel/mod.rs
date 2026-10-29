@@ -133,7 +133,7 @@ impl<'a> PixelData<'a> {
 
     /// `(0028,0008)`; absent means one frame.
     pub fn number_of_frames(&self) -> u32 {
-        self.dataset.try_get_str(NUMBER_OF_FRAMES).and_then(|s| s.trim().parse().ok()).unwrap_or(1).max(1)
+        self.dataset.try_get_str_ref(NUMBER_OF_FRAMES).and_then(|s| s.trim().parse().ok()).unwrap_or(1).max(1)
     }
 
     /// `(0028,0100)`, validated to 1/8/16/32/64.
@@ -168,7 +168,7 @@ impl<'a> PixelData<'a> {
     }
 
     pub fn photometric_interpretation(&self) -> Option<PhotometricInterpretation> {
-        self.dataset.try_get_str(PHOTOMETRIC_INTERPRETATION).map(|s| PhotometricInterpretation::parse(&s))
+        self.dataset.try_get_str_ref(PHOTOMETRIC_INTERPRETATION).map(PhotometricInterpretation::parse)
     }
 
     pub fn transfer_syntax(&self) -> Arc<TransferSyntax> {

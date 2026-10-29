@@ -155,6 +155,20 @@ impl Dataset {
         self.try_get(tag)
     }
 
+    /// Borrowing string view for callers that only parse or compare the value
+    /// (photometric interpretation, frame count, ...). Avoids the `String`
+    /// allocation of [`Self::try_get_str`]; returns `None` for non-string VRs.
+    pub fn try_get_str_ref(&self, tag: impl AsRef<Tag>) -> Option<&str> {
+        let tag = self.normalize_read(tag.as_ref());
+        match self.items.get(&tag) {
+            Some(DicomItem::Element(element)) => match element.value() {
+                crate::model::element::ElementValue::Str(text) => Some(text.as_str()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Raw element access (zero-copy buffer reads via `get::<SharedBuffer>`).
     pub fn get_element(&self, tag: impl AsRef<Tag>) -> Result<&DicomElement, Error> {
         let tag = self.normalize_read(tag.as_ref());

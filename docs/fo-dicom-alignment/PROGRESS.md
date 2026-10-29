@@ -250,3 +250,5 @@
 - **渲染 / 02 §3.4 定性**：每次渲染 clone `Dataset` 收益为微秒级，消除需读写门拆分；标为【已定性，保留（低收益）】，代码处保留 `ponytail:` 说明。
 
 - **网络 / 异步**：`send_c_find_stream`/`send_c_move_stream`/`send_c_get_stream` 由 `Pin<Box<dyn Future>>` 改为原生 `async fn`，去掉每次调用的堆分配与动态派发；`expert.rs` 已在 async fn 中 await，无需装箱。
+
+- **模型 / 渲染（零分配字符串读）**：新增 `Dataset::try_get_str_ref(&Tag) -> Option<&str>`；`number_of_frames`、`photometric_interpretation` 及 `render_frame` 的 PI / VOILUTFunction / SOPClassUID / 首数值读取改用借用视图，热路径读文本 tag 不再分配 `String`。
