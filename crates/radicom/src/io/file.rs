@@ -180,7 +180,7 @@ impl DicomFile {
         dataset.set_transfer_syntax(syntax.clone());
 
         // the ACR-NEMA recognition code lives in the *dataset* (0008,0010)
-        let format = match dataset.try_get_str(Tag::RECOGNITION_CODE) {
+        let format = match dataset.try_get_str_ref(Tag::RECOGNITION_CODE) {
             Some(code) => match code.trim() {
                 "ACR-NEMA 1.0" => FileFormat::AcrNema1,
                 "ACR-NEMA 2.0" => FileFormat::AcrNema2,
@@ -234,7 +234,7 @@ impl DicomFile {
         let (mut dataset, outcome) = parse_dataset_with(dataset_bytes, &syntax, options)?;
         dataset.set_transfer_syntax(syntax);
         // the ACR-NEMA recognition code lives in the *dataset* (0008,0010)
-        let format = match dataset.try_get_str(Tag::RECOGNITION_CODE) {
+        let format = match dataset.try_get_str_ref(Tag::RECOGNITION_CODE) {
             Some(code) => match code.trim() {
                 "ACR-NEMA 1.0" => FileFormat::AcrNema1,
                 "ACR-NEMA 2.0" => FileFormat::AcrNema2,

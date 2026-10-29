@@ -165,14 +165,14 @@ pub struct DirectoryRecord {
 impl DirectoryRecord {
     pub fn record_type(&self) -> RecordType {
         self.dataset
-            .try_get_str(tags::RECORD_TYPE)
-            .map(|s| RecordType::parse(&s))
+            .try_get_str_ref(tags::RECORD_TYPE)
+            .map(RecordType::parse)
             .unwrap_or_else(|| RecordType::Other(String::new()))
     }
 
     /// `(0004,1500)` as a path; the stored form is `\`-separated.
     pub fn referenced_file_id(&self) -> Option<PathBuf> {
-        let id = self.dataset.try_get_str(tags::REFERENCED_FILE_ID)?;
+        let id = self.dataset.try_get_str_ref(tags::REFERENCED_FILE_ID)?;
         let mut path = PathBuf::new();
         for part in id.split('\\').filter(|part| !part.is_empty()) {
             path.push(part);

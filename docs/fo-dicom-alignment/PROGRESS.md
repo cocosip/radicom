@@ -68,6 +68,9 @@
 | 01 §1.3 `CopyTo(dest, masked)` / tag 列表 | 已实现 | `34955d5`；`copy_to_masked`/`copy_tags` |
 | 04 §1 `DicomDirectory::validate` / 环保护 | 已实现 | `DicomDirectory::validate`；`walk` 去重防环；`a_parent_cycle_is_reported_and_walk_terminates` |
 | 03 §1.4 状态码描述可扩展注册 | 已实现 | `6a6a43b`；`register_status_description`（对齐 `AddKnownDicomStatuses`） |
+| 01 §3.10 私有 creator 索引 | 已修复 | 按 group 的 256 槽块表 + 共享 `Arc<PrivateCreator>`；`de52fe1` |
+| 02 §3.4 每次渲染 clone `Dataset` | 已修复 | 新增只读 `PixelDataRef`，render/transcode/codec/icon/MPR 改用；`3bd7279`、`fafdae4` |
+| 04 §3.5 DICOMDIR `rebuild` 反复序列化 | 已修复 | 单次写布局 + 原地补 offsets + `encoded_prefix_len`；`ead657b`、`c903629` |
 
 > 截至本轮，五份报告中**已没有“缺失”行**：每一条要么已实现，要么明确改为“有意不实现/设计边界”。
 > 传输/TLS/平台一节已改为按 **Rust 生态**（tokio + socket2 + rustls）的能力判定，不照搬 .NET 的
@@ -90,7 +93,8 @@
    校验开关覆盖、`ProgressFilesCount` 因每文件一次 Progress 而不再是缺口、自定义 profile 增删行
    已提供 `with_row`、Regex 已改为独立 `regex-rules` feature。
 5. **05 其余**：监听式 linger（同步 API 无队列，属设计偏差，已在代码注释说明）、多请求
-   watchdog 扫描、Expert 层真正流式、C-MOVE 逐实例串行流水线、C-GET 每实例重建 Transcoder。
+   watchdog 扫描、Expert 层真正流式、C-MOVE 逐实例串行流水线。C-GET 的 Transcoder 已按
+   `(source, target)` 缓存复用。
 6. **01 其余低项**：`ReadLargeOnDemand` 每元素一个 fd、读侧 `EvenLengthBuffer`、`BufferPool`
    无消费者（形态项）、`Tag::parse` 宽容度。`CopyTo` masked/tag 列表重载与 `io_err` 的
    `needed` 已补齐。
@@ -262,3 +266,5 @@
 - **媒体 / 图标**：`IconGenerator::generate`/`generate_frame` 改为接收 `&Dataset`（内部用 `PixelDataRef`），`add_file_inner` 不再为生成预览克隆整个数据集；图标生成路径只读、零数据集复制。
 
 - **渲染 / MPR**：`reconstruction::read_grayscale` 改用 `PixelDataRef`，去除读取源数据集时的 clone；测试同样改为借用视图。
+
+- **字符串读取 / 媒体与 IO**：`DirectoryRecord::record_type`/`referenced_file_id`、`render/icon` 的 PhotometricInterpretation、`io/file` 的 ACR-NEMA recognition code 改用 `try_get_str_ref`，避免只比较/解析时的 `String` 分配。PROGRESS 状态表补齐 01 §3.10、02 §3.4、04 §3.5 的已修复行。

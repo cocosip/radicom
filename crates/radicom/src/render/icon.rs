@@ -35,9 +35,9 @@ impl IconImage {
     /// is rendered.
     pub fn try_from_sequence_item(item: &Dataset) -> Result<IconImage, Error> {
         let pi_text = item
-            .try_get_str(PHOTOMETRIC_INTERPRETATION)
+            .try_get_str_ref(PHOTOMETRIC_INTERPRETATION)
             .ok_or_else(|| invalid("icon item has no PhotometricInterpretation"))?;
-        let pi = PhotometricInterpretation::parse(&pi_text);
+        let pi = PhotometricInterpretation::parse(pi_text);
         if !matches!(
             pi,
             PhotometricInterpretation::Monochrome1
