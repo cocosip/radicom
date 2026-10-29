@@ -1,4 +1,5 @@
-//! xtask: workspace code generation tasks (`cargo xtask gen-dict`).
+//! xtask: workspace code generation and maintenance tasks
+//! (`cargo xtask gen-dict`, `cargo xtask coverage`).
 
 use std::fmt::Write as _;
 use std::fs;
@@ -9,13 +10,24 @@ use flate2::read::GzDecoder;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
+mod coverage;
+
 fn main() {
     let arg = std::env::args().nth(1);
     match arg.as_deref() {
-        Some("gen-dict") => gen_dict(),
+        Some("gen-dict") => {
+            let check = std::env::args().skip(2).any(|a| a == "--check");
+            gen_dict(check);
+        }
         Some("regen-goldens") => regen_goldens(),
+        Some("coverage") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            std::process::exit(coverage::run(&root(), &args));
+        }
         _ => {
-            eprintln!("usage: cargo xtask <gen-dict|regen-goldens>");
+            eprintln!("usage: cargo xtask <gen-dict [--check]|regen-goldens|coverage>");
+            eprintln!("  gen-dict [--check]                  regenerate (or verify) the dictionary sources");
+            eprintln!("  coverage [--min PCT] [--lcov PATH]  production line coverage floor");
             std::process::exit(2);
         }
     }
@@ -73,13 +85,26 @@ fn vr_list(attr: &str) -> String {
 }
 
 /// Parses the public dictionary XML (root `<dictionary>`, no creator).
-fn parse_dictionary_xml(reader: impl Read) -> Result<Vec<RawTag>, String> {
+/// Parses the public dictionary XML. Returns the root `version` attribute (the
+/// PS3.6 edition the data was generated from) and the tag rows.
+fn parse_dictionary_xml(reader: impl Read) -> Result<(String, Vec<RawTag>), String> {
     let mut reader = Reader::from_reader(std::io::BufReader::new(reader));
     reader.config_mut().trim_text(true);
+    let mut version = String::new();
     let mut tags: Vec<RawTag> = Vec::new();
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == b"dictionary" => {
+                for attr in e.attributes().flatten() {
+                    if attr.key.as_ref() == b"version" {
+                        version = attr
+                            .decode_and_unescape_value(reader.decoder())
+                            .map_err(|e| e.to_string())?
+                            .into_owned();
+                    }
+                }
+            }
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == b"tag" => {
                 let mut group = None;
                 let mut element = None;
@@ -129,7 +154,10 @@ fn parse_dictionary_xml(reader: impl Read) -> Result<Vec<RawTag>, String> {
         }
         buf.clear();
     }
-    Ok(tags)
+    if version.is_empty() {
+        return Err("dictionary XML has no root version attribute".into());
+    }
+    Ok((version, tags))
 }
 
 fn screaming_snake(keyword: &str) -> String {
@@ -160,7 +188,7 @@ fn screaming_snake(keyword: &str) -> String {
     out
 }
 
-fn emit_dict_source(public: &[RawTag], private: &[(String, RawTag)]) -> String {
+fn emit_dict_source(public: &[RawTag], private: &[(String, RawTag)], version: &str) -> String {
     /// Escapes a value for inclusion in a Rust string literal.
     fn lit(s: &str) -> String {
         s.replace('\\', "\\\\").replace('"', "\\\"")
@@ -215,6 +243,16 @@ fn emit_dict_source(public: &[RawTag], private: &[(String, RawTag)]) -> String {
         "//! dictionary spelling (\"1\", \"1-n\", \"2-2n\"); the runtime dictionary parses them."
     );
     let _ = writeln!(s, "#![allow(clippy::all)]");
+    s.push('\n');
+    let _ = writeln!(
+        s,
+        "/// The bundled dictionary data version, read from the XML root `version`."
+    );
+    let _ = writeln!(
+        s,
+        "pub const DICTIONARY_VERSION: &str = \"{}\";",
+        version.replace('"', "\\\"")
+    );
     s.push('\n');
     let _ = writeln!(
         s,
@@ -431,130 +469,203 @@ fn read_usv(path: &Path) -> Result<Vec<UsvRow>, String> {
     Ok(rows)
 }
 
-fn read_gz_xml(path: &Path) -> Result<Vec<RawTag>, String> {
+fn read_gz_xml(path: &Path) -> Result<(String, Vec<RawTag>), String> {
     let f = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     parse_dictionary_xml(GzDecoder::new(f))
 }
 
-fn gen_dict() {
+struct Generated {
+    files: Vec<(PathBuf, String)>,
+    public_tags: usize,
+    masked: usize,
+    private_rows: usize,
+    uids: usize,
+}
+
+/// Builds every generated source in memory (no writes), so `--check` and a
+/// normal run share one code path and cannot drift.
+fn build_generated_sources() -> Result<Generated, String> {
     let root = root();
     let dict_dir = root.join("crates/radicom-dict/dictionaries");
-    let public = read_gz_xml(&dict_dir.join("DICOMDictionary.xml.gz")).expect("public dictionary");
+    let (version, public) = read_gz_xml(&dict_dir.join("DICOMDictionary.xml.gz"))?;
+    let private_rows = {
+        let f = fs::File::open(dict_dir.join("PrivateDictionary.xml.gz"))
+            .map_err(|e| format!("private dictionary: {e}"))?;
+        parse_private_dictionary_xml(GzDecoder::new(f))?
+    };
+    let uids = read_usv(&dict_dir.join("uids.tsv"))?;
 
-    // Re-parse private XML capturing the creator per <dictionary> block:
-    // parse_dictionary_xml returns one creator; the private file nests
-    // multiple dictionaries, so walk again block-wise by splitting on the
-    // creator attribute via a full parse that tracks context.
-    let mut private_rows: Vec<(String, RawTag)> = Vec::new();
-    {
-        let f =
-            fs::File::open(dict_dir.join("PrivateDictionary.xml.gz")).expect("private dictionary");
-        let mut reader = Reader::from_reader(std::io::BufReader::new(GzDecoder::new(f)));
-        reader.config_mut().trim_text(true);
-        let mut creator = String::new();
-        let mut buf = Vec::new();
-        let mut in_tag = false;
-        let mut cur: Option<RawTag> = None;
-        loop {
-            match reader.read_event_into(&mut buf) {
-                Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match e.name().as_ref() {
-                    b"dictionary" => {
-                        creator.clear();
-                        for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"creator" {
-                                creator = attr
-                                    .decode_and_unescape_value(reader.decoder())
-                                    .expect("creator")
-                                    .into_owned();
-                            }
-                        }
-                    }
-                    b"tag" => {
-                        in_tag = !e.is_empty();
-                        let mut g = (0u16, 0xFFFFu16);
-                        let mut el = (0u16, 0xFFFFu16);
-                        let mut keyword = String::new();
-                        let mut vr = String::new();
-                        let mut vm = String::new();
-                        let mut retired = false;
-                        for attr in e.attributes().flatten() {
-                            let val = attr
+    let masked = public
+        .iter()
+        .filter(|t| t.group_mask != 0xFFFF || t.element_mask != 0xFFFF)
+        .count();
+    let files = vec![
+        (
+            root.join("crates/radicom-dict/src/generated/dict.rs"),
+            emit_dict_source(&public, &private_rows, &version),
+        ),
+        (
+            root.join("crates/radicom-dict/src/generated/uids.rs"),
+            emit_uids_source(&uids),
+        ),
+        (
+            root.join("crates/radicom/src/generated/tags.rs"),
+            emit_tag_consts(&public),
+        ),
+    ];
+    Ok(Generated {
+        files,
+        public_tags: public.len(),
+        masked,
+        private_rows: private_rows.len(),
+        uids: uids.len(),
+    })
+}
+
+/// Parses the private dictionary XML, tracking the `<dictionary creator>` block
+/// each `<tag>` belongs to. Self-closing `<tag .../>` rows are kept too (they
+/// carry no name text).
+fn parse_private_dictionary_xml(reader: impl Read) -> Result<Vec<(String, RawTag)>, String> {
+    let mut reader = Reader::from_reader(std::io::BufReader::new(reader));
+    reader.config_mut().trim_text(true);
+    let mut creator = String::new();
+    let mut rows: Vec<(String, RawTag)> = Vec::new();
+    let mut buf = Vec::new();
+    let mut in_tag = false;
+    let mut cur: Option<RawTag> = None;
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => match e.name().as_ref() {
+                b"dictionary" => {
+                    creator.clear();
+                    for attr in e.attributes().flatten() {
+                        if attr.key.as_ref() == b"creator" {
+                            creator = attr
                                 .decode_and_unescape_value(reader.decoder())
-                                .expect("attr")
+                                .map_err(|e| e.to_string())?
                                 .into_owned();
-                            match attr.key.as_ref() {
-                                b"group" => g = parse_masked(&val).expect("group"),
-                                b"element" => el = parse_masked(&val).expect("element"),
-                                b"keyword" => keyword = val,
-                                b"vr" => vr = vr_list(&val),
-                                b"vm" => vm = val,
-                                b"retired" => retired = val == "true",
-                                _ => {}
-                            }
-                        }
-                        cur = Some(RawTag {
-                            group: g.0,
-                            element: el.0,
-                            group_mask: g.1,
-                            element_mask: el.1,
-                            keyword,
-                            name: String::new(),
-                            vr,
-                            vm,
-                            retired,
-                        });
-                    }
-                    _ => {}
-                },
-                Ok(Event::Text(t)) => {
-                    if in_tag {
-                        if let Some(c) = cur.as_mut() {
-                            c.name = t.unescape().expect("text").into_owned();
                         }
                     }
                 }
-                Ok(Event::End(e)) => {
-                    if e.name().as_ref() == b"tag" {
-                        if let Some(c) = cur.take() {
-                            private_rows.push((creator.clone(), c));
-                        }
-                        in_tag = false;
-                    }
+                b"tag" => {
+                    cur = Some(private_tag(&e, reader.decoder())?);
+                    in_tag = true;
                 }
-                Ok(Event::Eof) => break,
-                Err(e) => panic!("private XML: {e}"),
                 _ => {}
+            },
+            Ok(Event::Empty(e)) => {
+                if e.name().as_ref() == b"tag" {
+                    // `<tag .../>` has no child text; keep the row immediately
+                    rows.push((creator.clone(), private_tag(&e, reader.decoder())?));
+                }
             }
-            buf.clear();
+            Ok(Event::Text(t)) => {
+                if in_tag {
+                    if let Some(c) = cur.as_mut() {
+                        c.name = t.unescape().map_err(|e| e.to_string())?.into_owned();
+                    }
+                }
+            }
+            Ok(Event::End(e)) => {
+                if e.name().as_ref() == b"tag" {
+                    if let Some(c) = cur.take() {
+                        rows.push((creator.clone(), c));
+                    }
+                    in_tag = false;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(format!("private XML: {e}")),
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(rows)
+}
+
+/// Parses one private `<tag …>` element's attributes (no text child needed).
+fn private_tag(
+    e: &quick_xml::events::BytesStart<'_>,
+    decoder: quick_xml::encoding::Decoder,
+) -> Result<RawTag, String> {
+    let mut g = (0u16, 0xFFFFu16);
+    let mut el = (0u16, 0xFFFFu16);
+    let mut keyword = String::new();
+    let mut vr = String::new();
+    let mut vm = String::new();
+    let mut retired = false;
+    for attr in e.attributes().flatten() {
+        let val = attr
+            .decode_and_unescape_value(decoder)
+            .map_err(|e| e.to_string())?
+            .into_owned();
+        match attr.key.as_ref() {
+            b"group" => g = parse_masked(&val)?,
+            b"element" => el = parse_masked(&val)?,
+            b"keyword" => keyword = val,
+            b"vr" => vr = vr_list(&val),
+            b"vm" => vm = val,
+            b"retired" => retired = val == "true",
+            _ => {}
         }
     }
+    Ok(RawTag {
+        group: g.0,
+        element: el.0,
+        group_mask: g.1,
+        element_mask: el.1,
+        keyword,
+        name: String::new(),
+        vr,
+        vm,
+        retired,
+    })
+}
 
-    let uids = read_usv(&dict_dir.join("uids.tsv")).expect("uids.tsv");
-
-    // Emit radicom-dict generated sources.
-    let gen_dir = root.join("crates/radicom-dict/src/generated");
-    fs::create_dir_all(&gen_dir).expect("create generated dir");
-    fs::write(
-        gen_dir.join("dict.rs"),
-        emit_dict_source(&public, &private_rows),
-    )
-    .expect("write dict.rs");
-    fs::write(gen_dir.join("uids.rs"), emit_uids_source(&uids)).expect("write uids.rs");
-
-    // Emit radicom typed tag constants.
-    let core_dir = root.join("crates/radicom/src/generated");
-    fs::create_dir_all(&core_dir).expect("create core generated dir");
-    fs::write(core_dir.join("tags.rs"), emit_tag_consts(&public)).expect("write tags.rs");
-
+/// Writes or checks the generated sources.
+fn gen_dict(check: bool) {
+    let generated = match build_generated_sources() {
+        Ok(generated) => generated,
+        Err(error) => {
+            eprintln!("gen-dict: {error}");
+            std::process::exit(1);
+        }
+    };
+    if check {
+        let mut stale = Vec::new();
+        for (path, expected) in &generated.files {
+            let committed = fs::read_to_string(path).unwrap_or_default();
+            // git may check files out with CRLF on Windows; compare logical content
+            if committed.replace("\r\n", "\n") != expected.replace("\r\n", "\n") {
+                stale.push(path.clone());
+            }
+        }
+        if !stale.is_empty() {
+            for path in &stale {
+                eprintln!("gen-dict: stale {}", path.display());
+            }
+            eprintln!(
+                "gen-dict --check: {} generated file(s) are out of date; run `cargo xtask gen-dict`",
+                stale.len()
+            );
+            std::process::exit(1);
+        }
+        eprintln!("gen-dict --check: generated sources are up to date");
+        return;
+    }
+    for (path, contents) in &generated.files {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create generated dir");
+        }
+        fs::write(path, contents).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    }
     eprintln!(
-        "gen-dict: {} public tags ({} masked), {} private rows, {} UIDs",
-        public.len(),
-        public
-            .iter()
-            .filter(|t| t.group_mask != 0xFFFF || t.element_mask != 0xFFFF)
-            .count(),
-        private_rows.len(),
-        uids.len()
+        "gen-dict: {} public tags ({} masked), {} private rows, {} UIDs; wrote {} files",
+        generated.public_tags,
+        generated.masked,
+        generated.private_rows,
+        generated.uids,
+        generated.files.len()
     );
 }
 
@@ -713,4 +824,47 @@ fn fixture_command_cfind_pending_rsp() -> Vec<u8> {
     let request = CFindRequest::study_query(1);
     let response = CFindResponse::pending(&request, Dataset::new());
     command_bytes(&response.to_command()).expect("encode command")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_dictionary_version_comes_from_the_xml_root() {
+        let xml = r#"<dictionary version="2026b"><tag group="0008" element="0060" keyword="Modality" vr="CS" vm="1">Modality</tag></dictionary>"#;
+        let (version, tags) = parse_dictionary_xml(xml.as_bytes()).unwrap();
+        assert_eq!(version, "2026b");
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].keyword, "Modality");
+        assert_eq!(tags[0].name, "Modality");
+    }
+
+    #[test]
+    fn a_self_closing_private_tag_is_kept() {
+        let xml = r#"<dictionaries><dictionary creator="ACME"><tag group="0011" element="xx10" vr="UN" vm="1"/></dictionary></dictionaries>"#;
+        let rows = parse_private_dictionary_xml(xml.as_bytes()).unwrap();
+        assert_eq!(rows.len(), 1, "the <tag/> row must not be dropped");
+        assert_eq!(rows[0].0, "ACME");
+        assert_eq!(rows[0].1.group, 0x0011);
+        assert_eq!(rows[0].1.element_mask, 0x00FF);
+        assert_eq!(rows[0].1.vr, "UN");
+    }
+
+    #[test]
+    fn generated_sources_carry_the_xml_version() {
+        let public = vec![RawTag {
+            group: 0x0008,
+            element: 0x0060,
+            group_mask: 0xFFFF,
+            element_mask: 0xFFFF,
+            keyword: "Modality".into(),
+            name: "Modality".into(),
+            vr: "CS".into(),
+            vm: "1".into(),
+            retired: false,
+        }];
+        let source = emit_dict_source(&public, &[], "2026b");
+        assert!(source.contains(r#"pub const DICTIONARY_VERSION: &str = "2026b";"#));
+    }
 }
