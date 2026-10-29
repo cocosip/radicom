@@ -51,18 +51,18 @@
 
 按用户要求排除 codec 编解码实现后，**骨架层面的覆盖度是高的**——fo-dicom 的主要模块在 radicom 都有对应物，且不少设计意图清楚（两遍 offset 重建、Bump 分配池、PDU 分帧、DIMSE 命令字编码等与 fo-dicom 逐字一致）。真正的差距集中在三类：
 
-### 1.1 有符号但行为不成立（比"缺失"更危险）
+### 1.1 走查发现的行为缺陷（表中 radicom 列已标注当前状态）
 
 | 能力 | fo-dicom | radicom | 后果 |
 | --- | --- | --- | --- |
-| 解析中的私有序列探测 | `DicomReader.cs:1099 IsPrivateSequence` / `:1124 IsPrivateSequenceBad` / `:365 handleBadPrivateSequence` | **无对应实现**（`reader.rs:431-446` 用永真探测代替） | implicit-VR + 坏私有序列文件必然跑飞（GH626 等） |
-| 私有 tag 按私有字典取 VR | `DicomReader.cs:393-409` | `reader.rs:187-207` 对私有 tag 直接返回 `Un` | 所有私有元素类型访问失效 |
-| `Suspended` / `IsPartial` | `DicomFile.cs:250` | `ReadOutcome` 只有 Success/Stopped；`is_partial` 硬编码 `false`（`file.rs:187`、`:234`） | 截断文件整体失败而非部分成功（GH179B） |
-| CP-246（UN 定义的 SQ 在 BE 下按 LE 读） | `DicomReader.cs:608-623` 条件为 `UN && !IsPrivate` | `reader.rs:576` 条件**恰好相反**（仅私有） | GH177 读错长度 |
-| `LongCodeValue` / `URNCodeValue` | `DicomTagGenerated.cs:513` `(0008,0119)` UC、`:?` `(0008,0120)` UR | 已实现（原为完全未实现） | `sr/code_item.rs` 按短/长/URN 三段分派，分别写入 `(0008,0100)` SH / `(0008,0119)` UC / `(0008,0120)` UR |
+| 解析中的私有序列探测 | `DicomReader.cs:1099 IsPrivateSequence` / `:1124 IsPrivateSequenceBad` / `:365 handleBadPrivateSequence` | 已修复（`reader.rs` `private_probe` / `parse_private_sequence`） | 私有序列探测已接入，GH626 类 implicit-VR 文件可解析（`01 §2.2`） |
+| 私有 tag 按私有字典取 VR | `DicomReader.cs:393-409` | 有意不实现（不内置厂商私有字典；未知私有 tag 取 `UN`，隐式 VR 仍可解析） | 标准字典覆盖的 tag 正常；厂商私有字典按需由调用方提供（`01 §1` 已定性） |
+| `Suspended` / `IsPartial` | `DicomFile.cs:250` | 已实现（`ReadOutcome::Suspended` / `DicomFile.is_partial`） | 截断文件返回部分数据集（GH179B） |
+| CP-246（UN 定义的 SQ 在 BE 下按 LE 读） | `DicomReader.cs:608-623` 条件为 `UN && !IsPrivate` | 已修复（条件已纠正） | GH177 读取长度正确 |
+| `LongCodeValue` / `URNCodeValue` | `DicomTagGenerated.cs:513` `(0008,0119)` UC、`:?` `(0008,0120)` UR | 已实现（原为完全未实现） | `sr/code_item.rs` 按值写入 `(0008,0100)` SH / `(0008,0119)` UC / `(0008,0120)` UR，VR 正确 |
 | `DicomCodeItem::FromUrn` | `DicomCodeItem.cs:50` | 已实现（原为缺失） | `sr/code_item.rs` `from_urn`（`2ec3a5d`） |
-| N-GET/N-SET/N-ACTION/N-DELETE 的 Requested* 字段 | PS3.7 表 E.1-1 | 用 `Affected*` 代替（`nservice.rs:33-34,57-58,124-125`） | **DIMSE-N 全系列不可用** |
-| `DicomSummary` / 结构化富结果等便捷层 | 多处 | 部分缺失 | 见各分报告 |
+| N-GET/N-SET/N-ACTION/N-DELETE 的 Requested* 字段 | PS3.7 表 E.1-1 | 已实现（请求侧 `Requested*`、响应侧 `Affected*`） | DIMSE-N 全系列可用，回环测试覆盖（`05 §1.1`） |
+| `DicomSummary` / 结构化富结果等便捷层 | 多处 | 范围外（非五模块核心能力；SR 内容树访问已具备） | 未纳入本次对齐范围，不列为功能缺口 |
 
 ### 1.2 明确缺失（走查快照；以下四项现已实现）
 
