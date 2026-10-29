@@ -122,18 +122,15 @@ impl FilmBox {
     }
 }
 
-/// Maps each pixel's grey channel through the presentation LUT and rebuilds the
-/// BGRA patch (alpha preserved).
+/// Maps each pixel's grey channel through the presentation LUT in place (alpha
+/// preserved), avoiding a second full-image buffer per cell.
 fn apply_lut(image: &mut RawImage, table: &PresentationLutTable) {
-    let bytes = image.as_bytes();
-    let mapped: Vec<u8> = bytes
-        .as_chunks::<4>().0.iter()
-        .flat_map(|px| {
-            let out = table.map_byte(px[2] as i32);
-            [out, out, out, px[3]]
-        })
-        .collect();
-    *image = RawImage::new(image.width(), image.height(), mapped);
+    for px in image.as_bytes_mut().as_chunks_mut::<4>().0 {
+        let out = table.map_byte(px[2] as i32);
+        px[0] = out;
+        px[1] = out;
+        px[2] = out;
+    }
 }
 
 /// A BGRA32 canvas under construction.
@@ -145,9 +142,11 @@ struct Canvas {
 
 impl Canvas {
     fn filled(width: u32, height: u32, color: Color32) -> Self {
-        let mut bytes = Vec::with_capacity((width * height * 4) as usize);
-        for _ in 0..(width * height) {
-            bytes.extend_from_slice(&[color.b, color.g, color.r, 0xFF]);
+        let count = (width * height) as usize;
+        let mut bytes = vec![0u8; count * 4];
+        let pixel = [color.b, color.g, color.r, 0xFF];
+        for chunk in bytes.as_chunks_mut::<4>().0 {
+            *chunk = pixel;
         }
         Canvas { width, height, bytes }
     }
@@ -282,13 +281,12 @@ fn nearest_bgra32(input: &[u8], input_width: usize, input_height: usize, output_
 }
 
 fn invert(image: &mut RawImage) {
-    // invert by rebuilding through the public API (RawImage is read-only)
-    let bytes = image.as_bytes();
-    let inverted: Vec<u8> = bytes
-        .as_chunks::<4>().0.iter()
-        .flat_map(|px| [255 - px[0], 255 - px[1], 255 - px[2], px[3]])
-        .collect();
-    *image = RawImage::new(image.width(), image.height(), inverted);
+    // map channels in place instead of rebuilding the whole buffer
+    for px in image.as_bytes_mut().as_chunks_mut::<4>().0 {
+        px[0] = 255 - px[0];
+        px[1] = 255 - px[1];
+        px[2] = 255 - px[2];
+    }
 }
 
 #[cfg(test)]

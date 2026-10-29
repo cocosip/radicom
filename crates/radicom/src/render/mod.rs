@@ -770,6 +770,12 @@ impl RawImage {
         &self.bytes
     }
 
+    /// The raw BGRA32 bytes, mutable. Length stays `width * height * 4`, so a
+    /// caller can map channels in place without a second full-image buffer.
+    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.bytes
+    }
+
     /// The BGRA pixels as `u32` (0xAARRGGBB, matching fo-dicom's Image).
     pub fn pixels(&self) -> Vec<u32> {
         self.bytes
