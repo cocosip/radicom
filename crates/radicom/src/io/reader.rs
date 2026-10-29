@@ -105,7 +105,13 @@ impl Default for DicomReader {
     }
 }
 
-type PrivateCreators = HashMap<(u16, u8), String>;
+/// Private creators indexed by group then block number (element & 0xFF).
+///
+/// A flat 256-slot table per group avoids hashing a `(u16, u8)` key for every
+/// private element, and the creator is stored as a shared `Arc` so resolving a
+/// private tag clones a pointer instead of allocating a fresh creator
+/// (docs/fo-dicom-alignment/01 §3.10).
+type PrivateCreators = HashMap<u16, Box<[Option<Arc<crate::model::private_creator::PrivateCreator>>; 256]>>;
 
 /// What ends one nesting level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -336,12 +342,8 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         let tag = crate::model::tag_index::lookup_or_create(group, element);
         if tag.is_private() && tag.private_creator().is_none() && element > 0x00FF {
             let block = (element >> 8) as u8;
-            if let Some(creator) = self.private_creators.get(&(group, block)) {
-                return Tag::private(
-                    group,
-                    element,
-                    Arc::new(crate::model::private_creator::PrivateCreator::new(creator.clone())),
-                );
+            if let Some(creator) = self.private_creators.get(&group).and_then(|slots| slots[block as usize].as_ref()) {
+                return Tag::private(group, element, Arc::clone(creator));
             }
         }
         tag
@@ -542,8 +544,12 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         };
         // RD-05: private creator tracking
         if tag.is_private() && tag.is_private_creator_slot() && vr == Vr::Lo {
-            let creator = String::from_utf8_lossy(&buffer.data()).trim_end_matches([' ', '\0']).to_string();
-            self.private_creators.insert((group, (element & 0xFF) as u8), creator);
+            let creator = Arc::new(crate::model::private_creator::PrivateCreator::new(
+                String::from_utf8_lossy(&buffer.data()).trim_end_matches([' ', '\0']).to_string(),
+            ));
+            self.private_creators
+                .entry(group)
+                .or_insert_with(|| Box::new(std::array::from_fn(|_| None)))[(element & 0xFF) as usize] = Some(creator);
         }
         Ok(Step::Element { raw, tag, vr, pos: tag_pos, buffer })
     }
