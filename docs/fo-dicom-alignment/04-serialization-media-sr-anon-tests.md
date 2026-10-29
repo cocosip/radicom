@@ -123,7 +123,7 @@
 | JSON → 单 dataset | `DicomJson.cs:48` | 已实现 | `lib.rs:~360` `json_to_dataset` | — |
 | dataset 集合 → JSON 数组 | `DicomJson.cs:31` `ConvertDicomToJson(IEnumerable)` | 已实现 | `radicom-json/src/lib.rs` `datasets_to_json`（`ccb9468`） | QIDO-RS 多结果数组 |
 | JSON 数组 → dataset 集合 | `DicomJson.cs:56` `ConvertJsonToDicomArray` | 已实现 | `radicom-json/src/lib.rs` `json_to_datasets`（`ccb9468`） | 同上 |
-| group length 写出时剥离 | `JsonDicomConverter.cs` | **未实现** | `lib.rs:109-123` `dataset_to_value` | 见 §2.3 |
+| group length 写出时剥离 | `JsonDicomConverter.cs` | 已实现 | `radicom-json/src/lib.rs` `dataset_to_value` | `(GGGG,0000)` 在每层都被跳过；`group_lengths_are_stripped_at_every_level` 覆盖 |
 | 空 SQ 不写 `Value` | `JsonDicomConverter.cs` | **不一致** | `lib.rs:135-144`、`:172-176` | radicom 写 `"Value":[]`，fo-dicom 不写 |
 | 空值组件写 `null` | `JsonDicomConverter.cs` | **不一致** | `lib.rs:214`、`:503-509` | radicom 写 `""`，fo-dicom 写 `null`（见 §2.7） |
 | 数字默认模式 | `JsonDicomConverter.cs:69`（默认 `AsNumber`） | 有意不同 | `lib.rs:54-65`（默认 `PreferablyAsNumber`） | 差异见 §2.7，需明确声明 |
@@ -371,7 +371,7 @@ b 项还有一个不对称：`value_to_text` 把 `Value::Null` 读回成 `String
 
 `crates/radicom-json/src/xml.rs:42` 注释 "fragment sequences are not representable in the XML model"，但 `:43` 立刻调用 `write_fragments`（`:220`）把它们写成 `<Fragment>` 元素。同时 `:14-17` 的模块文档也只说"sequences nest their items"。实际行为（写片段）与 fo-dicom 一致，注释才是错的。无功能影响，但会误导后续维护者。
 
-### 2.10 【低】`JsonOptions::validate_on_read` 是声明了但从未实现的选项
+### 2.10 【已修复】`JsonOptions::validate_on_read` 现已接入读取路径
 
 `crates/radicom-json/src/lib.rs:72` 声明 `pub validate_on_read: bool`，`:81` 在 `Default` 里设为 `false`。但整个 crate 里没有任何地方读它——读取入口 `pub fn json_to_dataset(json: &str, _options: &JsonOptions)`（`lib.rs:356`）把 options 参数命名为 `_options` 并**整体忽略**（`value_to_dataset` 也不收 options）。
 
@@ -650,7 +650,7 @@ fo-dicom 的 `DicomJsonConverter` 有 `autoValidate`（`JsonDicomConverter.cs:69
 | 3 | `nearest-offset` 容忍度 | `docs/08:162`、`docs/01:170` | `a_corrupt_lower_offset_is_tolerated`（`media/mod.rs:1040`）只测"越界 offset 变成根"，不测"最近邻 offset" |
 | 4 | 图标 builder 输出校验（尺寸/位数/长度） | `docs/08:162` | `icon.rs` 8 个测试测了"无 icon"的各种情形，但没有一条验证生成 item 的 `Rows/Columns ≤ 128`、`BitsAllocated == 8`、`PixelData` 长度 == `Rows*Columns` |
 | 5 | `FileSetID` 空值被拒 | `docs/08:71` | 零覆盖 |
-| 6 | 扫描器的 `Stop()` / 完成事件 / 预统计 | `docs/01:172`（MEDIA-03） | 功能本身缺失（§1.2），自然也无测试 |
+| 6 | 扫描器的 `Stop()` / 完成事件 / 预统计 | `docs/01:172`（MEDIA-03） | 已实现（`Stop`/`Complete`/`Progress` 事件），已有测试 |
 | 7 | SR：真实文档的 code 值/relationship/measured value | `docs/08:163` | `a_real_sr_document_walks_its_content_tree` 只数节点 |
 | 8 | SR：type-checked 构造矩阵（15 ValueType × 7 Relationship 全组合） | `docs/08:163` | `content_item.rs` 有 `value_types_round_trip`/`relationships_round_trip` 覆盖枚举，但没有"每个 ValueType 的专用构造器写对 tag"的矩阵；`typed_scalar_items_write_their_value_tag`（`:525`）只覆盖部分 |
 | 9 | SR：`save` 后重新打开（explicit length 序列） | `docs/08:163` | `save_writes_a_file_that_opens_back`（`structured_report.rs:172`）**已覆盖**——此项不算缺口，保留在表中以示核对过程 |
@@ -663,7 +663,7 @@ fo-dicom 的 `DicomJsonConverter` 有 `autoValidate`（`JsonDicomConverter.cs:69
 | 16 | JSON：与 fo-dicom 输出的 golden 对比 | `docs/08:160` "golden files from fo-dicom output" | golden 是自生成的（§4.3 #3） |
 | 17 | JSON：group length 被剥离 | `docs/01:167` | 零覆盖，且功能错误（§2.3） |
 | 18 | JSON：`tags_as_keywords` 选项 | `lib.rs:70` | 该选项在**整个 repo 里从未被置为 `true`**（grep 无 `tags_as_keywords: true`），零覆盖 |
-| 19 | JSON：`validate_on_read` 选项 | `lib.rs:72` | 该字段**完全未被使用**：`json_to_dataset(json, _options)`（`lib.rs:356`）把参数命名为 `_options` 并整体忽略，`validate_on_read` 在 repo 内只有声明（`:72`）与 Default（`:81`）两处出现。即声明了"读时校验"但**从未实现**，也无任何测试 |
+| 19 | JSON：`validate_on_read` 选项 | `lib.rs:72` | 已实现：`json_to_dataset` 现在按 `options.validate_on_read` 读后校验，并有测试 |
 | 20 | JSON：空 SQ / 空值组件的 fo-dicom 兼容 | PS3.18 Annex F | 零覆盖；§2.7 的 a/b 两项因此全是"自洽往返" |
 | 21 | XML：`privateCreator` 属性、片段序列 | `docs/08:161`（"golden export snapshot tests"） | `xml.rs` 11 个测试没有一条涉及 `privateCreator` 或 `write_fragments`（grep 无 `privateCreator`、无 `insert_fragments`） |
 | 22 | Dump：与 `FO-DICOM.Dump` 的格式对齐 | `docs/01:202`（INF-04 "mirroring FO-DICOM.Dump"） | `dump/mod.rs` 的 8 个测试只断言"包含某词"，没有一条对比 fo-dicom 的实际行格式（`tag VR [value] #len, keyword`）；radicom 的格式与 fo-dicom 根本不同 |

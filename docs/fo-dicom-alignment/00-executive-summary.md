@@ -59,7 +59,7 @@
 | 私有 tag 按私有字典取 VR | `DicomReader.cs:393-409` | `reader.rs:187-207` 对私有 tag 直接返回 `Un` | 所有私有元素类型访问失效 |
 | `Suspended` / `IsPartial` | `DicomFile.cs:250` | `ReadOutcome` 只有 Success/Stopped；`is_partial` 硬编码 `false`（`file.rs:187`、`:234`） | 截断文件整体失败而非部分成功（GH179B） |
 | CP-246（UN 定义的 SQ 在 BE 下按 LE 读） | `DicomReader.cs:608-623` 条件为 `UN && !IsPrivate` | `reader.rs:576` 条件**恰好相反**（仅私有） | GH177 读错长度 |
-| `LongCodeValue` / `URNCodeValue` | `DicomTagGenerated.cs:513` `(0008,0119)` UC、`:?` `(0008,0120)` UR | **完全未实现**，长值与 URN 都写进 `(0008,0100)` SH | 写出的 SR 不符合 PS3.3 |
+| `LongCodeValue` / `URNCodeValue` | `DicomTagGenerated.cs:513` `(0008,0119)` UC、`:?` `(0008,0120)` UR | 已实现（原为完全未实现） | `sr/code_item.rs` 按短/长/URN 三段分派，分别写入 `(0008,0100)` SH / `(0008,0119)` UC / `(0008,0120)` UR |
 | `DicomCodeItem::FromUrn` | `DicomCodeItem.cs:50` | 已实现（原为缺失） | `sr/code_item.rs` `from_urn`（`2ec3a5d`） |
 | N-GET/N-SET/N-ACTION/N-DELETE 的 Requested* 字段 | PS3.7 表 E.1-1 | 用 `Affected*` 代替（`nservice.rs:33-34,57-58,124-125`） | **DIMSE-N 全系列不可用** |
 | `DicomSummary` / 结构化富结果等便捷层 | 多处 | 部分缺失 | 见各分报告 |

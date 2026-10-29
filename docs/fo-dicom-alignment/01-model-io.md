@@ -613,7 +613,7 @@ pub fn default_dictionary() -> Arc<Dictionary> {
 | 私有序列探测 | `reader.rs:431-446` | 无任何私有 SQ + 坏 VR 的测试。`GH626.dcm` 可直接作为夹具。 |
 | 分隔符后仍有数据 | `reader.rs:495` | 无。§2.1 的 52 字节夹具可零成本加入。 |
 | 隐式 VR 下的私有字典解析 | `reader.rs:192-194` | 无。构造 2 个元素即可测。 |
-| ISO_IR 编码正确性 | `charset.rs:16-50` | **完全缺失**。没有任何测试断言 `ISO_IR 144`/`127`/`126`/`138` 的解码输出。`chrRuss.dcm`/`chrArab.dcm` 是现成夹具。 |
+| ISO_IR 编码正确性 | `charset.rs` 映射表 | 已覆盖：`charset.rs` 断言 Iso-8859 系列往返，`corpus.rs` 用 `chrRuss`/`chrArab`/`chrGreek`/`chrHbrw` 断言真实解码文本 |
 | ISO 2022 单字节设计符切换 | `charset.rs:244-265` | 无。缺 `ESC - L`（Cyrillic）等设计符导致静默沿用旧编码。 |
 | `ReadLargeOnDemand` 的真惰性 | `buffer.rs:430` | `file.rs:947` 只测 `SkipLargeTags`。 |
 | `insert_or_update` 的私有 tag 静默丢弃 | `dataset.rs:222` | 无。 |
