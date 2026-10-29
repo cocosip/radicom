@@ -60,7 +60,7 @@
 | `DicomDirectoryRecord::ToString()` | `DicomDirectory.cs` | 已实现 | `Display for DirectoryRecord`（`b41359f`） | 渲染记录 dataset 的 dump |
 | `FileSetID` 空值校验 | `DicomDirectory.cs`（`FileSetID` setter 校验空串） | 已实现 | `media/mod.rs` `try_new` | `new("")` 现在 panic 并给出明确信息，`try_new("")` 返回错误（`5f3ca60`；`empty_file_set_id_is_rejected`） |
 | `AutoValidate` | `DicomDirectory.cs:44` | 已实现 | `DicomDirectory::validate`、`model/dataset.rs` `set_validation`、`validation::ValidationScopeGuard` | 可直接校验 DICOMDIR 记录树（FileSetID、父/根索引、环、可达性），也可用 Dataset 级校验开关；`walk` 对环已做去重保护 |
-| 图标生成（`IconImageSequence`） | `Media/DicomIconImageSequenceBuilder.cs:28` | 部分实现 | `media/icon.rs:44` `build_icon`、`:292` `attach_icon` | 只支持 8-bit MONOCHROME2 灰度、无 colour（`:285` 测试显式断言"彩色图不产生 icon"）；`MAX_ICON_SIZE=128` 一致 |
+| 图标生成（`IconImageSequence`） | `Media/DicomIconImageSequenceBuilder.cs:28` | 已实现 | `media/icon.rs` `build_icon`、`attach_icon` | fo-dicom 的 builder 同样只接受 8-bit MONOCHROME2 灰度；radicom 一致（彩色源不产生灰度 icon 属对齐行为），`MAX_ICON_SIZE=128` 一致 |
 | 图标失败的静默容忍 | `DicomDirectory.cs`（`AddIconSequence` 内 `catch { }`） | 已实现 | `media/mod.rs:377-382` | 走 `generator.generate(...)?`，**错误会上抛**，比 fo-dicom 更严格；行为差异见 §2.8 |
 | `IIconGenerator(frameIndex)` 显式帧号参数 | `Media/IIconGenerator.cs` | 已实现 | `media/icon.rs` `generate_frame`（`c9091b4`） | trait 提供显式帧号；`explicit_frame_index_selects_the_requested_frame` 覆盖 |
 

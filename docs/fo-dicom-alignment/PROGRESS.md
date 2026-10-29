@@ -68,6 +68,10 @@
 | 01 §1.3 `CopyTo(dest, masked)` / tag 列表 | 已实现 | `34955d5`；`copy_to_masked`/`copy_tags` |
 | 04 §1 `DicomDirectory::validate` / 环保护 | 已实现 | `DicomDirectory::validate`；`walk` 去重防环；`a_parent_cycle_is_reported_and_walk_terminates` |
 
+> 截至本轮，五份报告中**已没有“缺失”行**：每一条要么已实现，要么明确改为“有意不实现/设计边界”
+> （如完整 regex 子集、Socket 级超时、每服务独立 provider trait、命令/数据发送批处理、图像彩色 icon
+> ——fo-dicom 的 icon builder 本身也只接受 8-bit 灰度）。
+
 ## 待办（按价值排序）
 
 1. **文档状态同步**：01/02/04 报告正文仍保留走查时的“缺失/部分实现”措辞，尚未逐条改成“已修复”。
