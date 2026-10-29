@@ -239,3 +239,5 @@
 
 - **模型 / 插入**：新增 `Dataset::get_private_tag_ref(&Tag)`，`insert`/`insert_or_update`/`try_insert_or_update` 不再预克隆 tag；仅私有 block 解析路径才克隆。
 - **规则 / 记录**：`record()` 改收 `&Tag`，各 transform 调用点不再 `tag.clone()`。
+
+- **媒体 / DICOMDIR**：`rebuild()` 由“写两遍布局（两次克隆记录）”改为“写一次 + 原地 patch offsets”，新增 `Dataset::sequence_mut` 支持原地改序列项；偏移/图标测试全过。04 §3.5 标【已修复】。
