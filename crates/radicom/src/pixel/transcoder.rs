@@ -145,11 +145,11 @@ impl Transcoder {
         let mut decoded = target.clone();
         decoded.remove(PIXEL_DATA);
         {
-            let src = PixelData::from_dataset(&mut target)?;
+            let src = PixelDataRef::from_dataset(&target)?;
             let mut dst = PixelData::from_dataset(&mut decoded)?;
             codec.decode(&src, &mut dst, &self.in_params)?;
         }
-        PixelData::from_dataset(&mut decoded)?.get_frame(0)
+        PixelDataRef::from_dataset(&decoded)?.get_frame(0)
     }
 
     // -- flows ---------------------------------------------------------------
@@ -190,7 +190,7 @@ impl Transcoder {
         let mut decoded = source.clone();
         decoded.remove(PIXEL_DATA);
         {
-            let src = PixelData::from_dataset(&mut source)?;
+            let src = PixelDataRef::from_dataset(&source)?;
             let mut dst = PixelData::from_dataset(&mut decoded)?;
             codec.decode(&src, &mut dst, &self.in_params)?;
         }
@@ -204,8 +204,7 @@ impl Transcoder {
         encoded.set_transfer_syntax(self.to.clone());
         encoded.remove(PIXEL_DATA);
         {
-            let mut source = ds.clone();
-            let src = PixelData::from_dataset(&mut source)?;
+            let src = PixelDataRef::from_dataset(ds)?;
             let mut dst = PixelData::from_dataset(&mut encoded)?;
             codec.encode(&src, &mut dst, &self.out_params)?;
         }
@@ -333,7 +332,7 @@ mod tests {
         fn transfer_syntax(&self) -> &'static TransferSyntax {
             self.syntax
         }
-        fn encode(&self, src: &PixelData<'_>, dst: &mut PixelData<'_>, _p: &CodecParams) -> Result<(), Error> {
+        fn encode(&self, src: &PixelDataRef<'_>, dst: &mut PixelData<'_>, _p: &CodecParams) -> Result<(), Error> {
             for i in 0..src.number_of_frames() {
                 let frame = src.get_frame(i)?;
                 let bytes: Vec<u8> = frame.data().iter().map(|b| b ^ 0xFF).collect();
@@ -341,7 +340,7 @@ mod tests {
             }
             Ok(())
         }
-        fn decode(&self, src: &PixelData<'_>, dst: &mut PixelData<'_>, _p: &CodecParams) -> Result<(), Error> {
+        fn decode(&self, src: &PixelDataRef<'_>, dst: &mut PixelData<'_>, _p: &CodecParams) -> Result<(), Error> {
             self.encode(src, dst, &CodecParams::None)
         }
     }

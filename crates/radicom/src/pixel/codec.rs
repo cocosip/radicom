@@ -12,7 +12,7 @@
 
 use crate::error::{CodecError, Error};
 use crate::model::transfer_syntax::TransferSyntax;
-use crate::pixel::PixelData;
+use crate::pixel::{PixelData, PixelDataRef};
 use std::sync::{Arc, LazyLock, RwLock};
 
 // -- parameters (CODEC-02, §2.2) -----------------------------------------
@@ -186,11 +186,11 @@ pub trait Codec: Send + Sync {
     /// via `src.get_frame(i)`, write every frame via `dst.add_frame(...)`,
     /// touch no dataset element outside the `PixelData` setters, and map all
     /// failures to [`Error::Codec`] without panicking.
-    fn encode(&self, src: &PixelData<'_>, dst: &mut PixelData<'_>, params: &CodecParams) -> Result<(), Error>;
+    fn encode(&self, src: &PixelDataRef<'_>, dst: &mut PixelData<'_>, params: &CodecParams) -> Result<(), Error>;
 
     /// Decodes `src` frames into `dst`, with the same obligations as
     /// [`Codec::encode`].
-    fn decode(&self, src: &PixelData<'_>, dst: &mut PixelData<'_>, params: &CodecParams) -> Result<(), Error>;
+    fn decode(&self, src: &PixelDataRef<'_>, dst: &mut PixelData<'_>, params: &CodecParams) -> Result<(), Error>;
 }
 
 // -- registry (CODEC-03, §3) ---------------------------------------------
@@ -315,7 +315,7 @@ mod tests {
         fn transfer_syntax(&self) -> &'static TransferSyntax {
             self.syntax
         }
-        fn encode(&self, src: &PixelData<'_>, dst: &mut PixelData<'_>, _p: &CodecParams) -> Result<(), Error> {
+        fn encode(&self, src: &PixelDataRef<'_>, dst: &mut PixelData<'_>, _p: &CodecParams) -> Result<(), Error> {
             for i in 0..src.number_of_frames() {
                 let frame = src.get_frame(i)?;
                 // mock "compression": XOR every byte so tests can tell the
@@ -328,7 +328,7 @@ mod tests {
             }
             Ok(())
         }
-        fn decode(&self, src: &PixelData<'_>, dst: &mut PixelData<'_>, _p: &CodecParams) -> Result<(), Error> {
+        fn decode(&self, src: &PixelDataRef<'_>, dst: &mut PixelData<'_>, _p: &CodecParams) -> Result<(), Error> {
             self.encode(src, dst, &CodecParams::None)
         }
     }
@@ -427,7 +427,7 @@ mod tests {
         let mut target = dataset(8, 2, 2);
         target.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
         {
-            let src = PixelData::from_dataset(&mut source).unwrap();
+            let src = PixelDataRef::from_dataset(&source).unwrap();
             let mut dst = PixelData::from_dataset(&mut target).unwrap();
             codec.encode(&src, &mut dst, &codec.default_params()).unwrap();
         }
