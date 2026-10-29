@@ -248,3 +248,5 @@
 
 - **编码 / 字符集（续）**：`charset_encoding`/`is_known_charset` 用 32 字节栈缓冲规范化短 ASCII 词，只有超长/非 ASCII 才回退 `String`，字符集切换不再每次分配。
 - **渲染 / 02 §3.4 定性**：每次渲染 clone `Dataset` 收益为微秒级，消除需读写门拆分；标为【已定性，保留（低收益）】，代码处保留 `ponytail:` 说明。
+
+- **网络 / 异步**：`send_c_find_stream`/`send_c_move_stream`/`send_c_get_stream` 由 `Pin<Box<dyn Future>>` 改为原生 `async fn`，去掉每次调用的堆分配与动态派发；`expert.rs` 已在 async fn 中 await，无需装箱。
