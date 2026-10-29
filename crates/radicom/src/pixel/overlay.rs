@@ -223,7 +223,7 @@ impl OverlayData {
         let ox = (column as isize - 1).max(0) as usize;
         let oy = (row as isize - 1).max(0) as usize;
 
-        let raw = pixel.data();
+        let raw = pixel.data()?;
         let unit = (bits / 8) as usize;
         let frame_size = image_columns * image_rows * unit;
         let start = frame as usize * frame_size;
@@ -343,7 +343,7 @@ mod tests {
         assert_eq!(overlays.len(), 1);
         let loaded = overlays[0].load(&ds).unwrap();
         assert_eq!(
-            loaded.data().as_ref(),
+            loaded.data().unwrap().as_ref(),
             &[0b1100_0000],
             "stored bytes returned as-is"
         );
@@ -381,7 +381,7 @@ mod tests {
         let overlays = OverlayData::from_dataset(&ds);
         let data = overlays[0].load(&ds).unwrap();
         assert_eq!(
-            data.data().as_ref(),
+            data.data().unwrap().as_ref(),
             &[0x01, 0x01],
             "one byte per row, LSB first"
         );
@@ -405,11 +405,11 @@ mod tests {
         ));
         let overlay = &OverlayData::from_dataset(&ds)[0];
         assert_eq!(
-            overlay.load_frame(&ds, 0).unwrap().data().as_ref(),
+            overlay.load_frame(&ds, 0).unwrap().data().unwrap().as_ref(),
             &[0x00, 0x00]
         );
         assert_eq!(
-            overlay.load_frame(&ds, 1).unwrap().data().as_ref(),
+            overlay.load_frame(&ds, 1).unwrap().data().unwrap().as_ref(),
             &[0x01, 0x01],
             "frame 1's overlay plane"
         );
@@ -436,7 +436,11 @@ mod tests {
             ),
         ));
         let data = OverlayData::from_dataset(&ds)[0].load(&ds).unwrap();
-        assert_eq!(data.data().as_ref(), &[0b0000_0101], "pixels 0 and 2 set");
+        assert_eq!(
+            data.data().unwrap().as_ref(),
+            &[0b0000_0101],
+            "pixels 0 and 2 set"
+        );
     }
 
     #[test]
@@ -469,7 +473,7 @@ mod tests {
             .load(&back.dataset)
             .unwrap();
         assert_eq!(
-            data.data().as_ref(),
+            data.data().unwrap().as_ref(),
             &[0b0000_0001],
             "big-endian bit 12 of pixel 0 read correctly"
         );

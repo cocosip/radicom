@@ -1,4 +1,4 @@
-//! Dependency-free JSON benchmarks (docs/02-development-guide.md §5 §8: `json_roundtrip`).
+//! Dependency-free JSON benchmarks (docs/02-development-guide.md §5.8: `json_roundtrip`).
 //!
 //! Criterion is not vendored offline, so this is a `harness = false` binary that
 //! times dataset → JSON and dataset → JSON → dataset with std::time::Instant.

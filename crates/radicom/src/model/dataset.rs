@@ -719,7 +719,7 @@ mod tests {
         let th: f64 = ds.get(Tag::SLICE_THICKNESS).unwrap();
         assert_eq!(th, 2.5);
         let pixels: SharedBuffer = ds.get(Tag::PIXEL_DATA).unwrap();
-        assert_eq!(&*pixels.data(), &[1, 2, 3]);
+        assert_eq!(&*pixels.data().unwrap(), &[1, 2, 3]);
     }
 
     #[test]

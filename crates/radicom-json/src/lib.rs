@@ -46,6 +46,8 @@ pub enum JsonError {
     Malformed { tag: String, reason: String },
     #[error("invalid JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("deferred value read failed: {0}")]
+    Io(#[from] std::io::Error),
     #[error("{0}")]
     Unsupported(&'static str),
     #[error("dataset error: {0}")]
@@ -204,7 +206,7 @@ fn element_to_value(element: &DicomElement, options: &JsonOptions) -> Result<Val
             // an empty binary value carries no carrier at all (§1.1)
             if buffer.size() > 0 {
                 let encoded =
-                    base64::engine::general_purpose::STANDARD.encode(buffer.data().as_ref());
+                    base64::engine::general_purpose::STANDARD.encode(buffer.data()?.as_ref());
                 object.insert("InlineBinary".to_string(), Value::String(encoded));
             }
         }
@@ -230,7 +232,7 @@ fn element_values(element: &DicomElement, vr: Vr, options: &JsonOptions) -> Resu
     // bytes that are not a binary VR come from a parsed element (e.g. US);
     // strings are the other possible representation
     if let Some(raw) = element.value().as_buffer() {
-        return Ok(raw_value_array(raw, vr, element.tag()));
+        return raw_value_array(raw, vr, element.tag());
     }
     let text = element.string_value();
     if text.is_empty() {
@@ -273,11 +275,11 @@ fn element_values(element: &DicomElement, vr: Vr, options: &JsonOptions) -> Resu
 }
 
 /// Value arrays for elements held as bytes (parsed binary VRs).
-fn raw_value_array(raw: &SharedBuffer, vr: Vr, _tag: &Tag) -> Vec<Value> {
-    let bytes = raw.data();
+fn raw_value_array(raw: &SharedBuffer, vr: Vr, _tag: &Tag) -> Result<Vec<Value>> {
+    let bytes = raw.data()?;
     let bytes: &[u8] = bytes.as_ref();
     let unit = vr.unit_size().max(1);
-    match vr {
+    Ok(match vr {
         Vr::At => bytes
             .as_chunks::<4>()
             .0
@@ -300,7 +302,7 @@ fn raw_value_array(raw: &SharedBuffer, vr: Vr, _tag: &Tag) -> Vec<Value> {
             .chunks_exact(unit)
             .map(|chunk| binary_number(chunk, vr).unwrap_or(Value::Null))
             .collect(),
-    }
+    })
 }
 
 fn binary_number(chunk: &[u8], vr: Vr) -> Option<Value> {
@@ -870,7 +872,7 @@ mod tests {
         let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
         let bytes = back.get_element(Tag::PIXEL_DATA).unwrap();
         assert_eq!(
-            bytes.value().as_buffer().unwrap().data().to_vec(),
+            bytes.value().as_buffer().unwrap().data().unwrap().to_vec(),
             vec![1u8, 2, 3, 4]
         );
     }
@@ -892,7 +894,13 @@ mod tests {
         let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
         let element = back.get_element(Tag::ROWS).unwrap();
         assert_eq!(
-            element.value().as_buffer().unwrap().data().as_ref(),
+            element
+                .value()
+                .as_buffer()
+                .unwrap()
+                .data()
+                .unwrap()
+                .as_ref(),
             512u16.to_le_bytes(),
             "a US element stays byte-backed after a round-trip"
         );
@@ -921,7 +929,7 @@ mod tests {
         let element = back.get_element(Tag::SERIES_DESCRIPTION).unwrap();
         let bytes = element.value().as_buffer().unwrap();
         assert_eq!(
-            bytes.data().as_ref(),
+            bytes.data().unwrap().as_ref(),
             &[0x10, 0x00, 0x10, 0x00],
             "AT round-trips as 4-byte pairs"
         );

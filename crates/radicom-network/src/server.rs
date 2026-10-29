@@ -1,5 +1,5 @@
 //! End-to-end association and C-ECHO over a real TCP socket
-//! (SRV-01/02; docs/01-architecture.md §11, §8).
+//! (SRV-01/02; docs/01-architecture.md §11).
 //!
 //! The engine here is intentionally small: it drives the association
 //! handshake, routes one command/response exchange, and closes gracefully.

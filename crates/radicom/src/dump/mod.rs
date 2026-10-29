@@ -109,8 +109,11 @@ fn render_value(value: &ElementValue, vr: crate::model::vr::Vr, options: &DumpOp
             }
         }
         ElementValue::Bytes(buffer) => {
-            let bytes = buffer.data();
-            let bytes: &[u8] = bytes.as_ref();
+            let data = match buffer.data() {
+                Ok(data) => data,
+                Err(e) => return format!("(unreadable: {e})"),
+            };
+            let bytes: &[u8] = data.as_ref();
             if vr.is_string() && !bytes.is_empty() {
                 // string-typed Other values: show as text when printable
                 if let Ok(text) = std::str::from_utf8(bytes) {

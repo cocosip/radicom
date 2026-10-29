@@ -3,7 +3,7 @@
 //! The files live under `tests-data/` at the repo root (see its README for
 //! provenance — a minimal set imported from fo-dicom's MS-PL test data). Each
 //! entry below is parsed, re-written with identical options, re-parsed, and the
-//! datasets compared for semantic equality (docs/02-development-guide.md §5 §4).
+//! datasets compared for semantic equality (docs/02-development-guide.md §5.4).
 
 use std::path::PathBuf;
 

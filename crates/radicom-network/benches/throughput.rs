@@ -1,4 +1,4 @@
-//! Dependency-free network benchmark (docs/02-development-guide.md §5 §8: `network_throughput`).
+//! Dependency-free network benchmark (docs/02-development-guide.md §5.8: `network_throughput`).
 //!
 //! Criterion is not vendored offline, so this is a `harness = false` binary that
 //! drives a loopback C-STORE of a multi-frame file against an in-process SCP and

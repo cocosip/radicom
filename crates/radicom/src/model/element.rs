@@ -185,7 +185,7 @@ fn select(e: &DicomElement, index: Option<usize>) -> Result<String, Error> {
         ElementValue::Str(s) => s.clone(),
         ElementValue::Bytes(b) => {
             // lossy text view over binary data (documented lenient read)
-            String::from_utf8_lossy(&b.data()).into_owned()
+            String::from_utf8_lossy(&b.data()?).into_owned()
         }
     };
     match index {
@@ -222,7 +222,7 @@ fn read_le_unit<T: FromLeBytes>(
     let unit = e.vr().unit_size();
     let i = index.unwrap_or(0);
     let start = i * unit;
-    let data = b.data();
+    let data = b.data()?;
     if start + unit > data.len() {
         return Err(Error::Data(DataError::IndexOutOfRange {
             tag: (&e.tag).into(),
@@ -575,12 +575,12 @@ mod tests {
     #[test]
     fn encoded_padding() {
         let odd = el(Vr::Lo, "abc");
-        assert_eq!(&*odd.encoded().data(), b"abc ");
+        assert_eq!(&*odd.encoded().data().unwrap(), b"abc ");
         let even = el(Vr::Ui, "10.20.30");
-        assert_eq!(&*even.encoded().data(), b"10.20.30");
+        assert_eq!(&*even.encoded().data().unwrap(), b"10.20.30");
         // UI pads with NUL
         let ui_odd = el(Vr::Ui, "1.2");
-        assert_eq!(&*ui_odd.encoded().data(), b"1.2\x00");
+        assert_eq!(&*ui_odd.encoded().data().unwrap(), b"1.2\x00");
     }
 }
 
@@ -591,7 +591,7 @@ impl PartialEq for ElementValue {
         match (self, other) {
             (ElementValue::Str(a), ElementValue::Str(b)) => a == b,
             (ElementValue::Bytes(a), ElementValue::Bytes(b)) => {
-                a.size() == b.size() && a.data() == b.data()
+                crate::model::buffer::same_content(a, b)
             }
             _ => false,
         }

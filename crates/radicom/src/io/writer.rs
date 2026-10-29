@@ -540,7 +540,7 @@ fn write_buffer<W: Write>(
             take
         };
         let slice = &mut chunk[..take as usize];
-        buffer.get_byte_range(offset, slice);
+        buffer.get_byte_range(offset, slice).map_err(io_err)?;
         Endian::swap_buffer(slice, unit);
         out.write_bytes(slice).map_err(io_err)?;
         offset += take;
@@ -742,10 +742,10 @@ mod tests {
                     &[0, 10],
                     "offset table follows item headers + padding"
                 );
-                assert_eq!(&*f.fragments()[0].data(), &[0xAA, 0xBB]);
+                assert_eq!(&*f.fragments()[0].data().unwrap(), &[0xAA, 0xBB]);
                 // the reader keeps the declared (padded) item length, so a
                 // re-write is byte-identical
-                assert_eq!(&*f.fragments()[1].data(), &[0xCC, 0x00]);
+                assert_eq!(&*f.fragments()[1].data().unwrap(), &[0xCC, 0x00]);
             }
             other => panic!("expected fragments, got {other:?}"),
         }
@@ -893,13 +893,14 @@ mod tests {
         fn is_memory(&self) -> bool {
             true
         }
-        fn data(&self) -> std::borrow::Cow<'_, [u8]> {
-            std::borrow::Cow::Borrowed(&self.bytes)
+        fn data(&self) -> std::io::Result<std::borrow::Cow<'_, [u8]>> {
+            Ok(std::borrow::Cow::Borrowed(&self.bytes))
         }
-        fn get_byte_range(&self, offset: u64, buf: &mut [u8]) {
+        fn get_byte_range(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
             self.reads.lock().unwrap().push(buf.len());
             let start = offset as usize;
             buf.copy_from_slice(&self.bytes[start..start + buf.len()]);
+            Ok(())
         }
     }
 

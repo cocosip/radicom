@@ -91,7 +91,12 @@ impl Transcoder {
 
         // Lossy bookkeeping: the encoded (or decoded) target frames plus the
         // source's uncompressed first-frame size, captured before `frames` moves.
-        let encoded_bytes = frames.first().map(|f| f.data().len() as u64).unwrap_or(0);
+        // These are reporting figures only, so a frame that cannot be read
+        // contributes 0 instead of failing an already successful transcode.
+        let encoded_bytes = frames
+            .first()
+            .and_then(|f| f.data().ok())
+            .map_or(0, |d| d.len() as u64);
         let original_bytes = PixelDataRef::from_dataset(ds)
             .ok()
             .and_then(|p| p.uncompressed_frame_size().ok())
@@ -357,7 +362,7 @@ mod tests {
         ) -> Result<(), Error> {
             for i in 0..src.number_of_frames() {
                 let frame = src.get_frame(i)?;
-                let bytes: Vec<u8> = frame.data().iter().map(|b| b ^ 0xFF).collect();
+                let bytes: Vec<u8> = frame.data().unwrap().iter().map(|b| b ^ 0xFF).collect();
                 dst.add_frame(bytes)?;
             }
             Ok(())
@@ -424,7 +429,7 @@ mod tests {
         let mut owned = ds.clone();
         let pd = PixelData::from_dataset(&mut owned).unwrap();
         (0..pd.number_of_frames())
-            .map(|i| pd.get_frame(i).unwrap().data().to_vec())
+            .map(|i| pd.get_frame(i).unwrap().data().unwrap().to_vec())
             .collect()
     }
 
@@ -498,7 +503,10 @@ mod tests {
         match out.item(&PIXEL_DATA) {
             Some(DicomItem::Fragments(f)) => {
                 assert_eq!(f.vr(), Vr::Ob, "encapsulated data is stored as OB");
-                assert_eq!(f.fragments()[0].data().as_ref(), &[0xFE, 0xFD, 0xFC, 0xFB]);
+                assert_eq!(
+                    f.fragments()[0].data().unwrap().as_ref(),
+                    &[0xFE, 0xFD, 0xFC, 0xFB]
+                );
             }
             other => panic!("expected fragments, got {other:?}"),
         }
@@ -552,7 +560,10 @@ mod tests {
         // decode(0xFE..) = [1,2,3,4], then encode = [0xFE..] again
         match out.item(&PIXEL_DATA) {
             Some(DicomItem::Fragments(f)) => {
-                assert_eq!(f.fragments()[0].data().as_ref(), &[0xFE, 0xFD, 0xFC, 0xFB]);
+                assert_eq!(
+                    f.fragments()[0].data().unwrap().as_ref(),
+                    &[0xFE, 0xFD, 0xFC, 0xFB]
+                );
             }
             other => panic!("expected fragments, got {other:?}"),
         }
@@ -600,7 +611,7 @@ mod tests {
             None,
         );
         let frame = tr.decode_frame(&ds, 0).unwrap();
-        assert_eq!(frame.data().as_ref(), &[1, 2, 3, 4]);
+        assert_eq!(frame.data().unwrap().as_ref(), &[1, 2, 3, 4]);
         assert_eq!(ds, before, "TR-02: the source stays untouched");
         crate::pixel::codec::reset_codec_registry();
     }

@@ -1,4 +1,4 @@
-//! Value validation (VAL-01..03; docs/01-architecture.md §3).
+//! Value validation (VAL-01..03; docs/01-architecture.md §5).
 //!
 //! Layering: global switch × per-dataset flag × RAII scope guard. File
 //! parsing runs with validation off (read-tolerant policy).

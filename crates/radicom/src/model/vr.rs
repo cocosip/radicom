@@ -1,4 +1,4 @@
-//! Value Representation (VR-01, VR-02; docs/01-architecture.md §3).
+//! Value Representation (VR-01, VR-02; docs/01-architecture.md §2).
 
 use crate::error::{DataError, Error};
 
@@ -309,7 +309,7 @@ impl std::fmt::Display for Vr {
 mod tests {
     use super::*;
 
-    /// The authoritative attribute table from spec 04 §2.2, asserted as one
+    /// The authoritative attribute table from docs/01-architecture.md §2, asserted as one
     /// golden matrix over every standard VR: (code, string, charset, len16,
     /// pad, max_len, unit, swap).
     #[test]

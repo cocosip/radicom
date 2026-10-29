@@ -1,4 +1,4 @@
-//! DICOM data element tag (TAG-01, TAG-02; docs/01-architecture.md §3).
+//! DICOM data element tag (TAG-01, TAG-02; docs/01-architecture.md §1).
 
 use crate::error::{DataError, Error, TagRef};
 use crate::model::private_creator::PrivateCreator;

@@ -230,7 +230,7 @@ macro_rules! pixel_read_methods {
                         buffer.size() * 8
                     )));
                 }
-                let raw = buffer.data();
+                let raw = buffer.data()?;
                 let raw: &[u8] = raw.as_ref();
                 let mut out = vec![0u8; frame_bytes];
                 for bit_index in 0..frame_bits {
@@ -391,12 +391,13 @@ macro_rules! pixel_read_methods {
         /// The first input value mapped by the palette LUTs (PS3.3 C.7.6.3.1.5),
         /// read from the red descriptor. A PALETTE COLOR input value `v` maps to
         /// entry `v - first` (all three channels share the descriptor's first value).
+        /// An unreadable descriptor counts as absent, exactly like a malformed one.
         pub fn palette_first_mapped(&self) -> Option<i32> {
             let DicomItem::Element(element) = self.dataset.item(&RED_DESCRIPTOR)? else {
                 return None;
             };
             let descriptor = element.value().as_buffer()?;
-            let desc = descriptor.data();
+            let desc = descriptor.data().ok()?;
             if desc.len() < 6 {
                 return None;
             }
@@ -420,7 +421,7 @@ macro_rules! pixel_read_methods {
                 .item(&descriptor_tag)
                 .and_then(DicomItem::as_element_buffer)
                 .ok_or_else(|| pixel_err("palette LUT descriptor missing"))?;
-            let desc = descriptor.data();
+            let desc = descriptor.data()?;
             if desc.len() < 6 {
                 return Err(pixel_err("palette LUT descriptor is shorter than 6 bytes"));
             }
@@ -455,7 +456,7 @@ macro_rules! pixel_read_methods {
                 .item(&data_tag)
                 .and_then(DicomItem::as_element_buffer)
                 .ok_or_else(|| pixel_err("palette LUT data missing"))?;
-            let raw = data.data();
+            let raw = data.data()?;
 
             let mut out = Vec::with_capacity(count);
             if raw.len() == count {
@@ -553,11 +554,10 @@ impl<'a> PixelData<'a> {
                     _ => Vr::Ob,
                 };
                 let mut combined = match self.dataset.item(&PIXEL_DATA) {
-                    Some(DicomItem::Element(e)) => e
-                        .value()
-                        .as_buffer()
-                        .map(|b| b.data().to_vec())
-                        .unwrap_or_default(),
+                    Some(DicomItem::Element(e)) => match e.value().as_buffer() {
+                        Some(b) => b.data()?.to_vec(),
+                        None => Vec::new(),
+                    },
                     _ => Vec::new(),
                 };
                 if self.bits_allocated()? == 1 {
@@ -619,7 +619,7 @@ impl<'a> PixelData<'a> {
     pub fn add_frame_buffer(&mut self, frame: SharedBuffer) -> Result<u32, Error> {
         if !frame.size().is_multiple_of(2) {
             // odd frames need padding, which `add_frame` handles by copying
-            return self.add_frame(frame.data());
+            return self.add_frame(frame.data()?);
         }
         let index = self.stored_frame_count();
         match self.kind {
@@ -647,7 +647,7 @@ impl<'a> PixelData<'a> {
                     Ok(index)
                 } else {
                     // an existing native element has to be extended by copying
-                    self.add_frame(frame.data())
+                    self.add_frame(frame.data()?)
                 }
             }
         }
@@ -883,8 +883,14 @@ mod tests {
             ),
         ));
         let pd = PixelData::from_dataset(&mut ds).unwrap();
-        assert_eq!(pd.get_frame(0).unwrap().data().as_ref(), &[1, 2, 3, 4]);
-        assert_eq!(pd.get_frame(1).unwrap().data().as_ref(), &[5, 6, 7, 8]);
+        assert_eq!(
+            pd.get_frame(0).unwrap().data().unwrap().as_ref(),
+            &[1, 2, 3, 4]
+        );
+        assert_eq!(
+            pd.get_frame(1).unwrap().data().unwrap().as_ref(),
+            &[5, 6, 7, 8]
+        );
         assert!(pd.get_frame(2).is_err(), "frame index is range-checked");
     }
 
@@ -899,9 +905,9 @@ mod tests {
             assert_eq!(pd.add_frame([0x22]).unwrap(), 1);
         }
         let view = PixelDataRef::from_dataset(&ds).unwrap();
-        assert_eq!(view.get_frame(0).unwrap().data().as_ref(), &[0x11]);
+        assert_eq!(view.get_frame(0).unwrap().data().unwrap().as_ref(), &[0x11]);
         assert_eq!(
-            view.get_frame(1).unwrap().data().as_ref(),
+            view.get_frame(1).unwrap().data().unwrap().as_ref(),
             &[0x22],
             "no padding between odd native frames"
         );
@@ -914,8 +920,14 @@ mod tests {
             pd.add_frame([4u8, 5, 6]).unwrap();
         }
         let view = PixelDataRef::from_dataset(&ds).unwrap();
-        assert_eq!(view.get_frame(0).unwrap().data().as_ref(), &[1, 2, 3]);
-        assert_eq!(view.get_frame(1).unwrap().data().as_ref(), &[4, 5, 6]);
+        assert_eq!(
+            view.get_frame(0).unwrap().data().unwrap().as_ref(),
+            &[1, 2, 3]
+        );
+        assert_eq!(
+            view.get_frame(1).unwrap().data().unwrap().as_ref(),
+            &[4, 5, 6]
+        );
     }
 
     #[test]
@@ -930,8 +942,8 @@ mod tests {
             pd.add_frame([0x00]).unwrap();
         }
         let view = PixelDataRef::from_dataset(&ds).unwrap();
-        assert_eq!(view.get_frame(0).unwrap().data().as_ref(), &[0x01]);
-        assert_eq!(view.get_frame(1).unwrap().data().as_ref(), &[0x00]);
+        assert_eq!(view.get_frame(0).unwrap().data().unwrap().as_ref(), &[0x01]);
+        assert_eq!(view.get_frame(1).unwrap().data().unwrap().as_ref(), &[0x00]);
 
         // 3x1: frame 0 = pixels 1,0,1; frame 1 = pixels 0,1,1, sharing byte 0.
         let mut ds = mono_dataset(3, 1, 1, 2);
@@ -941,8 +953,14 @@ mod tests {
             pd.add_frame([0b0000_0110]).unwrap();
         }
         let view = PixelDataRef::from_dataset(&ds).unwrap();
-        assert_eq!(view.get_frame(0).unwrap().data().as_ref(), &[0b0000_0101]);
-        assert_eq!(view.get_frame(1).unwrap().data().as_ref(), &[0b0000_0110]);
+        assert_eq!(
+            view.get_frame(0).unwrap().data().unwrap().as_ref(),
+            &[0b0000_0101]
+        );
+        assert_eq!(
+            view.get_frame(1).unwrap().data().unwrap().as_ref(),
+            &[0b0000_0110]
+        );
     }
 
     #[test]
@@ -968,7 +986,7 @@ mod tests {
             .get_frame(0)
             .unwrap();
         assert_eq!(
-            frame.data().as_ref(),
+            frame.data().unwrap().as_ref(),
             &0x0102u16.to_ne_bytes(),
             "host-order 0x0102 once, not swapped twice"
         );
@@ -999,7 +1017,10 @@ mod tests {
         frags.push_fragment(Arc::new(MemoryBuffer::from(vec![9u8, 9, 9, 9])));
         let pd = PixelData::from_dataset(&mut ds).unwrap();
         // rule 1 wins even though the fragment count does not match frames
-        assert_eq!(pd.get_frame(0).unwrap().data().as_ref(), &[9, 9, 9, 9]);
+        assert_eq!(
+            pd.get_frame(0).unwrap().data().unwrap().as_ref(),
+            &[9, 9, 9, 9]
+        );
     }
 
     #[test]
@@ -1010,8 +1031,8 @@ mod tests {
         frags.push_fragment(Arc::new(MemoryBuffer::from(vec![1u8, 1])));
         frags.push_fragment(Arc::new(MemoryBuffer::from(vec![2u8, 2])));
         let pd = PixelData::from_dataset(&mut ds).unwrap();
-        assert_eq!(pd.get_frame(0).unwrap().data().as_ref(), &[1, 1]);
-        assert_eq!(pd.get_frame(1).unwrap().data().as_ref(), &[2, 2]);
+        assert_eq!(pd.get_frame(0).unwrap().data().unwrap().as_ref(), &[1, 1]);
+        assert_eq!(pd.get_frame(1).unwrap().data().unwrap().as_ref(), &[2, 2]);
     }
 
     #[test]
@@ -1028,11 +1049,11 @@ mod tests {
         let pd = PixelData::from_dataset(&mut ds).unwrap();
         // frame 0 spans fragments 0 and 1
         assert_eq!(
-            pd.get_frame(0).unwrap().data().as_ref(),
+            pd.get_frame(0).unwrap().data().unwrap().as_ref(),
             &[1, 2, 3, 4],
             "frame spans fragments"
         );
-        assert_eq!(pd.get_frame(1).unwrap().data().as_ref(), &[5, 6]);
+        assert_eq!(pd.get_frame(1).unwrap().data().unwrap().as_ref(), &[5, 6]);
     }
 
     #[test]
@@ -1056,7 +1077,10 @@ mod tests {
             assert_eq!(pd.add_frame([1u8, 2, 3, 4]).unwrap(), 0);
             assert_eq!(pd.add_frame([5u8, 6, 7, 8]).unwrap(), 1);
             assert_eq!(pd.number_of_frames(), 2);
-            assert_eq!(pd.get_frame(1).unwrap().data().as_ref(), &[5, 6, 7, 8]);
+            assert_eq!(
+                pd.get_frame(1).unwrap().data().unwrap().as_ref(),
+                &[5, 6, 7, 8]
+            );
         }
 
         let mut ds = mono_dataset(1, 1, 8, 1);
@@ -1064,7 +1088,7 @@ mod tests {
         let mut pd = PixelData::from_dataset(&mut ds).unwrap();
         pd.add_frame([7u8, 8]).unwrap();
         pd.add_frame([9u8, 9]).unwrap();
-        assert_eq!(pd.get_frame(1).unwrap().data().as_ref(), &[9, 9]);
+        assert_eq!(pd.get_frame(1).unwrap().data().unwrap().as_ref(), &[9, 9]);
     }
 
     #[test]
@@ -1078,7 +1102,10 @@ mod tests {
             let second: SharedBuffer = Arc::new(MemoryBuffer::from(vec![5u8, 6, 7, 8]));
             assert_eq!(pd.add_frame_buffer(second).unwrap(), 1);
             assert_eq!(pd.number_of_frames(), 2);
-            assert_eq!(pd.get_frame(1).unwrap().data().as_ref(), &[5, 6, 7, 8]);
+            assert_eq!(
+                pd.get_frame(1).unwrap().data().unwrap().as_ref(),
+                &[5, 6, 7, 8]
+            );
         }
 
         // an odd frame cannot be stored verbatim and falls back to padding
@@ -1086,7 +1113,10 @@ mod tests {
         let mut pd = PixelData::from_dataset(&mut ds).unwrap();
         let odd: SharedBuffer = Arc::new(MemoryBuffer::from(vec![5u8, 6, 7]));
         assert_eq!(pd.add_frame_buffer(odd).unwrap(), 0);
-        assert_eq!(pd.get_frame(0).unwrap().data().as_ref(), &[5, 6, 7, 0]);
+        assert_eq!(
+            pd.get_frame(0).unwrap().data().unwrap().as_ref(),
+            &[5, 6, 7, 0]
+        );
     }
 
     #[test]
@@ -1100,7 +1130,7 @@ mod tests {
         let view = PixelDataRef::from_dataset(&ds).unwrap();
         assert_eq!(view.width(), 2);
         assert_eq!(view.number_of_frames(), 2);
-        assert_eq!(view.get_frame(1).unwrap().data().as_ref(), &[3, 4]);
+        assert_eq!(view.get_frame(1).unwrap().data().unwrap().as_ref(), &[3, 4]);
     }
 
     #[test]

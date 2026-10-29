@@ -1,5 +1,5 @@
 //! Codec interface contract, parameters and registry
-//! (CODEC-01..03/05; docs/01-architecture.md §9, §3).
+//! (CODEC-01..03/05; docs/01-architecture.md §9).
 //!
 //! The core ships **zero codecs** (divergence D10). Every implementation —
 //! JPEG family, JPEG-LS, J2K, HTJ2K and DICOM RLE — lives in radicom-codecs
@@ -339,7 +339,7 @@ mod tests {
                 let frame = src.get_frame(i)?;
                 // mock "compression": XOR every byte so tests can tell the
                 // payload apart from the source
-                let mut bytes = frame.data().to_vec();
+                let mut bytes = frame.data().unwrap().to_vec();
                 for b in &mut bytes {
                     *b ^= 0xFF;
                 }
@@ -487,7 +487,7 @@ mod tests {
         // the mock flips every byte, so the payload is provably transformed
         let pd = PixelData::from_dataset(&mut target).unwrap();
         assert_eq!(
-            pd.get_frame(0).unwrap().data().as_ref(),
+            pd.get_frame(0).unwrap().data().unwrap().as_ref(),
             &[0xFE, 0xFD, 0xFC, 0xFB]
         );
         reset_codec_registry();

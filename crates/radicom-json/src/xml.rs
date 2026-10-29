@@ -23,30 +23,33 @@ use radicom::model::element::DicomElement;
 use radicom::model::item::{DicomItem, DicomSequence};
 use radicom::model::tag::Tag;
 use radicom::model::vr::Vr;
+use radicom::Error;
 use std::fmt::Write as _;
-/// Renders a dataset as an XML string (XML-01).
-pub fn dataset_to_xml(dataset: &Dataset) -> String {
+/// Renders a dataset as an XML string (XML-01). A deferred value that cannot be
+/// read is an error, not an empty value.
+pub fn dataset_to_xml(dataset: &Dataset) -> Result<String, Error> {
     let mut out = String::with_capacity(1024);
     out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     out.push_str("<NativeDicomModel>\n");
-    write_dataset(&mut out, dataset, 1);
+    write_dataset(&mut out, dataset, 1)?;
     out.push_str("</NativeDicomModel>\n");
-    out
+    Ok(out)
 }
 
 /// Writes one dataset's items at `depth`.
-fn write_dataset(out: &mut String, dataset: &Dataset, depth: usize) {
+fn write_dataset(out: &mut String, dataset: &Dataset, depth: usize) -> Result<(), Error> {
     for item in dataset.items() {
         match item {
-            DicomItem::Element(element) => write_element(out, element, depth),
-            DicomItem::Sequence(sequence) => write_sequence(out, sequence, depth),
+            DicomItem::Element(element) => write_element(out, element, depth)?,
+            DicomItem::Sequence(sequence) => write_sequence(out, sequence, depth)?,
             // encapsulated pixel data exports as numbered <Fragment> elements,
             // which is what fo-dicom's DicomXML writer does too
             DicomItem::Fragments(fragments) => {
-                write_fragments(out, fragments.tag(), fragments.vr(), fragments, depth)
+                write_fragments(out, fragments.tag(), fragments.vr(), fragments, depth)?
             }
         }
     }
+    Ok(())
 }
 
 fn indent(out: &mut String, depth: usize) {
@@ -56,7 +59,7 @@ fn indent(out: &mut String, depth: usize) {
 }
 
 /// Writes a `<DicomAttribute>` for one element.
-fn write_element(out: &mut String, element: &DicomElement, depth: usize) {
+fn write_element(out: &mut String, element: &DicomElement, depth: usize) -> Result<(), Error> {
     indent(out, depth);
     write_attribute_open(out, element.tag(), element.vr());
     out.push('>');
@@ -64,15 +67,16 @@ fn write_element(out: &mut String, element: &DicomElement, depth: usize) {
 
     let vr = element.vr();
     if is_binary(vr) {
-        write_inline_binary(out, element, depth + 1);
+        write_inline_binary(out, element, depth + 1)?;
     } else if vr == Vr::Sq {
         // an empty sequence element: no items
     } else {
-        write_values(out, element, depth + 1);
+        write_values(out, element, depth + 1)?;
     }
 
     indent(out, depth);
     out.push_str("</DicomAttribute>\n");
+    Ok(())
 }
 
 /// `<DicomAttribute tag=.. vr=.. keyword=..>` (no closing bracket).
@@ -93,14 +97,14 @@ fn write_attribute_open(out: &mut String, tag: &Tag, vr: Vr) {
     }
 }
 
-fn write_values(out: &mut String, element: &DicomElement, depth: usize) {
+fn write_values(out: &mut String, element: &DicomElement, depth: usize) -> Result<(), Error> {
     let vr = element.vr();
     if vr == Vr::Pn {
-        write_person_name(out, element, depth);
-        return;
+        write_person_name(out, element, depth)?;
+        return Ok(());
     }
     // byte-backed non-binary VRs (parsed US/AT/etc.) render through their text
-    let text = text_form(element, vr);
+    let text = text_form(element, vr)?;
     let mut number = 1;
     for part in text.split('\\') {
         if part.is_empty() {
@@ -110,24 +114,25 @@ fn write_values(out: &mut String, element: &DicomElement, depth: usize) {
         let _ = writeln!(out, "<Value number=\"{number}\">{}</Value>", escape(part));
         number += 1;
     }
+    Ok(())
 }
 
 /// The text of every value component, `\`-joined (§2).
-fn text_form(element: &DicomElement, vr: Vr) -> String {
+fn text_form(element: &DicomElement, vr: Vr) -> Result<String, Error> {
     if let Some(raw) = element.value().as_buffer() {
         // parsed binary VRs: render each unit as text so XML stays readable
         return if is_binary(vr) {
-            String::new()
+            Ok(String::new())
         } else {
             raw_units_text(raw, vr)
         };
     }
-    element.string_value().to_string()
+    Ok(element.string_value().to_string())
 }
 
 /// Text form of a byte-backed numeric VR (US/UL/SS/SL/FL/FD/AT).
-fn raw_units_text(raw: &radicom::model::buffer::SharedBuffer, vr: Vr) -> String {
-    let bytes = raw.data();
+fn raw_units_text(raw: &radicom::model::buffer::SharedBuffer, vr: Vr) -> Result<String, Error> {
+    let bytes = raw.data()?;
     let bytes: &[u8] = bytes.as_ref();
     let unit = vr.unit_size().max(1);
     let mut parts = Vec::new();
@@ -162,16 +167,16 @@ fn raw_units_text(raw: &radicom::model::buffer::SharedBuffer, vr: Vr) -> String 
         };
         parts.push(text);
     }
-    parts.join("\\")
+    Ok(parts.join("\\"))
 }
 
 /// Writes PN as the Native DICOM Model shape (§2, PS3.19 / PS3.18 F.3.1):
 /// one `<PersonName number="n">` per value (VM `\`-separated), each carrying
 /// `<Alphabetic>`/`<Ideographic>`/`<Phonetic>` groups of named component
 /// elements `<FamilyName>`/`<GivenName>`/`<MiddleName>`/`<NamePrefix>`/`<NameSuffix>`.
-fn write_person_name(out: &mut String, element: &DicomElement, depth: usize) {
+fn write_person_name(out: &mut String, element: &DicomElement, depth: usize) -> Result<(), Error> {
     let text = match element.value().as_buffer() {
-        Some(raw) => String::from_utf8_lossy(raw.data().as_ref()).into_owned(),
+        Some(raw) => String::from_utf8_lossy(raw.data()?.as_ref()).into_owned(),
         None => element.string_value().to_string(),
     };
     const GROUPS: [&str; 3] = ["Alphabetic", "Ideographic", "Phonetic"];
@@ -210,34 +215,41 @@ fn write_person_name(out: &mut String, element: &DicomElement, depth: usize) {
         out.push_str("</PersonName>\n");
         number += 1;
     }
+    Ok(())
 }
 
-fn write_inline_binary(out: &mut String, element: &DicomElement, depth: usize) {
+fn write_inline_binary(
+    out: &mut String,
+    element: &DicomElement,
+    depth: usize,
+) -> Result<(), Error> {
     let Some(buffer) = element.value().as_buffer() else {
-        return;
+        return Ok(());
     };
     if buffer.size() == 0 {
-        return;
+        return Ok(());
     }
-    let encoded = base64::engine::general_purpose::STANDARD.encode(buffer.data().as_ref());
+    let encoded = base64::engine::general_purpose::STANDARD.encode(buffer.data()?.as_ref());
     indent(out, depth);
     let _ = writeln!(out, "<InlineBinary>{encoded}</InlineBinary>");
+    Ok(())
 }
 
 /// Writes a sequence attribute with its items nested as `<Item>` (§2).
-fn write_sequence(out: &mut String, sequence: &DicomSequence, depth: usize) {
+fn write_sequence(out: &mut String, sequence: &DicomSequence, depth: usize) -> Result<(), Error> {
     indent(out, depth);
     write_attribute_open(out, sequence.tag(), Vr::Sq);
     out.push_str(">\n");
     for (index, item) in sequence.items().iter().enumerate() {
         indent(out, depth + 1);
         let _ = writeln!(out, "<Item number=\"{}\">", index + 1);
-        write_dataset(out, item, depth + 2);
+        write_dataset(out, item, depth + 2)?;
         indent(out, depth + 1);
         out.push_str("</Item>\n");
     }
     indent(out, depth);
     out.push_str("</DicomAttribute>\n");
+    Ok(())
 }
 
 /// Fragment sequences are not representable; render what the bytes carry so
@@ -248,17 +260,18 @@ fn write_fragments(
     vr: Vr,
     fragments: &radicom::model::item::DicomFragmentSequence,
     depth: usize,
-) {
+) -> Result<(), Error> {
     indent(out, depth);
     write_attribute_open(out, tag, vr);
     out.push_str(">\n");
     for fragment in fragments.fragments() {
-        let encoded = base64::engine::general_purpose::STANDARD.encode(fragment.data().as_ref());
+        let encoded = base64::engine::general_purpose::STANDARD.encode(fragment.data()?.as_ref());
         indent(out, depth + 1);
         let _ = writeln!(out, "<InlineBinary>{encoded}</InlineBinary>");
     }
     indent(out, depth);
     out.push_str("</DicomAttribute>\n");
+    Ok(())
 }
 
 /// Binary VRs carried as base64 (§2).
@@ -303,7 +316,7 @@ mod tests {
 
     #[test]
     fn the_document_has_the_native_model_root() {
-        let xml = dataset_to_xml(&dataset());
+        let xml = dataset_to_xml(&dataset()).unwrap();
         assert!(xml.starts_with("<?xml"));
         assert!(xml.contains("<NativeDicomModel>"));
         assert!(xml.trim_end().ends_with("</NativeDicomModel>"));
@@ -311,7 +324,7 @@ mod tests {
 
     #[test]
     fn an_element_carries_tag_vr_keyword_and_value() {
-        let xml = dataset_to_xml(&dataset());
+        let xml = dataset_to_xml(&dataset()).unwrap();
         assert!(
             xml.contains("<DicomAttribute tag=\"00100020\" vr=\"LO\" keyword=\"PatientID\">"),
             "{xml}"
@@ -322,7 +335,7 @@ mod tests {
 
     #[test]
     fn a_person_name_expands_to_named_component_groups() {
-        let xml = dataset_to_xml(&dataset());
+        let xml = dataset_to_xml(&dataset()).unwrap();
         assert!(xml.contains("<PersonName number=\"1\">"), "{xml}");
         assert!(xml.contains("<Alphabetic>"), "{xml}");
         assert!(xml.contains("<FamilyName>Doe</FamilyName>"), "{xml}");
@@ -333,7 +346,7 @@ mod tests {
     fn a_multi_valued_person_name_becomes_numbered_person_name_elements() {
         let mut ds = Dataset::new();
         ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John\\Roe^Jane");
-        let xml = dataset_to_xml(&ds);
+        let xml = dataset_to_xml(&ds).unwrap();
         assert!(
             xml.contains("<PersonName number=\"1\">") && xml.contains("<PersonName number=\"2\">"),
             "{xml}"
@@ -349,7 +362,7 @@ mod tests {
     fn a_multi_value_element_numbers_each_component() {
         let mut ds = Dataset::new();
         ds.insert_str(Tag::IMAGE_TYPE, Vr::Cs, "ORIGINAL\\PRIMARY\\AXIAL");
-        let xml = dataset_to_xml(&ds);
+        let xml = dataset_to_xml(&ds).unwrap();
         assert!(
             xml.contains("<Value number=\"1\">ORIGINAL</Value>"),
             "{xml}"
@@ -368,7 +381,7 @@ mod tests {
                 1u8, 2, 3, 4,
             ])),
         )));
-        let xml = dataset_to_xml(&ds);
+        let xml = dataset_to_xml(&ds).unwrap();
         assert!(
             xml.contains("<InlineBinary>AQIDBA==</InlineBinary>"),
             "{xml}"
@@ -387,7 +400,7 @@ mod tests {
         );
         sequence.push(item);
 
-        let xml = dataset_to_xml(&ds);
+        let xml = dataset_to_xml(&ds).unwrap();
         assert!(xml.contains("vr=\"SQ\""), "{xml}");
         assert!(xml.contains("<Item number=\"1\">"), "{xml}");
         assert!(xml.contains("<Value number=\"1\">1.2.840.10008.5.1.4.1.1.2</Value>"));
@@ -398,7 +411,7 @@ mod tests {
     fn xml_metacharacters_are_escaped() {
         let mut ds = Dataset::new();
         ds.insert_str(Tag::INSTITUTION_ADDRESS, Vr::St, "a & b < c > d");
-        let xml = dataset_to_xml(&ds);
+        let xml = dataset_to_xml(&ds).unwrap();
         assert!(xml.contains("a &amp; b &lt; c &gt; d"), "{xml}");
         assert!(!xml.contains("a & b"), "the raw ampersand must not appear");
     }
@@ -414,7 +427,7 @@ mod tests {
                 512u16.to_le_bytes().to_vec(),
             )),
         )));
-        let xml = dataset_to_xml(&ds);
+        let xml = dataset_to_xml(&ds).unwrap();
         assert!(xml.contains("<Value number=\"1\">512</Value>"), "{xml}");
     }
 
@@ -422,7 +435,7 @@ mod tests {
     fn an_empty_value_writes_no_value_elements() {
         let mut ds = Dataset::new();
         ds.insert_empty(Tag::PATIENT_BIRTH_DATE, Vr::Da);
-        let xml = dataset_to_xml(&ds);
+        let xml = dataset_to_xml(&ds).unwrap();
         assert!(
             !xml.contains("<Value"),
             "an empty element carries no Value: {xml}"
@@ -454,7 +467,7 @@ mod tests {
         item.insert_str(Tag::REFERENCED_SOP_CLASS_UID, Vr::Ui, "1.2.3");
         sequence.push(item);
 
-        let xml = dataset_to_xml(&ds);
+        let xml = dataset_to_xml(&ds).unwrap();
         let mut reader = Reader::from_str(&xml);
         reader.config_mut().trim_text(false);
 

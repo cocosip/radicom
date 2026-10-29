@@ -110,7 +110,7 @@ impl DicomFragmentSequence {
     /// fragment's item tag, i.e. every preceding fragment contributes its
     /// 8-byte item header plus its padded length (docs/01-architecture.md §7).
     /// A computed offset beyond `u32::MAX` clears the table (readers then
-    /// fall back to the fragment-count == frame-count mapping, spec 06 §1.4).
+    /// fall back to the fragment-count == frame-count mapping, docs/01-architecture.md §9.1).
     pub fn push_fragment(&mut self, fragment: SharedBuffer) {
         if self.next_offset <= u32::MAX as u64 {
             self.offset_table.push(self.next_offset as u32);
@@ -197,7 +197,7 @@ impl PartialEq for DicomFragmentSequence {
                 .fragments
                 .iter()
                 .zip(other.fragments.iter())
-                .all(|(a, b)| a.size() == b.size() && a.data() == b.data())
+                .all(|(a, b)| crate::model::buffer::same_content(a, b))
     }
 }
 impl Eq for DicomFragmentSequence {}

@@ -1,4 +1,4 @@
-//! Tag interning index (TAG-04; docs/01-architecture.md §3).
+//! Tag interning index (TAG-04; docs/01-architecture.md §1).
 //!
 //! Reuses interned instances for known tags so the parser and AT elements
 //! avoid per-element allocations. Unknown tags are constructed fresh and

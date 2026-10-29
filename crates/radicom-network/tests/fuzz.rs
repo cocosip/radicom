@@ -1,4 +1,4 @@
-//! PDU robustness baseline (docs/02-development-guide.md §5 §7): arbitrary byte streams must
+//! PDU robustness baseline (docs/02-development-guide.md §5.7): arbitrary byte streams must
 //! decode to a typed `Result` without panicking. Pure `std`, deterministic.
 
 use radicom_network::pdu::decode;

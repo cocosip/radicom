@@ -376,8 +376,8 @@ fn read_grayscale(dataset: &Dataset) -> Result<Vec<f64>, Error> {
     let pixel = PixelDataRef::from_dataset(dataset)?;
     let slots = (pixel.width() * pixel.height() * pixel.samples_per_pixel() as u32) as usize;
     let frame = pixel.get_frame(0)?;
-    let bytes = frame.data();
-    let bytes = bytes.as_ref();
+    let frame_data = frame.data()?;
+    let bytes = frame_data.as_ref();
     let bits = pixel.bits_allocated()?;
     let signed = pixel.pixel_representation() == 1;
     let depth = crate::render::bit_depth::BitDepth::new(
@@ -878,7 +878,7 @@ mod tests {
             .unwrap()
             .get_frame(0)
             .unwrap();
-        let bytes = frame.data();
+        let bytes = frame.data().unwrap();
         assert_eq!(
             bytes.len(),
             4 * 4 * 2,

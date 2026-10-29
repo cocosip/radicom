@@ -631,7 +631,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         // RD-05: private creator tracking
         if tag.is_private() && tag.is_private_creator_slot() && vr == Vr::Lo {
             let creator = Arc::new(crate::model::private_creator::PrivateCreator::new(
-                String::from_utf8_lossy(&buffer.data())
+                String::from_utf8_lossy(&buffer.data()?)
                     .trim_end_matches([' ', '\0'])
                     .to_string(),
             ));
@@ -716,7 +716,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                         Err(e) => return Err(e),
                     };
                     if first {
-                        let table = decode_offset_table(&buffer, self.big_endian);
+                        let table = decode_offset_table(&buffer, self.big_endian)?;
                         observer.on_begin_fragment(&self.ctx(start), tag, vr, table.clone())?;
                         offset_table = Some(table);
                     } else {
@@ -938,8 +938,8 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
 /// each. PS3.5 requires the item length to be a multiple of 4; a malformed
 /// trailing partial entry is ignored without shifting the complete entries (and
 /// without a word-swap unit assertion firing on an odd length).
-fn decode_offset_table(buffer: &SharedBuffer, big_endian: bool) -> Vec<u32> {
-    let data = buffer.data();
+fn decode_offset_table(buffer: &SharedBuffer, big_endian: bool) -> Result<Vec<u32>, Error> {
+    let data = buffer.data()?;
     let (chunks, remainder) = data.as_chunks::<4>();
     let mut entries = Vec::with_capacity(chunks.len());
     for chunk in chunks {
@@ -956,7 +956,7 @@ fn decode_offset_table(buffer: &SharedBuffer, big_endian: bool) -> Vec<u32> {
             "basic offset table length is not a multiple of 4; ignoring trailing bytes"
         );
     }
-    entries
+    Ok(entries)
 }
 
 /// RD-04: inflates a deflated dataset body. The file meta group is never

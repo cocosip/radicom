@@ -268,7 +268,7 @@ impl<W: Write> ByteTargetWriter<W> {
             if take == 0 {
                 break;
             }
-            buffer.get_byte_range(offset, &mut self.scratch[..take]);
+            buffer.get_byte_range(offset, &mut self.scratch[..take])?;
             self.inner.write_all(&self.scratch[..take])?;
             offset += take as u64;
             written += take as u64;
@@ -346,7 +346,7 @@ mod tests {
         assert_eq!(bytes, vec![10, 20, 30]);
         src.goto(1).unwrap();
         let buf = src.read_buffer(3).unwrap();
-        assert_eq!(&*buf.data(), &[10, 20, 30]);
+        assert_eq!(&*buf.data().unwrap(), &[10, 20, 30]);
     }
 
     #[test]

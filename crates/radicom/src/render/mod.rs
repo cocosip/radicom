@@ -1,5 +1,5 @@
 //! Grayscale rendering and a zero-dependency PNG writer (REND-01/03/04/07;
-//! docs/01-architecture.md §10, §3, §4, §7).
+//! docs/01-architecture.md §10).
 //!
 //! This round delivers the smallest vertical slice that satisfies the milestone
 //! acceptance test — "render a 16-bit CT frame to PNG correctly":
@@ -64,10 +64,11 @@ pub struct LutTable {
 
 impl LutTable {
     /// Builds from a LUT-sequence item's `(0028,3002)` descriptor and
-    /// `(0028,3006)` data. Returns `None` when either is missing or malformed.
+    /// `(0028,3006)` data. Returns `None` when either is missing, malformed or
+    /// unreadable.
     pub fn from_item(item: &Dataset) -> Option<LutTable> {
         let descriptor = item.get_element(Tag::LUT_DESCRIPTOR).ok()?;
-        let desc = descriptor.value().as_buffer()?.data();
+        let desc = descriptor.value().as_buffer()?.data().ok()?;
         if desc.len() < 6 {
             return None;
         }
@@ -195,12 +196,16 @@ impl ModalityLut {
     }
 }
 
-/// Reads an element's bytes from a dataset (raw buffer form).
+/// Reads an element's bytes from a dataset (raw buffer form). A value that
+/// cannot be materialized counts as absent: LUT discovery is a fallback chain,
+/// and the frame read itself reports the file error when the data is unusable.
 fn element_bytes(dataset: &Dataset, tag: Tag) -> Option<Vec<u8>> {
     match dataset.item(&tag)? {
-        crate::model::item::DicomItem::Element(e) => {
-            e.value().as_buffer().map(|b| b.data().to_vec())
-        }
+        crate::model::item::DicomItem::Element(e) => e
+            .value()
+            .as_buffer()
+            .and_then(|b| b.data().ok())
+            .map(|b| b.to_vec()),
         _ => None,
     }
 }
@@ -715,8 +720,8 @@ fn visit_frame_stored_values(
     mut f: impl FnMut(f64),
 ) -> Result<(), Error> {
     let (buffer, depth, width, height) = frame_sample_buffer(dataset, frame)?;
-    let raw = buffer.data();
-    let raw: &[u8] = raw.as_ref();
+    let raw_data = buffer.data()?;
+    let raw: &[u8] = raw_data.as_ref();
     let signed = depth.signed;
     let stored = depth.stored;
     let value = |v: u16| -> f64 {
@@ -1015,8 +1020,8 @@ impl RawImage {
         color: crate::pixel::Color32,
     ) -> Result<(), Error> {
         let bits = overlay.load_frame(dataset, frame)?;
-        let bits = bits.data();
-        let bits: &[u8] = bits.as_ref();
+        let bits_data = bits.data()?;
+        let bits: &[u8] = bits_data.as_ref();
         let ov_rows = overlay.rows() as usize;
         let ov_cols = overlay.columns() as usize;
         if ov_rows == 0 || ov_cols == 0 {
@@ -1164,8 +1169,8 @@ fn render_grayscale_with_threshold(
     }
 
     let buffer = pixel.get_frame(frame)?;
-    let raw = buffer.data();
-    let raw: &[u8] = raw.as_ref();
+    let raw_data = buffer.data()?;
+    let raw: &[u8] = raw_data.as_ref();
 
     // 1-bit (bilevel) frames are packed continuously, LSB first (PS3.5 §8.1.1).
     // They are display-black/white, not windowed data.
@@ -1667,8 +1672,8 @@ fn read_frame_samples(pixel: &PixelDataRef<'_>, frame: u32) -> Result<(Vec<u16>,
         return Err(unsupported("compressed frames need the codec layer"));
     }
     let buffer = pixel.get_frame(frame)?;
-    let raw = buffer.data();
-    let raw: &[u8] = raw.as_ref();
+    let raw_data = buffer.data()?;
+    let raw: &[u8] = raw_data.as_ref();
     let samples = if bits == 8 {
         raw.iter().map(|b| *b as u16).collect()
     } else {
@@ -1802,8 +1807,8 @@ fn render_ybr_frame(
     }
     let (width, height) = (pixel.width(), pixel.height());
     let buffer = pixel.get_frame(frame)?;
-    let raw = buffer.data();
-    let raw: &[u8] = raw.as_ref();
+    let raw_data = buffer.data()?;
+    let raw: &[u8] = raw_data.as_ref();
 
     // Read a sample at byte level, honouring 8/16-bit little-endian storage.
     // The stored depth is normalised exactly like the RGB path: PS3.3 defines
@@ -3880,7 +3885,7 @@ mod tests {
         let overlays = crate::pixel::overlay::OverlayData::from_dataset(&ds);
         let data = overlays[0].load(&ds).unwrap();
         assert_eq!(
-            data.data().as_ref(),
+            data.data().unwrap().as_ref(),
             &[0x01, 0x02],
             "bits at (1,1) and (2,2) of the image"
         );

@@ -1,4 +1,4 @@
-//! Robustness / fuzz-style baselines (docs/02-development-guide.md §5 §7).
+//! Robustness / fuzz-style baselines (docs/02-development-guide.md §5.7).
 //!
 //! Pure-`std` deterministic byte sweeps (no cargo-fuzz / libfuzzer needed): the
 //! reader must terminate with a typed `Result` — never panic or hang — on

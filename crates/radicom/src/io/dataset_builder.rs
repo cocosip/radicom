@@ -103,7 +103,7 @@ impl ParseObserver for DatasetBuilder {
         // SpecificCharacterSet: ASCII by definition, and it governs this
         // level plus nested items that do not override it
         if tag.group() == 0x0008 && tag.element() == 0x0005 {
-            let text = String::from_utf8_lossy(&buffer.data())
+            let text = String::from_utf8_lossy(&buffer.data()?)
                 .trim_end_matches([' ', '\0'])
                 .to_string();
             let enc = Self::charset_of(&text).unwrap_or_else(|| charset_encoding("ISO_IR 6"));
@@ -115,7 +115,7 @@ impl ParseObserver for DatasetBuilder {
         }
 
         let element = if vr.is_string() {
-            let text = self.decode_str(&buffer.data(), vr == Vr::Pn);
+            let text = self.decode_str(&buffer.data()?, vr == Vr::Pn);
             DicomElement::new_str(tag.clone(), vr, trim_value_padding(vr, text))
         } else {
             DicomElement::new_bytes(tag.clone(), vr, buffer)
@@ -499,7 +499,7 @@ mod tests {
         };
         assert_eq!(frags.offset_table(), &[0]);
         assert_eq!(frags.fragments().len(), 1);
-        assert_eq!(&*frags.fragments()[0].data(), &[0xAA, 0xBB]);
+        assert_eq!(&*frags.fragments()[0].data().unwrap(), &[0xAA, 0xBB]);
     }
 
     #[test]
@@ -528,7 +528,7 @@ mod tests {
         };
         assert_eq!(frags.fragments().len(), 1);
         assert_eq!(
-            &*frags.fragments()[0].data(),
+            &*frags.fragments()[0].data().unwrap(),
             &[0xAA, 0xBB, 0xCC, 0x00],
             "an odd fragment is exposed even-length with a zero pad"
         );
@@ -937,7 +937,7 @@ mod tests {
             1,
             "one data fragment besides the offset table"
         );
-        assert_eq!(fragments[0].data().as_ref(), &[1, 2, 3, 4]);
+        assert_eq!(fragments[0].data().unwrap().as_ref(), &[1, 2, 3, 4]);
     }
 
     #[test]
@@ -1079,7 +1079,7 @@ mod tests {
             "complete entry kept, trailing byte ignored"
         );
         assert_eq!(frags.fragments().len(), 1);
-        assert_eq!(&*frags.fragments()[0].data(), &[0xAA, 0xBB]);
+        assert_eq!(&*frags.fragments()[0].data().unwrap(), &[0xAA, 0xBB]);
         assert_eq!(ds.get_str(Tag::ACCESSION_NUMBER).unwrap(), "TAIL");
     }
 
@@ -1163,7 +1163,7 @@ mod tests {
                     let value = element
                         .value()
                         .as_buffer()
-                        .map(|b| b.data().to_vec())
+                        .map(|b| b.data().unwrap().to_vec())
                         .unwrap_or_default();
                     seen.push((
                         tag.element(),

@@ -1,4 +1,4 @@
-//! Dependency-free benchmarks (docs/02-development-guide.md §5 §8; M8 "benchmarks published").
+//! Dependency-free benchmarks (docs/02-development-guide.md §5.8; M8 "benchmarks published").
 //!
 //! Criterion is not vendored in this workspace's offline cache, so this suite is a
 //! plain `harness = false` binary that times the core hot paths with

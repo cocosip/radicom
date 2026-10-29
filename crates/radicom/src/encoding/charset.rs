@@ -1,4 +1,4 @@
-//! Character set handling (ENC-01..04; docs/01-architecture.md §3).
+//! Character set handling (ENC-01..04; docs/01-architecture.md §4).
 //!
 //! Maps Specific Character Set terms to encodings, handles ISO 2022
 //! escape-sequence switching on decode, and per-segment fallback encoding
@@ -10,7 +10,7 @@ use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-/// The built-in term → encoding table (spec 04 §8.1). ISO 2022 extended
+/// The built-in term → encoding table (docs/01-architecture.md §4). ISO 2022 extended
 /// terms decode their base encoding; escape switching is handled by
 /// [`decode_multi_charset`].
 static BUILTINS: &[(&str, &str)] = &[

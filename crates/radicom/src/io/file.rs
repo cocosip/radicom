@@ -1,5 +1,5 @@
 //! DICOM file container: format detection, file meta, open and save
-//! (FILE-01..06; docs/01-architecture.md §7, §5.3).
+//! (FILE-01..06; docs/01-architecture.md §7).
 
 use crate::error::{Error, FileError};
 use crate::io::byte_source::ByteSourceReader;
@@ -1324,7 +1324,7 @@ mod tests {
             );
             // range reads and streaming go straight to disk; only data() caches
             let mut slice = [0u8; 16];
-            buffer.get_byte_range(1000, &mut slice);
+            buffer.get_byte_range(1000, &mut slice).unwrap();
             assert_eq!(
                 slice,
                 big[1000..1016],
@@ -1333,7 +1333,11 @@ mod tests {
             let mut streamed = Vec::new();
             assert_eq!(buffer.copy_to(&mut streamed).unwrap(), 5000);
             assert_eq!(streamed, big, "streaming returns the whole value in chunks");
-            assert_eq!(&*buffer.data(), &big[..], "window reads the real bytes");
+            assert_eq!(
+                &*buffer.data().unwrap(),
+                &big[..],
+                "window reads the real bytes"
+            );
             assert_eq!(file.dataset.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
         }
         std::fs::remove_file(&path).ok();
@@ -1351,7 +1355,7 @@ mod tests {
             let buffer = large_value_buffer(&file.dataset);
             assert_eq!(buffer.size(), 5000);
             assert!(buffer.is_memory(), "ReadAll keeps the value in memory");
-            assert_eq!(&*buffer.data(), &big[..]);
+            assert_eq!(&*buffer.data().unwrap(), &big[..]);
         }
         std::fs::remove_file(&path).ok();
     }
@@ -1367,7 +1371,7 @@ mod tests {
             let file = DicomFile::open_with_options(&path, &opts).unwrap();
             let buffer = large_value_buffer(&file.dataset);
             assert_eq!(buffer.size(), 0, "skipped value is an empty placeholder");
-            assert!(buffer.data().is_empty());
+            assert!(buffer.data().unwrap().is_empty());
             // the parser still advanced past the skipped value to the next element
             assert_eq!(file.dataset.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
         }

@@ -71,7 +71,7 @@ impl PresentationLutTable {
             .value()
             .as_buffer()
             .ok_or_else(|| data_error("Presentation LUT Descriptor is not byte-backed"))?
-            .data();
+            .data()?;
         if desc.len() < 6 {
             return Err(data_error(
                 "Presentation LUT Descriptor is shorter than 3 US values",
@@ -95,7 +95,7 @@ impl PresentationLutTable {
             )));
         }
 
-        let data = element_bytes(item, Tag::LUT_DATA)
+        let data = element_bytes(item, Tag::LUT_DATA)?
             .ok_or_else(|| data_error("Presentation LUT Sequence item has no LUT Data"))?;
         let data_vr = item
             .get_element(Tag::LUT_DATA)
@@ -209,13 +209,13 @@ impl PresentationLut {
     }
 }
 
-fn element_bytes(dataset: &Dataset, tag: Tag) -> Option<Vec<u8>> {
-    match dataset.item(&tag)? {
-        DicomItem::Element(element) => element
-            .value()
-            .as_buffer()
-            .map(|buffer| buffer.data().to_vec()),
-        _ => None,
+fn element_bytes(dataset: &Dataset, tag: Tag) -> Result<Option<Vec<u8>>, Error> {
+    match dataset.item(&tag) {
+        Some(DicomItem::Element(element)) => match element.value().as_buffer() {
+            Some(buffer) => Ok(Some(buffer.data()?.to_vec())),
+            None => Ok(None),
+        },
+        _ => Ok(None),
     }
 }
 

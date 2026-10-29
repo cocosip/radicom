@@ -1,4 +1,4 @@
-//! Data dictionary (DICT-01, DICT-02, DICT-03; docs/01-architecture.md §3).
+//! Data dictionary (DICT-01, DICT-02, DICT-03; docs/01-architecture.md §2).
 
 use crate::error::{DataError, Error};
 use crate::model::private_creator::PrivateCreator;

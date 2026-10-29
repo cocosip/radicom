@@ -370,7 +370,7 @@ impl Command {
                     "Attribute Identifier List is not binary",
                 ));
             };
-            let bytes = buffer.data();
+            let bytes = buffer.data()?;
             if bytes.len() % 4 != 0 {
                 return Err(NetworkError::protocol(
                     "Attribute Identifier List has an invalid length",

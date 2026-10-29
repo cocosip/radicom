@@ -1,4 +1,4 @@
-//! JSON golden snapshot baseline (docs/02-development-guide.md §5 §4).
+//! JSON golden snapshot baseline (docs/02-development-guide.md §5.4).
 //!
 //! Regenerate with `cargo xtask regen-goldens`; this test fails when the JSON
 //! output drifts from the committed `tests-data/goldens/GH178.json`.

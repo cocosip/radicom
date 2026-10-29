@@ -1,4 +1,4 @@
-//! C-STORE receive path (SRV-03; docs/01-architecture.md §11, §7.2).
+//! C-STORE receive path (SRV-03; docs/01-architecture.md §11).
 //!
 //! The receiver parses the inbound dataset bytes into a [`DicomFile`]. The
 //! bytes are already buffered in memory by the time the sink runs, so the

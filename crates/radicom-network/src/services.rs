@@ -1,4 +1,4 @@
-//! Services: C-ECHO and C-STORE (SRV-02/03; docs/01-architecture.md §11, §7.2).
+//! Services: C-ECHO and C-STORE (SRV-02/03; docs/01-architecture.md §11).
 //!
 //! Providers are the SCP-side hooks. The built-in `VerificationProvider`
 //! answers C-ECHO; everything else is user code.

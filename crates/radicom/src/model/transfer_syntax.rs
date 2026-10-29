@@ -1,4 +1,4 @@
-//! Transfer syntax registry (TS-01, TS-02, TS-03; docs/01-architecture.md §3).
+//! Transfer syntax registry (TS-01, TS-02, TS-03; docs/01-architecture.md §2).
 
 use crate::error::{DataError, Error};
 use crate::model::endian::Endian;

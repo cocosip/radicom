@@ -84,8 +84,8 @@ fn build_icon(dataset: &Dataset, requested_frame: Option<u32>) -> Result<Option<
     let frame_index =
         requested_frame.unwrap_or_else(|| representative_frame(pixel.dataset(), frames));
     let frame = pixel.get_frame(frame_index)?;
-    let raw = frame.data();
-    let raw: &[u8] = raw.as_ref();
+    let raw_data = frame.data()?;
+    let raw: &[u8] = raw_data.as_ref();
 
     // normalise high-bit padding so a 12-bit-in-16 source is not read at 16x
     // magnitude (same rule as the render path; a small local copy because `render`
@@ -319,7 +319,7 @@ mod tests {
         let element = icon.get_element(Tag::PIXEL_DATA).unwrap();
         assert_eq!(element.value().as_buffer().unwrap().size(), 16 * 16);
         // 1000 of 65535 scales to ~4, NOT clipped to 255 (the old white-icon bug)
-        let bytes = element.value().as_buffer().unwrap().data();
+        let bytes = element.value().as_buffer().unwrap().data().unwrap();
         assert_eq!(
             bytes[0], 4,
             "16-bit value scales to 8-bit, not clipped white"
@@ -338,7 +338,8 @@ mod tests {
             .value()
             .as_buffer()
             .unwrap()
-            .data();
+            .data()
+            .unwrap();
         assert_eq!(bytes[0], 128, "2048 of 4095 → ~128, not clipped");
     }
 
@@ -349,7 +350,7 @@ mod tests {
         ds.insert_value(Tag::REPRESENTATIVE_FRAME_NUMBER, 2u16);
         let icon = BasicIconGenerator.generate(&ds).unwrap().unwrap();
         let element = icon.get_element(Tag::PIXEL_DATA).unwrap();
-        let bytes = element.value().as_buffer().unwrap().data();
+        let bytes = element.value().as_buffer().unwrap().data().unwrap();
         assert_eq!(bytes[0], 20, "the representative frame's value is used");
     }
 
@@ -363,7 +364,8 @@ mod tests {
             .value()
             .as_buffer()
             .unwrap()
-            .data();
+            .data()
+            .unwrap();
         assert_eq!(
             bytes[0], 20,
             "frame index is zero-based and selects frame 1"

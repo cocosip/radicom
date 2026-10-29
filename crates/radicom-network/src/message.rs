@@ -1,5 +1,5 @@
 //! DIMSE message encoding: command + dataset as one message (NET-05/06;
-//! docs/01-architecture.md §11, §5.3).
+//! docs/01-architecture.md §11).
 //!
 //! A message is a command set followed by an optional dataset. The command
 //! set is always Implicit VR Little Endian; the dataset uses the presentation
