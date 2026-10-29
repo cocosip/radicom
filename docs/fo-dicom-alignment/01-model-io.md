@@ -80,7 +80,7 @@
 | fo-dicom 能力 | 状态 | radicom 对应 | 证据 |
 |---|---|---|---|
 | `Add` / `AddOrUpdate` / `AddOrUpdate(VR, tag, values)` | ✅ | `insert` / `insert_or_update` / `insert_value` / `insert_value_with_vr` | 新增 `insert_value_with_vr(tag, vr, value)` 显式指定 VR 覆盖字典；多值经 `IntoElement` 表达 |
-| `AddOrUpdate` 对私有 tag 的 creator 校验 | 🟡 | `resolve_private_write`（`dataset.rs:464`） | 字典式私有 tag 会自动分配 creator block，并把元素/序列/片段重绑定到具体 block；creator block 耗尽时仍受 `insert_or_update` 无错误返回值的 API 限制 |
+| `AddOrUpdate` 对私有 tag 的 creator 校验 | ✅ | `resolve_private_write`；`try_insert_or_update` | 字典式私有 tag 自动分配 creator block 并重绑定元素/序列/片段；新增 `try_insert_or_update` 在 block 耗尽时返回错误（`insert_or_update` 保持宽容为已知上限） |
 | `GetPrivateTag(tag, create)` | ✅ | `dataset.rs:316` | |
 | `GetCodeItem` / `GetMeasuredValue` / `GetReferencedSOP`（SR 辅助） | ⛔（有意分层） | `sr/code_item.rs` `CodeItem::read_from`、`sr/content_item.rs` `MeasuredValue::read_from`/`ReferencedSop::read_from` | 读取逻辑都在 `sr/` 模块；不在 `Dataset` 上加重导出，避免 `model` 反向依赖 `sr` |
 | `FunctionalGroupValues(frame)` | ✅ | `dataset.rs:775` `functional_groups` | 返回临时 Dataset，语义一致 |

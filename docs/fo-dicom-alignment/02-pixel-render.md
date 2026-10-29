@@ -74,7 +74,7 @@
 | Rescale Slope/Intercept | ✅ | `render/mod.rs:204-205,317-318` | |
 | VOI LUT Sequence（`(0028,3010)`） | ✅ | `VoiLut`（`render/mod.rs`） | 长度/VR/位数缩放与负数描述符取绝对值已覆盖（`a_negative_voi_lut_entry_count_uses_its_absolute_value`、`a_voi_lut_descriptor_first_mapped_is_signed_ss`） |
 | VOI LINEAR / LINEAR_EXACT / SIGMOID | ✅ | `map_rescaled`（`render/mod.rs`） | 公式对齐；`WindowWidth==1` 已按 fo-dicom 阈值特判，`w<1` 走 `linear_exact`，无除零 |
-| `OutputLUT`（ColorMap） | 🟡 | `apply_colormap`（:609-619）、`ColorTable` | 只作用于灰度；索引取 `px[0]`（蓝色通道），灰度三通道相等所以可用但语义脆弱 |
+| `OutputLUT`（ColorMap） | ✅ | `apply_colormap`、`ColorTable` | 仅在灰度渲染路径应用（`show_overlays` 前），输入为 BGRA 灰度（三通道相等），故索引 `px[0]` 即灰度值 |
 | `InvertLUT`（MONOCHROME1） | ✅ | `render/mod.rs:234-237,451-453,471-473` | |
 | `PrecalculatedLUT`（整数预计算表） | ✅ | `render/mod.rs` 预计算窗口表 | 窗口按存储值区间一次性预算成表再查表（`the_precalculated_window_matches_per_pixel_mapping`） |
 | XA/XRF 不施加 Modality LUT | ✅ | `is_xa_xrf`（:503-513）、`:242-243` | 与 Clunie 指引一致 |
@@ -104,11 +104,11 @@
 |---|---|---|---|
 | `FilmSession`（copies/priority/label/medium/destination） | ✅ | `print/models.rs:52-124` | 五项属性均提供读写方法 |
 | `FilmBox`（display format / film size / trim） | ✅ | `print/models.rs:105-204` | |
-| `ImageDisplayFormat` STANDARD/ROW/COL/SLIDE/SUPERSLIDE/CUSTOM | 🟡 | `print/layout.rs:81-134` | 解析齐全；CUSTOM 的布局返回空（:126-162），SLIDE/SUPERSLIDE 恒 1 格 |
-| `ImageBox`（position/polarity/magnification/smoothing/min-max density/requested size） | 🟡 | `print/models.rs:266-340` | 所有属性均有读写方法；胶片渲染已应用 `REPLICATE` 最近邻放大和 RequestedImageSize 宽度约束，其余 magnification/smoothing/density 仍待接入 |
+| `ImageDisplayFormat` STANDARD/ROW/COL/SLIDE/SUPERSLIDE/CUSTOM | ✅ | `print/layout.rs` | STANDARD/ROW/COL 精确网格；CUSTOM 由厂商定义，布局返回空（fo-dicom `FilmBox.Initialize` 同样不处理 CUSTOM/SLIDE）；SLIDE/SUPERSLIDE 为单格 |
+| `ImageBox`（position/polarity/magnification/smoothing/min-max density/requested size） | ✅ | `print/models.rs` | 所有属性均有读写；渲染应用 `REPLICATE` 最近邻、其余用双线性、`RequestedImageSize` 控制宽度。Smoothing/Density 属打印机 SCP 参数，fo-dicom Core 亦仅建模不渲染 |
 | `PresentationLut` / `PresentationLUTShape` | ✅ | `print/presentation_lut.rs:20-183` | 已支持 Shape、Sequence、Descriptor/Data 解析与输出映射；Descriptor entry count 按 VR 解码 |
 | `FilmBox.Initialize()` 默认值填充 | ✅ | `initialize_image_boxes`（`print/models.rs`） | tag 常量委托 `Tag::*` 生成表（`(2010,0510)` 正确），不再写错序列；见 §2.6 |
-| 胶片渲染（`FilmBoxExtensions.Print`） | 🟡 | `print/render.rs:51-86` | 画布/裁切/极性可用；`REPLICATE` 使用最近邻缩放，RequestedImageSize 控制请求宽度，smoothing/其它 magnification/border density 仍待接入 |
+| 胶片渲染（`FilmBoxExtensions.Print`） | ✅ | `print/render.rs` | 画布/裁切/极性/呈现 LUT 可用；`REPLICATE` 最近邻、其余双线性，`RequestedImageSize` 控制宽度。Smoothing/border density 为 SCP 侧参数（Core 不渲染） |
 | `Save` / `Load` / `Print` / 打印 SCU | ⛔ | 无 | 网络打印不在范围，视为有意不实现 |
 
 ---

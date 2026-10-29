@@ -184,6 +184,10 @@
   `AddOrUpdate(VR, tag, values)`；各加一个测试。
 - **IO / 读侧偶长片段**：`parse_fragment_sequence` 对奇数长度 fragment 用 `EvenLengthBuffer::wrap_if_needed`
   补齐为偶数并告警（此前该类型存在但解析路径未用），新增回归测试。
+- **模型 / 私有 creator 耗尽**：新增 `Dataset::try_insert_or_update`，私有 block 用尽时返回
+  `PrivateTagResolution` 错误而非静默丢弃；`insert_or_update` 保持宽容（已知上限）。含耗尽场景测试。
+- **打印/像素文档复核**：`OutputLUT` 仅用于灰度路径、`CUSTOM` 布局与 fo-dicom 一致为空、
+  ImageBox 的 smoothing/density 属 SCP 参数（Core 不渲染）——均为能力等价，行状态已更正。
 - .NET 专属抽象，Rust 不适用（按能力已覆盖）→ `INetworkManager`、`DicomTimeout`、`NetworkStreamCreationOptions`、
   `IImage`/`IImageManager`、`IPixelData` 接口、每服务独立 provider 接口、`DirectoryRecord` 指针、`CacheType`、`ArrayPool`。
 

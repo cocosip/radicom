@@ -242,6 +242,23 @@ impl Dataset {
         self
     }
 
+    /// Fallible insert-or-update: a dictionary-style private tag that cannot be
+    /// assigned a block (the group has no free creator slot) returns an error
+    /// instead of being silently dropped.
+    pub fn try_insert_or_update(&mut self, item: impl Into<DicomItem>) -> Result<&mut Self, Error> {
+        let item: DicomItem = item.into();
+        let original = item.tag().clone();
+        match self.resolve_private_write(original.clone(), true) {
+            Some(t) => {
+                self.items.insert(t.clone(), item.with_tag(t));
+                Ok(self)
+            }
+            None => Err(Error::Data(DataError::PrivateTagResolution {
+                tag: TagRef(original.group(), original.element()),
+            })),
+        }
+    }
+
     /// Typed insert with dictionary VR resolution (DS-03 dispatch).
     pub fn insert_value<V: IntoElement>(&mut self, tag: Tag, value: V) -> &mut Self {
         let vr = self.resolve_vr(&tag, value.preferred_vr());
@@ -854,6 +871,23 @@ mod tests {
         }
         let overflow = mk("one more");
         assert_eq!(ds.get_private_tag(overflow, true), None, "group exhausted");
+    }
+
+    #[test]
+    fn try_insert_or_update_errors_when_the_private_group_is_full() {
+        let mut ds = Dataset::new();
+        for i in 0..240u32 {
+            let creator = Arc::new(crate::model::private_creator::PrivateCreator::new(format!("C{i}")));
+            assert!(ds.get_private_tag(Tag::private(0x002B, 0x0001, creator), true).is_some());
+        }
+        let tag = Tag::private(
+            0x002B,
+            0x0001,
+            Arc::new(crate::model::private_creator::PrivateCreator::new("overflow")),
+        );
+        let item = DicomItem::Element(DicomElement::new_str(tag, Vr::Lo, "x"));
+        assert_eq!(ds.len(), 240, "creator slots only");
+        assert!(ds.try_insert_or_update(item).is_err(), "a full group surfaces an error, not a silent drop");
     }
 
     #[test]
