@@ -42,7 +42,9 @@ fn write_dataset(out: &mut String, dataset: &Dataset, depth: usize) {
             DicomItem::Sequence(sequence) => write_sequence(out, sequence, depth),
             // encapsulated pixel data exports as numbered <Fragment> elements,
             // which is what fo-dicom's DicomXML writer does too
-            DicomItem::Fragments(fragments) => write_fragments(out, fragments.tag(), fragments.vr(), fragments, depth),
+            DicomItem::Fragments(fragments) => {
+                write_fragments(out, fragments.tag(), fragments.vr(), fragments, depth)
+            }
         }
     }
 }
@@ -76,7 +78,12 @@ fn write_element(out: &mut String, element: &DicomElement, depth: usize) {
 /// `<DicomAttribute tag=.. vr=.. keyword=..>` (no closing bracket).
 fn write_attribute_open(out: &mut String, tag: &Tag, vr: Vr) {
     let keyword = radicom::default_dictionary().entry(tag).keyword.to_string();
-    let _ = write!(out, "<DicomAttribute tag=\"{}\" vr=\"{}\"", tag.to_json_string(), vr.code());
+    let _ = write!(
+        out,
+        "<DicomAttribute tag=\"{}\" vr=\"{}\"",
+        tag.to_json_string(),
+        vr.code()
+    );
     if !keyword.is_empty() {
         let _ = write!(out, " keyword=\"{}\"", escape(&keyword));
     }
@@ -133,6 +140,14 @@ fn raw_units_text(raw: &radicom::model::buffer::SharedBuffer, vr: Vr) -> String 
             Vr::Ss => i16::from_le_bytes([chunk[0], chunk[1]]).to_string(),
             Vr::Ul => u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).to_string(),
             Vr::Sl => i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).to_string(),
+            Vr::Sv if unit == 8 => i64::from_le_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+            ])
+            .to_string(),
+            Vr::Uv if unit == 8 => u64::from_le_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+            ])
+            .to_string(),
             Vr::Fl => f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).to_string(),
             Vr::Fd => f64::from_le_bytes([
                 chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
@@ -160,14 +175,22 @@ fn write_person_name(out: &mut String, element: &DicomElement, depth: usize) {
         None => element.string_value().to_string(),
     };
     const GROUPS: [&str; 3] = ["Alphabetic", "Ideographic", "Phonetic"];
-    const COMPONENTS: [&str; 5] = ["FamilyName", "GivenName", "MiddleName", "NamePrefix", "NameSuffix"];
+    const COMPONENTS: [&str; 5] = [
+        "FamilyName",
+        "GivenName",
+        "MiddleName",
+        "NamePrefix",
+        "NameSuffix",
+    ];
     let mut number = 1;
     for value in text.split('\\') {
         indent(out, depth);
         let _ = writeln!(out, "<PersonName number=\"{number}\">");
         let mut group_iter = value.split('=');
         for group in GROUPS {
-            let Some(group_text) = group_iter.next() else { break };
+            let Some(group_text) = group_iter.next() else {
+                break;
+            };
             let parts: Vec<&str> = group_text.split('^').collect();
             if !parts.iter().any(|p| !p.is_empty()) {
                 continue; // an absent group is omitted
@@ -240,7 +263,10 @@ fn write_fragments(
 
 /// Binary VRs carried as base64 (§2).
 fn is_binary(vr: Vr) -> bool {
-    matches!(vr, Vr::Ob | Vr::Od | Vr::Of | Vr::Ol | Vr::Ov | Vr::Ow | Vr::Un)
+    matches!(
+        vr,
+        Vr::Ob | Vr::Od | Vr::Of | Vr::Ol | Vr::Ov | Vr::Ow | Vr::Un
+    )
 }
 
 /// Escapes the five XML metacharacters.
@@ -286,7 +312,10 @@ mod tests {
     #[test]
     fn an_element_carries_tag_vr_keyword_and_value() {
         let xml = dataset_to_xml(&dataset());
-        assert!(xml.contains("<DicomAttribute tag=\"00100020\" vr=\"LO\" keyword=\"PatientID\">"), "{xml}");
+        assert!(
+            xml.contains("<DicomAttribute tag=\"00100020\" vr=\"LO\" keyword=\"PatientID\">"),
+            "{xml}"
+        );
         assert!(xml.contains("<Value number=\"1\">12345</Value>"));
         assert!(xml.contains("</DicomAttribute>"));
     }
@@ -305,9 +334,15 @@ mod tests {
         let mut ds = Dataset::new();
         ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John\\Roe^Jane");
         let xml = dataset_to_xml(&ds);
-        assert!(xml.contains("<PersonName number=\"1\">") && xml.contains("<PersonName number=\"2\">"), "{xml}");
+        assert!(
+            xml.contains("<PersonName number=\"1\">") && xml.contains("<PersonName number=\"2\">"),
+            "{xml}"
+        );
         assert!(xml.contains("<FamilyName>Doe</FamilyName>"), "{xml}");
-        assert!(xml.contains("<FamilyName>Roe</FamilyName>"), "the second value is not merged: {xml}");
+        assert!(
+            xml.contains("<FamilyName>Roe</FamilyName>"),
+            "the second value is not merged: {xml}"
+        );
     }
 
     #[test]
@@ -315,7 +350,10 @@ mod tests {
         let mut ds = Dataset::new();
         ds.insert_str(Tag::IMAGE_TYPE, Vr::Cs, "ORIGINAL\\PRIMARY\\AXIAL");
         let xml = dataset_to_xml(&ds);
-        assert!(xml.contains("<Value number=\"1\">ORIGINAL</Value>"), "{xml}");
+        assert!(
+            xml.contains("<Value number=\"1\">ORIGINAL</Value>"),
+            "{xml}"
+        );
         assert!(xml.contains("<Value number=\"2\">PRIMARY</Value>"), "{xml}");
         assert!(xml.contains("<Value number=\"3\">AXIAL</Value>"), "{xml}");
     }
@@ -326,10 +364,15 @@ mod tests {
         ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
             Tag::PIXEL_DATA,
             Vr::Ob,
-            Arc::new(radicom::model::buffer::MemoryBuffer::from(vec![1u8, 2, 3, 4])),
+            Arc::new(radicom::model::buffer::MemoryBuffer::from(vec![
+                1u8, 2, 3, 4,
+            ])),
         )));
         let xml = dataset_to_xml(&ds);
-        assert!(xml.contains("<InlineBinary>AQIDBA==</InlineBinary>"), "{xml}");
+        assert!(
+            xml.contains("<InlineBinary>AQIDBA==</InlineBinary>"),
+            "{xml}"
+        );
     }
 
     #[test]
@@ -337,7 +380,11 @@ mod tests {
         let mut ds = Dataset::new();
         let sequence = ds.insert_sequence(Tag::REFERENCED_IMAGE_SEQUENCE);
         let mut item = Dataset::new();
-        item.insert_str(Tag::REFERENCED_SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.2");
+        item.insert_str(
+            Tag::REFERENCED_SOP_CLASS_UID,
+            Vr::Ui,
+            "1.2.840.10008.5.1.4.1.1.2",
+        );
         sequence.push(item);
 
         let xml = dataset_to_xml(&ds);
@@ -363,7 +410,9 @@ mod tests {
         ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
             Tag::ROWS,
             Vr::Us,
-            Arc::new(radicom::model::buffer::MemoryBuffer::from(512u16.to_le_bytes().to_vec())),
+            Arc::new(radicom::model::buffer::MemoryBuffer::from(
+                512u16.to_le_bytes().to_vec(),
+            )),
         )));
         let xml = dataset_to_xml(&ds);
         assert!(xml.contains("<Value number=\"1\">512</Value>"), "{xml}");
@@ -374,7 +423,10 @@ mod tests {
         let mut ds = Dataset::new();
         ds.insert_empty(Tag::PATIENT_BIRTH_DATE, Vr::Da);
         let xml = dataset_to_xml(&ds);
-        assert!(!xml.contains("<Value"), "an empty element carries no Value: {xml}");
+        assert!(
+            !xml.contains("<Value"),
+            "an empty element carries no Value: {xml}"
+        );
         assert!(xml.contains("</DicomAttribute>"));
     }
 
@@ -393,7 +445,9 @@ mod tests {
         ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
             Tag::PIXEL_DATA,
             Vr::Ob,
-            Arc::new(radicom::model::buffer::MemoryBuffer::from(vec![1u8, 2, 3, 4])),
+            Arc::new(radicom::model::buffer::MemoryBuffer::from(vec![
+                1u8, 2, 3, 4,
+            ])),
         )));
         let sequence = ds.insert_sequence(Tag::REFERENCED_IMAGE_SEQUENCE);
         let mut item = Dataset::new();
@@ -435,8 +489,14 @@ mod tests {
         assert!(saw_root, "the NativeDicomModel root must parse");
         assert!(saw_item, "the sequence item must parse");
         assert!(saw_pn_group, "PN groups must parse as elements");
-        assert!(xml.contains("<InlineBinary>AQIDBA==</InlineBinary>"), "binary must appear: {xml}");
+        assert!(
+            xml.contains("<InlineBinary>AQIDBA==</InlineBinary>"),
+            "binary must appear: {xml}"
+        );
         // the escaped ampersand must decode back to the original text
-        assert!(xml.contains("P&amp;&lt;1&gt;"), "value metacharacters are escaped: {xml}");
+        assert!(
+            xml.contains("P&amp;&lt;1&gt;"),
+            "value metacharacters are escaped: {xml}"
+        );
     }
 }

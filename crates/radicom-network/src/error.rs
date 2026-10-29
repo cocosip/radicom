@@ -94,7 +94,11 @@ impl AbortSource {
 #[derive(Debug, thiserror::Error)]
 pub enum NetworkError {
     #[error("association rejected (result {result}, source {source_code}, reason {reason})")]
-    Reject { result: u8, source_code: u8, reason: u8 },
+    Reject {
+        result: u8,
+        source_code: u8,
+        reason: u8,
+    },
     #[error("association aborted (source {source_code}, reason {reason})")]
     Abort { source_code: u8, reason: u8 },
     #[error("association request timed out after {attempts} attempt(s)")]
@@ -115,9 +119,15 @@ pub enum NetworkError {
     /// A request needs a presentation context the peer did not accept.
     #[error("SOP class {sop_class} is not supported by the association")]
     SopClassNotSupported { sop_class: String },
+    /// The peer did not grant this side the SCU role for the class (§4.1).
+    #[error("SOP class {sop_class}: the peer did not grant this side the SCU role")]
+    ScuRoleNotNegotiated { sop_class: String },
     /// TLS setup failed (bad PEM, unusable key, handshake configuration).
     #[error("TLS error: {0}")]
     Tls(String),
+    /// The TLS handshake did not finish inside `tls_handshake_timeout`.
+    #[error("TLS handshake timed out after {timeout_ms} ms")]
+    TlsHandshakeTimedOut { timeout_ms: u64 },
 }
 
 impl NetworkError {
@@ -138,12 +148,22 @@ mod tests {
 
     #[test]
     fn reject_codes_round_trip() {
-        assert_eq!(RejectResult::from_code(RejectResult::Permanent.code()), Some(RejectResult::Permanent));
-        assert_eq!(RejectResult::from_code(RejectResult::Transient.code()), Some(RejectResult::Transient));
+        assert_eq!(
+            RejectResult::from_code(RejectResult::Permanent.code()),
+            Some(RejectResult::Permanent)
+        );
+        assert_eq!(
+            RejectResult::from_code(RejectResult::Transient.code()),
+            Some(RejectResult::Transient)
+        );
         assert_eq!(RejectResult::from_code(0), None);
         assert_eq!(RejectResult::from_code(3), None);
 
-        for source in [RejectSource::User, RejectSource::ProviderAcse, RejectSource::ProviderPresentation] {
+        for source in [
+            RejectSource::User,
+            RejectSource::ProviderAcse,
+            RejectSource::ProviderPresentation,
+        ] {
             assert_eq!(RejectSource::from_code(source.code()), Some(source));
         }
         assert_eq!(RejectSource::from_code(4), None);

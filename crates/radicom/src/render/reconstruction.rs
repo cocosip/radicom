@@ -36,7 +36,9 @@ impl ImageData {
     pub fn from_dataset(dataset: &Dataset) -> Result<ImageData, Error> {
         let geometry = FrameGeometry::from_dataset(dataset)?;
         if !geometry.has_geometry_data() {
-            return Err(invalid("slice has no geometry (needs orientation + position)"));
+            return Err(invalid(
+                "slice has no geometry (needs orientation + position)",
+            ));
         }
         let pixels = read_grayscale(dataset)?;
         let width = geometry.width();
@@ -44,9 +46,21 @@ impl ImageData {
         if pixels.len() as u32 != width * height {
             return Err(invalid("pixel count does not match width*height"));
         }
-        let instance_number = dataset.try_get::<i32>(crate::model::tag::Tag::INSTANCE_NUMBER).unwrap_or(0);
-        let sorting_value = dot(&geometry.direction_normal(), &point_to_vector(&geometry.point_top_left()));
-        Ok(ImageData { geometry, pixels, width, height, instance_number, sorting_value })
+        let instance_number = dataset
+            .try_get::<i32>(crate::model::tag::Tag::INSTANCE_NUMBER)
+            .unwrap_or(0);
+        let sorting_value = dot(
+            &geometry.direction_normal(),
+            &point_to_vector(&geometry.point_top_left()),
+        );
+        Ok(ImageData {
+            geometry,
+            pixels,
+            width,
+            height,
+            instance_number,
+            sorting_value,
+        })
     }
 
     /// The slice geometry.
@@ -118,7 +132,10 @@ impl VolumeData {
             return Err(invalid("no slices with usable geometry"));
         }
         let first_uid = images[0].frame_of_reference_uid().to_string();
-        if images.iter().any(|i| i.frame_of_reference_uid() != first_uid) {
+        if images
+            .iter()
+            .any(|i| i.frame_of_reference_uid() != first_uid)
+        {
             return Err(invalid("slices are mixed up from different stacks"));
         }
 
@@ -143,7 +160,13 @@ impl VolumeData {
             );
         }
 
-        Ok(VolumeData { slices: images, sort_orders, slices_normal, bounding_min, bounding_max })
+        Ok(VolumeData {
+            slices: images,
+            sort_orders,
+            slices_normal,
+            bounding_min,
+            bounding_max,
+        })
     }
 
     /// Volume bounding-box minimum corner (patient space).
@@ -206,9 +229,10 @@ impl VolumeData {
                         next_slice.geometry.transform_patient_to_image(point),
                         prev_slice.geometry.transform_patient_to_image(point),
                     ) {
-                        if let (Some(next_pixel), Some(prev_pixel)) =
-                            (next_slice.interpolate(next_img), prev_slice.interpolate(prev_img))
-                        {
+                        if let (Some(next_pixel), Some(prev_pixel)) = (
+                            next_slice.interpolate(next_img),
+                            prev_slice.interpolate(prev_img),
+                        ) {
                             let alpha1 = next_slice.sorting_value() - ordered;
                             let alpha2 = ordered - prev_slice.sorting_value();
                             if alpha1 + alpha2 != 0.0 {
@@ -218,7 +242,11 @@ impl VolumeData {
                         }
                     }
                 }
-                point = Point3::new(point.x + delta_y.x, point.y + delta_y.y, point.z + delta_y.z);
+                point = Point3::new(
+                    point.x + delta_y.x,
+                    point.y + delta_y.y,
+                    point.z + delta_y.z,
+                );
                 ordered += ordered_delta_y;
             }
         }
@@ -298,7 +326,11 @@ impl Slice {
     /// The `(min, max)` of the sampled values (fo-dicom `GetMinMaxValue`).
     pub fn min_max(&self) -> (f64, f64) {
         let min = self.output.iter().copied().fold(f64::INFINITY, f64::min);
-        let max = self.output.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let max = self
+            .output
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
         (min, max)
     }
 
@@ -315,13 +347,22 @@ impl Slice {
 
     /// Renders the raw sample values as little-endian bytes of `bytes_per_pixel`
     /// width (fo-dicom `RenderRawData`): 1 byte truncates, 2 bytes little-endian.
-    pub fn render_raw_data(&self, bytes_per_pixel: u8) -> Vec<u8> {
+    /// Signed samples are written two's-complement (review #7).
+    pub fn render_raw_data(&self, bytes_per_pixel: u8, signed: bool) -> Vec<u8> {
         match bytes_per_pixel {
-            1 => self.output.iter().map(|&v| v.round() as u8).collect(),
+            1 => self
+                .output
+                .iter()
+                .map(|&v| (v.round() as i64) as u8)
+                .collect(),
             2 => {
                 let mut out = Vec::with_capacity(self.output.len() * 2);
                 for &v in &self.output {
-                    out.extend_from_slice(&(v.round() as u16).to_le_bytes());
+                    if signed {
+                        out.extend_from_slice(&((v.round() as i64) as i16).to_le_bytes());
+                    } else {
+                        out.extend_from_slice(&((v.round() as i64) as u16).to_le_bytes());
+                    }
                 }
                 out
             }
@@ -339,15 +380,26 @@ fn read_grayscale(dataset: &Dataset) -> Result<Vec<f64>, Error> {
     let bytes = bytes.as_ref();
     let bits = pixel.bits_allocated()?;
     let signed = pixel.pixel_representation() == 1;
-    let depth = crate::render::bit_depth::BitDepth::new(bits, pixel.bits_stored(), pixel.high_bit(), signed);
+    let depth = crate::render::bit_depth::BitDepth::new(
+        bits,
+        pixel.bits_stored(),
+        pixel.high_bit(),
+        signed,
+    );
 
     // Normalise away any high-bit padding and sign-extend, so non-standard depth
     // metadata (e.g. 12-bit-in-16) stacks comparably — the same rule the render
     // path uses. Standard low-aligned data is unchanged.
     let raw: Vec<f64> = match bits {
-        8 => bytes.iter().take(slots).map(|&b| normalise_sample(b as u16, &depth)).collect(),
+        8 => bytes
+            .iter()
+            .take(slots)
+            .map(|&b| normalise_sample(b as u16, &depth))
+            .collect(),
         16 => bytes
-            .as_chunks::<2>().0.iter()
+            .as_chunks::<2>()
+            .0
+            .iter()
             .take(slots)
             .map(|c| normalise_sample(u16::from_le_bytes([c[0], c[1]]), &depth))
             .collect(),
@@ -371,7 +423,11 @@ fn read_grayscale(dataset: &Dataset) -> Result<Vec<f64>, Error> {
 fn normalise_sample(value: u16, depth: &crate::render::bit_depth::BitDepth) -> f64 {
     let n = depth.normalize(value);
     if depth.signed {
-        let bits = if depth.stored == 0 || depth.stored >= 16 { 16 } else { depth.stored };
+        let bits = if depth.stored == 0 || depth.stored >= 16 {
+            16
+        } else {
+            depth.stored
+        };
         let shift = 16 - bits;
         (((n << shift) as i16) >> shift) as f64
     } else {
@@ -392,7 +448,9 @@ fn point_to_vector(p: &Point3) -> Vector3 {
 }
 
 fn invalid(message: &str) -> Error {
-    Error::Data(DataError::Other { message: format!("MPR: {message}") })
+    Error::Data(DataError::Other {
+        message: format!("MPR: {message}"),
+    })
 }
 
 /// The orthogonal plane a new [`Stack`] is cut along (fo-dicom `StackType`).
@@ -414,7 +472,12 @@ pub struct Stack {
 impl Stack {
     /// Cuts a new stack out of `volume` at `spacing` in-plane and `slice_distance`
     /// between slices.
-    pub fn new(volume: &VolumeData, stack_type: StackType, spacing: f64, slice_distance: f64) -> Stack {
+    pub fn new(
+        volume: &VolumeData,
+        stack_type: StackType,
+        spacing: f64,
+        slice_distance: f64,
+    ) -> Stack {
         let min = volume.bounding_min();
         let max = volume.bounding_max();
         let (dx, dy, dz) = (max.x - min.x, max.y - min.y, max.z - min.z);
@@ -453,9 +516,16 @@ impl Stack {
         let mut top_left = top_left0;
         for _ in 0..count.max(1) {
             slices.push(volume.get_cut(top_left, row_dir, col_dir, rows, cols, spacing));
-            top_left = Point3::new(top_left.x + step.x, top_left.y + step.y, top_left.z + step.z);
+            top_left = Point3::new(
+                top_left.x + step.x,
+                top_left.y + step.y,
+                top_left.z + step.z,
+            );
         }
-        Stack { slices, slice_distance }
+        Stack {
+            slices,
+            slice_distance,
+        }
     }
 
     /// The generated slices.
@@ -484,7 +554,16 @@ impl DicomGenerator {
     }
 
     /// Stores the stack as one dataset per slice, described by `new_series_description`.
-    pub fn store_as_dicom(&self, stack: &Stack, new_series_description: &str) -> Vec<Dataset> {
+    ///
+    /// Slice values are already physical (rescale applied on read), so they are
+    /// written as stored values with a matching signed depth and an identity
+    /// rescale, and any old Pixel Data on the common dataset is dropped first
+    /// (review #7).
+    pub fn store_as_dicom(
+        &self,
+        stack: &Stack,
+        new_series_description: &str,
+    ) -> Result<Vec<Dataset>, Error> {
         let new_series_uid = Uid::generate_value();
         let mut out = Vec::with_capacity(stack.slices().len());
         for (index, slice) in stack.slices().iter().enumerate() {
@@ -500,7 +579,11 @@ impl DicomGenerator {
             ds.insert_value(Tag::ROWS, rows);
             ds.insert_value(Tag::COLUMNS, cols);
             let tl = slice.top_left();
-            ds.insert_str(Tag::IMAGE_POSITION_PATIENT, Vr::Ds, format!("{}\\{}\\{}", tl.x, tl.y, tl.z));
+            ds.insert_str(
+                Tag::IMAGE_POSITION_PATIENT,
+                Vr::Ds,
+                format!("{}\\{}\\{}", tl.x, tl.y, tl.z),
+            );
             let rd = slice.row_direction();
             let cd = slice.column_direction();
             ds.insert_str(
@@ -508,35 +591,56 @@ impl DicomGenerator {
                 Vr::Ds,
                 format!("{}\\{}\\{}\\{}\\{}\\{}", rd.x, rd.y, rd.z, cd.x, cd.y, cd.z),
             );
-            ds.insert_str(Tag::PIXEL_SPACING, Vr::Ds, format!("{}\\{}", slice.spacing(), slice.spacing()));
-            ds.insert_str(Tag::SLICE_THICKNESS, Vr::Ds, format!("{}", stack.slice_distance()));
+            ds.insert_str(
+                Tag::PIXEL_SPACING,
+                Vr::Ds,
+                format!("{}\\{}", slice.spacing(), slice.spacing()),
+            );
+            ds.insert_str(
+                Tag::SLICE_THICKNESS,
+                Vr::Ds,
+                format!("{}", stack.slice_distance()),
+            );
 
-            // infer the smallest storage width from the observed maximum
-            let (_, max_value) = slice.min_max();
-            let bits_stored = if max_value <= 255.0 {
-                8u16
+            // Pick a depth that actually holds the observed range, signed when
+            // negatives occur. Overflowing 8/16-bit must fail loudly, not wrap.
+            let (min_value, max_value) = slice.min_max();
+            let (bits, signed) = if min_value >= 0.0 && max_value <= 255.0 {
+                (8u16, false)
+            } else if min_value >= 0.0 && max_value <= 65535.0 {
+                (16u16, false)
+            } else if min_value >= -32768.0 && max_value <= 32767.0 {
+                (16u16, true)
             } else {
-                16
+                return Err(invalid(&format!(
+                    "slice values {min_value}..{max_value} do not fit 8/16-bit storage"
+                )));
             };
-            ds.insert_value(Tag::BITS_ALLOCATED, bits_stored); // BitsAllocated
-            ds.insert_value(Tag::BITS_STORED, bits_stored); // BitsStored
-            ds.insert_value(Tag::HIGH_BIT, bits_stored - 1); // HighBit
-            ds.insert_value(Tag::PIXEL_REPRESENTATION, 0u16); // PixelRepresentation unsigned
-            ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16); // SamplesPerPixel
+            ds.insert_value(Tag::BITS_ALLOCATED, bits);
+            ds.insert_value(Tag::BITS_STORED, bits);
+            ds.insert_value(Tag::HIGH_BIT, bits - 1);
+            ds.insert_value(Tag::PIXEL_REPRESENTATION, if signed { 1u16 } else { 0u16 });
+            ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16);
             if !ds.contains(&Tag::PHOTOMETRIC_INTERPRETATION) {
                 ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
             }
+            // values are physical: drop the source rescale so they are not
+            // reinterpreted a second time
+            ds.insert_str(Tag::RESCALE_SLOPE, Vr::Ds, "1");
+            ds.insert_str(Tag::RESCALE_INTERCEPT, Vr::Ds, "0");
 
-            let bytes_per_pixel = if bits_stored <= 8 { 1u8 } else { 2u8 };
-            let frame = slice.render_raw_data(bytes_per_pixel);
-            {
-                let mut pixel = PixelData::create_new(&mut ds).expect("create pixel data");
-                pixel.add_frame(frame).expect("append frame");
-            }
+            // a cloned source dataset may still carry old pixels/frame count
+            ds.remove(Tag::PIXEL_DATA);
+            ds.remove(Tag::NUMBER_OF_FRAMES);
+
+            let bytes_per_pixel = if bits <= 8 { 1u8 } else { 2u8 };
+            let frame = slice.render_raw_data(bytes_per_pixel, signed);
+            let mut pixel = PixelData::create_new(&mut ds)?;
+            pixel.add_frame(frame)?;
 
             out.push(ds);
         }
-        out
+        Ok(out)
     }
 }
 
@@ -559,7 +663,7 @@ mod tests {
         ds.insert_value(Tag::HIGH_BIT, 15u16); // high bit
         ds.insert_value(Tag::PIXEL_REPRESENTATION, 0u16); // unsigned
         ds.insert_str(Tag::PIXEL_SPACING, Vr::Ds, "1\\1"); // pixel spacing
-        // image orientation: rows=+y, cols=+x, normal=+z
+                                                           // image orientation: rows=+y, cols=+x, normal=+z
         ds.insert_str(Tag::IMAGE_ORIENTATION_PATIENT, Vr::Ds, "1\\0\\0\\0\\1\\0");
         ds.insert_str(Tag::IMAGE_POSITION_PATIENT, Vr::Ds, format!("0\\0\\{z}"));
         ds.insert_str(Tag::FRAME_OF_REFERENCE_UID, Vr::Ui, "1.2.3.4");
@@ -575,13 +679,19 @@ mod tests {
                 Arc::new(crate::model::buffer::MemoryBuffer::from(bytes)),
             ),
         ));
-        ds.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        ds.set_transfer_syntax(
+            crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
         ds
     }
 
     #[test]
     fn a_volume_stacks_and_sorts_slices_by_position() {
-        let slices = [axial_slice(2.0, 200), axial_slice(0.0, 100), axial_slice(1.0, 150)];
+        let slices = [
+            axial_slice(2.0, 200),
+            axial_slice(0.0, 100),
+            axial_slice(1.0, 150),
+        ];
         let volume = VolumeData::from_datasets(&slices).unwrap();
         assert_eq!(volume.len(), 3);
         // sorted ascending by z
@@ -632,7 +742,10 @@ mod tests {
             1.0,
         );
         let v = cut.pixels()[0];
-        assert!((40.0..=60.0).contains(&v), "mid-slice value is ~50, got {v}");
+        assert!(
+            (40.0..=60.0).contains(&v),
+            "mid-slice value is ~50, got {v}"
+        );
     }
 
     #[test]
@@ -653,7 +766,10 @@ mod tests {
             1.0,
         );
         let v = cut.pixels()[0];
-        assert!((v - 4095.0).abs() < 1.0, "12-bit-in-16 normalised to 4095, got {v}");
+        assert!(
+            (v - 4095.0).abs() < 1.0,
+            "12-bit-in-16 normalised to 4095, got {v}"
+        );
     }
 
     #[test]
@@ -672,7 +788,10 @@ mod tests {
         assert!(max >= min);
         let bytes = cut.render_into_byte_array();
         assert_eq!(bytes.len(), 4);
-        assert!(bytes.contains(&0) || bytes.contains(&255), "the range is spread to the byte domain");
+        assert!(
+            bytes.contains(&0) || bytes.contains(&255),
+            "the range is spread to the byte domain"
+        );
     }
 
     #[test]
@@ -708,7 +827,7 @@ mod tests {
         let stack = Stack::new(&volume, StackType::Axial, 1.0, 1.0);
 
         let generator = DicomGenerator::new(slices[0].clone());
-        let outputs = generator.store_as_dicom(&stack, "MPR axial");
+        let outputs = generator.store_as_dicom(&stack, "MPR axial").unwrap();
         assert_eq!(outputs.len(), stack.slices().len());
 
         let mut sops = std::collections::HashSet::new();
@@ -725,5 +844,50 @@ mod tests {
             let pixel = PixelDataRef::from_dataset(ds).unwrap();
             assert!(pixel.get_frame(0).is_ok(), "pixel data written");
         }
+    }
+
+    #[test]
+    fn dicom_generator_keeps_negative_physical_values_and_drops_old_pixels() {
+        // review #7: stored 500 with intercept -1024 reads as -524; the write-back
+        // must keep that value in a signed domain, reset the rescale, and not
+        // append to the common dataset's old Pixel Data.
+        let mut s0 = axial_slice(0.0, 500);
+        s0.insert_str(Tag::RESCALE_INTERCEPT, Vr::Ds, "-1024");
+        let mut s1 = axial_slice(1.0, 500);
+        s1.insert_str(Tag::RESCALE_INTERCEPT, Vr::Ds, "-1024");
+        let volume = VolumeData::from_datasets(&[s0.clone(), s1]).unwrap();
+        let stack = Stack::new(&volume, StackType::Axial, 1.0, 1.0);
+
+        // the common dataset deliberately still carries the source Pixel Data
+        let outputs = DicomGenerator::new(s0)
+            .store_as_dicom(&stack, "MPR axial")
+            .unwrap();
+        let out = &outputs[0];
+        assert_eq!(
+            out.get::<u16>(Tag::PIXEL_REPRESENTATION).unwrap(),
+            1,
+            "negative values need signed storage"
+        );
+        assert_eq!(
+            out.try_get_str(Tag::RESCALE_INTERCEPT),
+            Some("0".to_string()),
+            "physical values: rescale reset"
+        );
+
+        let frame = PixelDataRef::from_dataset(out)
+            .unwrap()
+            .get_frame(0)
+            .unwrap();
+        let bytes = frame.data();
+        assert_eq!(
+            bytes.len(),
+            4 * 4 * 2,
+            "exactly one 4x4 16-bit frame, not appended to the old one"
+        );
+        assert_eq!(
+            i16::from_ne_bytes([bytes[0], bytes[1]]),
+            -524,
+            "stored value is the physical HU value"
+        );
     }
 }

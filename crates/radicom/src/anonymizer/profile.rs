@@ -115,7 +115,9 @@ impl TagPattern {
                     index += 1;
                     while index < chars.len() && chars[index] != ']' {
                         // expand `a-b` ranges; the grammar only needs hex ranges
-                        if chars.get(index + 1) == Some(&'-') && chars.get(index + 2).is_some_and(|c| *c != ']') {
+                        if chars.get(index + 1) == Some(&'-')
+                            && chars.get(index + 2).is_some_and(|c| *c != ']')
+                        {
                             let start = chars[index];
                             let end = chars[index + 2];
                             let mut c = start;
@@ -136,8 +138,9 @@ impl TagPattern {
                         return Err(pattern_error(text, "unterminated character class"));
                     }
                     index += 1; // skip ']'
-                    // expansion: `{n}` repeats the just-closed class
-                    let (repeat, consumed) = parse_repeat(&chars[index..]).map_err(|e| pattern_error(text, &e))?;
+                                // expansion: `{n}` repeats the just-closed class
+                    let (repeat, consumed) =
+                        parse_repeat(&chars[index..]).map_err(|e| pattern_error(text, &e))?;
                     index += consumed;
                     let count = repeat.unwrap_or(1);
                     for _ in 0..count {
@@ -147,7 +150,8 @@ impl TagPattern {
                 ch => {
                     let literal = ch.to_ascii_uppercase();
                     index += 1;
-                    let (repeat, consumed) = parse_repeat(&chars[index..]).map_err(|e| pattern_error(text, &e))?;
+                    let (repeat, consumed) =
+                        parse_repeat(&chars[index..]).map_err(|e| pattern_error(text, &e))?;
                     index += consumed;
                     let count = repeat.unwrap_or(1);
                     for _ in 0..count {
@@ -156,7 +160,10 @@ impl TagPattern {
                 }
             }
         }
-        Ok(TagPattern { text: text.to_string(), tokens })
+        Ok(TagPattern {
+            text: text.to_string(),
+            tokens,
+        })
     }
 
     /// True when `tag` (as `GGGG,EEEE`, uppercase) matches this pattern.
@@ -197,12 +204,16 @@ fn parse_repeat(rest: &[char]) -> Result<(Option<usize>, usize), String> {
     if rest.get(index) != Some(&'}') || digits.is_empty() {
         return Err("malformed {n} repetition".into());
     }
-    let count = digits.parse::<usize>().map_err(|_| "bad repetition count".to_string())?;
+    let count = digits
+        .parse::<usize>()
+        .map_err(|_| "bad repetition count".to_string())?;
     Ok((Some(count), index + 1))
 }
 
 fn pattern_error(text: &str, reason: &str) -> Error {
-    Error::Data(DataError::Other { message: format!("bad profile pattern \"{text}\": {reason}") })
+    Error::Data(DataError::Other {
+        message: format!("bad profile pattern \"{text}\": {reason}"),
+    })
 }
 
 /// The packed `group << 16 | element` key of a `GGGG,EEEE` tag string — the
@@ -290,7 +301,9 @@ impl SecurityProfile {
             let _ = line_number;
         }
         if rows.is_empty() {
-            return Err(Error::Data(DataError::Other { message: "profile has no rows".into() }));
+            return Err(Error::Data(DataError::Other {
+                message: "profile has no rows".into(),
+            }));
         }
         Ok(Self::indexed(rows))
     }
@@ -305,7 +318,8 @@ impl SecurityProfile {
         let literals: Vec<(u32, String)> = rows
             .iter()
             .filter_map(|row| {
-                tag_key(row.pattern.text()).map(|key| (key, row.pattern.text().to_ascii_uppercase()))
+                tag_key(row.pattern.text())
+                    .map(|key| (key, row.pattern.text().to_ascii_uppercase()))
             })
             .collect();
         let wildcards: Vec<usize> = rows
@@ -318,7 +332,9 @@ impl SecurityProfile {
         let mut exact: [HashMap<u32, Action>; 11] = Default::default();
         for (slot, option) in exact.iter_mut().zip(AnonOption::ALL) {
             for row in &rows {
-                let Some(action) = row.action_for(option) else { continue };
+                let Some(action) = row.action_for(option) else {
+                    continue;
+                };
                 match tag_key(row.pattern.text()) {
                     Some(key) => {
                         slot.entry(key).or_insert(action);
@@ -333,7 +349,13 @@ impl SecurityProfile {
                 }
             }
         }
-        SecurityProfile { inner: Arc::new(ProfileInner { rows, wildcards, exact }) }
+        SecurityProfile {
+            inner: Arc::new(ProfileInner {
+                rows,
+                wildcards,
+                exact,
+            }),
+        }
     }
 
     /// The action for `tag` under `option` (§6.2).
@@ -362,23 +384,31 @@ impl SecurityProfile {
             return Some(*action);
         }
         // only a wildcard row can still match; it needs the textual form
-        self.match_wildcard(&format!("{:04X},{:04X}", tag.group(), tag.element()), option)
+        self.match_wildcard(
+            &format!("{:04X},{:04X}", tag.group(), tag.element()),
+            option,
+        )
     }
 
     fn match_wildcard(&self, tag: &str, option: AnonOption) -> Option<Action> {
         self.inner.wildcards.iter().find_map(|index| {
             let row = &self.inner.rows[*index];
-            row.pattern.matches(tag).then(|| row.action_for(option)).flatten()
+            row.pattern
+                .matches(tag)
+                .then(|| row.action_for(option))
+                .flatten()
         })
     }
 
     /// The unindexed scan this type used to do; kept to prove the index agrees.
     #[cfg(test)]
     fn linear_action_for(&self, tag: &str, option: AnonOption) -> Option<Action> {
-        self.inner
-            .rows
-            .iter()
-            .find_map(|row| row.pattern.matches(tag).then(|| row.action_for(option)).flatten())
+        self.inner.rows.iter().find_map(|row| {
+            row.pattern
+                .matches(tag)
+                .then(|| row.action_for(option))
+                .flatten()
+        })
     }
 
     pub fn rows(&self) -> &[ProfileRow] {
@@ -403,20 +433,30 @@ mod tests {
     #[test]
     fn the_builtin_profile_parses_and_is_large() {
         let profile = SecurityProfile::basic();
-        assert!(profile.rows().len() > 600, "the PS3.15 table has ~655 rows, got {}", profile.rows().len());
+        assert!(
+            profile.rows().len() > 600,
+            "the PS3.15 table has ~655 rows, got {}",
+            profile.rows().len()
+        );
     }
 
     #[test]
     fn a_literal_tag_matches_and_gets_its_action() {
         let profile = SecurityProfile::basic();
         // (0008,0050) AccessionNumber is Z (blank) under the basic profile
-        assert_eq!(profile.action_for("0008,0050", AnonOption::BasicProfile), Some(Action::ZeroLength));
+        assert_eq!(
+            profile.action_for("0008,0050", AnonOption::BasicProfile),
+            Some(Action::ZeroLength)
+        );
     }
 
     #[test]
     fn a_row_can_be_added_to_an_existing_profile() {
         let profile = SecurityProfile::parse("0008,0050;Z;;;;;;;;;;").unwrap();
-        assert_eq!(profile.action_for("0010,0010", AnonOption::BasicProfile), None);
+        assert_eq!(
+            profile.action_for("0010,0010", AnonOption::BasicProfile),
+            None
+        );
 
         let mut actions = [None; 11];
         actions[AnonOption::BasicProfile as usize] = Some(Action::Remove);
@@ -425,8 +465,15 @@ mod tests {
             actions,
         });
 
-        assert_eq!(extended.action_for("0010,0010", AnonOption::BasicProfile), Some(Action::Remove));
-        assert_eq!(profile.action_for("0010,0010", AnonOption::BasicProfile), None, "original unchanged");
+        assert_eq!(
+            extended.action_for("0010,0010", AnonOption::BasicProfile),
+            Some(Action::Remove)
+        );
+        assert_eq!(
+            profile.action_for("0010,0010", AnonOption::BasicProfile),
+            None,
+            "original unchanged"
+        );
         assert_eq!(
             extended.action_for("0008,0050", AnonOption::BasicProfile),
             Some(Action::ZeroLength),
@@ -438,17 +485,29 @@ mod tests {
     fn a_class_pattern_matches_curve_tags() {
         let profile = SecurityProfile::basic();
         // 50xx,xxxx curve group is X (remove) under basic profile
-        assert_eq!(profile.action_for("5000,0100", AnonOption::BasicProfile), Some(Action::Remove));
-        assert_eq!(profile.action_for("5010,ABCD", AnonOption::BasicProfile), Some(Action::Remove));
+        assert_eq!(
+            profile.action_for("5000,0100", AnonOption::BasicProfile),
+            Some(Action::Remove)
+        );
+        assert_eq!(
+            profile.action_for("5010,ABCD", AnonOption::BasicProfile),
+            Some(Action::Remove)
+        );
     }
 
     #[test]
     fn the_odd_private_group_pattern_matches() {
         let profile = SecurityProfile::basic();
         // odd group + odd element (private) is X under basic profile
-        assert_eq!(profile.action_for("0009,0001", AnonOption::BasicProfile), Some(Action::Remove));
+        assert_eq!(
+            profile.action_for("0009,0001", AnonOption::BasicProfile),
+            Some(Action::Remove)
+        );
         // an even group does not match that row
-        assert_ne!(profile.action_for("0008,0001", AnonOption::BasicProfile), Some(Action::Remove));
+        assert_ne!(
+            profile.action_for("0008,0001", AnonOption::BasicProfile),
+            Some(Action::Remove)
+        );
     }
 
     #[test]
@@ -458,16 +517,34 @@ mod tests {
         // no CleanGraph cell; the graph rows below it must still be reachable
         // (fo-dicom: one table per option, rows with an empty cell are absent).
         let profile = SecurityProfile::basic();
-        assert_eq!(profile.action_for("5011,1234", AnonOption::CleanGraph), Some(Action::Clean));
-        assert_eq!(profile.action_for("6011,3000", AnonOption::CleanGraph), Some(Action::Clean));
-        assert_eq!(profile.action_for("50FF,0001", AnonOption::CleanGraph), Some(Action::Clean));
+        assert_eq!(
+            profile.action_for("5011,1234", AnonOption::CleanGraph),
+            Some(Action::Clean)
+        );
+        assert_eq!(
+            profile.action_for("6011,3000", AnonOption::CleanGraph),
+            Some(Action::Clean)
+        );
+        assert_eq!(
+            profile.action_for("50FF,0001", AnonOption::CleanGraph),
+            Some(Action::Clean)
+        );
 
         // ... while the options the leading row does take part in are unchanged
-        assert_eq!(profile.action_for("5011,1234", AnonOption::BasicProfile), Some(Action::Remove));
-        assert_eq!(profile.action_for("5011,1234", AnonOption::RetainSafePrivate), Some(Action::Clean));
+        assert_eq!(
+            profile.action_for("5011,1234", AnonOption::BasicProfile),
+            Some(Action::Remove)
+        );
+        assert_eq!(
+            profile.action_for("5011,1234", AnonOption::RetainSafePrivate),
+            Some(Action::Clean)
+        );
 
         // a tag no row covers under the option still has no action
-        assert_eq!(profile.action_for("0010,0010", AnonOption::CleanGraph), None);
+        assert_eq!(
+            profile.action_for("0010,0010", AnonOption::CleanGraph),
+            None
+        );
     }
 
     #[test]
@@ -475,7 +552,10 @@ mod tests {
         let pattern = TagPattern::new("50[0-9A-F]{2},[0-9A-F]{4}").unwrap();
         assert!(pattern.matches("50AB,1234"));
         assert!(pattern.matches("50ab,1234"), "matching is case-insensitive");
-        assert!(!pattern.matches("60AB,1234"), "the first literal must match");
+        assert!(
+            !pattern.matches("60AB,1234"),
+            "the first literal must match"
+        );
         assert!(!pattern.matches("50AB,12345"), "length must match exactly");
     }
 
@@ -483,7 +563,10 @@ mod tests {
     fn the_builtin_profile_is_parsed_once_and_shared() {
         let first = SecurityProfile::basic();
         let second = SecurityProfile::basic();
-        assert!(Arc::ptr_eq(&first.inner, &second.inner), "basic() shares one parsed table");
+        assert!(
+            Arc::ptr_eq(&first.inner, &second.inner),
+            "basic() shares one parsed table"
+        );
 
         // the two handles describe the same table
         assert_eq!(first.rows().len(), second.rows().len());
@@ -495,7 +578,10 @@ mod tests {
         // a custom profile stays its own table and does not disturb the cached one
         let custom = SecurityProfile::parse("0010,0010;D\n").unwrap();
         assert_eq!(custom.rows().len(), 1);
-        assert_eq!(custom.action_for("0010,0010", AnonOption::BasicProfile), Some(Action::Dummy));
+        assert_eq!(
+            custom.action_for("0010,0010", AnonOption::BasicProfile),
+            Some(Action::Dummy)
+        );
         assert_eq!(
             SecurityProfile::basic().action_for("0010,0010", AnonOption::BasicProfile),
             Some(Action::ZeroLength),
@@ -529,8 +615,16 @@ mod tests {
             }
         }
         probes.extend(
-            ["0008,0060", "0008,0001", "0009,0001", "5011,1234", "60FF,3000", "0070,0001", "FFFF,FFFF"]
-                .map(String::from),
+            [
+                "0008,0060",
+                "0008,0001",
+                "0009,0001",
+                "5011,1234",
+                "60FF,3000",
+                "0070,0001",
+                "FFFF,FFFF",
+            ]
+            .map(String::from),
         );
 
         for option in AnonOption::ALL {
@@ -577,7 +671,11 @@ mod tests {
         assert_eq!(Action::parse("D"), Some(Action::Dummy));
         assert_eq!(Action::parse("K"), Some(Action::Keep));
         assert_eq!(Action::parse("U"), Some(Action::Uid));
-        assert_eq!(Action::parse("X/Z"), Some(Action::Remove), "conditional cells take the first letter");
+        assert_eq!(
+            Action::parse("X/Z"),
+            Some(Action::Remove),
+            "conditional cells take the first letter"
+        );
         assert_eq!(Action::parse("Z/D"), Some(Action::ZeroLength));
         assert_eq!(Action::parse("X/Z/U*"), Some(Action::Remove));
         assert_eq!(Action::parse(""), None);

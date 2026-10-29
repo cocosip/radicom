@@ -15,9 +15,8 @@ static INDEX: Lazy<HashMap<u32, Arc<Tag>>> = Lazy::new(|| {
     // Seed from the generated constant table: ~5259 entries, built once.
     let mut m = HashMap::with_capacity(8192);
     for raw in radicom_dict::generated::dict::DICTIONARY {
-        m.entry((raw.group as u32) << 16 | raw.element as u32).or_insert_with(|| {
-            Arc::new(Tag::new(raw.group, raw.element))
-        });
+        m.entry((raw.group as u32) << 16 | raw.element as u32)
+            .or_insert_with(|| Arc::new(Tag::new(raw.group, raw.element)));
     }
     m
 });
@@ -33,7 +32,9 @@ pub fn lookup_interned(group: u16, element: u16) -> Option<&'static Tag> {
 /// Returns the interned instance for a known tag, or a fresh (uninterned)
 /// tag for unknown values.
 pub fn lookup_or_create(group: u16, element: u16) -> Tag {
-    lookup_interned(group, element).cloned().unwrap_or_else(|| Tag::new(group, element))
+    lookup_interned(group, element)
+        .cloned()
+        .unwrap_or_else(|| Tag::new(group, element))
 }
 
 /// Number of interned tags (the generated public exact table size).
@@ -62,6 +63,11 @@ mod tests {
         assert!(lookup_interned(0x0045, 0xABCD).is_none());
         let t = lookup_or_create(0x0045, 0xABCD);
         assert_eq!(t, Tag::new(0x0045, 0xABCD));
-        assert_eq!(len(), lookup_interned(0x0010, 0x0020).map(|_| len()).unwrap_or(len()));
+        assert_eq!(
+            len(),
+            lookup_interned(0x0010, 0x0020)
+                .map(|_| len())
+                .unwrap_or(len())
+        );
     }
 }

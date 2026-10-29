@@ -188,23 +188,33 @@ impl MeasuredValue {
         dataset.insert_str(tags::NUMERIC_VALUE, Vr::Ds, text);
         let mut units = Dataset::new();
         self.units.write_into(&mut units);
-        dataset.insert_sequence(tags::MEASUREMENT_UNITS_CODE_SEQUENCE).push(units);
+        dataset
+            .insert_sequence(tags::MEASUREMENT_UNITS_CODE_SEQUENCE)
+            .push(units);
         Ok(())
     }
 
     /// Reads a measured value from a MeasuredValueSequence item (§4.2).
     pub fn read_from(dataset: &Dataset) -> Result<Self, Error> {
-        let text = dataset
-            .try_get_str(tags::NUMERIC_VALUE)
-            .ok_or_else(|| Error::Data(DataError::Other { message: "measured value lacks NumericValue".into() }))?;
+        let text = dataset.try_get_str(tags::NUMERIC_VALUE).ok_or_else(|| {
+            Error::Data(DataError::Other {
+                message: "measured value lacks NumericValue".into(),
+            })
+        })?;
         let value = text.trim().parse::<f64>().map_err(|_| {
-            Error::Data(DataError::Other { message: format!("numeric value `{text}` is not a number") })
+            Error::Data(DataError::Other {
+                message: format!("numeric value `{text}` is not a number"),
+            })
         })?;
         let units = dataset
             .try_get_sequence(tags::MEASUREMENT_UNITS_CODE_SEQUENCE)
             .and_then(|sequence| sequence.items().first())
             .and_then(|item| CodeItem::read_from(item).ok())
-            .ok_or_else(|| Error::Data(DataError::Other { message: "measured value lacks units".into() }))?;
+            .ok_or_else(|| {
+                Error::Data(DataError::Other {
+                    message: "measured value lacks units".into(),
+                })
+            })?;
         Ok(MeasuredValue { value, units })
     }
 }
@@ -225,25 +235,47 @@ pub struct ReferencedSop {
 
 impl ReferencedSop {
     pub fn new(class_uid: impl Into<String>, instance_uid: impl Into<String>) -> Self {
-        ReferencedSop { class_uid: class_uid.into(), instance_uid: instance_uid.into() }
+        ReferencedSop {
+            class_uid: class_uid.into(),
+            instance_uid: instance_uid.into(),
+        }
     }
 
     /// Writes ReferencedSOPClassUID / ReferencedSOPInstanceUID into `dataset`
     /// (an item of a ReferencedSOPSequence).
     pub fn write_into(&self, dataset: &mut Dataset) {
-        dataset.insert_str(tags::REFERENCED_SOP_CLASS_UID, Vr::Ui, self.class_uid.as_str());
-        dataset.insert_str(tags::REFERENCED_SOP_INSTANCE_UID, Vr::Ui, self.instance_uid.as_str());
+        dataset.insert_str(
+            tags::REFERENCED_SOP_CLASS_UID,
+            Vr::Ui,
+            self.class_uid.as_str(),
+        );
+        dataset.insert_str(
+            tags::REFERENCED_SOP_INSTANCE_UID,
+            Vr::Ui,
+            self.instance_uid.as_str(),
+        );
     }
 
     /// Reads a reference from a ReferencedSOPSequence item (§4.2).
     pub fn read_from(dataset: &Dataset) -> Result<Self, Error> {
         let class_uid = dataset
             .try_get_str(tags::REFERENCED_SOP_CLASS_UID)
-            .ok_or_else(|| Error::Data(DataError::Other { message: "reference lacks ReferencedSOPClassUID".into() }))?;
+            .ok_or_else(|| {
+                Error::Data(DataError::Other {
+                    message: "reference lacks ReferencedSOPClassUID".into(),
+                })
+            })?;
         let instance_uid = dataset
             .try_get_str(tags::REFERENCED_SOP_INSTANCE_UID)
-            .ok_or_else(|| Error::Data(DataError::Other { message: "reference lacks ReferencedSOPInstanceUID".into() }))?;
-        Ok(ReferencedSop { class_uid: class_uid.trim().to_string(), instance_uid: instance_uid.trim().to_string() })
+            .ok_or_else(|| {
+                Error::Data(DataError::Other {
+                    message: "reference lacks ReferencedSOPInstanceUID".into(),
+                })
+            })?;
+        Ok(ReferencedSop {
+            class_uid: class_uid.trim().to_string(),
+            instance_uid: instance_uid.trim().to_string(),
+        })
     }
 }
 
@@ -255,16 +287,25 @@ pub struct ContentItem {
 
 impl ContentItem {
     /// Starts a container with a concept name (§4.1).
-    pub fn container(concept_name: CodeItem, relationship: Option<Relationship>, continuity: Option<&str>) -> Self {
+    pub fn container(
+        concept_name: CodeItem,
+        relationship: Option<Relationship>,
+        continuity: Option<&str>,
+    ) -> Self {
         let mut item = Self::base(concept_name, ValueType::Container, relationship);
         if let Some(continuity) = continuity {
-            item.dataset.insert_str(tags::CONTINUITY_OF_CONTENT, Vr::Cs, continuity);
+            item.dataset
+                .insert_str(tags::CONTINUITY_OF_CONTENT, Vr::Cs, continuity);
         }
         item
     }
 
     /// A TEXT value (§4.1).
-    pub fn text(concept_name: CodeItem, relationship: Relationship, text: impl Into<String>) -> Self {
+    pub fn text(
+        concept_name: CodeItem,
+        relationship: Relationship,
+        text: impl Into<String>,
+    ) -> Self {
         let mut item = Self::base(concept_name, ValueType::Text, Some(relationship));
         item.dataset.insert_str(tags::TEXT_VALUE, Vr::Ut, text);
         item
@@ -275,40 +316,62 @@ impl ContentItem {
         let mut item = Self::base(concept_name, ValueType::Code, Some(relationship));
         let mut coded = Dataset::new();
         code.write_into(&mut coded);
-        item.dataset.insert_sequence(tags::CONCEPT_CODE_SEQUENCE).push(coded);
+        item.dataset
+            .insert_sequence(tags::CONCEPT_CODE_SEQUENCE)
+            .push(coded);
         item
     }
 
     /// A PNAME value (§4.1).
-    pub fn person_name(concept_name: CodeItem, relationship: Relationship, name: impl Into<String>) -> Self {
+    pub fn person_name(
+        concept_name: CodeItem,
+        relationship: Relationship,
+        name: impl Into<String>,
+    ) -> Self {
         let mut item = Self::base(concept_name, ValueType::PersonName, Some(relationship));
         item.dataset.insert_str(tags::PERSON_NAME, Vr::Pn, name);
         item
     }
 
     /// A DATETIME value (§4.1).
-    pub fn date_time(concept_name: CodeItem, relationship: Relationship, value: impl Into<String>) -> Self {
+    pub fn date_time(
+        concept_name: CodeItem,
+        relationship: Relationship,
+        value: impl Into<String>,
+    ) -> Self {
         let mut item = Self::base(concept_name, ValueType::DateTime, Some(relationship));
         item.dataset.insert_str(tags::DATE_TIME, Vr::Dt, value);
         item
     }
 
     /// A DATE value (§4.1).
-    pub fn date(concept_name: CodeItem, relationship: Relationship, value: impl Into<String>) -> Self {
+    pub fn date(
+        concept_name: CodeItem,
+        relationship: Relationship,
+        value: impl Into<String>,
+    ) -> Self {
         let mut item = Self::base(concept_name, ValueType::Date, Some(relationship));
         item.dataset.insert_str(tags::DATE, Vr::Da, value);
         item
     }
 
     /// A TIME value (§4.1).
-    pub fn time(concept_name: CodeItem, relationship: Relationship, value: impl Into<String>) -> Self {
+    pub fn time(
+        concept_name: CodeItem,
+        relationship: Relationship,
+        value: impl Into<String>,
+    ) -> Self {
         let mut item = Self::base(concept_name, ValueType::Time, Some(relationship));
         item.dataset.insert_str(tags::TIME, Vr::Tm, value);
         item
     }
 
     /// A UIDREF value (§4.1).
-    pub fn uid_ref(concept_name: CodeItem, relationship: Relationship, uid: impl Into<String>) -> Self {
+    pub fn uid_ref(
+        concept_name: CodeItem,
+        relationship: Relationship,
+        uid: impl Into<String>,
+    ) -> Self {
         let mut item = Self::base(concept_name, ValueType::UidRef, Some(relationship));
         item.dataset.insert_str(tags::UID, Vr::Ui, uid);
         item
@@ -326,7 +389,9 @@ impl ContentItem {
         let mut item = Self::base(concept_name, ValueType::Num, Some(relationship));
         let mut measured_item = Dataset::new();
         measured.write_into(&mut measured_item)?;
-        item.dataset.insert_sequence(tags::MEASURED_VALUE_SEQUENCE).push(measured_item);
+        item.dataset
+            .insert_sequence(tags::MEASURED_VALUE_SEQUENCE)
+            .push(measured_item);
         Ok(item)
     }
 
@@ -363,17 +428,24 @@ impl ContentItem {
     }
 
     pub fn value_type(&self) -> Option<ValueType> {
-        self.dataset.try_get_str(tags::VALUE_TYPE).and_then(|s| ValueType::parse(&s))
+        self.dataset
+            .try_get_str(tags::VALUE_TYPE)
+            .and_then(|s| ValueType::parse(&s))
     }
 
     pub fn relationship(&self) -> Option<Relationship> {
-        self.dataset.try_get_str(tags::RELATIONSHIP_TYPE).and_then(|s| Relationship::parse(&s))
+        self.dataset
+            .try_get_str(tags::RELATIONSHIP_TYPE)
+            .and_then(|s| Relationship::parse(&s))
     }
 
     /// The concept name code, when present.
     pub fn concept_name(&self) -> Option<CodeItem> {
         let sequence = self.dataset.try_get_sequence(tags::CONCEPT_NAME)?;
-        sequence.items().first().and_then(|item| CodeItem::read_from(item).ok())
+        sequence
+            .items()
+            .first()
+            .and_then(|item| CodeItem::read_from(item).ok())
     }
 
     /// The text value, if this is a TEXT item.
@@ -394,7 +466,11 @@ impl ContentItem {
         self.dataset
             .try_get_sequence(tags::REFERENCED_SOP_SEQUENCE)
             .map(|sequence| {
-                sequence.items().iter().filter_map(|item| ReferencedSop::read_from(item).ok()).collect()
+                sequence
+                    .items()
+                    .iter()
+                    .filter_map(|item| ReferencedSop::read_from(item).ok())
+                    .collect()
             })
             .unwrap_or_default()
     }
@@ -404,7 +480,13 @@ impl ContentItem {
         self.dataset
             .try_get_sequence(tags::CONTENT_SEQUENCE)
             .map(|sequence| {
-                sequence.items().iter().map(|item| ContentItem { dataset: item.clone() }).collect()
+                sequence
+                    .items()
+                    .iter()
+                    .map(|item| ContentItem {
+                        dataset: item.clone(),
+                    })
+                    .collect()
             })
             .unwrap_or_default()
     }
@@ -420,12 +502,19 @@ impl ContentItem {
             .map(|sequence| sequence.items().to_vec())
             .unwrap_or_default();
         items.push(child.dataset);
-        *self.dataset.insert_sequence(tags::CONTENT_SEQUENCE).items_mut() = items;
+        *self
+            .dataset
+            .insert_sequence(tags::CONTENT_SEQUENCE)
+            .items_mut() = items;
         self
     }
 
     /// The shared header: concept name, value type and relationship (§4.1).
-    fn base(concept_name: CodeItem, value_type: ValueType, relationship: Option<Relationship>) -> Self {
+    fn base(
+        concept_name: CodeItem,
+        value_type: ValueType,
+        relationship: Option<Relationship>,
+    ) -> Self {
         let mut dataset = Dataset::new();
         dataset.insert_str(tags::VALUE_TYPE, Vr::Cs, value_type.as_str());
         if let Some(relationship) = relationship {
@@ -443,7 +532,9 @@ pub fn content_item_from_dataset(dataset: Dataset) -> Result<ContentItem, Error>
     let item = ContentItem { dataset };
     match item.value_type() {
         Some(_) => Ok(item),
-        None => Err(Error::Data(DataError::Other { message: "content item lacks a valid ValueType".into() })),
+        None => Err(Error::Data(DataError::Other {
+            message: "content item lacks a valid ValueType".into(),
+        })),
     }
 }
 
@@ -467,8 +558,12 @@ mod tests {
     #[test]
     fn a_num_item_carries_a_measured_value_and_units() {
         let units = CodeItem::new("mm", "UCUM").with_meaning("millimeter");
-        let item = ContentItem::num(concept(), Relationship::Contains, MeasuredValue::new(12.5, units.clone()))
-            .unwrap();
+        let item = ContentItem::num(
+            concept(),
+            Relationship::Contains,
+            MeasuredValue::new(12.5, units.clone()),
+        )
+        .unwrap();
         assert_eq!(item.value_type(), Some(ValueType::Num));
         let measured = item.measured_value().expect("a measured value round-trips");
         assert_eq!(measured.value, 12.5);
@@ -498,11 +593,15 @@ mod tests {
         assert_eq!(ds.try_get_str(tags::NUMERIC_VALUE).as_deref(), Some("12.5"));
 
         // a large magnitude falls back to the exponent form DS allows
-        let large = MeasuredValue::new(1e300, units.clone()).numeric_value_text().unwrap();
+        let large = MeasuredValue::new(1e300, units.clone())
+            .numeric_value_text()
+            .unwrap();
         assert!(large.len() <= 16 && large.contains('e'), "got {large}");
 
         // a non-finite value has no DS form at all
-        assert!(MeasuredValue::new(f64::NAN, units).numeric_value_text().is_err());
+        assert!(MeasuredValue::new(f64::NAN, units)
+            .numeric_value_text()
+            .is_err());
     }
 
     #[test]
@@ -511,7 +610,12 @@ mod tests {
             ReferencedSop::new("1.2.840.10008.5.1.4.1.1.2", "1.2.3.4"),
             ReferencedSop::new("1.2.840.10008.5.1.4.1.1.2", "1.2.3.5"),
         ];
-        let item = ContentItem::referenced_sop(concept(), Relationship::Contains, ValueType::Image, &references);
+        let item = ContentItem::referenced_sop(
+            concept(),
+            Relationship::Contains,
+            ValueType::Image,
+            &references,
+        );
         assert_eq!(item.value_type(), Some(ValueType::Image));
         assert_eq!(item.referenced_sops(), references);
     }
@@ -551,15 +655,26 @@ mod tests {
             Relationship::HasAcqContext,
             Relationship::HasConceptMod,
         ] {
-            assert_eq!(Relationship::parse(relationship.as_str()), Some(relationship));
+            assert_eq!(
+                Relationship::parse(relationship.as_str()),
+                Some(relationship)
+            );
         }
     }
 
     #[test]
     fn a_container_holds_children_in_its_content_sequence() {
         let mut root = ContentItem::container(concept(), None, Some("SEPARATE"));
-        root.add_child(ContentItem::text(concept(), Relationship::Contains, "child 1"));
-        root.add_child(ContentItem::text(concept(), Relationship::Contains, "child 2"));
+        root.add_child(ContentItem::text(
+            concept(),
+            Relationship::Contains,
+            "child 1",
+        ));
+        root.add_child(ContentItem::text(
+            concept(),
+            Relationship::Contains,
+            "child 2",
+        ));
 
         let children = root.children();
         assert_eq!(children.len(), 2);
@@ -576,20 +691,39 @@ mod tests {
 
     #[test]
     fn a_code_item_writes_into_concept_code_sequence() {
-        let item = ContentItem::code(concept(), Relationship::Contains, CodeItem::new("T-D0050", "SRT"));
+        let item = ContentItem::code(
+            concept(),
+            Relationship::Contains,
+            CodeItem::new("T-D0050", "SRT"),
+        );
         assert_eq!(item.value_type(), Some(ValueType::Code));
-        let sequence = item.dataset().try_get_sequence(tags::CONCEPT_CODE_SEQUENCE).unwrap();
-        assert_eq!(CodeItem::read_from(&sequence.items()[0]).unwrap().value, "T-D0050");
+        let sequence = item
+            .dataset()
+            .try_get_sequence(tags::CONCEPT_CODE_SEQUENCE)
+            .unwrap();
+        assert_eq!(
+            CodeItem::read_from(&sequence.items()[0]).unwrap().value,
+            "T-D0050"
+        );
     }
 
     #[test]
     fn typed_scalar_items_write_their_value_tag() {
         let date = ContentItem::date(concept(), Relationship::HasObsContext, "20260101");
-        assert_eq!(date.dataset().try_get_str(tags::DATE).as_deref(), Some("20260101"));
+        assert_eq!(
+            date.dataset().try_get_str(tags::DATE).as_deref(),
+            Some("20260101")
+        );
         let dt = ContentItem::date_time(concept(), Relationship::HasObsContext, "20260101120000");
-        assert_eq!(dt.dataset().try_get_str(tags::DATE_TIME).as_deref(), Some("20260101120000"));
+        assert_eq!(
+            dt.dataset().try_get_str(tags::DATE_TIME).as_deref(),
+            Some("20260101120000")
+        );
         let uid = ContentItem::uid_ref(concept(), Relationship::InferredFrom, "1.2.3");
-        assert_eq!(uid.dataset().try_get_str(tags::UID).as_deref(), Some("1.2.3"));
+        assert_eq!(
+            uid.dataset().try_get_str(tags::UID).as_deref(),
+            Some("1.2.3")
+        );
     }
 
     #[test]

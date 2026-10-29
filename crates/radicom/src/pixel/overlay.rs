@@ -52,7 +52,11 @@ impl OverlayData {
     fn read(ds: &Dataset, group: u16) -> Option<OverlayData> {
         let columns = ds.get_or(Tag::new(group, 0x0011), 0u16);
         let rows = ds.get_or(Tag::new(group, 0x0010), 0u16);
-        let overlay_type = ds.try_get_str(Tag::new(group, 0x0040)).unwrap_or_default().trim().to_string();
+        let overlay_type = ds
+            .try_get_str(Tag::new(group, 0x0040))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
         if rows == 0 || columns == 0 || overlay_type.is_empty() {
             return None;
         }
@@ -80,8 +84,12 @@ impl OverlayData {
             bits_allocated: ds.get_or(Tag::new(group, 0x0100), 1u16),
             bit_position: ds.get_or(Tag::new(group, 0x0102), 0u16),
             overlay_type,
-            label: ds.try_get_str(Tag::new(group, 0x1500)).map(|s| s.trim().to_string()),
-            description: ds.try_get_str(Tag::new(group, 0x0022)).map(|s| s.trim().to_string()),
+            label: ds
+                .try_get_str(Tag::new(group, 0x1500))
+                .map(|s| s.trim().to_string()),
+            description: ds
+                .try_get_str(Tag::new(group, 0x0022))
+                .map(|s| s.trim().to_string()),
         })
     }
 
@@ -150,7 +158,11 @@ impl OverlayData {
 
     /// Extracts the embedded bit plane of `group` from `frame` into an
     /// unpacked 1-bit buffer.
-    pub fn extract_embedded_frame(ds: &Dataset, group: u16, frame: u32) -> Result<SharedBuffer, Error> {
+    pub fn extract_embedded_frame(
+        ds: &Dataset,
+        group: u16,
+        frame: u32,
+    ) -> Result<SharedBuffer, Error> {
         let syntax = ds.transfer_syntax();
         if syntax.is_encapsulated() {
             return Err(Error::Imaging(ImagingError(
@@ -161,17 +173,22 @@ impl OverlayData {
         let rows = ds.get_or(Tag::new(group, 0x0010), 0u16) as u64;
         let columns = ds.get_or(Tag::new(group, 0x0011), 0u16) as u64;
         if rows == 0 || columns == 0 {
-            return Err(Error::Imaging(ImagingError("embedded overlay has no shape".into())));
+            return Err(Error::Imaging(ImagingError(
+                "embedded overlay has no shape".into(),
+            )));
         }
 
-        let pixel = match ds.item(&crate::pixel::PIXEL_DATA) {
-            Some(DicomItem::Element(e)) => e
-                .value()
-                .as_buffer()
-                .cloned()
-                .ok_or_else(|| Error::Imaging(ImagingError("pixel data holds no bytes".into())))?,
-            _ => return Err(Error::Imaging(ImagingError("dataset has no pixel data".into()))),
-        };
+        let pixel =
+            match ds.item(&crate::pixel::PIXEL_DATA) {
+                Some(DicomItem::Element(e)) => e.value().as_buffer().cloned().ok_or_else(|| {
+                    Error::Imaging(ImagingError("pixel data holds no bytes".into()))
+                })?,
+                _ => {
+                    return Err(Error::Imaging(ImagingError(
+                        "dataset has no pixel data".into(),
+                    )))
+                }
+            };
         let bits = ds.get_or(crate::pixel::BITS_ALLOCATED, 8u16);
         let bits_stored = ds.get_or(crate::pixel::BITS_STORED, bits);
         // absent HighBit implies BitsStored - 1 (PS3.3 C.7.6.3.1.2)
@@ -196,7 +213,9 @@ impl OverlayData {
         let image_columns = ds.get_or(crate::pixel::COLUMNS, 0u16) as usize;
         let image_rows = ds.get_or(crate::pixel::ROWS, 0u16) as usize;
         if image_columns == 0 || image_rows == 0 {
-            return Err(Error::Imaging(ImagingError("dataset has no image dimensions".into())));
+            return Err(Error::Imaging(ImagingError(
+                "dataset has no image dimensions".into(),
+            )));
         }
         let origin_tag = Tag::new(group, 0x0050);
         let row = ds.get_at::<i16>(&origin_tag, 0).unwrap_or(0);
@@ -228,12 +247,8 @@ impl OverlayData {
                 let value = if unit == 1 {
                     frame_bytes[idx] as u16
                 } else {
-                    // pixel data is in the dataset's byte order, not the host's
-                    let pair = [frame_bytes[idx], frame_bytes[idx + 1]];
-                    match syntax.endian() {
-                        crate::model::endian::Endian::Big => u16::from_be_bytes(pair),
-                        crate::model::endian::Endian::Little => u16::from_le_bytes(pair),
-                    }
+                    // in-memory pixel buffers are host byte order (§1.2)
+                    u16::from_ne_bytes([frame_bytes[idx], frame_bytes[idx + 1]])
                 };
                 if (value >> bit_position) & 1 == 1 {
                     out[o + x / 8] |= 0x01 << (x % 8);
@@ -248,12 +263,14 @@ impl OverlayData {
     /// normalizes bits allocated / bit position (§5.4).
     pub fn store(&self, ds: &mut Dataset, data: SharedBuffer) -> Result<(), Error> {
         let group = self.group;
-        let vr = if self.bits_allocated <= 8 { Vr::Ob } else { Vr::Ow };
-        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
-            Tag::new(group, 0x3000),
-            vr,
-            data,
-        )));
+        let vr = if self.bits_allocated <= 8 {
+            Vr::Ob
+        } else {
+            Vr::Ow
+        };
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(Tag::new(group, 0x3000), vr, data),
+        ));
         ds.insert_value(Tag::new(group, 0x0100), 1u16);
         ds.insert_value(Tag::new(group, 0x0102), 0u16);
         Ok(())
@@ -286,10 +303,15 @@ mod tests {
     use super::*;
     use crate::model::buffer::MemoryBuffer;
     use crate::model::transfer_syntax::syntaxes;
-    use crate::pixel::{BITS_ALLOCATED, BITS_STORED, COLUMNS, PHOTOMETRIC_INTERPRETATION, PIXEL_DATA, ROWS};
+    use crate::pixel::{
+        BITS_ALLOCATED, BITS_STORED, COLUMNS, PHOTOMETRIC_INTERPRETATION, PIXEL_DATA, ROWS,
+    };
 
     fn base(bits: u16, w: u16, h: u16) -> Dataset {
         let mut ds = Dataset::new();
+        // the file meta group is built from the dataset's own SOP class (#8)
+        ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.2");
+        ds.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5.6.7");
         ds.insert_value(ROWS, h);
         ds.insert_value(COLUMNS, w);
         ds.insert_value(BITS_ALLOCATED, bits);
@@ -310,15 +332,21 @@ mod tests {
     fn standalone_overlay_data_is_used_directly() {
         let mut ds = base(8, 2, 2);
         add_overlay_shape(&mut ds, 0x6000, 2, 2, 0);
-        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
-            Tag::new(0x6000, 0x3000),
-            Vr::Ob,
-            Arc::new(MemoryBuffer::from(vec![0b1100_0000u8])),
-        )));
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::new(0x6000, 0x3000),
+                Vr::Ob,
+                Arc::new(MemoryBuffer::from(vec![0b1100_0000u8])),
+            ),
+        ));
         let overlays = OverlayData::from_dataset(&ds);
         assert_eq!(overlays.len(), 1);
         let loaded = overlays[0].load(&ds).unwrap();
-        assert_eq!(loaded.data().as_ref(), &[0b1100_0000], "stored bytes returned as-is");
+        assert_eq!(
+            loaded.data().as_ref(),
+            &[0b1100_0000],
+            "stored bytes returned as-is"
+        );
     }
 
     #[test]
@@ -343,14 +371,20 @@ mod tests {
         add_overlay_shape(&mut ds, 0x6000, 8, 2, 7);
         // bit 7 set on the first pixel of each row
         let pixels = vec![0x80u8, 0, 0, 0, 0, 0, 0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0];
-        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
-            PIXEL_DATA,
-            Vr::Ob,
-            Arc::new(MemoryBuffer::from(pixels)),
-        )));
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                PIXEL_DATA,
+                Vr::Ob,
+                Arc::new(MemoryBuffer::from(pixels)),
+            ),
+        ));
         let overlays = OverlayData::from_dataset(&ds);
         let data = overlays[0].load(&ds).unwrap();
-        assert_eq!(data.data().as_ref(), &[0x01, 0x01], "one byte per row, LSB first");
+        assert_eq!(
+            data.data().as_ref(),
+            &[0x01, 0x01],
+            "one byte per row, LSB first"
+        );
     }
 
     #[test]
@@ -362,13 +396,18 @@ mod tests {
         let mut pixels = vec![0u8; 32];
         pixels[16] = 0x80;
         pixels[24] = 0x80;
-        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
-            PIXEL_DATA,
-            Vr::Ob,
-            Arc::new(MemoryBuffer::from(pixels)),
-        )));
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                PIXEL_DATA,
+                Vr::Ob,
+                Arc::new(MemoryBuffer::from(pixels)),
+            ),
+        ));
         let overlay = &OverlayData::from_dataset(&ds)[0];
-        assert_eq!(overlay.load_frame(&ds, 0).unwrap().data().as_ref(), &[0x00, 0x00]);
+        assert_eq!(
+            overlay.load_frame(&ds, 0).unwrap().data().as_ref(),
+            &[0x00, 0x00]
+        );
         assert_eq!(
             overlay.load_frame(&ds, 1).unwrap().data().as_ref(),
             &[0x01, 0x01],
@@ -389,31 +428,51 @@ mod tests {
         let p2 = 1u16 << 12;
         pixels[0..2].copy_from_slice(&p0.to_le_bytes());
         pixels[4..6].copy_from_slice(&p2.to_le_bytes());
-        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
-            PIXEL_DATA,
-            Vr::Ow,
-            Arc::new(MemoryBuffer::from(pixels)),
-        )));
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                PIXEL_DATA,
+                Vr::Ow,
+                Arc::new(MemoryBuffer::from(pixels)),
+            ),
+        ));
         let data = OverlayData::from_dataset(&ds)[0].load(&ds).unwrap();
         assert_eq!(data.data().as_ref(), &[0b0000_0101], "pixels 0 and 2 set");
     }
 
     #[test]
-    fn embedded_overlay_reads_big_endian_pixels_correctly() {
+    fn embedded_overlay_reads_big_endian_pixels_after_a_real_file_round_trip() {
         let mut ds = base(16, 2, 1);
         ds.set_transfer_syntax(syntaxes::EXPLICIT_VR_BIG_ENDIAN.clone());
         ds.insert_value(BITS_STORED, 12u16);
         add_overlay_shape(&mut ds, 0x6000, 2, 1, 12);
-        // pixel 0 = 0x1000 (bit 12) in BIG-endian bytes; pixel 1 = 0
+        // pixel 0 = 0x1000 (bit 12), pixel 1 = 0, in host byte order in memory
         let mut pixels = vec![0u8; 4];
-        pixels[0..2].copy_from_slice(&(1u16 << 12).to_be_bytes());
-        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
-            PIXEL_DATA,
-            Vr::Ow,
-            Arc::new(MemoryBuffer::from(pixels)),
-        )));
-        let data = OverlayData::from_dataset(&ds)[0].load(&ds).unwrap();
-        assert_eq!(data.data().as_ref(), &[0b0000_0001], "big-endian bit 12 of pixel 0 read correctly");
+        pixels[0..2].copy_from_slice(&(1u16 << 12).to_ne_bytes());
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                PIXEL_DATA,
+                Vr::Ow,
+                Arc::new(MemoryBuffer::from(pixels)),
+            ),
+        ));
+        // Writing big-endian and re-reading must leave host-order pixels, so the
+        // embedded overlay still finds bit 12 of pixel 0 (review #3).
+        let bytes = crate::io::file::DicomFile::from_dataset(ds)
+            .to_bytes(&crate::io::writer::WriteOptions::default())
+            .unwrap();
+        let back = crate::io::file::DicomFile::from_bytes(
+            &bytes,
+            &crate::io::file::ReadOptions::default(),
+        )
+        .unwrap();
+        let data = OverlayData::from_dataset(&back.dataset)[0]
+            .load(&back.dataset)
+            .unwrap();
+        assert_eq!(
+            data.data().as_ref(),
+            &[0b0000_0001],
+            "big-endian bit 12 of pixel 0 read correctly"
+        );
     }
 
     #[test]
@@ -422,7 +481,10 @@ mod tests {
         ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
         add_overlay_shape(&mut ds, 0x6000, 8, 2, 7);
         let overlays = OverlayData::from_dataset(&ds);
-        assert!(overlays[0].load(&ds).is_err(), "encapsulated data cannot embed overlays");
+        assert!(
+            overlays[0].load(&ds).is_err(),
+            "encapsulated data cannot embed overlays"
+        );
     }
 
     #[test]
@@ -430,13 +492,18 @@ mod tests {
         let mut ds = base(8, 4, 1);
         // bits stored 8 means positions 0..7 are real pixel data
         add_overlay_shape(&mut ds, 0x6000, 4, 1, 3);
-        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
-            PIXEL_DATA,
-            Vr::Ob,
-            Arc::new(MemoryBuffer::from(vec![0u8; 4])),
-        )));
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                PIXEL_DATA,
+                Vr::Ob,
+                Arc::new(MemoryBuffer::from(vec![0u8; 4])),
+            ),
+        ));
         let overlays = OverlayData::from_dataset(&ds);
-        assert!(overlays[0].load(&ds).is_err(), "#110 rule: not an overlay bit");
+        assert!(
+            overlays[0].load(&ds).is_err(),
+            "#110 rule: not an overlay bit"
+        );
     }
 
     #[test]
@@ -444,11 +511,13 @@ mod tests {
         let mut ds = base(8, 8, 1);
         ds.insert_value(BITS_STORED, 7u16);
         add_overlay_shape(&mut ds, 0x6000, 8, 1, 7);
-        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
-            PIXEL_DATA,
-            Vr::Ob,
-            Arc::new(MemoryBuffer::from(vec![0x80u8, 0, 0, 0, 0, 0, 0, 0])),
-        )));
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                PIXEL_DATA,
+                Vr::Ob,
+                Arc::new(MemoryBuffer::from(vec![0x80u8, 0, 0, 0, 0, 0, 0, 0])),
+            ),
+        ));
         assert_eq!(extract_overlays(&mut ds).unwrap(), 1);
         // now standalone
         let overlays = OverlayData::from_dataset(&ds);
@@ -467,17 +536,23 @@ mod tests {
         let mut origin_bytes = Vec::new();
         origin_bytes.extend_from_slice(&2i16.to_le_bytes());
         origin_bytes.extend_from_slice(&3i16.to_le_bytes());
-        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
-            Tag::new(0x6002, 0x0050),
-            Vr::Ss,
-            Arc::new(MemoryBuffer::from(origin_bytes)),
-        )));
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::new(0x6002, 0x0050),
+                Vr::Ss,
+                Arc::new(MemoryBuffer::from(origin_bytes)),
+            ),
+        ));
         ds.insert_value(Tag::new(0x6002, 0x0051), 4u16);
         ds.insert_str(Tag::new(0x6002, 0x1500), Vr::Lo, "LABEL");
         let overlays = OverlayData::from_dataset(&ds);
         assert_eq!(overlays[0].group, 0x6002);
         assert_eq!(overlays[0].origin(), (3, 2), "OverlayOrigin is row\\column");
-        assert_eq!(overlays[0].frame_origin(), 4, "ImageFrameOrigin is (60xx,0051)");
+        assert_eq!(
+            overlays[0].frame_origin(),
+            4,
+            "ImageFrameOrigin is (60xx,0051)"
+        );
         assert_eq!(overlays[0].label(), Some("LABEL"));
         assert_eq!(overlays[0].overlay_type(), "G");
     }

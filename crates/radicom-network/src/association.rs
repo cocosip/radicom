@@ -119,7 +119,12 @@ pub struct ProposedContext {
 
 impl ProposedContext {
     pub fn new(id: u8, abstract_syntax: impl Into<String>, transfer_syntaxes: Vec<String>) -> Self {
-        ProposedContext { id, abstract_syntax: abstract_syntax.into(), transfer_syntaxes, roles: Vec::new() }
+        ProposedContext {
+            id,
+            abstract_syntax: abstract_syntax.into(),
+            transfer_syntaxes,
+            roles: Vec::new(),
+        }
     }
 
     /// True when this context has the same abstract syntax, transfer syntax
@@ -157,13 +162,19 @@ impl ContextSetBuilder {
     }
 
     /// Adds a context, reusing an existing identical one; returns its ID.
-    pub fn add(&mut self, abstract_syntax: impl Into<String>, transfer_syntaxes: Vec<String>) -> Result<u8> {
+    pub fn add(
+        &mut self,
+        abstract_syntax: impl Into<String>,
+        transfer_syntaxes: Vec<String>,
+    ) -> Result<u8> {
         let abstract_syntax = abstract_syntax.into();
         if abstract_syntax.is_empty() {
             return Err(NetworkError::protocol("abstract syntax must not be empty"));
         }
         if transfer_syntaxes.is_empty() {
-            return Err(NetworkError::protocol("a presentation context needs a transfer syntax"));
+            return Err(NetworkError::protocol(
+                "a presentation context needs a transfer syntax",
+            ));
         }
         let candidate = ProposedContext::new(0, abstract_syntax, transfer_syntaxes);
         if let Some(existing) = self.contexts.iter().find(|c| c.is_duplicate_of(&candidate)) {
@@ -185,7 +196,8 @@ impl ContextSetBuilder {
         roles: Vec<RoleSelection>,
     ) -> Result<u8> {
         let abstract_syntax = abstract_syntax.into();
-        let mut candidate = ProposedContext::new(0, abstract_syntax.clone(), transfer_syntaxes.clone());
+        let mut candidate =
+            ProposedContext::new(0, abstract_syntax.clone(), transfer_syntaxes.clone());
         candidate.roles = roles.clone();
         if let Some(existing) = self.contexts.iter().find(|c| c.is_duplicate_of(&candidate)) {
             return Ok(existing.id);
@@ -205,7 +217,13 @@ impl ContextSetBuilder {
     pub fn to_wire(&self) -> Vec<PresentationContext> {
         self.contexts
             .iter()
-            .map(|c| PresentationContext::new(c.id, c.abstract_syntax.clone(), c.transfer_syntaxes.clone()))
+            .map(|c| {
+                PresentationContext::new(
+                    c.id,
+                    c.abstract_syntax.clone(),
+                    c.transfer_syntaxes.clone(),
+                )
+            })
             .collect()
     }
 
@@ -285,7 +303,10 @@ impl Default for NegotiationPolicy {
 impl NegotiationPolicy {
     /// A policy that supports exactly these abstract syntaxes.
     pub fn new(supported_abstract: Vec<String>) -> Self {
-        NegotiationPolicy { supported_abstract, ..Default::default() }
+        NegotiationPolicy {
+            supported_abstract,
+            ..Default::default()
+        }
     }
 
     /// Negotiates every proposed context, in order (§4.1).
@@ -295,7 +316,11 @@ impl NegotiationPolicy {
 
     fn negotiate_one(&self, pc: &PresentationContext) -> NegotiatedContext {
         // abstract syntax first: an unsupported abstract is a 3-reject
-        if !self.supported_abstract.iter().any(|s| s == &pc.abstract_syntax) {
+        if !self
+            .supported_abstract
+            .iter()
+            .any(|s| s == &pc.abstract_syntax)
+        {
             return NegotiatedContext {
                 id: pc.id,
                 abstract_syntax: pc.abstract_syntax.clone(),
@@ -358,7 +383,9 @@ pub struct AcceptedContexts {
 
 impl AcceptedContexts {
     pub fn from_negotiated(contexts: Vec<NegotiatedContext>) -> Self {
-        AcceptedContexts { contexts: contexts.into_iter().filter(|c| c.is_accepted()).collect() }
+        AcceptedContexts {
+            contexts: contexts.into_iter().filter(|c| c.is_accepted()).collect(),
+        }
     }
 
     pub fn all(&self) -> &[NegotiatedContext] {
@@ -370,26 +397,47 @@ impl AcceptedContexts {
     }
 
     /// The context for an exact (abstract, syntax) pair.
-    pub fn find_exact(&self, abstract_syntax: &str, transfer_syntax: &str) -> Option<&NegotiatedContext> {
+    pub fn find_exact(
+        &self,
+        abstract_syntax: &str,
+        transfer_syntax: &str,
+    ) -> Option<&NegotiatedContext> {
         self.contexts
             .iter()
             .find(|c| c.abstract_syntax == abstract_syntax && c.transfer_syntax == transfer_syntax)
     }
 
+    /// The accepted context with this presentation-context id.
+    ///
+    /// PDVs name their context, so this is the only correct way to choose the
+    /// transfer syntax for a received dataset: the same SOP class may be
+    /// accepted on several contexts with different syntaxes (review #15).
+    pub fn by_id(&self, id: u8) -> Option<&NegotiatedContext> {
+        self.contexts.iter().find(|c| c.id == id)
+    }
+
     /// The first accepted context for an abstract syntax, whatever its syntax.
     pub fn find_abstract(&self, abstract_syntax: &str) -> Option<&NegotiatedContext> {
-        self.contexts.iter().find(|c| c.abstract_syntax == abstract_syntax)
+        self.contexts
+            .iter()
+            .find(|c| c.abstract_syntax == abstract_syntax)
     }
 
     /// Picks the context a message should travel on (§4.2):
     /// an exact syntax match first, then the first context of the abstract
     /// syntax, otherwise `SopClassNotSupported`.
-    pub fn pick(&self, abstract_syntax: &str, preferred_syntax: &str) -> Result<&NegotiatedContext> {
+    pub fn pick(
+        &self,
+        abstract_syntax: &str,
+        preferred_syntax: &str,
+    ) -> Result<&NegotiatedContext> {
         if let Some(context) = self.find_exact(abstract_syntax, preferred_syntax) {
             return Ok(context);
         }
         self.find_abstract(abstract_syntax)
-            .ok_or_else(|| NetworkError::SopClassNotSupported { sop_class: abstract_syntax.to_string() })
+            .ok_or_else(|| NetworkError::SopClassNotSupported {
+                sop_class: abstract_syntax.to_string(),
+            })
     }
 
     /// True when this side may act as SCU for the abstract syntax.
@@ -397,6 +445,27 @@ impl AcceptedContexts {
         self.contexts
             .iter()
             .any(|c| c.abstract_syntax == abstract_syntax && c.roles.iter().any(|r| r.scu_role))
+    }
+
+    /// True when the peer holds the SCP role for the abstract syntax, so this
+    /// side may send it requests of that class (§4.1).
+    ///
+    /// This is the acceptor's view: role selection pairs are stored as they
+    /// were granted to the association's requestor.
+    pub fn peer_holds_scp_role(&self, abstract_syntax: &str) -> bool {
+        self.contexts
+            .iter()
+            .any(|c| c.abstract_syntax == abstract_syntax && c.roles.iter().any(|r| r.scp_role))
+    }
+
+    /// True when role selection took part in this negotiation at all.
+    ///
+    /// Without it, [`Self::peer_holds_scp_role`] is false for everything simply
+    /// because nobody asked: peers that ignore role selection keep working the
+    /// way they always did, and only a peer that negotiated roles is held to
+    /// them.
+    pub fn negotiated_roles(&self) -> bool {
+        self.contexts.iter().any(|c| !c.roles.is_empty())
     }
 }
 
@@ -421,7 +490,11 @@ mod tests {
     use super::*;
 
     fn pc(id: u8, abstract_syntax: &str, syntaxes: &[&str]) -> PresentationContext {
-        PresentationContext::new(id, abstract_syntax, syntaxes.iter().map(|s| s.to_string()).collect())
+        PresentationContext::new(
+            id,
+            abstract_syntax,
+            syntaxes.iter().map(|s| s.to_string()).collect(),
+        )
     }
 
     #[test]
@@ -443,13 +516,19 @@ mod tests {
     #[test]
     fn duplicate_contexts_are_reused() {
         let mut builder = ContextSetBuilder::new();
-        let first = builder.add("1.2.3", vec!["1.2.840.10008.1.2".into()]).unwrap();
-        let again = builder.add("1.2.3", vec!["1.2.840.10008.1.2".into()]).unwrap();
+        let first = builder
+            .add("1.2.3", vec!["1.2.840.10008.1.2".into()])
+            .unwrap();
+        let again = builder
+            .add("1.2.3", vec!["1.2.840.10008.1.2".into()])
+            .unwrap();
         assert_eq!(first, again, "identical proposals share an ID");
         assert_eq!(builder.contexts().len(), 1);
 
         // a different syntax set is a different context
-        let other = builder.add("1.2.3", vec!["1.2.840.10008.1.2.1".into()]).unwrap();
+        let other = builder
+            .add("1.2.3", vec!["1.2.840.10008.1.2.1".into()])
+            .unwrap();
         assert_ne!(other, first);
         assert_eq!(builder.contexts().len(), 2);
     }
@@ -465,9 +544,17 @@ mod tests {
     #[test]
     fn contexts_with_roles_deduplicate_by_roles() {
         let mut builder = ContextSetBuilder::new();
-        let role = RoleSelection { sop_class: "1.2.3".into(), scu_role: true, scp_role: false };
-        let a = builder.add_with_roles("1.2.3", vec!["S".into()], vec![role.clone()]).unwrap();
-        let b = builder.add_with_roles("1.2.3", vec!["S".into()], vec![role]).unwrap();
+        let role = RoleSelection {
+            sop_class: "1.2.3".into(),
+            scu_role: true,
+            scp_role: false,
+        };
+        let a = builder
+            .add_with_roles("1.2.3", vec!["S".into()], vec![role.clone()])
+            .unwrap();
+        let b = builder
+            .add_with_roles("1.2.3", vec!["S".into()], vec![role])
+            .unwrap();
         assert_eq!(a, b);
         assert_eq!(builder.role_selections().len(), 1);
 
@@ -476,7 +563,11 @@ mod tests {
             .add_with_roles(
                 "1.2.3",
                 vec!["S".into()],
-                vec![RoleSelection { sop_class: "1.2.3".into(), scu_role: false, scp_role: true }],
+                vec![RoleSelection {
+                    sop_class: "1.2.3".into(),
+                    scu_role: false,
+                    scp_role: true,
+                }],
             )
             .unwrap();
         assert_ne!(c, a);
@@ -485,8 +576,14 @@ mod tests {
     #[test]
     fn empty_proposals_are_rejected() {
         let mut builder = ContextSetBuilder::new();
-        assert!(builder.add("", vec!["1.2".into()]).is_err(), "abstract syntax required");
-        assert!(builder.add("1.2.3", Vec::new()).is_err(), "transfer syntax required");
+        assert!(
+            builder.add("", vec!["1.2".into()]).is_err(),
+            "abstract syntax required"
+        );
+        assert!(
+            builder.add("1.2.3", Vec::new()).is_err(),
+            "transfer syntax required"
+        );
     }
 
     #[test]
@@ -504,7 +601,10 @@ mod tests {
         let policy = NegotiationPolicy::new(vec!["1.2.840.10008.1.1".into()]);
         let proposed = vec![pc(1, "9.9.9", &["1.2.840.10008.1.2"])];
         let negotiated = policy.negotiate(&proposed);
-        assert_eq!(negotiated[0].state, ContextState::RejectAbstractSyntaxNotSupported);
+        assert_eq!(
+            negotiated[0].state,
+            ContextState::RejectAbstractSyntaxNotSupported
+        );
         assert_eq!(negotiated[0].state.result_code(), Some(3));
         assert_eq!(
             negotiated[0].transfer_syntax, "1.2.840.10008.1.2",
@@ -517,7 +617,10 @@ mod tests {
         let policy = NegotiationPolicy::new(vec!["1.2.840.10008.1.1".into()]);
         let proposed = vec![pc(1, "1.2.840.10008.1.1", &["9.9.9.9"])];
         let negotiated = policy.negotiate(&proposed);
-        assert_eq!(negotiated[0].state, ContextState::RejectTransferSyntaxesNotSupported);
+        assert_eq!(
+            negotiated[0].state,
+            ContextState::RejectTransferSyntaxesNotSupported
+        );
         assert_eq!(negotiated[0].state.result_code(), Some(4));
     }
 
@@ -532,7 +635,10 @@ mod tests {
         let proposed = vec![pc(
             1,
             "1.2.3",
-            &[transfer_syntax::IMPLICIT_VR_LITTLE_ENDIAN, transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN],
+            &[
+                transfer_syntax::IMPLICIT_VR_LITTLE_ENDIAN,
+                transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN,
+            ],
         )];
 
         policy.priority = SyntaxPriority::Offered;
@@ -563,23 +669,38 @@ mod tests {
         assert!(negotiated[0].is_accepted());
         assert!(!negotiated[1].is_accepted());
         assert!(!negotiated[2].is_accepted());
-        assert_eq!(negotiated.iter().map(|c| c.id).collect::<Vec<_>>(), vec![1, 3, 5]);
+        assert_eq!(
+            negotiated.iter().map(|c| c.id).collect::<Vec<_>>(),
+            vec![1, 3, 5]
+        );
     }
 
     #[test]
     fn accepted_contexts_carry_exactly_one_syntax() {
         let policy = NegotiationPolicy::new(vec!["1.2.3".into()]);
-        let proposed = vec![pc(1, "1.2.3", &["1.2.840.10008.1.2", "1.2.840.10008.1.2.1"])];
+        let proposed = vec![pc(
+            1,
+            "1.2.3",
+            &["1.2.840.10008.1.2", "1.2.840.10008.1.2.1"],
+        )];
         let negotiated = policy.negotiate(&proposed);
         let wire = negotiated[0].to_wire();
-        assert_eq!(wire.transfer_syntaxes.len(), 1, "an accepted PC carries one syntax");
+        assert_eq!(
+            wire.transfer_syntaxes.len(),
+            1,
+            "an accepted PC carries one syntax"
+        );
         assert_eq!(wire.result, 0);
     }
 
     #[test]
     fn role_selection_is_granted_only_when_allowed() {
         let proposed = vec![pc(1, "1.2.3", &["1.2.840.10008.1.2"])];
-        let role = RoleSelection { sop_class: "1.2.3".into(), scu_role: true, scp_role: false };
+        let role = RoleSelection {
+            sop_class: "1.2.3".into(),
+            scu_role: true,
+            scp_role: false,
+        };
 
         let mut policy = NegotiationPolicy::new(vec!["1.2.3".into()]);
         policy.accept_roles = false;
@@ -601,9 +722,16 @@ mod tests {
         let mut negotiated = policy.negotiate(&proposed);
         policy.negotiate_roles(
             &mut negotiated,
-            &[RoleSelection { sop_class: "9.9.9".into(), scu_role: true, scp_role: true }],
+            &[RoleSelection {
+                sop_class: "9.9.9".into(),
+                scu_role: true,
+                scp_role: true,
+            }],
         );
-        assert!(negotiated[0].roles.is_empty(), "a rejected context grants nothing");
+        assert!(
+            negotiated[0].roles.is_empty(),
+            "a rejected context grants nothing"
+        );
     }
 
     #[test]
@@ -615,7 +743,10 @@ mod tests {
             ContextState::RejectAbstractSyntaxNotSupported,
             ContextState::RejectTransferSyntaxesNotSupported,
         ] {
-            assert_eq!(ContextState::from_result_code(state.result_code().expect("an AC result")), state);
+            assert_eq!(
+                ContextState::from_result_code(state.result_code().expect("an AC result")),
+                state
+            );
         }
         assert_eq!(ContextState::Accept.result_code(), Some(0));
         assert!(ContextState::Accept.is_accept());
@@ -636,7 +767,10 @@ mod tests {
             roles: Vec::new(),
         };
         let wire = context.to_wire();
-        assert_eq!(wire.result, 2, "an unnegotiated context falls back to 'rejected, no reason'");
+        assert_eq!(
+            wire.result, 2,
+            "an unnegotiated context falls back to 'rejected, no reason'"
+        );
         assert!(!wire.is_accepted());
     }
 
@@ -649,7 +783,10 @@ mod tests {
         ];
         let accepted = AcceptedContexts::from_negotiated(policy.negotiate(&proposed));
         let exact = accepted.pick("A", "1.2.840.10008.1.2.1").unwrap();
-        assert_eq!(exact.id, 3, "the exact syntax match wins over the first context");
+        assert_eq!(
+            exact.id, 3,
+            "the exact syntax match wins over the first context"
+        );
     }
 
     #[test]
@@ -658,13 +795,20 @@ mod tests {
         let proposed = vec![pc(1, "A", &["1.2.840.10008.1.2"])];
         let accepted = AcceptedContexts::from_negotiated(policy.negotiate(&proposed));
         let context = accepted.pick("A", "1.2.840.10008.1.2.1").unwrap();
-        assert_eq!(context.id, 1, "no exact match: the first context of the abstract syntax is used");
+        assert_eq!(
+            context.id, 1,
+            "no exact match: the first context of the abstract syntax is used"
+        );
     }
 
     #[test]
     fn message_routing_fails_for_an_unnegotiated_sop_class() {
         let policy = NegotiationPolicy::new(vec!["A".into()]);
-        let accepted = AcceptedContexts::from_negotiated(policy.negotiate(&[pc(1, "A", &["1.2.840.10008.1.2"])]));
+        let accepted = AcceptedContexts::from_negotiated(policy.negotiate(&[pc(
+            1,
+            "A",
+            &["1.2.840.10008.1.2"],
+        )]));
         match accepted.pick("B", "1.2.840.10008.1.2") {
             Err(NetworkError::SopClassNotSupported { sop_class }) => assert_eq!(sop_class, "B"),
             other => panic!("expected SopClassNotSupported, got {other:?}"),
@@ -690,7 +834,11 @@ mod tests {
         let mut negotiated = policy.negotiate(&proposed);
         policy.negotiate_roles(
             &mut negotiated,
-            &[RoleSelection { sop_class: "A".into(), scu_role: true, scp_role: false }],
+            &[RoleSelection {
+                sop_class: "A".into(),
+                scu_role: true,
+                scp_role: false,
+            }],
         );
         let accepted = AcceptedContexts::from_negotiated(negotiated);
         assert!(accepted.can_scu("A"));
@@ -699,11 +847,18 @@ mod tests {
 
     #[test]
     fn user_information_carries_identity_and_roles() {
-        let roles = vec![RoleSelection { sop_class: "1.2.3".into(), scu_role: true, scp_role: false }];
+        let roles = vec![RoleSelection {
+            sop_class: "1.2.3".into(),
+            scu_role: true,
+            scp_role: false,
+        }];
         let ui = build_user_information(16384, "1.2.826.0.1", "RADICOM_0_1", roles);
         assert_eq!(ui.max_pdu_length, 16384);
         assert_eq!(ui.implementation_class_uid.as_deref(), Some("1.2.826.0.1"));
-        assert_eq!(ui.implementation_version_name.as_deref(), Some("RADICOM_0_1"));
+        assert_eq!(
+            ui.implementation_version_name.as_deref(),
+            Some("RADICOM_0_1")
+        );
         assert_eq!(ui.role_selections.len(), 1);
     }
 

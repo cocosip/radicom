@@ -116,24 +116,36 @@ impl TransformRule {
             TransformRule::Prefix(tag, prefix) => {
                 if let Some(value) = dataset.try_get_str(tag) {
                     record(&mut modified, dataset, tag);
-                    dataset.insert_str(tag.clone(), tag_vr_or(dataset, tag.clone()), format!("{prefix}{value}"));
+                    dataset.insert_str(
+                        tag.clone(),
+                        tag_vr_or(dataset, tag.clone()),
+                        format!("{prefix}{value}"),
+                    );
                 }
             }
             TransformRule::Append(tag, suffix) => {
                 if let Some(value) = dataset.try_get_str(tag) {
                     record(&mut modified, dataset, tag);
-                    dataset.insert_str(tag.clone(), tag_vr_or(dataset, tag.clone()), format!("{value}{suffix}"));
+                    dataset.insert_str(
+                        tag.clone(),
+                        tag_vr_or(dataset, tag.clone()),
+                        format!("{value}{suffix}"),
+                    );
                 }
             }
             TransformRule::TrimString(tag, position, trim) => {
                 if let Some(mut value) = dataset.try_get_str(tag) {
                     record(&mut modified, dataset, tag);
-                    if matches!(position, TrimPosition::Start | TrimPosition::Both) && !trim.is_empty() {
+                    if matches!(position, TrimPosition::Start | TrimPosition::Both)
+                        && !trim.is_empty()
+                    {
                         while value.starts_with(trim.as_str()) {
                             value = value[trim.len()..].to_string();
                         }
                     }
-                    if matches!(position, TrimPosition::End | TrimPosition::Both) && !trim.is_empty() {
+                    if matches!(position, TrimPosition::End | TrimPosition::Both)
+                        && !trim.is_empty()
+                    {
                         while value.ends_with(trim.as_str()) {
                             value.truncate(value.len() - trim.len());
                         }
@@ -196,19 +208,31 @@ impl TransformRule {
             TransformRule::ToUpper(tag) => {
                 if let Some(value) = dataset.try_get_str(tag) {
                     record(&mut modified, dataset, tag);
-                    dataset.insert_str(tag.clone(), tag_vr_or(dataset, tag.clone()), value.to_uppercase());
+                    dataset.insert_str(
+                        tag.clone(),
+                        tag_vr_or(dataset, tag.clone()),
+                        value.to_uppercase(),
+                    );
                 }
             }
             TransformRule::ToLower(tag) => {
                 if let Some(value) = dataset.try_get_str(tag) {
                     record(&mut modified, dataset, tag);
-                    dataset.insert_str(tag.clone(), tag_vr_or(dataset, tag.clone()), value.to_lowercase());
+                    dataset.insert_str(
+                        tag.clone(),
+                        tag_vr_or(dataset, tag.clone()),
+                        value.to_lowercase(),
+                    );
                 }
             }
             TransformRule::GenerateUid(tag) => {
                 if dataset.contains(tag) {
                     record(&mut modified, dataset, tag);
-                    dataset.insert_str(tag.clone(), tag_vr_or(dataset, tag.clone()), Uid::generate_value());
+                    dataset.insert_str(
+                        tag.clone(),
+                        tag_vr_or(dataset, tag.clone()),
+                        Uid::generate_value(),
+                    );
                 }
             }
         }
@@ -339,7 +363,8 @@ mod tests {
     fn trim_and_pad_and_truncate() {
         let mut ds = Dataset::new();
         ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "xxHelloxx");
-        TransformRule::TrimString(Tag::PATIENT_NAME, TrimPosition::Both, "xx".into()).apply(&mut ds);
+        TransformRule::TrimString(Tag::PATIENT_NAME, TrimPosition::Both, "xx".into())
+            .apply(&mut ds);
         assert_eq!(value(&ds, 0x0010, 0x0010).as_deref(), Some("Hello"));
 
         let mut ds = Dataset::new();
@@ -397,9 +422,11 @@ mod tests {
     fn trim_split_case_and_pad_variants() {
         let mut ds = Dataset::new();
         ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "xxHelloxx");
-        TransformRule::TrimCharacters(Tag::PATIENT_NAME, TrimPosition::Start, Some(vec!['x'])).apply(&mut ds);
+        TransformRule::TrimCharacters(Tag::PATIENT_NAME, TrimPosition::Start, Some(vec!['x']))
+            .apply(&mut ds);
         assert_eq!(value(&ds, 0x0010, 0x0010).as_deref(), Some("Helloxx"));
-        TransformRule::TrimCharacters(Tag::PATIENT_NAME, TrimPosition::End, Some(vec!['x'])).apply(&mut ds);
+        TransformRule::TrimCharacters(Tag::PATIENT_NAME, TrimPosition::End, Some(vec!['x']))
+            .apply(&mut ds);
         assert_eq!(value(&ds, 0x0010, 0x0010).as_deref(), Some("Hello"));
 
         let mut ds = Dataset::new();
@@ -409,7 +436,8 @@ mod tests {
 
         let mut ds = Dataset::new();
         ds.insert_str(Tag::OTHER_PATIENT_I_DS, Vr::Sh, "a,b;c");
-        TransformRule::SplitFormat(Tag::OTHER_PATIENT_I_DS, vec![',', ';'], "[{0}]".into()).apply(&mut ds);
+        TransformRule::SplitFormat(Tag::OTHER_PATIENT_I_DS, vec![',', ';'], "[{0}]".into())
+            .apply(&mut ds);
         assert_eq!(value(&ds, 0x0010, 0x1000).as_deref(), Some("[a/b/c]"));
 
         let mut ds = Dataset::new();
@@ -434,7 +462,10 @@ mod tests {
         TransformRule::ToLower(Tag::MODALITY).apply(&mut ds);
         TransformRule::GenerateUid(Tag::SOP_INSTANCE_UID).apply(&mut ds);
         TransformRule::CopyValue(Tag::MODALITY, Tag::PATIENT_ID).apply(&mut ds);
-        assert!(ds.items().next().is_none(), "rules on absent tags do nothing");
+        assert!(
+            ds.items().next().is_none(),
+            "rules on absent tags do nothing"
+        );
     }
 
     #[test]
@@ -448,7 +479,11 @@ mod tests {
 
         let mut ds = dataset();
         set.apply(&mut ds);
-        assert_eq!(value(&ds, 0x0008, 0x0060).as_deref(), Some("CT"), "condition matched, rule ran");
+        assert_eq!(
+            value(&ds, 0x0008, 0x0060).as_deref(),
+            Some("CT"),
+            "condition matched, rule ran"
+        );
 
         // a non-matching condition leaves the dataset untouched
         let mut other = Dataset::new();
@@ -466,6 +501,10 @@ mod tests {
         TransformRule::Regex(Tag::OTHER_PATIENT_I_DS, "\\d+".into(), "###".into())
             .apply_recording(&mut ds, &mut modified);
         assert_eq!(value(&ds, 0x0010, 0x1000).as_deref(), Some("ACC-###-XYZ"));
-        assert_eq!(value(&modified, 0x0010, 0x1000).as_deref(), Some("ACC-123-XYZ"), "original recorded");
+        assert_eq!(
+            value(&modified, 0x0010, 0x1000).as_deref(),
+            Some("ACC-123-XYZ"),
+            "original recorded"
+        );
     }
 }

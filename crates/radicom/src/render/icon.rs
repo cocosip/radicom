@@ -10,9 +10,9 @@
 use super::RawImage;
 use crate::error::{DataError, Error};
 use crate::model::dataset::Dataset;
+use crate::model::tag::Tag;
 use crate::pixel::photometric::PhotometricInterpretation;
 use crate::render::render_frame;
-use crate::model::tag::Tag;
 
 /// `(0000,9113) Icon Image Sequence`.
 const ICON_IMAGE_SEQUENCE: Tag = Tag::new(0x0000, 0x9113);
@@ -92,7 +92,9 @@ impl IconImage {
 }
 
 fn invalid(message: &str) -> Error {
-    Error::Data(DataError::Other { message: format!("invalid icon image: {message}") })
+    Error::Data(DataError::Other {
+        message: format!("invalid icon image: {message}"),
+    })
 }
 
 #[cfg(test)]
@@ -141,7 +143,10 @@ mod tests {
     #[test]
     fn an_rgb_icon_is_rejected() {
         let result = IconImage::try_from_sequence_item(&icon_item("RGB", 0));
-        assert!(result.is_err(), "RGB is not a valid icon photometric interpretation");
+        assert!(
+            result.is_err(),
+            "RGB is not a valid icon photometric interpretation"
+        );
     }
 
     #[test]
@@ -157,7 +162,10 @@ mod tests {
         item.insert_str(NUMBER_OF_FRAMES, Vr::Is, "9");
         let icon = IconImage::try_from_sequence_item(&item).unwrap();
         // only frame 0 renders; the dataset reports one frame
-        assert_eq!(icon.dataset.try_get_str(NUMBER_OF_FRAMES).as_deref(), Some("1"));
+        assert_eq!(
+            icon.dataset.try_get_str(NUMBER_OF_FRAMES).as_deref(),
+            Some("1")
+        );
     }
 
     #[test]

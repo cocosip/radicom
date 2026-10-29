@@ -16,7 +16,12 @@ pub struct BitDepth {
 
 impl BitDepth {
     pub const fn new(allocated: u16, stored: u16, high_bit: u16, signed: bool) -> Self {
-        BitDepth { allocated, stored, high_bit, signed }
+        BitDepth {
+            allocated,
+            stored,
+            high_bit,
+            signed,
+        }
     }
 
     /// The smallest representable stored value.
@@ -58,9 +63,20 @@ impl BitDepth {
         if self.stored == 0 || self.stored > self.allocated || self.high_bit >= self.allocated {
             return value;
         }
+        // Drop any junk above the high bit first: an 8-bit allocated value with
+        // HighBit 3 must lose bits 4..7 instead of shifting them back in
+        // (review #6).
+        let value = if self.high_bit + 1 >= 16 {
+            value
+        } else {
+            value & ((1u16 << (self.high_bit + 1)) - 1)
+        };
         let up = self.allocated - self.high_bit - 1;
         let down = self.allocated - self.stored;
-        value.checked_shl(up as u32).unwrap_or(0).wrapping_shr(down as u32)
+        value
+            .checked_shl(up as u32)
+            .unwrap_or(0)
+            .wrapping_shr(down as u32)
     }
 }
 
@@ -91,6 +107,15 @@ mod tests {
         // stored 12 bits left-aligned at the top of 16 → shift right by 4
         let d = BitDepth::new(16, 12, 15, false);
         assert_eq!(d.normalize(0xF000), 0x0F00);
+    }
+
+    #[test]
+    fn normalize_drops_junk_above_the_high_bit() {
+        // allocated 8, stored 4, high bit 3: bits 4..7 are padding and must not
+        // survive the shift round-trip (review #6).
+        let d = BitDepth::new(8, 4, 3, false);
+        assert_eq!(d.normalize(0xF0), 0);
+        assert_eq!(d.normalize(0x0F), 0x0F);
     }
 
     #[test]

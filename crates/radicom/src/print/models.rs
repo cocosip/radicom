@@ -72,7 +72,9 @@ pub struct FilmSession {
 
 impl FilmSession {
     pub fn new() -> Self {
-        FilmSession { dataset: Dataset::new() }
+        FilmSession {
+            dataset: Dataset::new(),
+        }
     }
 
     pub fn from_dataset(dataset: Dataset) -> Self {
@@ -97,7 +99,8 @@ impl FilmSession {
     }
 
     pub fn set_label(&mut self, label: impl Into<String>) -> &mut Self {
-        self.dataset.insert_str(tags::FILM_SESSION_LABEL, Vr::Sh, label);
+        self.dataset
+            .insert_str(tags::FILM_SESSION_LABEL, Vr::Sh, label);
         self
     }
 
@@ -106,7 +109,8 @@ impl FilmSession {
     }
 
     pub fn set_priority(&mut self, priority: impl Into<String>) -> &mut Self {
-        self.dataset.insert_str(tags::PRINT_PRIORITY, Vr::Cs, priority);
+        self.dataset
+            .insert_str(tags::PRINT_PRIORITY, Vr::Cs, priority);
         self
     }
 
@@ -124,7 +128,8 @@ impl FilmSession {
     }
 
     pub fn set_destination(&mut self, destination: impl Into<String>) -> &mut Self {
-        self.dataset.insert_str(tags::FILM_DESTINATION, Vr::Cs, destination);
+        self.dataset
+            .insert_str(tags::FILM_DESTINATION, Vr::Cs, destination);
         self
     }
 
@@ -147,7 +152,9 @@ pub struct FilmBox {
 
 impl FilmBox {
     pub fn new() -> Self {
-        FilmBox { dataset: Dataset::new() }
+        FilmBox {
+            dataset: Dataset::new(),
+        }
     }
 
     pub fn from_dataset(dataset: Dataset) -> Self {
@@ -163,10 +170,14 @@ impl FilmBox {
     }
 
     /// Sets the display format string and validates it parses (§5).
-    pub fn set_image_display_format(&mut self, format: impl Into<String>) -> Result<&mut Self, Error> {
+    pub fn set_image_display_format(
+        &mut self,
+        format: impl Into<String>,
+    ) -> Result<&mut Self, Error> {
         let text = format.into();
         ImageDisplayFormat::parse(&text)?;
-        self.dataset.insert_str(tags::IMAGE_DISPLAY_FORMAT, Vr::Cs, text);
+        self.dataset
+            .insert_str(tags::IMAGE_DISPLAY_FORMAT, Vr::Cs, text);
         Ok(self)
     }
 
@@ -193,7 +204,8 @@ impl FilmBox {
     }
 
     pub fn set_trim(&mut self, trim: bool) -> &mut Self {
-        self.dataset.insert_str(tags::TRIM, Vr::Cs, if trim { "YES" } else { "NO" });
+        self.dataset
+            .insert_str(tags::TRIM, Vr::Cs, if trim { "YES" } else { "NO" });
         self
     }
 
@@ -215,7 +227,9 @@ impl FilmBox {
     /// Initialises the ReferencedImageBoxSequence with `count` image boxes,
     /// numbering positions 1..=count (§5, `initialize()`).
     pub fn initialize_image_boxes(&mut self, count: u32) -> &mut Self {
-        let sequence = self.dataset.insert_sequence(tags::REFERENCED_IMAGE_BOX_SEQUENCE);
+        let sequence = self
+            .dataset
+            .insert_sequence(tags::REFERENCED_IMAGE_BOX_SEQUENCE);
         sequence.items_mut().clear();
         for position in 1..=count {
             let mut boxed = Dataset::new();
@@ -237,7 +251,14 @@ impl FilmBox {
     pub fn image_boxes(&self) -> Vec<ImageBox> {
         self.dataset
             .try_get_sequence(tags::REFERENCED_IMAGE_BOX_SEQUENCE)
-            .map(|sequence| sequence.items().iter().cloned().map(ImageBox::from_dataset).collect())
+            .map(|sequence| {
+                sequence
+                    .items()
+                    .iter()
+                    .cloned()
+                    .map(ImageBox::from_dataset)
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -250,7 +271,8 @@ impl FilmBox {
 
     /// Sets the Presentation LUT Shape `(2050,0020)`.
     pub fn set_presentation_lut_shape(&mut self, shape: PresentationLutShape) -> &mut Self {
-        self.dataset.insert_str(tags::PRESENTATION_LUT_SHAPE, Vr::Cs, shape.as_str());
+        self.dataset
+            .insert_str(tags::PRESENTATION_LUT_SHAPE, Vr::Cs, shape.as_str());
         self
     }
 }
@@ -292,12 +314,17 @@ impl ImageBox {
     }
 
     pub fn set_polarity(&mut self, reverse: bool) -> &mut Self {
-        self.dataset.insert_str(tags::POLARITY, Vr::Cs, if reverse { "REVERSE" } else { "NORMAL" });
+        self.dataset.insert_str(
+            tags::POLARITY,
+            Vr::Cs,
+            if reverse { "REVERSE" } else { "NORMAL" },
+        );
         self
     }
 
     pub fn set_magnification_type(&mut self, value: impl Into<String>) -> &mut Self {
-        self.dataset.insert_str(tags::MAGNIFICATION_TYPE, Vr::Cs, value);
+        self.dataset
+            .insert_str(tags::MAGNIFICATION_TYPE, Vr::Cs, value);
         self
     }
 
@@ -333,7 +360,8 @@ impl ImageBox {
     }
 
     pub fn set_requested_image_size(&mut self, value: f64) -> &mut Self {
-        self.dataset.insert_str(tags::REQUESTED_IMAGE_SIZE, Vr::Ds, value.to_string());
+        self.dataset
+            .insert_str(tags::REQUESTED_IMAGE_SIZE, Vr::Ds, value.to_string());
         self
     }
 
@@ -368,7 +396,9 @@ impl ImageBox {
 }
 
 fn format_error(text: &str) -> Error {
-    Error::Data(crate::error::DataError::Other { message: format!("unknown film size \"{text}\"") })
+    Error::Data(crate::error::DataError::Other {
+        message: format!("unknown film size \"{text}\""),
+    })
 }
 
 #[cfg(test)]
@@ -395,8 +425,17 @@ mod tests {
     fn a_film_box_validates_the_display_format() {
         let mut film = FilmBox::new();
         film.set_image_display_format("STANDARD\\2,2").unwrap();
-        assert_eq!(film.image_display_format(), Some(ImageDisplayFormat::Standard { columns: 2, rows: 2 }));
-        assert!(film.set_image_display_format("BOGUS").is_err(), "invalid format is rejected");
+        assert_eq!(
+            film.image_display_format(),
+            Some(ImageDisplayFormat::Standard {
+                columns: 2,
+                rows: 2
+            })
+        );
+        assert!(
+            film.set_image_display_format("BOGUS").is_err(),
+            "invalid format is rejected"
+        );
     }
 
     #[test]
@@ -429,9 +468,18 @@ mod tests {
         let mut film = FilmBox::new();
         film.initialize_image_boxes(3);
         assert_eq!(film.image_box_count(), 3);
-        let sequence = film.dataset().try_get_sequence(tags::REFERENCED_IMAGE_BOX_SEQUENCE).unwrap();
-        assert_eq!(sequence.items()[0].try_get::<u16>(tags::IMAGE_POSITION), Some(1));
-        assert_eq!(sequence.items()[2].try_get::<u16>(tags::IMAGE_POSITION), Some(3));
+        let sequence = film
+            .dataset()
+            .try_get_sequence(tags::REFERENCED_IMAGE_BOX_SEQUENCE)
+            .unwrap();
+        assert_eq!(
+            sequence.items()[0].try_get::<u16>(tags::IMAGE_POSITION),
+            Some(1)
+        );
+        assert_eq!(
+            sequence.items()[2].try_get::<u16>(tags::IMAGE_POSITION),
+            Some(3)
+        );
     }
 
     #[test]
@@ -486,17 +534,27 @@ mod tests {
             (tags::MIN_DENSITY, "MinDensity"),
             (tags::MAX_DENSITY, "MaxDensity"),
             (tags::TRIM, "Trim"),
-            (tags::REFERENCED_IMAGE_BOX_SEQUENCE, "ReferencedImageBoxSequence"),
+            (
+                tags::REFERENCED_IMAGE_BOX_SEQUENCE,
+                "ReferencedImageBoxSequence",
+            ),
             (tags::IMAGE_POSITION, "ImageBoxPosition"),
             (tags::POLARITY, "Polarity"),
             (tags::REQUESTED_IMAGE_SIZE, "RequestedImageSize"),
         ];
         let dictionary = crate::default_dictionary();
         for (tag, keyword) in expected {
-            assert_eq!(dictionary.entry(&tag).keyword, keyword, "{tag} is not {keyword}");
+            assert_eq!(
+                dictionary.entry(&tag).keyword,
+                keyword,
+                "{tag} is not {keyword}"
+            );
         }
         // the two tags the print module got wrong, spelled out
         assert_eq!(tags::EMPTY_IMAGE_DENSITY, Tag::new(0x2010, 0x0110));
-        assert_eq!(tags::REFERENCED_IMAGE_BOX_SEQUENCE, Tag::new(0x2010, 0x0510));
+        assert_eq!(
+            tags::REFERENCED_IMAGE_BOX_SEQUENCE,
+            Tag::new(0x2010, 0x0510)
+        );
     }
 }

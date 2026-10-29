@@ -48,7 +48,11 @@ pub struct ReceivedInstance {
 impl ReceivedInstance {
     /// An instance that owns no spool file.
     pub fn from_file(file: DicomFile) -> Self {
-        ReceivedInstance { file, path: None, temp: None }
+        ReceivedInstance {
+            file,
+            path: None,
+            temp: None,
+        }
     }
 }
 
@@ -64,10 +68,15 @@ impl Drop for TempSpool {
 
 impl StoreSink {
     /// Materializes the instance from the dataset bytes.
-    pub fn materialize(&self, bytes: &[u8], syntax: &Arc<TransferSyntax>) -> Result<ReceivedInstance> {
+    pub fn materialize(
+        &self,
+        bytes: &[u8],
+        syntax: &Arc<TransferSyntax>,
+    ) -> Result<ReceivedInstance> {
         match self {
             StoreSink::Memory => {
-                let mut file = DicomFile::from_bytes(bytes, &ReadOptions::default()).map_err(parse_err)?;
+                let mut file =
+                    DicomFile::from_bytes(bytes, &ReadOptions::default()).map_err(parse_err)?;
                 // the wire syntax wins: the spooled bytes carry no file meta
                 file.dataset.set_transfer_syntax(syntax.clone());
                 Ok(ReceivedInstance::from_file(file))
@@ -88,8 +97,11 @@ impl StoreSink {
             StoreSink::SpoolToDir(dir) => {
                 std::fs::create_dir_all(dir).map_err(NetworkError::Io)?;
                 let path = dir.join(format!("{}.dcm", uuid_like()));
-                write_and_parse(&path, bytes, syntax)
-                    .map(|file| ReceivedInstance { file, path: Some(path), temp: None })
+                write_and_parse(&path, bytes, syntax).map(|file| ReceivedInstance {
+                    file,
+                    path: Some(path),
+                    temp: None,
+                })
             }
         }
     }
@@ -116,7 +128,10 @@ fn write_and_parse(path: &Path, bytes: &[u8], syntax: &Arc<TransferSyntax>) -> R
 }
 
 fn parse_err(e: radicom::Error) -> NetworkError {
-    NetworkError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+    NetworkError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        e.to_string(),
+    ))
 }
 
 /// A process-unique temporary path (no extra dependency).
@@ -144,14 +159,20 @@ pub fn c_store_request_from_message(
     if command.field != CommandField::CStoreRq {
         return Err(NetworkError::protocol("not a C-STORE request"));
     }
-    let affected_sop_class_uid = command
-        .affected_sop_class_uid
-        .clone()
-        .ok_or(NetworkError::protocol("C-STORE request has no affected SOP class UID"))?;
-    let affected_sop_instance_uid = command
-        .affected_sop_instance_uid
-        .clone()
-        .ok_or(NetworkError::protocol("C-STORE request has no affected SOP instance UID"))?;
+    let affected_sop_class_uid =
+        command
+            .affected_sop_class_uid
+            .clone()
+            .ok_or(NetworkError::protocol(
+                "C-STORE request has no affected SOP class UID",
+            ))?;
+    let affected_sop_instance_uid =
+        command
+            .affected_sop_instance_uid
+            .clone()
+            .ok_or(NetworkError::protocol(
+                "C-STORE request has no affected SOP instance UID",
+            ))?;
     Ok(CStoreRequest {
         message_id: command.message_id,
         affected_sop_class_uid,
@@ -169,7 +190,9 @@ pub fn c_store_request_from_message(
 /// a truncated comment, never a disconnect.
 pub fn failure_response(request: &CStoreRequest, error: &NetworkError) -> CStoreResponse {
     let code = match error {
-        NetworkError::SopClassNotSupported { .. } => status::STORAGE_DATA_SET_DOES_NOT_MATCH_SOP_CLASS,
+        NetworkError::SopClassNotSupported { .. } => {
+            status::STORAGE_DATA_SET_DOES_NOT_MATCH_SOP_CLASS
+        }
         NetworkError::Io(_) => status::STORAGE_FAILURE,
         _ => status::PROCESSING_FAILURE,
     };
@@ -212,7 +235,10 @@ mod tests {
         let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
         let bytes = dataset_bytes(&syntax);
         let instance = StoreSink::Memory.materialize(&bytes, &syntax).unwrap();
-        assert_eq!(instance.file.dataset.get_str(Tag::PATIENT_NAME).unwrap(), "Doe^John");
+        assert_eq!(
+            instance.file.dataset.get_str(Tag::PATIENT_NAME).unwrap(),
+            "Doe^John"
+        );
         assert_eq!(instance.file.dataset.transfer_syntax().uid(), syntax.uid());
         assert!(instance.path.is_none(), "no file kept");
     }
@@ -222,12 +248,25 @@ mod tests {
         let syntax = syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone();
         let bytes = dataset_bytes(&syntax);
         let instance = StoreSink::SpoolToTemp.materialize(&bytes, &syntax).unwrap();
-        assert_eq!(instance.file.dataset.get_str(Tag::SOP_INSTANCE_UID).unwrap(), "1.2.3.4.5");
-        assert!(instance.path.is_none(), "temporary spool files are not reported");
+        assert_eq!(
+            instance
+                .file
+                .dataset
+                .get_str(Tag::SOP_INSTANCE_UID)
+                .unwrap(),
+            "1.2.3.4.5"
+        );
+        assert!(
+            instance.path.is_none(),
+            "temporary spool files are not reported"
+        );
         let spooled = instance.temp.as_ref().expect("a temp spool file").0.clone();
         assert!(spooled.exists(), "the instance was spooled to disk");
         drop(instance);
-        assert!(!spooled.exists(), "the temp spool file must not outlive the instance");
+        assert!(
+            !spooled.exists(),
+            "the temp spool file must not outlive the instance"
+        );
     }
 
     #[test]
@@ -235,7 +274,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("radicom-sink-{}", std::process::id()));
         let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
         let bytes = dataset_bytes(&syntax);
-        let instance = StoreSink::SpoolToDir(dir.clone()).materialize(&bytes, &syntax).unwrap();
+        let instance = StoreSink::SpoolToDir(dir.clone())
+            .materialize(&bytes, &syntax)
+            .unwrap();
         let path = instance.path.expect("directory sink reports its path");
         assert!(path.exists(), "the spooled file is kept");
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
@@ -258,7 +299,10 @@ mod tests {
         let bytes = dataset_bytes(&syntaxes::IMPLICIT_VR_LITTLE_ENDIAN);
         let announced = syntaxes::EXPLICIT_VR_BIG_ENDIAN.clone();
         let instance = StoreSink::Memory.materialize(&bytes, &announced).unwrap();
-        assert_eq!(instance.file.dataset.transfer_syntax().uid(), announced.uid());
+        assert_eq!(
+            instance.file.dataset.transfer_syntax().uid(),
+            announced.uid()
+        );
     }
 
     #[test]
@@ -270,13 +314,18 @@ mod tests {
         assert_eq!(request.message_id, 11);
         assert_eq!(request.affected_sop_class_uid, "1.2.840.10008.5.1.4.1.1.7");
         assert_eq!(request.affected_sop_instance_uid, "1.2.3.4.5");
-        assert_eq!(request.file.dataset.get_str(Tag::PATIENT_NAME).unwrap(), "Doe^John");
+        assert_eq!(
+            request.file.dataset.get_str(Tag::PATIENT_NAME).unwrap(),
+            "Doe^John"
+        );
     }
 
     #[test]
     fn wrong_command_field_is_rejected() {
         let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
-        let instance = StoreSink::Memory.materialize(&dataset_bytes(&syntax), &syntax).unwrap();
+        let instance = StoreSink::Memory
+            .materialize(&dataset_bytes(&syntax), &syntax)
+            .unwrap();
         let command = Command::request(CommandField::CEchoRq, 1);
         assert!(c_store_request_from_message(&command, instance).is_err());
     }
@@ -284,7 +333,9 @@ mod tests {
     #[test]
     fn missing_instance_uid_is_rejected() {
         let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
-        let instance = StoreSink::Memory.materialize(&dataset_bytes(&syntax), &syntax).unwrap();
+        let instance = StoreSink::Memory
+            .materialize(&dataset_bytes(&syntax), &syntax)
+            .unwrap();
         let mut command = c_store_command();
         command.affected_sop_instance_uid = None;
         assert!(c_store_request_from_message(&command, instance).is_err());
@@ -293,28 +344,42 @@ mod tests {
     #[test]
     fn provider_failures_map_to_storage_statuses() {
         let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
-        let instance = StoreSink::Memory.materialize(&dataset_bytes(&syntax), &syntax).unwrap();
+        let instance = StoreSink::Memory
+            .materialize(&dataset_bytes(&syntax), &syntax)
+            .unwrap();
         let request = c_store_request_from_message(&c_store_command(), instance).unwrap();
 
         let response = failure_response(
             &request,
-            &NetworkError::SopClassNotSupported { sop_class: "9.9".into() },
+            &NetworkError::SopClassNotSupported {
+                sop_class: "9.9".into(),
+            },
         );
-        assert_eq!(response.status, status::STORAGE_DATA_SET_DOES_NOT_MATCH_SOP_CLASS);
+        assert_eq!(
+            response.status,
+            status::STORAGE_DATA_SET_DOES_NOT_MATCH_SOP_CLASS
+        );
 
         let response = failure_response(&request, &NetworkError::protocol("bad"));
         assert_eq!(response.status, status::PROCESSING_FAILURE);
-        assert!(response.error_comment.is_some(), "the comment carries the reason");
+        assert!(
+            response.error_comment.is_some(),
+            "the comment carries the reason"
+        );
     }
 
     #[test]
     fn long_failure_comments_are_truncated() {
         let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
-        let instance = StoreSink::Memory.materialize(&dataset_bytes(&syntax), &syntax).unwrap();
+        let instance = StoreSink::Memory
+            .materialize(&dataset_bytes(&syntax), &syntax)
+            .unwrap();
         let request = c_store_request_from_message(&c_store_command(), instance).unwrap();
         let response = failure_response(
             &request,
-            &NetworkError::SopClassNotSupported { sop_class: "x".repeat(500) },
+            &NetworkError::SopClassNotSupported {
+                sop_class: "x".repeat(500),
+            },
         );
         assert!(response.error_comment.unwrap().len() <= 64);
     }

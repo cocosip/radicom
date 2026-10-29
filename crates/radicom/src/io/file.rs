@@ -64,7 +64,10 @@ pub struct ReadOptions {
 
 impl Default for ReadOptions {
     fn default() -> Self {
-        ReadOptions { read: FileReadOption::Default, large_object_size: 64 * 1024 }
+        ReadOptions {
+            read: FileReadOption::Default,
+            large_object_size: 64 * 1024,
+        }
     }
 }
 
@@ -113,15 +116,21 @@ impl DicomFile {
     pub fn open_with_options(path: impl AsRef<Path>, options: &ReadOptions) -> Result<Self, Error> {
         let path = path.as_ref();
         let mut file = std::fs::File::open(path).map_err(|e| file_err(path, "open", e))?;
-        let file_len = file.metadata().map_err(|e| file_err(path, "stat", e))?.len();
+        let file_len = file
+            .metadata()
+            .map_err(|e| file_err(path, "stat", e))?
+            .len();
         if file_len < 8 {
-            return Err(Error::File(FileError::InvalidFormat("file is too short to be DICOM".into())));
+            return Err(Error::File(FileError::InvalidFormat(
+                "file is too short to be DICOM".into(),
+            )));
         }
 
         // preamble / header
         let head_len = file_len.min(132) as usize;
         let mut head = vec![0u8; head_len];
-        file.read_exact(&mut head).map_err(|e| file_err(path, "read", e))?;
+        file.read_exact(&mut head)
+            .map_err(|e| file_err(path, "read", e))?;
         let (mut format, meta_start) = if head_len >= 132 && &head[128..132] == b"DICM" {
             (FileFormat::Dicom3, 132u64)
         } else {
@@ -156,7 +165,8 @@ impl DicomFile {
             let plain = crate::io::reader::inflate_stream(&mut file, dataset_offset)?;
             parse_slice(&plain, &syntax, options)?
         } else {
-            file.seek(SeekFrom::Start(dataset_offset)).map_err(|e| file_err(path, "seek", e))?;
+            file.seek(SeekFrom::Start(dataset_offset))
+                .map_err(|e| file_err(path, "seek", e))?;
             // Buffered reads: the parser issues several small reads per element,
             // and each one used to be its own syscall. This is safe now that the
             // source tracks its own position instead of asking the stream, so the
@@ -164,9 +174,14 @@ impl DicomFile {
             let buffered = std::io::BufReader::with_capacity(64 * 1024, file);
             // one shared handle for every lazy window over this file, rather
             // than one fd per large value
-            let shared = Arc::new(buffered.get_ref().try_clone().map_err(|e| file_err(path, "clone", e))?);
-            let mut source = ByteSourceReader::new(buffered, syntax.endian())
-                .with_shared_file(shared);
+            let shared = Arc::new(
+                buffered
+                    .get_ref()
+                    .try_clone()
+                    .map_err(|e| file_err(path, "clone", e))?,
+            );
+            let mut source =
+                ByteSourceReader::new(buffered, syntax.endian()).with_shared_file(shared);
             let reader = DicomReader {
                 large_object_size: options.large_object_size,
                 large_policy: policy_of(options.read),
@@ -198,7 +213,6 @@ impl DicomFile {
         })
     }
 
-
     /// Parses from a byte slice.
     ///
     /// The slice is parsed in place: it is not copied into a `Vec` first, which
@@ -208,7 +222,10 @@ impl DicomFile {
     }
 
     /// Parses from any seekable reader (FILE-01).
-    pub fn from_reader<R: Read + Seek>(reader: &mut R, options: &ReadOptions) -> Result<Self, Error> {
+    pub fn from_reader<R: Read + Seek>(
+        reader: &mut R,
+        options: &ReadOptions,
+    ) -> Result<Self, Error> {
         let mut raw = Vec::new();
         reader
             .read_to_end(&mut raw)
@@ -253,7 +270,10 @@ impl DicomFile {
     }
 
     /// Parses until `stop` returns true, leaving the rest unread (FILE-01).
-    pub fn open_partial(path: impl AsRef<Path>, stop: &dyn Fn(&crate::io::reader::ParseState) -> bool) -> Result<Self, Error> {
+    pub fn open_partial(
+        path: impl AsRef<Path>,
+        stop: &dyn Fn(&crate::io::reader::ParseState) -> bool,
+    ) -> Result<Self, Error> {
         let path = path.as_ref();
         let bytes = std::fs::read(path).map_err(|e| file_err(path, "read", e))?;
         let (format, meta_bytes, dataset_bytes) = detect(&bytes).map_err(|e| attach(e, path))?;
@@ -268,7 +288,8 @@ impl DicomFile {
 
         let mut source = ByteSourceReader::new(Cursor::new(dataset_bytes), syntax.endian());
         let mut builder = DatasetBuilder::with_transfer_syntax(syntax.clone());
-        let outcome = DicomReader::default().read(&mut source, &syntax, &mut builder, Some(stop))?;
+        let outcome =
+            DicomReader::default().read(&mut source, &syntax, &mut builder, Some(stop))?;
         Ok(DicomFile {
             file_meta,
             dataset: builder.into_dataset(),
@@ -294,7 +315,10 @@ impl DicomFile {
     /// Serializes preamble, meta group and dataset (FILE-05).
     pub fn to_bytes(&self, options: &WriteOptions) -> Result<Vec<u8>, Error> {
         if !self.format.is_saveable() {
-            return Err(Error::File(FileError::FormatNotSaveable(format!("{:?}", self.format))));
+            return Err(Error::File(FileError::FormatNotSaveable(format!(
+                "{:?}",
+                self.format
+            ))));
         }
         let mut out = Vec::new();
         out.extend_from_slice(&[0u8; 128]);
@@ -303,7 +327,10 @@ impl DicomFile {
         // PS3.10 Table 7.1-1: (0002,0000) File Meta Information Group Length is
         // Type 1 (required), so always recalculate it for the meta group whatever
         // the caller's dataset option says.
-        let meta_options = WriteOptions { keep_group_lengths: true, ..options.clone() };
+        let meta_options = WriteOptions {
+            keep_group_lengths: true,
+            ..options.clone()
+        };
         DicomWriter::new(meta_options).write_dataset(
             &meta,
             &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN,
@@ -313,7 +340,11 @@ impl DicomFile {
         let syntax = self.dataset.transfer_syntax();
         if syntax.is_deflate() {
             let mut plain = Vec::new();
-            DicomWriter::new(options.clone()).write_dataset(&self.dataset, &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN, &mut plain)?;
+            DicomWriter::new(options.clone()).write_dataset(
+                &self.dataset,
+                &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN,
+                &mut plain,
+            )?;
             out.extend_from_slice(&deflate(&plain)?);
         } else {
             DicomWriter::new(options.clone()).write_dataset(&self.dataset, &syntax, &mut out)?;
@@ -326,21 +357,26 @@ impl DicomFile {
     /// while writing a media storage directory (FILE-05).
     pub(crate) fn encoded_prefix_len(&self, options: &WriteOptions) -> Result<u64, Error> {
         if !self.format.is_saveable() {
-            return Err(Error::File(FileError::FormatNotSaveable(format!("{:?}", self.format))));
+            return Err(Error::File(FileError::FormatNotSaveable(format!(
+                "{:?}",
+                self.format
+            ))));
         }
         let meta = self.refreshed_meta()?;
-        let meta_options = WriteOptions { keep_group_lengths: true, ..options.clone() };
-        let meta_len = DicomWriter::new(meta_options).dataset_length(
-            &meta,
-            &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN,
-        )?;
+        let meta_options = WriteOptions {
+            keep_group_lengths: true,
+            ..options.clone()
+        };
+        let meta_len = DicomWriter::new(meta_options)
+            .dataset_length(&meta, &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN)?;
         Ok(132 + meta_len)
     }
 
     /// Writes to an arbitrary writer.
     pub fn write<W: Write>(&self, out: &mut W, options: &WriteOptions) -> Result<(), Error> {
         let bytes = self.to_bytes(options)?;
-        out.write_all(&bytes).map_err(|e| Error::File(FileError::Other(format!("write: {e}"))))
+        out.write_all(&bytes)
+            .map_err(|e| Error::File(FileError::Other(format!("write: {e}"))))
     }
 
     /// FILE-06: true when `path` carries the 128-byte preamble + `DICM`.
@@ -361,10 +397,38 @@ impl DicomFile {
         let mut meta = self.file_meta.clone();
         let syntax = self.dataset.transfer_syntax();
         meta.insert_str(Tag::TRANSFER_SYNTAX_UID, Vr::Ui, syntax.uid());
-        meta.insert_str(Tag::IMPLEMENTATION_CLASS_UID, Vr::Ui, IMPLEMENTATION_CLASS_UID);
-        meta.insert_str(Tag::IMPLEMENTATION_VERSION_NAME, Vr::Sh, IMPLEMENTATION_VERSION_NAME);
-        if !meta.contains(&Tag::MEDIA_STORAGE_SOP_CLASS_UID) {
-            meta.insert_str(Tag::MEDIA_STORAGE_SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        meta.insert_str(
+            Tag::IMPLEMENTATION_CLASS_UID,
+            Vr::Ui,
+            IMPLEMENTATION_CLASS_UID,
+        );
+        meta.insert_str(
+            Tag::IMPLEMENTATION_VERSION_NAME,
+            Vr::Sh,
+            IMPLEMENTATION_VERSION_NAME,
+        );
+        // The media storage SOP class must describe the dataset's own SOP, never
+        // a guessed secondary-capture default; an inconsistent meta group is an
+        // error, and a dataset with no SOP class cannot build a file (review #8).
+        let dataset_sop_class = self.dataset.try_get_str(Tag::SOP_CLASS_UID);
+        let existing_sop_class = meta.try_get_str(Tag::MEDIA_STORAGE_SOP_CLASS_UID);
+        match (dataset_sop_class, existing_sop_class) {
+            (Some(class), Some(existing)) => {
+                if existing != class.as_str() {
+                    return Err(Error::File(FileError::Other(format!(
+                        "file meta MediaStorageSOPClassUID {existing} disagrees with dataset SOPClassUID {class}"
+                    ))));
+                }
+            }
+            (Some(class), None) => {
+                meta.insert_str(Tag::MEDIA_STORAGE_SOP_CLASS_UID, Vr::Ui, class);
+            }
+            (None, Some(_)) => {}
+            (None, None) => {
+                return Err(Error::File(FileError::Other(
+                    "dataset has no SOPClassUID; cannot build file meta information".into(),
+                )));
+            }
         }
         if !meta.contains(&Tag::MEDIA_STORAGE_SOP_INSTANCE_UID) {
             let uid = self
@@ -437,7 +501,11 @@ fn parse_slice(
 fn read_probe(file: &mut std::fs::File, start: u64, file_len: u64) -> Vec<u8> {
     let take = file_len.saturating_sub(start).min(4096) as usize;
     let mut buf = vec![0u8; take];
-    if file.seek(SeekFrom::Start(start)).and_then(|_| file.read_exact(&mut buf)).is_err() {
+    if file
+        .seek(SeekFrom::Start(start))
+        .and_then(|_| file.read_exact(&mut buf))
+        .is_err()
+    {
         return Vec::new();
     }
     buf
@@ -458,7 +526,11 @@ enum MetaScan {
 /// The buffer grows geometrically; each growth reads only the newly needed
 /// bytes from the one already-seeked file position, so the bytes read are
 /// O(n) rather than re-reading the prefix on every step.
-fn read_meta_block(file: &mut std::fs::File, start: u64, file_len: u64) -> std::io::Result<(Vec<u8>, u64)> {
+fn read_meta_block(
+    file: &mut std::fs::File,
+    start: u64,
+    file_len: u64,
+) -> std::io::Result<(Vec<u8>, u64)> {
     let avail = file_len.saturating_sub(start) as usize;
     file.seek(SeekFrom::Start(start))?;
     let mut buf: Vec<u8> = Vec::new();
@@ -475,7 +547,10 @@ fn read_meta_block(file: &mut std::fs::File, start: u64, file_len: u64) -> std::
             MetaScan::None => return Ok((Vec::new(), 0)),
             MetaScan::More => {
                 if take == avail {
-                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "meta group is truncated"));
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "meta group is truncated",
+                    ));
                 }
                 want = (take.saturating_mul(2)).min(avail);
             }
@@ -506,7 +581,11 @@ fn scan_meta(buf: &[u8]) -> MetaScan {
             if pos + 12 > buf.len() {
                 return MetaScan::More;
             }
-            (u32::from_le_bytes([buf[pos + 8], buf[pos + 9], buf[pos + 10], buf[pos + 11]]) as usize, 12)
+            (
+                u32::from_le_bytes([buf[pos + 8], buf[pos + 9], buf[pos + 10], buf[pos + 11]])
+                    as usize,
+                12,
+            )
         };
         let end = pos + header + len;
         if end > buf.len() {
@@ -532,14 +611,20 @@ fn detect(raw: &[u8]) -> Result<Split<'_>, Error> {
     }
     // otherwise the file starts with the meta group or the dataset
     let (meta, dataset) = split_meta(raw)?;
-    let format = if meta.is_some() { FileFormat::Dicom3NoPreamble } else { FileFormat::Dicom3NoFileMetaInfo };
+    let format = if meta.is_some() {
+        FileFormat::Dicom3NoPreamble
+    } else {
+        FileFormat::Dicom3NoFileMetaInfo
+    };
     Ok((format, meta, dataset))
 }
 
 /// Splits leading group 0002 elements from the dataset that follows.
 fn split_meta(raw: &[u8]) -> Result<(Option<&[u8]>, &[u8]), Error> {
     if raw.len() < 8 {
-        return Err(Error::File(FileError::InvalidFormat("truncated header".into())));
+        return Err(Error::File(FileError::InvalidFormat(
+            "truncated header".into(),
+        )));
     }
     let group = u16::from_le_bytes([raw[0], raw[1]]);
     if group != 0x0002 {
@@ -554,7 +639,9 @@ fn split_meta(raw: &[u8]) -> Result<(Option<&[u8]>, &[u8]), Error> {
             break;
         }
         let vr = Vr::try_parse(&[raw[pos + 4], raw[pos + 5]]).ok_or_else(|| {
-            Error::File(FileError::InvalidFormat(format!("bad meta VR at offset {pos}")))
+            Error::File(FileError::InvalidFormat(format!(
+                "bad meta VR at offset {pos}"
+            )))
         })?;
         let (len, header) = if vr.is_16bit_length() {
             (u16::from_le_bytes([raw[pos + 6], raw[pos + 7]]) as usize, 8)
@@ -563,13 +650,16 @@ fn split_meta(raw: &[u8]) -> Result<(Option<&[u8]>, &[u8]), Error> {
                 break;
             }
             (
-                u32::from_le_bytes([raw[pos + 8], raw[pos + 9], raw[pos + 10], raw[pos + 11]]) as usize,
+                u32::from_le_bytes([raw[pos + 8], raw[pos + 9], raw[pos + 10], raw[pos + 11]])
+                    as usize,
                 12,
             )
         };
         let end = pos + header + len;
         if end > raw.len() {
-            return Err(Error::File(FileError::InvalidFormat("meta group is truncated".into())));
+            return Err(Error::File(FileError::InvalidFormat(
+                "meta group is truncated".into(),
+            )));
         }
         pos = end;
     }
@@ -625,7 +715,10 @@ fn deflate(bytes: &[u8]) -> Result<Vec<u8>, Error> {
 }
 
 fn file_err(path: &Path, action: &str, e: std::io::Error) -> Error {
-    Error::File(FileError::Other(format!("{action} {}: {e}", path.display())))
+    Error::File(FileError::Other(format!(
+        "{action} {}: {e}",
+        path.display()
+    )))
 }
 
 fn attach(e: Error, path: &Path) -> Error {
@@ -687,8 +780,14 @@ mod tests {
         assert_eq!(&bytes[128..132], b"DICM", "preamble + magic");
         // literal encoded values, independent of the reader: a wrong writer that
         // the reader happens to mirror would fail these
-        assert!(bytes.windows(8).any(|w| w == b"Doe^John"), "PN value written verbatim");
-        assert!(bytes.windows(5).any(|w| w == b"PID-1"), "LO value written verbatim");
+        assert!(
+            bytes.windows(8).any(|w| w == b"Doe^John"),
+            "PN value written verbatim"
+        );
+        assert!(
+            bytes.windows(5).any(|w| w == b"PID-1"),
+            "LO value written verbatim"
+        );
         let back = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
         assert_eq!(back.format, FileFormat::Dicom3);
         assert_eq!(back.get_str(Tag::PATIENT_NAME), "Doe^John");
@@ -700,7 +799,9 @@ mod tests {
         let mut file = sample_file();
         let mut item = Dataset::new();
         item.insert_str(Tag::STUDY_DATE, Vr::Da, "20240101");
-        file.dataset.insert_sequence(Tag::REFERENCED_STUDY_SEQUENCE).push(item);
+        file.dataset
+            .insert_sequence(Tag::REFERENCED_STUDY_SEQUENCE)
+            .push(item);
 
         let implicit = temp_file("save-implicit");
         file.save_with(&implicit, &WriteOptions::default()).unwrap();
@@ -714,9 +815,20 @@ mod tests {
 
         let a = std::fs::read(&implicit).unwrap();
         let b = std::fs::read(&explicit).unwrap();
-        assert_ne!(a, b, "explicit-length options reach the encoded file, not just to_bytes");
+        assert_ne!(
+            a, b,
+            "explicit-length options reach the encoded file, not just to_bytes"
+        );
         let reopened = DicomFile::open(&explicit).unwrap();
-        assert_eq!(reopened.dataset.try_get_sequence(Tag::REFERENCED_STUDY_SEQUENCE).unwrap().items().len(), 1);
+        assert_eq!(
+            reopened
+                .dataset
+                .try_get_sequence(Tag::REFERENCED_STUDY_SEQUENCE)
+                .unwrap()
+                .items()
+                .len(),
+            1
+        );
 
         std::fs::remove_file(&implicit).ok();
         std::fs::remove_file(&explicit).ok();
@@ -726,11 +838,26 @@ mod tests {
     fn meta_group_is_refreshed_on_save() {
         let bytes = sample_file().to_bytes(&WriteOptions::default()).unwrap();
         let back = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
-        assert_eq!(back.file_meta.get_str(Tag::TRANSFER_SYNTAX_UID).unwrap(), "1.2.840.10008.1.2.1");
-        assert_eq!(back.file_meta.get_str(Tag::IMPLEMENTATION_CLASS_UID).unwrap(), IMPLEMENTATION_CLASS_UID);
-        assert_eq!(back.file_meta.get_str(Tag::IMPLEMENTATION_VERSION_NAME).unwrap(), IMPLEMENTATION_VERSION_NAME);
         assert_eq!(
-            back.file_meta.get_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID).unwrap(),
+            back.file_meta.get_str(Tag::TRANSFER_SYNTAX_UID).unwrap(),
+            "1.2.840.10008.1.2.1"
+        );
+        assert_eq!(
+            back.file_meta
+                .get_str(Tag::IMPLEMENTATION_CLASS_UID)
+                .unwrap(),
+            IMPLEMENTATION_CLASS_UID
+        );
+        assert_eq!(
+            back.file_meta
+                .get_str(Tag::IMPLEMENTATION_VERSION_NAME)
+                .unwrap(),
+            IMPLEMENTATION_VERSION_NAME
+        );
+        assert_eq!(
+            back.file_meta
+                .get_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID)
+                .unwrap(),
             "1.2.3.4.5",
             "media storage instance UID comes from the dataset"
         );
@@ -741,15 +868,23 @@ mod tests {
         // PS3.10 Table 7.1-1: (0002,0000) FileMetaInformationGroupLength is Type 1.
         let bytes = sample_file().to_bytes(&WriteOptions::default()).unwrap();
         let m = 132usize; // after the 128-byte preamble + "DICM"
-        assert_eq!(&bytes[m..m + 2], &[0x02, 0x00], "first meta element is group 0002");
+        assert_eq!(
+            &bytes[m..m + 2],
+            &[0x02, 0x00],
+            "first meta element is group 0002"
+        );
         assert_eq!(&bytes[m + 2..m + 4], &[0x00, 0x00], "element is 0000");
         assert_eq!(&bytes[m + 4..m + 6], b"UL", "(0002,0000) carries UL");
-        let group_len = u32::from_le_bytes([bytes[m + 8], bytes[m + 9], bytes[m + 10], bytes[m + 11]]) as usize;
+        let group_len =
+            u32::from_le_bytes([bytes[m + 8], bytes[m + 9], bytes[m + 10], bytes[m + 11]]) as usize;
         assert!(group_len > 0, "group length is non-zero");
         // the dataset must begin exactly after the declared meta remainder
         let dataset_start = m + 12 + group_len;
         let g = u16::from_le_bytes([bytes[dataset_start], bytes[dataset_start + 1]]);
-        assert_ne!(g, 0x0002, "the bytes after the declared meta length are the dataset, not more meta");
+        assert_ne!(
+            g, 0x0002,
+            "the bytes after the declared meta length are the dataset, not more meta"
+        );
     }
 
     #[test]
@@ -810,15 +945,38 @@ mod tests {
         dataset.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID-1");
         dataset.insert_value(Tag::ROWS, 512u16); // Rows (US)
         dataset.insert_value(Tag::COLUMNS, 256u16); // Columns (US)
+        dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.2");
         dataset.set_transfer_syntax(syntaxes::EXPLICIT_VR_BIG_ENDIAN.clone());
-        let bytes = DicomFile::from_dataset(dataset).to_bytes(&WriteOptions::default()).unwrap();
+        let bytes = DicomFile::from_dataset(dataset)
+            .to_bytes(&WriteOptions::default())
+            .unwrap();
 
         let back = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
         assert_eq!(back.dataset.transfer_syntax().uid(), "1.2.840.10008.1.2.2");
         assert_eq!(back.get_str(Tag::PATIENT_ID), "PID-1");
         let rows: u16 = back.dataset.get(Tag::ROWS).unwrap();
         let cols: u16 = back.dataset.get(Tag::COLUMNS).unwrap();
-        assert_eq!((rows, cols), (512, 256), "US values survive the big-endian file round-trip");
+        assert_eq!(
+            (rows, cols),
+            (512, 256),
+            "US values survive the big-endian file round-trip"
+        );
+    }
+
+    #[test]
+    fn file_meta_sop_class_comes_from_the_dataset() {
+        // review #8: a CT dataset must not be labelled Secondary Capture.
+        let mut dataset = Dataset::new();
+        dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.2");
+        dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4");
+        let bytes = DicomFile::from_dataset(dataset)
+            .to_bytes(&WriteOptions::default())
+            .unwrap();
+        let back = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
+        assert_eq!(
+            back.file_meta.try_get_str(Tag::MEDIA_STORAGE_SOP_CLASS_UID),
+            Some("1.2.840.10008.5.1.4.1.1.2".to_string())
+        );
     }
 
     #[test]
@@ -832,10 +990,13 @@ mod tests {
             .unwrap();
         let file = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
         assert_eq!(file.format, FileFormat::AcrNema2);
-        assert!(matches!(
-            file.to_bytes(&WriteOptions::default()),
-            Err(Error::File(FileError::FormatNotSaveable(_)))
-        ), "ACR-NEMA cannot be saved");
+        assert!(
+            matches!(
+                file.to_bytes(&WriteOptions::default()),
+                Err(Error::File(FileError::FormatNotSaveable(_)))
+            ),
+            "ACR-NEMA cannot be saved"
+        );
     }
 
     #[test]
@@ -860,7 +1021,10 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
         match DicomFile::open(&path) {
             Err(Error::File(FileError::InvalidFormat(message))) => {
-                assert!(message.contains("meta group"), "typed meta-group error, got {message}");
+                assert!(
+                    message.contains("meta group"),
+                    "typed meta-group error, got {message}"
+                );
             }
             other => panic!("expected FileError::InvalidFormat(meta group), got {other:?}"),
         }
@@ -956,7 +1120,8 @@ mod tests {
     #[test]
     fn deflated_file_round_trips() {
         let mut file = sample_file();
-        file.dataset.set_transfer_syntax(syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        file.dataset
+            .set_transfer_syntax(syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone());
         let bytes = file.to_bytes(&WriteOptions::default()).unwrap();
         let back = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
         assert_eq!(back.get_str(Tag::PATIENT_NAME), "Doe^John");
@@ -971,16 +1136,32 @@ mod tests {
         let plain_path = dir.join("plain.dcm");
 
         let mut deflated = sample_file();
-        deflated.dataset.set_transfer_syntax(syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone());
-        std::fs::write(&deflated_path, deflated.to_bytes(&WriteOptions::default()).unwrap()).unwrap();
-        std::fs::write(&plain_path, sample_file().to_bytes(&WriteOptions::default()).unwrap()).unwrap();
+        deflated
+            .dataset
+            .set_transfer_syntax(syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        std::fs::write(
+            &deflated_path,
+            deflated.to_bytes(&WriteOptions::default()).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            &plain_path,
+            sample_file().to_bytes(&WriteOptions::default()).unwrap(),
+        )
+        .unwrap();
 
         // `open` goes through the streaming inflate path; both must yield the same data
         let from_disk = DicomFile::open(&deflated_path).unwrap();
         let plain = DicomFile::open(&plain_path).unwrap();
         assert!(from_disk.dataset.transfer_syntax().is_deflate());
-        assert_eq!(from_disk.get_str(Tag::PATIENT_NAME), plain.get_str(Tag::PATIENT_NAME));
-        assert_eq!(from_disk.get_str(Tag::PATIENT_ID), plain.get_str(Tag::PATIENT_ID));
+        assert_eq!(
+            from_disk.get_str(Tag::PATIENT_NAME),
+            plain.get_str(Tag::PATIENT_NAME)
+        );
+        assert_eq!(
+            from_disk.get_str(Tag::PATIENT_ID),
+            plain.get_str(Tag::PATIENT_ID)
+        );
         assert_eq!(from_disk.dataset.len(), plain.dataset.len());
 
         // a truncated deflate stream is a typed error, never a panic
@@ -1017,7 +1198,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let good = dir.join("good.dcm");
         let bad = dir.join("bad.dcm");
-        std::fs::write(&good, sample_file().to_bytes(&WriteOptions::default()).unwrap()).unwrap();
+        std::fs::write(
+            &good,
+            sample_file().to_bytes(&WriteOptions::default()).unwrap(),
+        )
+        .unwrap();
         std::fs::write(&bad, b"not a dicom file at all").unwrap();
         assert!(DicomFile::has_valid_header(&good));
         assert!(!DicomFile::has_valid_header(&bad));
@@ -1033,7 +1218,13 @@ mod tests {
         sample_file().save(&path).unwrap();
         let back = DicomFile::open(&path).unwrap();
         assert_eq!(back.get_str(Tag::PATIENT_ID), "PID-1");
-        assert_eq!(read_file_meta(&path).unwrap().get_str(Tag::TRANSFER_SYNTAX_UID).unwrap(), "1.2.840.10008.1.2.1");
+        assert_eq!(
+            read_file_meta(&path)
+                .unwrap()
+                .get_str(Tag::TRANSFER_SYNTAX_UID)
+                .unwrap(),
+            "1.2.840.10008.1.2.1"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1047,15 +1238,25 @@ mod tests {
         let stop = |state: &crate::io::reader::ParseState| state.tag == (0x0010, 0x0010);
         let file = DicomFile::open_partial(&path, &stop).unwrap();
         assert!(file.is_partial, "FILE-01: is_partial set when stopped");
-        assert!(file.dataset.contains(&Tag::SOP_CLASS_UID), "elements before the stop tag");
-        assert!(!file.dataset.contains(&Tag::PATIENT_NAME), "stop tag not read");
-        assert!(!file.dataset.contains(&Tag::PATIENT_ID), "nothing past the stop tag");
+        assert!(
+            file.dataset.contains(&Tag::SOP_CLASS_UID),
+            "elements before the stop tag"
+        );
+        assert!(
+            !file.dataset.contains(&Tag::PATIENT_NAME),
+            "stop tag not read"
+        );
+        assert!(
+            !file.dataset.contains(&Tag::PATIENT_ID),
+            "nothing past the stop tag"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
     #[test]
     fn deflated_file_rewrite_is_stable() {
         let mut file = sample_file();
-        file.dataset.set_transfer_syntax(syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        file.dataset
+            .set_transfer_syntax(syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone());
         let first = file.to_bytes(&WriteOptions::default()).unwrap();
         let back = DicomFile::from_bytes(&first, &ReadOptions::default()).unwrap();
         let second = back.to_bytes(&WriteOptions::default()).unwrap();
@@ -1090,6 +1291,7 @@ mod tests {
             std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(big.clone())),
         ));
         ds.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID-1");
+        ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.2");
         let file = DicomFile::from_dataset(ds);
         let path = temp_file("large");
         file.save(&path).unwrap();
@@ -1098,7 +1300,9 @@ mod tests {
 
     fn large_value_buffer(ds: &Dataset) -> &crate::model::buffer::SharedBuffer {
         match ds.item(&Tag::new(0x0009, 0x1001)) {
-            Some(crate::model::item::DicomItem::Element(e)) => e.value().as_buffer().expect("value has a buffer"),
+            Some(crate::model::item::DicomItem::Element(e)) => {
+                e.value().as_buffer().expect("value has a buffer")
+            }
             other => panic!("expected element, got {other:?}"),
         }
     }
@@ -1107,15 +1311,25 @@ mod tests {
     fn read_large_on_demand_yields_a_lazy_window() {
         let (path, big) = file_with_large_value(5000);
         {
-            let opts = ReadOptions { read: FileReadOption::ReadLargeOnDemand, large_object_size: 1000 };
+            let opts = ReadOptions {
+                read: FileReadOption::ReadLargeOnDemand,
+                large_object_size: 1000,
+            };
             let file = DicomFile::open_with_options(&path, &opts).unwrap();
             let buffer = large_value_buffer(&file.dataset);
             assert_eq!(buffer.size(), 5000);
-            assert!(!buffer.is_memory(), "large value must stay a file window, not in memory");
+            assert!(
+                !buffer.is_memory(),
+                "large value must stay a file window, not in memory"
+            );
             // range reads and streaming go straight to disk; only data() caches
             let mut slice = [0u8; 16];
             buffer.get_byte_range(1000, &mut slice);
-            assert_eq!(slice, big[1000..1016], "a range read returns the file's bytes");
+            assert_eq!(
+                slice,
+                big[1000..1016],
+                "a range read returns the file's bytes"
+            );
             let mut streamed = Vec::new();
             assert_eq!(buffer.copy_to(&mut streamed).unwrap(), 5000);
             assert_eq!(streamed, big, "streaming returns the whole value in chunks");
@@ -1129,7 +1343,10 @@ mod tests {
     fn read_all_materializes_large_values() {
         let (path, big) = file_with_large_value(5000);
         {
-            let opts = ReadOptions { read: FileReadOption::ReadAll, large_object_size: 1000 };
+            let opts = ReadOptions {
+                read: FileReadOption::ReadAll,
+                large_object_size: 1000,
+            };
             let file = DicomFile::open_with_options(&path, &opts).unwrap();
             let buffer = large_value_buffer(&file.dataset);
             assert_eq!(buffer.size(), 5000);
@@ -1143,7 +1360,10 @@ mod tests {
     fn skip_large_tags_leaves_a_placeholder_and_advances() {
         let (path, _big) = file_with_large_value(5000);
         {
-            let opts = ReadOptions { read: FileReadOption::SkipLargeTags, large_object_size: 1000 };
+            let opts = ReadOptions {
+                read: FileReadOption::SkipLargeTags,
+                large_object_size: 1000,
+            };
             let file = DicomFile::open_with_options(&path, &opts).unwrap();
             let buffer = large_value_buffer(&file.dataset);
             assert_eq!(buffer.size(), 0, "skipped value is an empty placeholder");

@@ -28,7 +28,12 @@ fn sample() -> Dataset {
         (0x0020, 0x000E, Vr::Ui, "1.2.3.4.5.6.7.8.9"),
         (0x0020, 0x0011, Vr::Is, "7"),
         (0x0020, 0x0013, Vr::Is, "12"),
-        (0x0020, 0x4000, Vr::Lt, "a fairly long comment used for benchmarking the JSON path"),
+        (
+            0x0020,
+            0x4000,
+            Vr::Lt,
+            "a fairly long comment used for benchmarking the JSON path",
+        ),
         (0x0028, 0x0010, Vr::Us, "512"),
         (0x0028, 0x0011, Vr::Us, "512"),
         (0x0028, 0x1050, Vr::Ds, "2048"),
@@ -59,7 +64,11 @@ fn main() {
     let dataset = sample();
     let options = JsonOptions::default();
     let json = dataset_to_json(&dataset, &options).expect("encode");
-    println!("fixture: {} elements, {} bytes of JSON\n", dataset.len(), json.len());
+    println!(
+        "fixture: {} elements, {} bytes of JSON\n",
+        dataset.len(),
+        json.len()
+    );
 
     let iters = 20_000;
     let ns = time_ops(iters, || {

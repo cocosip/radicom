@@ -19,14 +19,19 @@ pub struct DicomServerRegistry;
 impl DicomServerRegistry {
     /// Returns `true` when no server has registered `address` in this process.
     pub fn is_available(address: SocketAddr) -> bool {
-        !registered().lock().expect("server registry lock poisoned").contains(&address)
+        !registered()
+            .lock()
+            .expect("server registry lock poisoned")
+            .contains(&address)
     }
 
     /// Reserves `address` until the returned guard is dropped.
     pub fn register(address: SocketAddr) -> Result<DicomServerRegistration> {
         let mut addresses = registered().lock().expect("server registry lock poisoned");
         if !addresses.insert(address) {
-            return Err(NetworkError::protocol("server address is already registered"));
+            return Err(NetworkError::protocol(
+                "server address is already registered",
+            ));
         }
         Ok(DicomServerRegistration { address })
     }

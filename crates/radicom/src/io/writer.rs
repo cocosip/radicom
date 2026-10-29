@@ -50,7 +50,12 @@ struct Charsets {
 impl Charsets {
     /// Reads `(0008,0005)` from `ds`; falls back to the enclosing level.
     fn resolve(ds: &Dataset, inherited: Option<&Charsets>) -> Option<Charsets> {
-        let inherit = || inherited.map(|c| Charsets { first: c.first, alternates: c.alternates.clone() });
+        let inherit = || {
+            inherited.map(|c| Charsets {
+                first: c.first,
+                alternates: c.alternates.clone(),
+            })
+        };
         let Some(DicomItem::Element(element)) = ds.item(&Tag::SPECIFIC_CHARACTER_SET) else {
             return inherit();
         };
@@ -119,7 +124,13 @@ impl DicomWriter {
                     Endian::Little => len.to_le_bytes(),
                     Endian::Big => len.to_be_bytes(),
                 };
-                *written += self.write_leaf(&Tag::new(g, 0x0000), Vr::Ul, ValueRef::Bytes(&len_bytes), syntax, out)?;
+                *written += self.write_leaf(
+                    &Tag::new(g, 0x0000),
+                    Vr::Ul,
+                    ValueRef::Bytes(&len_bytes),
+                    syntax,
+                    out,
+                )?;
             }
             if is_group_length {
                 // removed unless recalculated above (PS3.5 §7.2)
@@ -141,7 +152,9 @@ impl DicomWriter {
             DicomItem::Element(e) => {
                 let bytes = encode_value(e, charset);
                 match bytes {
-                    Some(value) => self.write_leaf(e.tag(), e.vr(), ValueRef::Bytes(&value), syntax, out),
+                    Some(value) => {
+                        self.write_leaf(e.tag(), e.vr(), ValueRef::Bytes(&value), syntax, out)
+                    }
                     // binary VR: stream the buffer, swapping when the target
                     // byte order differs from the in-memory (native) order
                     None => self.write_binary(e, syntax, out),
@@ -218,7 +231,13 @@ impl DicomWriter {
             // item lengths must be even; the pad byte is part of the value
             let pad = fragment.size() % 2;
             written += write_item_tag(out, fragment.size() + pad, true)?;
-            written += write_buffer(out, fragment.as_ref(), f.vr().byte_swap_size(), syntax.endian(), self.options.large_object_size)?;
+            written += write_buffer(
+                out,
+                fragment.as_ref(),
+                f.vr().byte_swap_size(),
+                syntax.endian(),
+                self.options.large_object_size,
+            )?;
             if pad == 1 {
                 out.write_u8(0).map_err(io_err)?;
                 written += 1;
@@ -261,7 +280,13 @@ impl DicomWriter {
         let size = buffer.size();
         let pad = size % 2;
         let mut written = self.write_header(e.tag(), e.vr(), Some(size + pad), syntax, out)?;
-        written += write_buffer(out, buffer.as_ref(), e.vr().byte_swap_size(), syntax.endian(), self.options.large_object_size)?;
+        written += write_buffer(
+            out,
+            buffer.as_ref(),
+            e.vr().byte_swap_size(),
+            syntax.endian(),
+            self.options.large_object_size,
+        )?;
         if pad == 1 {
             out.write_u8(e.vr().padding()).map_err(io_err)?;
             written += 1;
@@ -350,9 +375,7 @@ impl DicomWriter {
             DicomItem::Sequence(seq) => {
                 let body = self.sequence_body_len(seq, syntax, charset)?;
                 let defined = self.options.explicit_length_sequences || seq.tag().is_private();
-                header_len(seq.tag(), Vr::Sq, body, syntax)
-                    + body
-                    + if defined { 0 } else { 8 }
+                header_len(seq.tag(), Vr::Sq, body, syntax) + body + if defined { 0 } else { 8 }
             }
             DicomItem::Fragments(f) => {
                 let mut total = header_len(f.tag(), f.vr(), 0, syntax);
@@ -463,7 +486,11 @@ fn header_len(_tag: &Tag, vr: Vr, value_len: u64, syntax: &TransferSyntax) -> u6
 }
 
 /// `FFFE,XXXX` item header.
-fn write_item_tag<W: Write>(out: &mut ByteTargetWriter<W>, len: u64, defined: bool) -> Result<u64, Error> {
+fn write_item_tag<W: Write>(
+    out: &mut ByteTargetWriter<W>,
+    len: u64,
+    defined: bool,
+) -> Result<u64, Error> {
     out.write_u16(0xFFFE).map_err(io_err)?;
     out.write_u16(0xE000).map_err(io_err)?;
     let value = if defined { len as u32 } else { 0xFFFF_FFFF };
@@ -489,9 +516,15 @@ fn write_buffer<W: Write>(
     target: Endian,
     chunk_size: u64,
 ) -> Result<u64, Error> {
-    let native = if cfg!(target_endian = "big") { Endian::Big } else { Endian::Little };
+    let native = if cfg!(target_endian = "big") {
+        Endian::Big
+    } else {
+        Endian::Little
+    };
     if unit <= 1 || target == native {
-        return out.write_buffer_with_chunk(buffer, chunk_size.max(1) as usize).map_err(io_err);
+        return out
+            .write_buffer_with_chunk(buffer, chunk_size.max(1) as usize)
+            .map_err(io_err);
     }
     let chunk_size = chunk_size.max(1);
     let mut written = 0u64;
@@ -501,7 +534,11 @@ fn write_buffer<W: Write>(
         let take = (buffer.size() - offset).min(chunk_size);
         // whole units only, so the swap stays aligned across chunks
         let take = take - take % unit as u64;
-        let take = if take == 0 { buffer.size() - offset } else { take };
+        let take = if take == 0 {
+            buffer.size() - offset
+        } else {
+            take
+        };
         let slice = &mut chunk[..take as usize];
         buffer.get_byte_range(offset, slice);
         Endian::swap_buffer(slice, unit);
@@ -538,7 +575,9 @@ mod tests {
 
     fn encode(ds: &Dataset, syntax: &TransferSyntax, options: WriteOptions) -> Vec<u8> {
         let mut out = Vec::new();
-        DicomWriter::new(options).write_dataset(ds, syntax, &mut out).unwrap();
+        DicomWriter::new(options)
+            .write_dataset(ds, syntax, &mut out)
+            .unwrap();
         out
     }
 
@@ -560,7 +599,10 @@ mod tests {
         let ds = sample();
         let explicit = encode(&ds, &le(), WriteOptions::default());
         // (0008,0050) SH "ACC1": 4 tag + 2 vr + 2 len + 4 value
-        assert_eq!(&explicit[..10], &[0x08, 0x00, 0x50, 0x00, b'S', b'H', 4, 0, b'A', b'C']);
+        assert_eq!(
+            &explicit[..10],
+            &[0x08, 0x00, 0x50, 0x00, b'S', b'H', 4, 0, b'A', b'C']
+        );
         let implicit = encode(&ds, &implicit(), WriteOptions::default());
         // implicit: 4 tag + 4 len, no VR bytes
         assert_eq!(&implicit[..8], &[0x08, 0x00, 0x50, 0x00, 4, 0, 0, 0]);
@@ -572,7 +614,11 @@ mod tests {
         for syntax in [le(), implicit(), be()] {
             let bytes = encode(&ds, &syntax, WriteOptions::default());
             let declared = DicomWriter::default().dataset_length(&ds, &syntax).unwrap();
-            assert_eq!(declared, bytes.len() as u64, "WR-02 must match WR-01 for {syntax:?}");
+            assert_eq!(
+                declared,
+                bytes.len() as u64,
+                "WR-02 must match WR-01 for {syntax:?}"
+            );
         }
     }
 
@@ -609,13 +655,21 @@ mod tests {
         let bytes = encode(&ds, &le(), WriteOptions::default());
         // SQ header: tag + "SQ" + 2 reserved + FFFFFFFF
         assert_eq!(&bytes[4..6], b"SQ");
-        assert_eq!(&bytes[8..12], &[0xFF, 0xFF, 0xFF, 0xFF], "undefined SQ length");
+        assert_eq!(
+            &bytes[8..12],
+            &[0xFF, 0xFF, 0xFF, 0xFF],
+            "undefined SQ length"
+        );
         // item header with undefined length
         assert_eq!(&bytes[12..16], &[0xFE, 0xFF, 0x00, 0xE0]);
         assert_eq!(&bytes[16..20], &[0xFF, 0xFF, 0xFF, 0xFF]);
         // ends with the sequence delimiter
         let tail = &bytes[bytes.len() - 8..];
-        assert_eq!(tail, &[0xFE, 0xFF, 0xDD, 0xE0, 0, 0, 0, 0], "sequence delimiter");
+        assert_eq!(
+            tail,
+            &[0xFE, 0xFF, 0xDD, 0xE0, 0, 0, 0, 0],
+            "sequence delimiter"
+        );
 
         let back = parse_dataset_bytes(&bytes, &le()).unwrap();
         assert_eq!(back, ds);
@@ -636,8 +690,17 @@ mod tests {
             ..Default::default()
         };
         let bytes = encode(&ds, &le(), options.clone());
-        assert_ne!(&bytes[8..12], &[0xFF, 0xFF, 0xFF, 0xFF], "defined SQ length");
-        assert_eq!(DicomWriter::new(options.clone()).dataset_length(&ds, &le()).unwrap(), bytes.len() as u64);
+        assert_ne!(
+            &bytes[8..12],
+            &[0xFF, 0xFF, 0xFF, 0xFF],
+            "defined SQ length"
+        );
+        assert_eq!(
+            DicomWriter::new(options.clone())
+                .dataset_length(&ds, &le())
+                .unwrap(),
+            bytes.len() as u64
+        );
         let back = parse_dataset_bytes(&bytes, &le()).unwrap();
         assert_eq!(back, ds);
     }
@@ -653,7 +716,11 @@ mod tests {
 
         // even with the default (undefined) option, private SQs get a length
         let bytes = encode(&ds, &le(), WriteOptions::default());
-        assert_ne!(&bytes[8..12], &[0xFF, 0xFF, 0xFF, 0xFF], "private SQ uses a defined length");
+        assert_ne!(
+            &bytes[8..12],
+            &[0xFF, 0xFF, 0xFF, 0xFF],
+            "private SQ uses a defined length"
+        );
         let back = parse_dataset_bytes(&bytes, &le()).unwrap();
         assert_eq!(back, ds);
     }
@@ -670,7 +737,11 @@ mod tests {
         match back.item(&Tag::PIXEL_DATA) {
             Some(DicomItem::Fragments(f)) => {
                 assert_eq!(f.fragments().len(), 2);
-                assert_eq!(f.offset_table(), &[0, 10], "offset table follows item headers + padding");
+                assert_eq!(
+                    f.offset_table(),
+                    &[0, 10],
+                    "offset table follows item headers + padding"
+                );
                 assert_eq!(&*f.fragments()[0].data(), &[0xAA, 0xBB]);
                 // the reader keeps the declared (padded) item length, so a
                 // re-write is byte-identical
@@ -688,15 +759,27 @@ mod tests {
 
         // default: no group length element on the wire
         let without = encode(&ds, &le(), WriteOptions::default());
-        assert!(parse_dataset_bytes(&without, &le()).unwrap().item(&Tag::new(0x0010, 0x0000)).is_none());
+        assert!(parse_dataset_bytes(&without, &le())
+            .unwrap()
+            .item(&Tag::new(0x0010, 0x0000))
+            .is_none());
 
         // keep_group_lengths: one recalculated element per group
-        let options = WriteOptions { keep_group_lengths: true, ..Default::default() };
+        let options = WriteOptions {
+            keep_group_lengths: true,
+            ..Default::default()
+        };
         let with = encode(&ds, &le(), options.clone());
         let back = parse_dataset_bytes(&with, &le()).unwrap();
         let gl: u32 = back.get(Tag::new(0x0010, 0x0000)).unwrap();
-        let total = DicomWriter::new(options.clone()).dataset_length(&ds, &le()).unwrap();
-        assert_eq!(gl as u64, total - 12, "group length covers the rest of the group");
+        let total = DicomWriter::new(options.clone())
+            .dataset_length(&ds, &le())
+            .unwrap();
+        assert_eq!(
+            gl as u64,
+            total - 12,
+            "group length covers the rest of the group"
+        );
         assert_eq!(total, with.len() as u64);
     }
 
@@ -705,17 +788,30 @@ mod tests {
         // a big-endian dataset must write its UL group length big-endian too
         let mut ds = Dataset::new();
         ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
-        let options = WriteOptions { keep_group_lengths: true, ..Default::default() };
+        let options = WriteOptions {
+            keep_group_lengths: true,
+            ..Default::default()
+        };
         let bytes = encode(&ds, &be(), options);
         // tag(4) + "UL"(2) + len(2) then the value
         assert_eq!(&bytes[4..6], b"UL");
         let declared = u16::from_be_bytes([bytes[6], bytes[7]]) as usize;
         assert_eq!(declared, 4);
         let value = u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
-        assert_eq!(value as usize, bytes.len() - 12, "value counts the remaining group bytes");
-        assert_eq!(DicomWriter::new(WriteOptions { keep_group_lengths: true, ..Default::default() })
+        assert_eq!(
+            value as usize,
+            bytes.len() - 12,
+            "value counts the remaining group bytes"
+        );
+        assert_eq!(
+            DicomWriter::new(WriteOptions {
+                keep_group_lengths: true,
+                ..Default::default()
+            })
             .dataset_length(&ds, &be())
-            .unwrap(), bytes.len() as u64);
+            .unwrap(),
+            bytes.len() as u64
+        );
     }
 
     #[test]
@@ -723,12 +819,22 @@ mod tests {
         // CP-1066: a value above 0xFFFE under a 16-bit-length VR becomes UN
         let mut ds = Dataset::new();
         let big = vec![b'A'; 0x10000];
-        ds.insert_str(Tag::ACCESSION_NUMBER, Vr::Sh, String::from_utf8(big).unwrap());
+        ds.insert_str(
+            Tag::ACCESSION_NUMBER,
+            Vr::Sh,
+            String::from_utf8(big).unwrap(),
+        );
         let bytes = encode(&ds, &le(), WriteOptions::default());
         assert_eq!(&bytes[4..6], b"UN", "demoted to UN");
         assert_eq!(&bytes[6..8], &[0, 0], "UN uses the reserved form");
-        assert_eq!(u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]), 0x10000);
-        assert_eq!(DicomWriter::default().dataset_length(&ds, &le()).unwrap(), bytes.len() as u64);
+        assert_eq!(
+            u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+            0x10000
+        );
+        assert_eq!(
+            DicomWriter::default().dataset_length(&ds, &le()).unwrap(),
+            bytes.len() as u64
+        );
     }
 
     #[test]
@@ -736,7 +842,11 @@ mod tests {
         let mut ds = Dataset::new();
         ds.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID");
         let bytes = encode(&ds, &le(), WriteOptions::default());
-        assert_eq!(u16::from_le_bytes([bytes[6], bytes[7]]), 4, "padded to even length");
+        assert_eq!(
+            u16::from_le_bytes([bytes[6], bytes[7]]),
+            4,
+            "padded to even length"
+        );
         assert_eq!(bytes[bytes.len() - 1], b' ', "space padding for string VRs");
     }
 
@@ -756,9 +866,16 @@ mod tests {
                 "PN should be UTF-8 encoded, missing {ch:?}"
             );
         }
-        assert!(!bytes.contains(&b'?'), "no replacement fallback for encodable characters");
+        assert!(
+            !bytes.contains(&b'?'),
+            "no replacement fallback for encodable characters"
+        );
         let back = parse_dataset_bytes(&bytes, &le()).unwrap();
-        assert_eq!(back.get_str(Tag::PATIENT_NAME).unwrap(), "王^小明", "UTF-8 round-trip");
+        assert_eq!(
+            back.get_str(Tag::PATIENT_NAME).unwrap(),
+            "王^小明",
+            "UTF-8 round-trip"
+        );
     }
 
     /// Records the length of each `get_byte_range` request, proving how the
@@ -791,15 +908,20 @@ mod tests {
         let payload: Vec<u8> = (0..10u8).collect();
         let build = |chunk: u64| {
             let reads = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let buffer: Arc<dyn ByteBuffer> =
-                Arc::new(RecordingBuffer { bytes: payload.clone(), reads: reads.clone() });
+            let buffer: Arc<dyn ByteBuffer> = Arc::new(RecordingBuffer {
+                bytes: payload.clone(),
+                reads: reads.clone(),
+            });
             let mut ds = Dataset::new();
             ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
                 Tag::new(0x0009, 0x1001),
                 Vr::Us,
                 buffer,
             )));
-            let options = WriteOptions { large_object_size: chunk, ..Default::default() };
+            let options = WriteOptions {
+                large_object_size: chunk,
+                ..Default::default()
+            };
             // big-endian target forces the swapping chunk path
             (encode(&ds, &be(), options), reads)
         };
@@ -807,9 +929,21 @@ mod tests {
         let (large, large_reads) = build(1024 * 1024);
 
         assert_eq!(small, large, "chunk size must not change the written bytes");
-        assert_eq!(*small_reads.lock().unwrap(), vec![4, 4, 2], "small chunks bound each read");
-        assert_eq!(*large_reads.lock().unwrap(), vec![10], "default chunk reads the value once");
+        assert_eq!(
+            *small_reads.lock().unwrap(),
+            vec![4, 4, 2],
+            "small chunks bound each read"
+        );
+        assert_eq!(
+            *large_reads.lock().unwrap(),
+            vec![10],
+            "default chunk reads the value once"
+        );
         // the swap actually happened, so this is the swapping path
-        assert_eq!(&small[8..10], &[1, 0], "0x0001 stored big-endian from little-endian source");
+        assert_eq!(
+            &small[8..10],
+            &[1, 0],
+            "0x0001 stored big-endian from little-endian source"
+        );
     }
 }

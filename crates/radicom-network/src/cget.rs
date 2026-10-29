@@ -32,9 +32,9 @@ impl CGetRequest {
     ///
     /// A worklist has no retrieve model, so that combination is an error.
     pub fn new(level: QueryRetrieveLevel, root: QueryRoot, message_id: u16) -> Result<Self> {
-        let sop_class_uid = level
-            .get_sop_class(root)
-            .ok_or(NetworkError::protocol("C-GET has no worklist information model"))?;
+        let sop_class_uid = level.get_sop_class(root).ok_or(NetworkError::protocol(
+            "C-GET has no worklist information model",
+        ))?;
         let mut identifier = Dataset::new();
         identifier.insert_str(Tag::QUERY_RETRIEVE_LEVEL, Vr::Cs, level.as_str());
         Ok(CGetRequest {
@@ -93,17 +93,20 @@ impl CGetRequest {
         message_id: u16,
         keys: &[(u16, u16, Vr, String)],
     ) -> Self {
-        let mut request =
-            CGetRequest::new(level, QueryRoot::Study, message_id).expect("Q/R levels have a retrieve model");
+        let mut request = CGetRequest::new(level, QueryRoot::Study, message_id)
+            .expect("Q/R levels have a retrieve model");
         for (group, element, vr, value) in keys {
-            request.identifier.insert_str(Tag::new(*group, *element), *vr, value.clone());
+            request
+                .identifier
+                .insert_str(Tag::new(*group, *element), *vr, value.clone());
         }
         request
     }
 
     /// Adds a matching key.
     pub fn with_key(mut self, group: u16, element: u16, vr: Vr, value: impl Into<String>) -> Self {
-        self.identifier.insert_str(Tag::new(group, element), vr, value);
+        self.identifier
+            .insert_str(Tag::new(group, element), vr, value);
         self
     }
 
@@ -184,7 +187,8 @@ impl CGetResponse {
     }
 
     pub fn to_command(&self) -> Command {
-        let mut command = Command::request(CommandField::CGetRsp, self.message_id_being_responded_to);
+        let mut command =
+            Command::request(CommandField::CGetRsp, self.message_id_being_responded_to);
         command.message_id_being_responded_to = Some(self.message_id_being_responded_to);
         command.affected_sop_class_uid = Some(self.affected_sop_class_uid.clone());
         command.status = Some(self.status);
@@ -244,12 +248,18 @@ mod tests {
 
     #[test]
     fn levels_map_to_the_get_sop_classes() {
-        assert_eq!(QueryRetrieveLevel::Study.get_sop_class(QueryRoot::Study), Some(sop_class::STUDY_ROOT_QR_GET));
+        assert_eq!(
+            QueryRetrieveLevel::Study.get_sop_class(QueryRoot::Study),
+            Some(sop_class::STUDY_ROOT_QR_GET)
+        );
         assert_eq!(
             QueryRetrieveLevel::Patient.get_sop_class(QueryRoot::Patient),
             Some(sop_class::PATIENT_ROOT_QR_GET)
         );
-        assert_eq!(QueryRetrieveLevel::Worklist.get_sop_class(QueryRoot::Study), None);
+        assert_eq!(
+            QueryRetrieveLevel::Worklist.get_sop_class(QueryRoot::Study),
+            None
+        );
         // the get and move models must not be confused
         assert_ne!(
             QueryRetrieveLevel::Study.get_sop_class(QueryRoot::Study),
@@ -267,7 +277,10 @@ mod tests {
         let request = CGetRequest::study("1.2.3", 5);
         assert_eq!(request.level(), Some(QueryRetrieveLevel::Study));
         assert_eq!(request.sop_class_uid, sop_class::STUDY_ROOT_QR_GET);
-        assert_eq!(request.identifier.get_str(Tag::STUDY_INSTANCE_UID).unwrap(), "1.2.3");
+        assert_eq!(
+            request.identifier.get_str(Tag::STUDY_INSTANCE_UID).unwrap(),
+            "1.2.3"
+        );
 
         let command = request.to_command();
         assert_eq!(command.field, CommandField::CGetRq);
@@ -280,18 +293,37 @@ mod tests {
         assert_eq!(series.level(), Some(QueryRetrieveLevel::Series));
         let image = CGetRequest::image("1.1", "1.2", "1.3", 2);
         assert_eq!(image.level(), Some(QueryRetrieveLevel::Image));
-        assert_eq!(image.identifier.get_str(Tag::SOP_INSTANCE_UID).unwrap(), "1.3");
+        assert_eq!(
+            image.identifier.get_str(Tag::SOP_INSTANCE_UID).unwrap(),
+            "1.3"
+        );
     }
 
     #[test]
     fn terminal_status_follows_the_counters() {
         let request = CGetRequest::study("1.2.3", 1);
         assert_eq!(
-            CGetResponse::completed(&request, SubOperationSummary { completed: 2, failed: 0, warning: 0 }).status,
+            CGetResponse::completed(
+                &request,
+                SubOperationSummary {
+                    completed: 2,
+                    failed: 0,
+                    warning: 0
+                }
+            )
+            .status,
             status::SUCCESS
         );
         assert_eq!(
-            CGetResponse::completed(&request, SubOperationSummary { completed: 0, failed: 1, warning: 0 }).status,
+            CGetResponse::completed(
+                &request,
+                SubOperationSummary {
+                    completed: 0,
+                    failed: 1,
+                    warning: 0
+                }
+            )
+            .status,
             status::UNABLE_TO_PERFORM_SUBOPERATIONS
         );
     }
@@ -299,7 +331,15 @@ mod tests {
     #[test]
     fn responses_round_trip_through_a_command() {
         let request = CGetRequest::study("1.2.3", 8);
-        let response = CGetResponse::pending(&request, 3, SubOperationSummary { completed: 1, failed: 0, warning: 0 });
+        let response = CGetResponse::pending(
+            &request,
+            3,
+            SubOperationSummary {
+                completed: 1,
+                failed: 0,
+                warning: 0,
+            },
+        );
         let back = CGetResponse::from_command(&response.to_command()).unwrap();
         assert_eq!(back, response);
         assert!(back.is_pending());

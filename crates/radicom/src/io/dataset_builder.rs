@@ -48,7 +48,10 @@ impl Default for DatasetBuilder {
 impl DatasetBuilder {
     /// Builder for a dataset encoded with `syntax`.
     pub fn with_transfer_syntax(syntax: Arc<TransferSyntax>) -> Self {
-        DatasetBuilder { root: Dataset::with_transfer_syntax(syntax), ..Default::default() }
+        DatasetBuilder {
+            root: Dataset::with_transfer_syntax(syntax),
+            ..Default::default()
+        }
     }
 
     pub fn new() -> Self {
@@ -65,7 +68,10 @@ impl DatasetBuilder {
     }
 
     fn current_charset(&self) -> &'static encoding_rs::Encoding {
-        self.charset_stack.last().copied().unwrap_or_else(|| charset_encoding("ISO_IR 6"))
+        self.charset_stack
+            .last()
+            .copied()
+            .unwrap_or_else(|| charset_encoding("ISO_IR 6"))
     }
 
     fn charset_of(value: &str) -> Option<&'static encoding_rs::Encoding> {
@@ -73,7 +79,10 @@ impl DatasetBuilder {
         // default repertoire (ISO-IR 6). Use the first *non-empty* value as the
         // governing encoding so a list like `\ISO 2022 IR 58` resolves to GBK
         // rather than falling back to ASCII.
-        let first = value.split('\\').map(str::trim).find(|term| !term.is_empty())?;
+        let first = value
+            .split('\\')
+            .map(str::trim)
+            .find(|term| !term.is_empty())?;
         Some(charset_encoding(first))
     }
 
@@ -84,11 +93,19 @@ impl DatasetBuilder {
 }
 
 impl ParseObserver for DatasetBuilder {
-    fn on_element(&mut self, _ctx: &ParseContext, tag: &Tag, vr: Vr, buffer: SharedBuffer) -> Result<(), Error> {
+    fn on_element(
+        &mut self,
+        _ctx: &ParseContext,
+        tag: &Tag,
+        vr: Vr,
+        buffer: SharedBuffer,
+    ) -> Result<(), Error> {
         // SpecificCharacterSet: ASCII by definition, and it governs this
         // level plus nested items that do not override it
         if tag.group() == 0x0008 && tag.element() == 0x0005 {
-            let text = String::from_utf8_lossy(&buffer.data()).trim_end_matches([' ', '\0']).to_string();
+            let text = String::from_utf8_lossy(&buffer.data())
+                .trim_end_matches([' ', '\0'])
+                .to_string();
             let enc = Self::charset_of(&text).unwrap_or_else(|| charset_encoding("ISO_IR 6"));
             if let Some(top) = self.charset_stack.last_mut() {
                 *top = enc;
@@ -107,12 +124,21 @@ impl ParseObserver for DatasetBuilder {
         Ok(())
     }
 
-    fn on_begin_sequence(&mut self, _ctx: &ParseContext, tag: &Tag, _defined_length: Option<u32>) -> Result<(), Error> {
+    fn on_begin_sequence(
+        &mut self,
+        _ctx: &ParseContext,
+        tag: &Tag,
+        _defined_length: Option<u32>,
+    ) -> Result<(), Error> {
         self.sequence_stack.push(DicomSequence::new(tag.clone()));
         Ok(())
     }
 
-    fn on_begin_sequence_item(&mut self, _ctx: &ParseContext, _defined_length: Option<u32>) -> Result<(), Error> {
+    fn on_begin_sequence_item(
+        &mut self,
+        _ctx: &ParseContext,
+        _defined_length: Option<u32>,
+    ) -> Result<(), Error> {
         let ds = Dataset::with_transfer_syntax(self.current().transfer_syntax());
         self.dataset_stack.push(ds);
         // nested items inherit the enclosing charset until they override it
@@ -123,7 +149,9 @@ impl ParseObserver for DatasetBuilder {
 
     fn on_end_sequence_item(&mut self, _ctx: &ParseContext) -> Result<(), Error> {
         let item = self.dataset_stack.pop().ok_or_else(|| {
-            Error::Data(DataError::Other { message: "sequence item stack underflow".into() })
+            Error::Data(DataError::Other {
+                message: "sequence item stack underflow".into(),
+            })
         })?;
         if self.charset_stack.len() > 1 {
             self.charset_stack.pop();
@@ -135,10 +163,11 @@ impl ParseObserver for DatasetBuilder {
     }
 
     fn on_end_sequence(&mut self, _ctx: &ParseContext) -> Result<(), Error> {
-        let seq = self
-            .sequence_stack
-            .pop()
-            .ok_or_else(|| Error::Data(DataError::Other { message: "sequence stack underflow".into() }))?;
+        let seq = self.sequence_stack.pop().ok_or_else(|| {
+            Error::Data(DataError::Other {
+                message: "sequence stack underflow".into(),
+            })
+        })?;
         self.current().insert_or_update(DicomItem::Sequence(seq));
         Ok(())
     }
@@ -158,7 +187,8 @@ impl ParseObserver for DatasetBuilder {
             }));
         }
         self.fragment_offset_table = Some(offset_table);
-        self.fragment_stack.push(DicomFragmentSequence::new(tag.clone(), vr));
+        self.fragment_stack
+            .push(DicomFragmentSequence::new(tag.clone(), vr));
         Ok(())
     }
 
@@ -171,10 +201,11 @@ impl ParseObserver for DatasetBuilder {
     }
 
     fn on_end_fragment(&mut self, _ctx: &ParseContext) -> Result<(), Error> {
-        let mut frags = self
-            .fragment_stack
-            .pop()
-            .ok_or_else(|| Error::Data(DataError::Other { message: "fragment stack underflow".into() }))?;
+        let mut frags = self.fragment_stack.pop().ok_or_else(|| {
+            Error::Data(DataError::Other {
+                message: "fragment stack underflow".into(),
+            })
+        })?;
         if let Some(table) = self.fragment_offset_table.take() {
             frags.set_offset_table(table);
         }
@@ -315,7 +346,11 @@ mod tests {
         bytes.extend_from_slice(&5u16.to_le_bytes());
         bytes.extend_from_slice(b"PID-1");
         let ds = parse(&bytes, &le());
-        assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1", "T1: dictionary VR");
+        assert_eq!(
+            ds.get_str(Tag::PATIENT_ID).unwrap(),
+            "PID-1",
+            "T1: dictionary VR"
+        );
     }
 
     #[test]
@@ -329,7 +364,11 @@ mod tests {
         bytes.extend_from_slice(&5u32.to_le_bytes()); // 05 00 00 00
         bytes.extend_from_slice(b"PID-1");
         let ds = parse(&bytes, &le());
-        assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1", "T2: implicit fallback");
+        assert_eq!(
+            ds.get_str(Tag::PATIENT_ID).unwrap(),
+            "PID-1",
+            "T2: implicit fallback"
+        );
     }
 
     #[test]
@@ -347,7 +386,12 @@ mod tests {
         let ds = parse(&bytes, &le());
         let seq = ds.get_sequence(Tag::REFERENCED_IMAGE_SEQUENCE).unwrap();
         assert_eq!(seq.len(), 1, "T3: UN + undefined length reads as SQ");
-        assert_eq!(seq.items()[0].get_str(Tag::REFERENCED_SOP_CLASS_UID).unwrap(), "1.2.3");
+        assert_eq!(
+            seq.items()[0]
+                .get_str(Tag::REFERENCED_SOP_CLASS_UID)
+                .unwrap(),
+            "1.2.3"
+        );
     }
 
     #[test]
@@ -359,28 +403,55 @@ mod tests {
 
         let mut bytes = el_long(0x0008, 0x1140, "SQ", &sq);
         // nested SQ: item containing an inner sequence
-        let inner_sq = el_long(0x0008, 0x1140, "SQ", &[item(&el_header(0x0008, 0x1150, "UI", b"7.8.9"), false)].concat());
+        let inner_sq = el_long(
+            0x0008,
+            0x1140,
+            "SQ",
+            &[item(&el_header(0x0008, 0x1150, "UI", b"7.8.9"), false)].concat(),
+        );
         bytes.extend_from_slice(&item(&inner_sq, true));
 
         let ds = parse(&bytes, &le());
         let seq = ds.get_sequence(Tag::REFERENCED_IMAGE_SEQUENCE).unwrap();
         assert_eq!(seq.len(), 2);
-        assert_eq!(seq.items()[0].get_str(Tag::REFERENCED_SOP_CLASS_UID).unwrap(), "1.2.3");
-        assert_eq!(seq.items()[1].get_str(Tag::REFERENCED_SOP_INSTANCE_UID).unwrap(), "4.5.6");
+        assert_eq!(
+            seq.items()[0]
+                .get_str(Tag::REFERENCED_SOP_CLASS_UID)
+                .unwrap(),
+            "1.2.3"
+        );
+        assert_eq!(
+            seq.items()[1]
+                .get_str(Tag::REFERENCED_SOP_INSTANCE_UID)
+                .unwrap(),
+            "4.5.6"
+        );
     }
 
     #[test]
     fn nested_sequences_build_inner_datasets() {
-        let inner = el_long(0x0008, 0x1140, "SQ", &[item(&el_header(0x0008, 0x1150, "UI", b"1.2.3"), false)].concat());
+        let inner = el_long(
+            0x0008,
+            0x1140,
+            "SQ",
+            &[item(&el_header(0x0008, 0x1150, "UI", b"1.2.3"), false)].concat(),
+        );
         let bytes = item(&inner, false);
         let mut outer = el_long(0x0008, 0x1115, "SQ", &bytes);
         outer.extend_from_slice(&sequence_delimiter());
         let ds = parse(&outer, &le());
         let outer_seq = ds.get_sequence(Tag::REFERENCED_SERIES_SEQUENCE).unwrap();
         assert_eq!(outer_seq.len(), 1);
-        let inner_seq = outer_seq.items()[0].get_sequence(Tag::REFERENCED_IMAGE_SEQUENCE).unwrap();
+        let inner_seq = outer_seq.items()[0]
+            .get_sequence(Tag::REFERENCED_IMAGE_SEQUENCE)
+            .unwrap();
         assert_eq!(inner_seq.len(), 1);
-        assert_eq!(inner_seq.items()[0].get_str(Tag::REFERENCED_SOP_CLASS_UID).unwrap(), "1.2.3");
+        assert_eq!(
+            inner_seq.items()[0]
+                .get_str(Tag::REFERENCED_SOP_CLASS_UID)
+                .unwrap(),
+            "1.2.3"
+        );
     }
 
     #[test]
@@ -393,7 +464,12 @@ mod tests {
         let ds = parse(&bytes, &le());
         let seq = ds.get_sequence(Tag::REFERENCED_IMAGE_SEQUENCE).unwrap();
         assert_eq!(seq.len(), 1);
-        assert_eq!(seq.items()[0].get_str(Tag::REFERENCED_SOP_CLASS_UID).unwrap(), "1.2.3");
+        assert_eq!(
+            seq.items()[0]
+                .get_str(Tag::REFERENCED_SOP_CLASS_UID)
+                .unwrap(),
+            "1.2.3"
+        );
     }
 
     #[test]
@@ -471,10 +547,21 @@ mod tests {
         bytes.extend_from_slice(&sequence_delimiter());
 
         let ds = parse(&bytes, &le());
-        let seq = ds.get_sequence(Tag::ITEM).expect("T5: orphan item becomes SQ");
-        assert_eq!(seq.tag(), &Tag::new(0xFFFE, 0xE000), "PS3.5 §7.5 item identity");
+        let seq = ds
+            .get_sequence(Tag::ITEM)
+            .expect("T5: orphan item becomes SQ");
+        assert_eq!(
+            seq.tag(),
+            &Tag::new(0xFFFE, 0xE000),
+            "PS3.5 §7.5 item identity"
+        );
         assert_eq!(seq.len(), 1);
-        assert_eq!(seq.items()[0].get_str(Tag::REFERENCED_SOP_CLASS_UID).unwrap(), "1.2.3");
+        assert_eq!(
+            seq.items()[0]
+                .get_str(Tag::REFERENCED_SOP_CLASS_UID)
+                .unwrap(),
+            "1.2.3"
+        );
     }
 
     #[test]
@@ -523,7 +610,12 @@ mod tests {
         let ds = parse(&bytes, &le());
         let seq = ds.get_sequence(Tag::REFERENCED_IMAGE_SEQUENCE).unwrap();
         assert_eq!(seq.len(), 1, "T7: unterminated item is accepted");
-        assert_eq!(seq.items()[0].get_str(Tag::REFERENCED_SOP_CLASS_UID).unwrap(), "1.2.3");
+        assert_eq!(
+            seq.items()[0]
+                .get_str(Tag::REFERENCED_SOP_CLASS_UID)
+                .unwrap(),
+            "1.2.3"
+        );
         assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
     }
 
@@ -562,10 +654,19 @@ mod tests {
         bytes.extend_from_slice(b"PID-1");
 
         let ds = parse(&bytes, &implicit());
-        assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1", "T4: outer mode restored");
-        let seq = ds.get_sequence(Tag::new(0x0029, 0x1001)).expect("T4: private SQ parsed");
+        assert_eq!(
+            ds.get_str(Tag::PATIENT_ID).unwrap(),
+            "PID-1",
+            "T4: outer mode restored"
+        );
+        let seq = ds
+            .get_sequence(Tag::new(0x0029, 0x1001))
+            .expect("T4: private SQ parsed");
         assert_eq!(seq.len(), 1);
-        assert_eq!(seq.items()[0].get_str(Tag::new(0x0029, 0x1010)).unwrap(), "widget");
+        assert_eq!(
+            seq.items()[0].get_str(Tag::new(0x0029, 0x1010)).unwrap(),
+            "widget"
+        );
     }
 
     #[test]
@@ -582,7 +683,11 @@ mod tests {
 
         let syntax = syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone();
         let ds = parse(&deflated, &syntax);
-        assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1", "T10: transparent inflate");
+        assert_eq!(
+            ds.get_str(Tag::PATIENT_ID).unwrap(),
+            "PID-1",
+            "T10: transparent inflate"
+        );
     }
 
     #[test]
@@ -600,7 +705,11 @@ mod tests {
 
         let syntax = syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone();
         let ds = parse(&deflated, &syntax);
-        assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1", "zlib fallback inflate");
+        assert_eq!(
+            ds.get_str(Tag::PATIENT_ID).unwrap(),
+            "PID-1",
+            "zlib fallback inflate"
+        );
     }
 
     #[test]
@@ -630,7 +739,11 @@ mod tests {
                 }
             })
             .expect("private tag present");
-        assert_eq!(tag.private_creator().map(|c| c.as_str()), Some("ACME 1.2"), "RD-05: creator bound");
+        assert_eq!(
+            tag.private_creator().map(|c| c.as_str()),
+            Some("ACME 1.2"),
+            "RD-05: creator bound"
+        );
         assert_eq!(ds.get_str(tag).unwrap(), "widget");
     }
 
@@ -648,7 +761,9 @@ mod tests {
         let reader = crate::io::reader::DicomReader::default();
         let mut builder = DatasetBuilder::with_transfer_syntax(le());
         let stop = |state: &crate::io::reader::ParseState| state.tag == (0x0010, 0x0010);
-        let outcome = reader.read(&mut source, &le(), &mut builder, Some(&stop)).unwrap();
+        let outcome = reader
+            .read(&mut source, &le(), &mut builder, Some(&stop))
+            .unwrap();
         assert_eq!(outcome, crate::io::reader::ReadOutcome::Stopped);
 
         // everything before the stop tag is built; the stop tag is not
@@ -658,11 +773,16 @@ mod tests {
         assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
         assert!(!ds.contains(&Tag::PATIENT_NAME));
         // the source was rewound to the element start
-        assert_eq!(source.position().unwrap(), (bytes.len() - third.len()) as u64);
+        assert_eq!(
+            source.position().unwrap(),
+            (bytes.len() - third.len()) as u64
+        );
 
         // resuming from there parses the remaining element
         let mut builder2 = DatasetBuilder::with_transfer_syntax(le());
-        let outcome = reader.read(&mut source, &le(), &mut builder2, None).unwrap();
+        let outcome = reader
+            .read(&mut source, &le(), &mut builder2, None)
+            .unwrap();
         assert_eq!(outcome, crate::io::reader::ReadOutcome::Success);
         let resumed = builder2.into_dataset();
         assert_eq!(resumed.len(), 1);
@@ -684,7 +804,10 @@ mod tests {
             bytes.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
         }
         let result = parse_dataset_bytes(&bytes, &le());
-        assert!(matches!(result, Err(Error::Reader(ReaderError::TooDeep { .. }))), "depth cap fires");
+        assert!(
+            matches!(result, Err(Error::Reader(ReaderError::TooDeep { .. }))),
+            "depth cap fires"
+        );
     }
 
     #[test]
@@ -800,12 +923,20 @@ mod tests {
         bytes.extend_from_slice(&el_header(0x0008, 0x0050, "SH", b"TAIL"));
 
         let ds = parse(&bytes, &le());
-        assert_eq!(ds.get_str(Tag::ACCESSION_NUMBER).unwrap(), "TAIL", "stream stayed in sync");
+        assert_eq!(
+            ds.get_str(Tag::ACCESSION_NUMBER).unwrap(),
+            "TAIL",
+            "stream stayed in sync"
+        );
         let fragments = match ds.item(&Tag::PIXEL_DATA) {
             Some(crate::model::item::DicomItem::Fragments(f)) => f.fragments().to_vec(),
             other => panic!("expected fragments, got {other:?}"),
         };
-        assert_eq!(fragments.len(), 1, "one data fragment besides the offset table");
+        assert_eq!(
+            fragments.len(),
+            1,
+            "one data fragment besides the offset table"
+        );
         assert_eq!(fragments[0].data().as_ref(), &[1, 2, 3, 4]);
     }
 
@@ -840,10 +971,16 @@ mod tests {
         bytes.extend_from_slice(b"TAIL");
 
         let ds = parse(&bytes, &syntaxes::EXPLICIT_VR_BIG_ENDIAN.clone());
-        let seq = ds.get_sequence(Tag::SOURCE_IMAGE_SEQUENCE).expect("CP-246 sequence");
+        let seq = ds
+            .get_sequence(Tag::SOURCE_IMAGE_SEQUENCE)
+            .expect("CP-246 sequence");
         assert_eq!(seq.len(), 1);
         assert_eq!(seq.items()[0].get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
-        assert_eq!(ds.get_str(Tag::ACCESSION_NUMBER).unwrap(), "TAIL", "byte order restored");
+        assert_eq!(
+            ds.get_str(Tag::ACCESSION_NUMBER).unwrap(),
+            "TAIL",
+            "byte order restored"
+        );
     }
 
     #[test]
@@ -870,9 +1007,14 @@ mod tests {
         bytes.extend_from_slice(b"PID-1");
 
         let ds = parse(&bytes, &implicit());
-        let seq = ds.get_sequence(Tag::new(0x0029, 0x1001)).expect("real private SQ parses");
+        let seq = ds
+            .get_sequence(Tag::new(0x0029, 0x1001))
+            .expect("real private SQ parses");
         assert_eq!(seq.len(), 1);
-        assert_eq!(seq.items()[0].get_str(Tag::new(0x0029, 0x1010)).unwrap(), "widget");
+        assert_eq!(
+            seq.items()[0].get_str(Tag::new(0x0029, 0x1010)).unwrap(),
+            "widget"
+        );
         assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
     }
 
@@ -893,8 +1035,15 @@ mod tests {
         bytes.extend_from_slice(b"PID-1");
 
         let ds = parse(&bytes, &implicit());
-        assert!(ds.get_sequence(Tag::new(0x0029, 0x1001)).is_err(), "not treated as a sequence");
-        assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1", "stream stayed aligned");
+        assert!(
+            ds.get_sequence(Tag::new(0x0029, 0x1001)).is_err(),
+            "not treated as a sequence"
+        );
+        assert_eq!(
+            ds.get_str(Tag::PATIENT_ID).unwrap(),
+            "PID-1",
+            "stream stayed aligned"
+        );
     }
 
     #[test]
@@ -924,7 +1073,11 @@ mod tests {
             Some(DicomItem::Fragments(f)) => f,
             other => panic!("expected fragments, got {other:?}"),
         };
-        assert_eq!(frags.offset_table(), &[1], "complete entry kept, trailing byte ignored");
+        assert_eq!(
+            frags.offset_table(),
+            &[1],
+            "complete entry kept, trailing byte ignored"
+        );
         assert_eq!(frags.fragments().len(), 1);
         assert_eq!(&*frags.fragments()[0].data(), &[0xAA, 0xBB]);
         assert_eq!(ds.get_str(Tag::ACCESSION_NUMBER).unwrap(), "TAIL");
@@ -965,9 +1118,17 @@ mod tests {
             Some(DicomItem::Fragments(f)) => f,
             other => panic!("expected fragments, got {other:?}"),
         };
-        assert_eq!(frags.offset_table(), &[1], "32-bit entries in big-endian order");
+        assert_eq!(
+            frags.offset_table(),
+            &[1],
+            "32-bit entries in big-endian order"
+        );
         assert_eq!(frags.fragments().len(), 1);
-        assert_eq!(ds.get_str(Tag::ACCESSION_NUMBER).unwrap(), "TAIL", "byte order restored");
+        assert_eq!(
+            ds.get_str(Tag::ACCESSION_NUMBER).unwrap(),
+            "TAIL",
+            "byte order restored"
+        );
     }
 
     #[test]
@@ -983,7 +1144,10 @@ mod tests {
         };
         slot(0x0010, b"ACME 1.2");
         slot(0x0011, b"OTHER 3.4");
-        for (element, value) in [(0x1001u16, b"AAAA".as_slice()), (0x1101, b"BBBB".as_slice())] {
+        for (element, value) in [
+            (0x1001u16, b"AAAA".as_slice()),
+            (0x1101, b"BBBB".as_slice()),
+        ] {
             bytes.extend_from_slice(&0x0029u16.to_le_bytes());
             bytes.extend_from_slice(&element.to_le_bytes());
             bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
@@ -996,7 +1160,11 @@ mod tests {
             if let DicomItem::Element(element) = item {
                 let tag = element.tag();
                 if tag.group() == 0x0029 && (tag.element() == 0x1001 || tag.element() == 0x1101) {
-                    let value = element.value().as_buffer().map(|b| b.data().to_vec()).unwrap_or_default();
+                    let value = element
+                        .value()
+                        .as_buffer()
+                        .map(|b| b.data().to_vec())
+                        .unwrap_or_default();
                     seen.push((
                         tag.element(),
                         tag.private_creator().map(|c| c.as_str().to_string()),

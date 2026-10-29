@@ -20,8 +20,8 @@ pub mod message;
 pub mod nservice;
 pub mod observability;
 pub mod pdu;
-pub mod registry;
 pub mod print_sop;
+pub mod registry;
 pub mod server;
 pub mod services;
 pub mod store;
@@ -30,8 +30,8 @@ pub mod transport;
 
 pub use assembler::{MessageUnit, PduSplitter, PdvAssembler, Stream};
 pub use association::{
-    AcceptedContexts, ContextSetBuilder, ContextState, NegotiatedContext, NegotiationPolicy, ProposedContext,
-    SyntaxPriority,
+    AcceptedContexts, ContextSetBuilder, ContextState, NegotiatedContext, NegotiationPolicy,
+    ProposedContext, SyntaxPriority,
 };
 pub use cfind::{CFindRequest, CFindResponse, QueryRetrieveLevel, QueryRoot, RetrieveService};
 pub use cget::{CGetEvent, CGetRequest, CGetResponse};
@@ -41,26 +41,32 @@ pub use dimse::{
     register_status_description, status_description, status_description_for_service_class, Command,
     CommandField, Priority, Status, StatusServiceClass, StatusState,
 };
-pub use engine::{CircuitBreaker, ConnectionLifecycle, ConnectionState, EngineOptions, PendingRequest, PendingTable};
+pub use engine::{
+    CircuitBreaker, ConnectionLifecycle, ConnectionState, EngineOptions, PendingRequest,
+    PendingTable,
+};
 pub use error::{AbortSource, NetworkError, RejectResult, RejectSource, Result};
-pub use expert::{send as send_expert, Connection, ConnectionEvent, ExpertRequest, ExpertResponse, ResponseStream};
+pub use expert::{
+    send as send_expert, Connection, ConnectionEvent, ExpertRequest, ExpertResponse, ResponseStream,
+};
+pub use extended::{
+    apply_answer, validate_common_extended, AppInfo, ExtendedNegotiationPolicy, FindAppInfo,
+    RetrieveAppInfo, StorageAppInfo, StorageOption,
+};
 pub use hosting::{HostedDicomServer, HostedServerConfig, ServerHealth};
-pub use observability::{CountingMetrics, MetricsCollector, MetricsSnapshot, NoopMetrics};
-pub use registry::{DicomServerRegistration, DicomServerRegistry};
+pub use nservice::{is_n_request, NServiceRequest, NServiceResponse, N_REQUEST_FIELDS};
 #[cfg(feature = "otel")]
 pub use observability::TracingMetrics;
-pub use nservice::{is_n_request, NServiceRequest, NServiceResponse, N_REQUEST_FIELDS};
-pub use extended::{
-    apply_answer, validate_common_extended, AppInfo, ExtendedNegotiationPolicy, FindAppInfo, RetrieveAppInfo,
-    StorageAppInfo, StorageOption,
-};
+pub use observability::{CountingMetrics, MetricsCollector, MetricsSnapshot, NoopMetrics};
 pub use pdu::{
-    Abort, Associate, AssociateRj, AsyncOperations, CommonExtended, ExtendedNegotiation, PData, Pdu, PduType, Pdv,
-    PresentationContext, RoleSelection, UserIdentity, UserInformation, APPLICATION_CONTEXT, MAX_PDU_SIZE,
+    Abort, Associate, AssociateRj, AsyncOperations, CommonExtended, ExtendedNegotiation, PData,
+    Pdu, PduType, Pdv, PresentationContext, RoleSelection, UserIdentity, UserInformation,
+    APPLICATION_CONTEXT, MAX_PDU_SIZE,
 };
 pub use print_sop::{
     network_identifier_from_mac, parse_mac, try_get_network_identifier, MetaSopClasses,
 };
+pub use registry::{DicomServerRegistration, DicomServerRegistry};
 
 /// Test-only helpers for asserting wire bytes (not part of the public API).
 #[cfg(test)]
@@ -93,14 +99,21 @@ pub(crate) mod test_wire {
 
     /// The text of a string element, with the even-length pad removed.
     pub(crate) fn element_text(bytes: &[u8], group: u16, element: u16) -> Option<String> {
-        element_value(bytes, group, element)
-            .map(|value| String::from_utf8_lossy(&value).trim_end_matches('\0').to_string())
+        element_value(bytes, group, element).map(|value| {
+            String::from_utf8_lossy(&value)
+                .trim_end_matches('\0')
+                .to_string()
+        })
     }
 
     /// Answers a peer's A-ASSOCIATE-RQ with an AC that accepts every offered
     /// context (first syntax each), so a test can drive the ACSE phase itself.
-    pub(crate) async fn accept_association(stream: &mut tokio::net::TcpStream) -> crate::pdu::Associate {
-        let read = crate::transport::read_pdu(stream).await.expect("read A-ASSOCIATE-RQ");
+    pub(crate) async fn accept_association(
+        stream: &mut tokio::net::TcpStream,
+    ) -> crate::pdu::Associate {
+        let read = crate::transport::read_pdu(stream)
+            .await
+            .expect("read A-ASSOCIATE-RQ");
         let Some(crate::pdu::Pdu::AssociateRq(request)) = read else {
             panic!("expected an A-ASSOCIATE-RQ");
         };

@@ -26,6 +26,9 @@ fn dump_goldens_are_current() {
         let produced = file.dataset.to_dump_string();
         let expected = std::fs::read_to_string(tests_data().join("goldens").join(golden))
             .unwrap_or_else(|e| panic!("read golden {golden}: {e}"));
-        assert_eq!(produced, expected, "dump golden {golden} is stale; run `cargo xtask regen-goldens`");
+        assert_eq!(
+            produced, expected,
+            "dump golden {golden} is stale; run `cargo xtask regen-goldens`"
+        );
     }
 }

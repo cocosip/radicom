@@ -64,7 +64,8 @@ impl CEchoResponse {
     }
 
     pub fn to_command(&self) -> Command {
-        let mut command = Command::request(CommandField::CEchoRsp, self.message_id_being_responded_to);
+        let mut command =
+            Command::request(CommandField::CEchoRsp, self.message_id_being_responded_to);
         command.message_id_being_responded_to = Some(self.message_id_being_responded_to);
         command.status = Some(self.status);
         command.affected_sop_class_uid = Some(self.affected_sop_class_uid.clone());
@@ -153,7 +154,8 @@ impl CStoreResponse {
     }
 
     pub fn to_command(&self) -> Command {
-        let mut command = Command::request(CommandField::CStoreRsp, self.message_id_being_responded_to);
+        let mut command =
+            Command::request(CommandField::CStoreRsp, self.message_id_being_responded_to);
         command.message_id_being_responded_to = Some(self.message_id_being_responded_to);
         command.status = Some(self.status);
         command.affected_sop_class_uid = Some(self.affected_sop_class_uid.clone());
@@ -171,7 +173,10 @@ impl CStoreResponse {
             message_id_being_responded_to: command.message_id_being_responded_to.unwrap_or(0),
             status: command.status.unwrap_or(status::PROCESSING_FAILURE),
             affected_sop_class_uid: command.affected_sop_class_uid.clone().unwrap_or_default(),
-            affected_sop_instance_uid: command.affected_sop_instance_uid.clone().unwrap_or_default(),
+            affected_sop_instance_uid: command
+                .affected_sop_instance_uid
+                .clone()
+                .unwrap_or_default(),
             error_comment: command.error_comment.clone(),
         })
     }
@@ -193,21 +198,30 @@ pub trait ServiceProvider: Send + Sync {
 
     /// Answers C-ECHO.
     async fn on_c_echo(&self, _request: &CEchoRequest) -> Result<CEchoResponse> {
-        Err(NetworkError::protocol("C-ECHO is not supported by this provider"))
+        Err(NetworkError::protocol(
+            "C-ECHO is not supported by this provider",
+        ))
     }
 
     /// Handles a received instance.
     async fn on_c_store(&self, request: &CStoreRequest) -> Result<CStoreResponse> {
         let _ = request;
-        Err(NetworkError::protocol("C-STORE is not supported by this provider"))
+        Err(NetworkError::protocol(
+            "C-STORE is not supported by this provider",
+        ))
     }
 
     /// Answers a C-FIND with a stream of Pending items and one terminal
     /// response (§7.3). The default refuses, so a provider opts in explicitly.
-    fn on_c_find<'a>(&'a self, request: &'a crate::cfind::CFindRequest) -> futures::stream::BoxStream<'a, Result<crate::cfind::CFindResponse>> {
+    fn on_c_find<'a>(
+        &'a self,
+        request: &'a crate::cfind::CFindRequest,
+    ) -> futures::stream::BoxStream<'a, Result<crate::cfind::CFindResponse>> {
         let _ = request;
         Box::pin(futures::stream::once(async {
-            Err(NetworkError::protocol("C-FIND is not supported by this provider"))
+            Err(NetworkError::protocol(
+                "C-FIND is not supported by this provider",
+            ))
         }))
     }
 
@@ -217,10 +231,15 @@ pub trait ServiceProvider: Send + Sync {
     /// The provider resolves the destination AE title and pushes the instances
     /// itself with [`crate::cmove::store_to_destination`]; the engine only
     /// relays the responses.
-    fn on_c_move<'a>(&'a self, request: &'a crate::cmove::CMoveRequest) -> futures::stream::BoxStream<'a, Result<crate::cmove::CMoveResponse>> {
+    fn on_c_move<'a>(
+        &'a self,
+        request: &'a crate::cmove::CMoveRequest,
+    ) -> futures::stream::BoxStream<'a, Result<crate::cmove::CMoveResponse>> {
         let _ = request;
         Box::pin(futures::stream::once(async {
-            Err(NetworkError::protocol("C-MOVE is not supported by this provider"))
+            Err(NetworkError::protocol(
+                "C-MOVE is not supported by this provider",
+            ))
         }))
     }
 
@@ -231,41 +250,76 @@ pub trait ServiceProvider: Send + Sync {
     /// writes to the socket itself. Pending [`crate::cget::CGetResponse`] events
     /// should carry the provider's remaining-sub-operation count; the engine
     /// forwards them while consuming the stream.
-    fn on_c_get<'a>(&'a self, request: &'a crate::cget::CGetRequest) -> futures::stream::BoxStream<'a, Result<crate::cget::CGetEvent>> {
+    fn on_c_get<'a>(
+        &'a self,
+        request: &'a crate::cget::CGetRequest,
+    ) -> futures::stream::BoxStream<'a, Result<crate::cget::CGetEvent>> {
         let _ = request;
         Box::pin(futures::stream::once(async {
-            Err(NetworkError::protocol("C-GET is not supported by this provider"))
+            Err(NetworkError::protocol(
+                "C-GET is not supported by this provider",
+            ))
         }))
     }
 
     /// Answers an N-EVENT-REPORT (§7.6). Defaults to unsupported.
-    async fn on_n_event_report(&self, _request: &crate::nservice::NServiceRequest) -> Result<crate::nservice::NServiceResponse> {
-        Err(NetworkError::protocol("N-EVENT-REPORT is not supported by this provider"))
+    async fn on_n_event_report(
+        &self,
+        _request: &crate::nservice::NServiceRequest,
+    ) -> Result<crate::nservice::NServiceResponse> {
+        Err(NetworkError::protocol(
+            "N-EVENT-REPORT is not supported by this provider",
+        ))
     }
 
     /// Answers an N-GET (§7.6). Defaults to unsupported.
-    async fn on_n_get(&self, _request: &crate::nservice::NServiceRequest) -> Result<crate::nservice::NServiceResponse> {
-        Err(NetworkError::protocol("N-GET is not supported by this provider"))
+    async fn on_n_get(
+        &self,
+        _request: &crate::nservice::NServiceRequest,
+    ) -> Result<crate::nservice::NServiceResponse> {
+        Err(NetworkError::protocol(
+            "N-GET is not supported by this provider",
+        ))
     }
 
     /// Answers an N-SET (§7.6). Defaults to unsupported.
-    async fn on_n_set(&self, _request: &crate::nservice::NServiceRequest) -> Result<crate::nservice::NServiceResponse> {
-        Err(NetworkError::protocol("N-SET is not supported by this provider"))
+    async fn on_n_set(
+        &self,
+        _request: &crate::nservice::NServiceRequest,
+    ) -> Result<crate::nservice::NServiceResponse> {
+        Err(NetworkError::protocol(
+            "N-SET is not supported by this provider",
+        ))
     }
 
     /// Answers an N-ACTION (§7.6). Defaults to unsupported.
-    async fn on_n_action(&self, _request: &crate::nservice::NServiceRequest) -> Result<crate::nservice::NServiceResponse> {
-        Err(NetworkError::protocol("N-ACTION is not supported by this provider"))
+    async fn on_n_action(
+        &self,
+        _request: &crate::nservice::NServiceRequest,
+    ) -> Result<crate::nservice::NServiceResponse> {
+        Err(NetworkError::protocol(
+            "N-ACTION is not supported by this provider",
+        ))
     }
 
     /// Answers an N-CREATE (§7.6). Defaults to unsupported.
-    async fn on_n_create(&self, _request: &crate::nservice::NServiceRequest) -> Result<crate::nservice::NServiceResponse> {
-        Err(NetworkError::protocol("N-CREATE is not supported by this provider"))
+    async fn on_n_create(
+        &self,
+        _request: &crate::nservice::NServiceRequest,
+    ) -> Result<crate::nservice::NServiceResponse> {
+        Err(NetworkError::protocol(
+            "N-CREATE is not supported by this provider",
+        ))
     }
 
     /// Answers an N-DELETE (§7.6). Defaults to unsupported.
-    async fn on_n_delete(&self, _request: &crate::nservice::NServiceRequest) -> Result<crate::nservice::NServiceResponse> {
-        Err(NetworkError::protocol("N-DELETE is not supported by this provider"))
+    async fn on_n_delete(
+        &self,
+        _request: &crate::nservice::NServiceRequest,
+    ) -> Result<crate::nservice::NServiceResponse> {
+        Err(NetworkError::protocol(
+            "N-DELETE is not supported by this provider",
+        ))
     }
 }
 
@@ -282,7 +336,10 @@ impl ServiceProvider for VerificationProvider {
     async fn on_c_echo(&self, request: &CEchoRequest) -> Result<CEchoResponse> {
         // accept only the Verification abstract syntax
         if request.affected_sop_class_uid != sop_class::VERIFICATION {
-            return Ok(CEchoResponse::failure(request, status::SOP_CLASS_NOT_SUPPORTED));
+            return Ok(CEchoResponse::failure(
+                request,
+                status::SOP_CLASS_NOT_SUPPORTED,
+            ));
         }
         Ok(CEchoResponse::success(request))
     }
@@ -304,12 +361,18 @@ pub fn c_store_transfer_syntaxes(
             out.push(syntax.clone());
         }
     }
-    if !omit_implicit_vr && !out.iter().any(|s| s == transfer_syntax::IMPLICIT_VR_LITTLE_ENDIAN) {
+    if !omit_implicit_vr
+        && !out
+            .iter()
+            .any(|s| s == transfer_syntax::IMPLICIT_VR_LITTLE_ENDIAN)
+    {
         out.push(transfer_syntax::IMPLICIT_VR_LITTLE_ENDIAN.to_string());
     }
     // a deflated source also offers plain explicit VR LE
     if source_syntax == transfer_syntax::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN
-        && !out.iter().any(|s| s == transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN)
+        && !out
+            .iter()
+            .any(|s| s == transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN)
     {
         out.push(transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN.to_string());
     }
@@ -368,7 +431,10 @@ mod tests {
     #[tokio::test]
     async fn verification_provider_accepts_verification_only() {
         let provider = VerificationProvider;
-        assert_eq!(provider.supported_sop_classes(), vec![sop_class::VERIFICATION.to_string()]);
+        assert_eq!(
+            provider.supported_sop_classes(),
+            vec![sop_class::VERIFICATION.to_string()]
+        );
 
         let request = CEchoRequest {
             message_id: 1,
@@ -399,7 +465,10 @@ mod tests {
             move_originator_ae_title: None,
             move_originator_message_id: None,
         };
-        assert!(provider.on_c_store(&request).await.is_err(), "C-STORE is not part of Verification");
+        assert!(
+            provider.on_c_store(&request).await.is_err(),
+            "C-STORE is not part of Verification"
+        );
     }
 
     #[test]
@@ -442,7 +511,8 @@ mod tests {
 
     #[test]
     fn c_store_offers_the_source_syntax_plus_implicit() {
-        let syntaxes = c_store_transfer_syntaxes(transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN, &[], false);
+        let syntaxes =
+            c_store_transfer_syntaxes(transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN, &[], false);
         assert_eq!(
             syntaxes,
             vec![
@@ -454,23 +524,42 @@ mod tests {
 
     #[test]
     fn c_store_can_omit_implicit_vr() {
-        let syntaxes = c_store_transfer_syntaxes(transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN, &[], true);
-        assert_eq!(syntaxes, vec![transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN.to_string()]);
+        let syntaxes =
+            c_store_transfer_syntaxes(transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN, &[], true);
+        assert_eq!(
+            syntaxes,
+            vec![transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN.to_string()]
+        );
     }
 
     #[test]
     fn deflated_sources_also_offer_explicit_vr_le() {
-        let syntaxes = c_store_transfer_syntaxes(transfer_syntax::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN, &[], false);
+        let syntaxes = c_store_transfer_syntaxes(
+            transfer_syntax::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN,
+            &[],
+            false,
+        );
         assert!(syntaxes.contains(&transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN.to_string()));
-        assert_eq!(syntaxes[0], transfer_syntax::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN, "own syntax first");
+        assert_eq!(
+            syntaxes[0],
+            transfer_syntax::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN,
+            "own syntax first"
+        );
     }
 
     #[test]
     fn additional_syntaxes_are_deduplicated() {
         let additional = vec![transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN.to_string()];
-        let syntaxes = c_store_transfer_syntaxes(transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN, &additional, false);
+        let syntaxes = c_store_transfer_syntaxes(
+            transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN,
+            &additional,
+            false,
+        );
         assert_eq!(
-            syntaxes.iter().filter(|s| *s == transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN).count(),
+            syntaxes
+                .iter()
+                .filter(|s| *s == transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN)
+                .count(),
             1,
             "no duplicates"
         );

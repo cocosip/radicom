@@ -26,7 +26,13 @@ impl Default for SpatialTransform {
 
 impl SpatialTransform {
     pub fn new() -> Self {
-        SpatialTransform { scale: 1.0, rotation: 0, flip_x: false, flip_y: false, pan: Point2::ORIGIN }
+        SpatialTransform {
+            scale: 1.0,
+            rotation: 0,
+            flip_x: false,
+            flip_y: false,
+            pan: Point2::ORIGIN,
+        }
     }
 
     /// Adds `angle` degrees to the accumulated rotation (fo-dicom `Rotate`).
@@ -60,7 +66,10 @@ impl SpatialTransform {
         // rather than silently rendered as 90°.
         let angle = ((self.rotation % 360) + 360) % 360;
         if !matches!(angle, 0 | 90 | 180 | 270) {
-            tracing::warn!(rotation = angle, "only 90/180/270 degree rotations are applied");
+            tracing::warn!(
+                rotation = angle,
+                "only 90/180/270 degree rotations are applied"
+            );
         }
         let (width, height) = match angle {
             90 => {
@@ -113,7 +122,9 @@ impl SpatialTransform {
 fn pad_rgb(image: &RawImage) -> Vec<u32> {
     let bytes = image.as_bytes();
     bytes
-        .as_chunks::<4>().0.iter()
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| (p[2] as u32) << 16 | (p[1] as u32) << 8 | p[0] as u32)
         .collect()
 }
@@ -287,7 +298,11 @@ mod tests {
         // applying wraps 540 % 360 = 180
         let img = image(2, 1, &[red(), green()]);
         let out = t.apply_to(&img);
-        assert_eq!((out.width(), out.height()), (2, 1), "540° == 180°, dimensions preserved");
+        assert_eq!(
+            (out.width(), out.height()),
+            (2, 1),
+            "540° == 180°, dimensions preserved"
+        );
     }
 
     #[test]
@@ -310,7 +325,11 @@ mod tests {
         t.pan = Point2 { x: 1.0, y: 0.0 };
         assert!(t.is_transformed());
         let out = t.apply_to(&img);
-        assert_eq!((out.width(), out.height()), (2, 1), "pan preserves dimensions");
+        assert_eq!(
+            (out.width(), out.height()),
+            (2, 1),
+            "pan preserves dimensions"
+        );
         assert_eq!(pixel(&out, 0, 0), 0, "left edge exposed → black");
         assert_eq!(pixel(&out, 1, 0), red(), "content shifted right");
     }

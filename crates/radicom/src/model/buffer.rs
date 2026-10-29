@@ -36,7 +36,11 @@ pub trait ByteBuffer: Send + Sync + std::fmt::Debug {
         let data = self.data();
         let start = offset as usize;
         let end = start + buf.len();
-        debug_assert!(end <= data.len(), "range {start}..{end} out of bounds {}", data.len());
+        debug_assert!(
+            end <= data.len(),
+            "range {start}..{end} out of bounds {}",
+            data.len()
+        );
         buf.copy_from_slice(&data[start..end.min(data.len())]);
     }
 
@@ -64,12 +68,18 @@ pub struct BulkDataUri {
 impl BulkDataUri {
     /// A URI-only buffer (no local bytes).
     pub fn new(uri: impl Into<String>) -> Self {
-        BulkDataUri { uri: uri.into(), fallback: None }
+        BulkDataUri {
+            uri: uri.into(),
+            fallback: None,
+        }
     }
 
     /// A URI buffer backed by already-loaded bytes (e.g. after a fetch).
     pub fn with_data(uri: impl Into<String>, data: impl Into<Bytes>) -> Self {
-        BulkDataUri { uri: uri.into(), fallback: Some(data.into()) }
+        BulkDataUri {
+            uri: uri.into(),
+            fallback: Some(data.into()),
+        }
     }
 
     pub fn uri(&self) -> &str {
@@ -199,12 +209,12 @@ impl ByteBuffer for RangeBuffer {
     fn data(&self) -> std::borrow::Cow<'_, [u8]> {
         let data = self.inner.data();
         match data {
-            std::borrow::Cow::Borrowed(b) => {
-                std::borrow::Cow::Borrowed(&b[self.offset as usize..(self.offset + self.len) as usize])
-            }
-            std::borrow::Cow::Owned(b) => {
-                std::borrow::Cow::Owned(b[self.offset as usize..(self.offset + self.len) as usize].to_vec())
-            }
+            std::borrow::Cow::Borrowed(b) => std::borrow::Cow::Borrowed(
+                &b[self.offset as usize..(self.offset + self.len) as usize],
+            ),
+            std::borrow::Cow::Owned(b) => std::borrow::Cow::Owned(
+                b[self.offset as usize..(self.offset + self.len) as usize].to_vec(),
+            ),
         }
     }
     fn as_slice(&self) -> Option<&[u8]> {
@@ -237,7 +247,10 @@ pub struct CompositeBuffer {
 
 impl CompositeBuffer {
     pub fn new(parts: Vec<SharedBuffer>) -> Self {
-        CompositeBuffer { parts, concat: once_cell::sync::OnceCell::new() }
+        CompositeBuffer {
+            parts,
+            concat: once_cell::sync::OnceCell::new(),
+        }
     }
 
     pub fn parts(&self) -> &[SharedBuffer] {
@@ -393,7 +406,9 @@ impl ByteBuffer for EvenLengthBuffer {
             self.inner.get_byte_range(offset, buf);
         } else {
             let data = self.data();
-            buf.copy_from_slice(&data[offset as usize..(offset as usize + buf.len()).min(data.len())]);
+            buf.copy_from_slice(
+                &data[offset as usize..(offset as usize + buf.len()).min(data.len())],
+            );
         }
     }
 }
@@ -408,13 +423,18 @@ pub struct LazyBuffer<F: Fn() -> Vec<u8> + Send + Sync> {
 
 impl<F: Fn() -> Vec<u8> + Send + Sync> std::fmt::Debug for LazyBuffer<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LazyBuffer").field("materialized", &self.cell.get().is_some()).finish()
+        f.debug_struct("LazyBuffer")
+            .field("materialized", &self.cell.get().is_some())
+            .finish()
     }
 }
 
 impl<F: Fn() -> Vec<u8> + Send + Sync> LazyBuffer<F> {
     pub fn new(produce: F) -> Self {
-        LazyBuffer { cell: Arc::new(once_cell::sync::OnceCell::new()), produce }
+        LazyBuffer {
+            cell: Arc::new(once_cell::sync::OnceCell::new()),
+            produce,
+        }
     }
 }
 
@@ -447,7 +467,10 @@ use std::sync::Mutex;
 fn temp_path(tag: &str) -> PathBuf {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, AtomicOrdering::Relaxed);
-    std::env::temp_dir().join(format!("radicom-buf-{}-{seq}-{tag}.tmp", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "radicom-buf-{}-{seq}-{tag}.tmp",
+        std::process::id()
+    ))
 }
 
 /// Deletes the temp file on drop (after the owning file handle has closed).
@@ -488,7 +511,12 @@ impl FileWindow {
 
     /// Windows an already-open shared file, so many windows cost one handle.
     pub fn from_shared(file: Arc<std::fs::File>, offset: u64, len: u64) -> Self {
-        FileWindow { file, offset, len, cache: once_cell::sync::OnceCell::new() }
+        FileWindow {
+            file,
+            offset,
+            len,
+            cache: once_cell::sync::OnceCell::new(),
+        }
     }
 
     pub fn offset(&self) -> u64 {
@@ -561,7 +589,10 @@ fn read_exact_at(file: &std::fs::File, offset: u64, buf: &mut [u8]) -> io::Resul
 }
 
 fn eof_error() -> io::Error {
-    io::Error::new(io::ErrorKind::UnexpectedEof, "file window read past its end")
+    io::Error::new(
+        io::ErrorKind::UnexpectedEof,
+        "file window read past its end",
+    )
 }
 
 impl ByteBuffer for FileWindow {
@@ -572,7 +603,9 @@ impl ByteBuffer for FileWindow {
         false
     }
     fn data(&self) -> std::borrow::Cow<'_, [u8]> {
-        let bytes = self.cache.get_or_init(|| Bytes::from(self.read_all().expect("file window read")));
+        let bytes = self
+            .cache
+            .get_or_init(|| Bytes::from(self.read_all().expect("file window read")));
         std::borrow::Cow::Borrowed(bytes)
     }
     fn get_byte_range(&self, offset: u64, buf: &mut [u8]) {
@@ -611,7 +644,10 @@ impl TempFileSpill {
         let path = temp_path("spill");
         std::fs::write(&path, bytes)?;
         let window = FileWindow::open(&path, 0, bytes.len() as u64)?;
-        Ok(TempFileSpill { window, _temp: TempFile { path } })
+        Ok(TempFileSpill {
+            window,
+            _temp: TempFile { path },
+        })
     }
 
     /// Reads exactly `len` bytes from `reader` into a temp file, then windows it.
@@ -630,7 +666,10 @@ impl TempFileSpill {
         file.flush()?;
         drop(file);
         let window = FileWindow::open(&path, 0, len)?;
-        Ok(TempFileSpill { window, _temp: TempFile { path } })
+        Ok(TempFileSpill {
+            window,
+            _temp: TempFile { path },
+        })
     }
 }
 
@@ -663,7 +702,11 @@ pub struct StreamWindow {
 impl StreamWindow {
     /// Wraps `reader`, which will yield exactly `len` bytes.
     pub fn new(reader: Box<dyn Read + Send>, len: u64) -> Self {
-        StreamWindow { len, source: Mutex::new(Some(reader)), spill: once_cell::sync::OnceCell::new() }
+        StreamWindow {
+            len,
+            source: Mutex::new(Some(reader)),
+            spill: once_cell::sync::OnceCell::new(),
+        }
     }
 
     fn ensure(&self) -> &TempFileSpill {
@@ -677,7 +720,10 @@ impl StreamWindow {
 
 impl std::fmt::Debug for StreamWindow {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StreamWindow").field("len", &self.len).field("spilled", &self.spill.get().is_some()).finish()
+        f.debug_struct("StreamWindow")
+            .field("len", &self.len)
+            .field("spilled", &self.spill.get().is_some())
+            .finish()
     }
 }
 
@@ -698,7 +744,6 @@ impl ByteBuffer for StreamWindow {
         self.ensure().copy_to(w)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -774,12 +819,26 @@ mod tests {
     #[test]
     fn composite_data_is_concatenated_once() {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let a = shared(CountingBuffer { bytes: vec![1, 2], calls: calls.clone() });
-        let b = shared(CountingBuffer { bytes: vec![3], calls: calls.clone() });
+        let a = shared(CountingBuffer {
+            bytes: vec![1, 2],
+            calls: calls.clone(),
+        });
+        let b = shared(CountingBuffer {
+            bytes: vec![3],
+            calls: calls.clone(),
+        });
         let c = CompositeBuffer::new(vec![a, b]);
         assert_eq!(&*c.data(), &[1, 2, 3]);
-        assert_eq!(&*c.data(), &[1, 2, 3], "second data() reuses the cached concat");
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2, "each part read once");
+        assert_eq!(
+            &*c.data(),
+            &[1, 2, 3],
+            "second data() reuses the cached concat"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "each part read once"
+        );
         // size() still reflects the parts after caching
         assert_eq!(c.size(), 3);
     }
@@ -833,7 +892,10 @@ mod tests {
         assert_eq!(padded.size(), 4);
         assert_eq!(&*padded.data(), &[1, 2, 3, 0]);
         let even = shared(MemoryBuffer::from(vec![1, 2]));
-        assert!(Arc::ptr_eq(&EvenLengthBuffer::wrap_if_needed(even.clone()), &even));
+        assert!(Arc::ptr_eq(
+            &EvenLengthBuffer::wrap_if_needed(even.clone()),
+            &even
+        ));
     }
 
     #[test]
@@ -891,7 +953,8 @@ mod tests {
 
     #[test]
     fn windows_over_one_shared_file_read_independently() {
-        let path = std::env::temp_dir().join(format!("radicom-test-fw-shared-{}.bin", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("radicom-test-fw-shared-{}.bin", std::process::id()));
         std::fs::write(&path, b"0123456789").unwrap();
         {
             let file = Arc::new(std::fs::File::open(&path).unwrap());
@@ -901,7 +964,10 @@ mod tests {
             assert_eq!(&*second.data(), b"789");
             let mut out = [0u8; 2];
             first.get_byte_range(1, &mut out);
-            assert_eq!(&out, b"34", "positional reads are independent of the other window");
+            assert_eq!(
+                &out, b"34",
+                "positional reads are independent of the other window"
+            );
         }
         std::fs::remove_file(&path).ok();
     }

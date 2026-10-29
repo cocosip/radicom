@@ -24,7 +24,13 @@ impl TraceObserver {
 }
 
 impl ParseObserver for TraceObserver {
-    fn on_element(&mut self, ctx: &ParseContext, tag: &Tag, vr: Vr, _buffer: SharedBuffer) -> Result<(), Error> {
+    fn on_element(
+        &mut self,
+        ctx: &ParseContext,
+        tag: &Tag,
+        vr: Vr,
+        _buffer: SharedBuffer,
+    ) -> Result<(), Error> {
         tracing::debug!(
             target: targets::IO,
             position = ctx.position,
@@ -37,7 +43,12 @@ impl ParseObserver for TraceObserver {
         Ok(())
     }
 
-    fn on_begin_sequence(&mut self, ctx: &ParseContext, tag: &Tag, defined_length: Option<u32>) -> Result<(), Error> {
+    fn on_begin_sequence(
+        &mut self,
+        ctx: &ParseContext,
+        tag: &Tag,
+        defined_length: Option<u32>,
+    ) -> Result<(), Error> {
         tracing::debug!(
             target: targets::IO,
             position = ctx.position,
@@ -50,7 +61,11 @@ impl ParseObserver for TraceObserver {
         Ok(())
     }
 
-    fn on_begin_sequence_item(&mut self, ctx: &ParseContext, defined_length: Option<u32>) -> Result<(), Error> {
+    fn on_begin_sequence_item(
+        &mut self,
+        ctx: &ParseContext,
+        defined_length: Option<u32>,
+    ) -> Result<(), Error> {
         tracing::debug!(
             target: targets::IO,
             position = ctx.position, depth = ctx.depth, defined_length = ?defined_length,
@@ -148,7 +163,8 @@ mod tests {
                 tracing::span::Id::from_u64(1)
             }
             fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-            fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+            fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {
+            }
             fn event(&self, _event: &tracing::Event<'_>) {
                 self.0.fetch_add(1, Ordering::Relaxed);
             }
@@ -187,9 +203,12 @@ mod tests {
         let mut ds = Dataset::new();
         let mut item = Dataset::new();
         item.insert_str(Tag::PATIENT_NAME, Vr::Pn, "DOE^JOHN");
-        ds.insert_sequence(Tag::REFERENCED_IMAGE_SEQUENCE).push(item);
+        ds.insert_sequence(Tag::REFERENCED_IMAGE_SEQUENCE)
+            .push(item);
         ds.insert_fragments(Tag::FLOAT_PIXEL_DATA, Vr::Ob)
-            .push_fragment(std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![1, 2, 3])));
+            .push_fragment(std::sync::Arc::new(
+                crate::model::buffer::MemoryBuffer::from(vec![1, 2, 3]),
+            ));
 
         let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
         let mut bytes = Vec::new();

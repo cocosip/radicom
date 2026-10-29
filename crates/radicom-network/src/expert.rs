@@ -21,11 +21,15 @@ use crate::server::{Association as WireAssociation, ClientOptions};
 /// One connection-level event for the expert API (§9.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionEvent {
-    Connected { remote: String },
+    Connected {
+        remote: String,
+    },
     AssociationOpened,
     AssociationClosed,
     /// The association was aborted; the connection is finished.
-    Aborted { reason: u8 },
+    Aborted {
+        reason: u8,
+    },
 }
 
 /// The expert connection: one socket, one association at a time (§9.2).
@@ -50,7 +54,11 @@ impl std::fmt::Debug for Connection {
 
 impl Connection {
     /// Describes a connection; nothing is opened until `open_association`.
-    pub fn new(calling_ae: impl Into<String>, called_ae: impl Into<String>, remote: impl Into<String>) -> Self {
+    pub fn new(
+        calling_ae: impl Into<String>,
+        called_ae: impl Into<String>,
+        remote: impl Into<String>,
+    ) -> Self {
         Connection {
             remote: remote.into(),
             calling_ae: calling_ae.into(),
@@ -87,9 +95,14 @@ impl Connection {
     ///
     /// Returns `AlreadyAssociated` when one is still open: each connection
     /// carries exactly one association at a time.
-    pub async fn open_association(&mut self, presentation_contexts: Vec<PresentationContext>) -> Result<()> {
+    pub async fn open_association(
+        &mut self,
+        presentation_contexts: Vec<PresentationContext>,
+    ) -> Result<()> {
         if self.association.is_some() {
-            return Err(NetworkError::protocol("this connection already has an open association"));
+            return Err(NetworkError::protocol(
+                "this connection already has an open association",
+            ));
         }
         let association = WireAssociation::open(
             self.remote.as_str(),
@@ -100,24 +113,25 @@ impl Connection {
         )
         .await?;
         self.association = Some(association);
-        self.events.push(ConnectionEvent::Connected { remote: self.remote.clone() });
+        self.events.push(ConnectionEvent::Connected {
+            remote: self.remote.clone(),
+        });
         self.events.push(ConnectionEvent::AssociationOpened);
         Ok(())
     }
 
     /// The open association, or `NoOpenAssociation`.
     pub fn association(&mut self) -> Result<&mut WireAssociation> {
-        self.association
-            .as_mut()
-            .ok_or(NetworkError::protocol("no open association on this connection"))
+        self.association.as_mut().ok_or(NetworkError::protocol(
+            "no open association on this connection",
+        ))
     }
 
     /// Releases the association gracefully (§9.2).
     pub async fn release(&mut self) -> Result<()> {
-        let association = self
-            .association
-            .take()
-            .ok_or(NetworkError::protocol("no open association on this connection"))?;
+        let association = self.association.take().ok_or(NetworkError::protocol(
+            "no open association on this connection",
+        ))?;
         let result = association.release().await;
         self.events.push(ConnectionEvent::AssociationClosed);
         result
@@ -125,10 +139,9 @@ impl Connection {
 
     /// Aborts the association; the connection cannot be reused afterwards.
     pub async fn abort(&mut self, reason: u8) -> Result<()> {
-        let association = self
-            .association
-            .take()
-            .ok_or(NetworkError::protocol("no open association on this connection"))?;
+        let association = self.association.take().ok_or(NetworkError::protocol(
+            "no open association on this connection",
+        ))?;
         let result = association.abort(reason).await;
         self.events.push(ConnectionEvent::Aborted { reason });
         result
@@ -147,7 +160,9 @@ pub struct ResponseStream<T> {
 
 impl<T> ResponseStream<T> {
     pub fn from(items: Vec<T>) -> Self {
-        ResponseStream { items: items.into_iter() }
+        ResponseStream {
+            items: items.into_iter(),
+        }
     }
 
     /// Responses not yet handed out.
@@ -202,19 +217,37 @@ impl ExpertResponse {
 
 /// Sends one request on an open association and returns its response stream
 /// (§9.2).
-pub async fn send(association: &mut WireAssociation, request: ExpertRequest) -> Result<ResponseStream<ExpertResponse>> {
+pub async fn send(
+    association: &mut WireAssociation,
+    request: ExpertRequest,
+) -> Result<ResponseStream<ExpertResponse>> {
     match request {
         ExpertRequest::CFind(request) => {
             let responses = association.send_c_find(&request).await?;
-            Ok(ResponseStream::from(responses.into_iter().map(|r| ExpertResponse::CFind(Box::new(r))).collect()))
+            Ok(ResponseStream::from(
+                responses
+                    .into_iter()
+                    .map(|r| ExpertResponse::CFind(Box::new(r)))
+                    .collect(),
+            ))
         }
         ExpertRequest::CMove(request) => {
             let responses = association.send_c_move(&request).await?;
-            Ok(ResponseStream::from(responses.into_iter().map(|r| ExpertResponse::CMove(Box::new(r))).collect()))
+            Ok(ResponseStream::from(
+                responses
+                    .into_iter()
+                    .map(|r| ExpertResponse::CMove(Box::new(r)))
+                    .collect(),
+            ))
         }
         ExpertRequest::CGet(request) => {
             let responses = association.send_c_get(&request).await?;
-            Ok(ResponseStream::from(responses.into_iter().map(|r| ExpertResponse::CGet(Box::new(r))).collect()))
+            Ok(ResponseStream::from(
+                responses
+                    .into_iter()
+                    .map(|r| ExpertResponse::CGet(Box::new(r)))
+                    .collect(),
+            ))
         }
     }
 }
@@ -268,8 +301,8 @@ pub fn expected_response_field(kind: &ExpertRequest) -> CommandField {
 mod tests {
     use super::*;
     use crate::association::sop_class;
-    use crate::services::VerificationProvider;
     use crate::server::{DicomServer, ServerOptions};
+    use crate::services::VerificationProvider;
     use std::sync::Arc;
 
     /// A C-FIND SCP that returns two pending matches and a success.
@@ -305,11 +338,19 @@ mod tests {
     }
 
     fn find_context() -> PresentationContext {
-        PresentationContext::new(1, sop_class::STUDY_ROOT_QR_FIND, vec!["1.2.840.10008.1.2".to_string()])
+        PresentationContext::new(
+            1,
+            sop_class::STUDY_ROOT_QR_FIND,
+            vec!["1.2.840.10008.1.2".to_string()],
+        )
     }
 
     fn echo_context() -> PresentationContext {
-        PresentationContext::new(1, sop_class::VERIFICATION, vec!["1.2.840.10008.1.2".to_string()])
+        PresentationContext::new(
+            1,
+            sop_class::VERIFICATION,
+            vec!["1.2.840.10008.1.2".to_string()],
+        )
     }
 
     #[test]
@@ -337,21 +378,32 @@ mod tests {
         assert_eq!(stream.next(), Some(3));
         assert_eq!(stream.next(), None);
         assert!(stream.is_drained());
-        assert_eq!(ResponseStream::from(vec![1, 2]).count(), 2, "usable as an iterator");
+        assert_eq!(
+            ResponseStream::from(vec![1, 2]).count(),
+            2,
+            "usable as an iterator"
+        );
     }
 
     #[tokio::test]
     async fn send_streaming_forwards_each_response_without_buffering() {
-        let server = DicomServer::bind("127.0.0.1:0", Arc::new(TwoStudyProvider), ServerOptions::default())
-            .await
-            .unwrap();
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(TwoStudyProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
         let addr = server.local_addr();
         tokio::spawn(async move {
             let _ = server.run().await;
         });
 
         let mut connection = Connection::new("SCU", "SCP", addr.to_string());
-        connection.open_association(vec![find_context()]).await.unwrap();
+        connection
+            .open_association(vec![find_context()])
+            .await
+            .unwrap();
         let association = connection.association().unwrap();
         let request = ExpertRequest::CFind(crate::cfind::CFindRequest::study_query(1));
 
@@ -383,19 +435,28 @@ mod tests {
 
     #[tokio::test]
     async fn one_association_per_connection_is_enforced() {
-        let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), ServerOptions::default())
-            .await
-            .unwrap();
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(VerificationProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
         let addr = server.local_addr();
         let handle = tokio::spawn(async move { server.accept_one().await });
 
         let mut connection = Connection::new("SCU", "SCP", addr.to_string());
-        connection.open_association(vec![echo_context()]).await.unwrap();
+        connection
+            .open_association(vec![echo_context()])
+            .await
+            .unwrap();
         assert!(connection.is_associated());
 
         // a second association on the same connection is refused locally
         match connection.open_association(vec![echo_context()]).await {
-            Err(NetworkError::Protocol(message)) => assert!(message.contains("already"), "got {message}"),
+            Err(NetworkError::Protocol(message)) => {
+                assert!(message.contains("already"), "got {message}")
+            }
             other => panic!("expected a protocol error, got {other:?}"),
         }
 
@@ -403,48 +464,80 @@ mod tests {
         assert!(!connection.is_associated());
         assert_eq!(
             connection.events(),
-            &[ConnectionEvent::Connected { remote: addr.to_string() }, ConnectionEvent::AssociationOpened, ConnectionEvent::AssociationClosed]
+            &[
+                ConnectionEvent::Connected {
+                    remote: addr.to_string()
+                },
+                ConnectionEvent::AssociationOpened,
+                ConnectionEvent::AssociationClosed
+            ]
         );
         handle.await.unwrap().unwrap();
     }
 
     #[tokio::test]
     async fn a_connection_can_be_reused_after_release() {
-        let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), ServerOptions::default())
-            .await
-            .unwrap();
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(VerificationProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
         let addr = server.local_addr();
         tokio::spawn(async move {
             let _ = server.run().await;
         });
 
         let mut connection = Connection::new("SCU", "SCP", addr.to_string());
-        connection.open_association(vec![echo_context()]).await.unwrap();
+        connection
+            .open_association(vec![echo_context()])
+            .await
+            .unwrap();
         connection.release().await.unwrap();
         // the rule is one association *at a time*, not one per lifetime
-        connection.open_association(vec![echo_context()]).await.unwrap();
+        connection
+            .open_association(vec![echo_context()])
+            .await
+            .unwrap();
         let association = connection.association().unwrap();
-        let response = association.send_c_echo(sop_class::VERIFICATION).await.unwrap();
+        let response = association
+            .send_c_echo(sop_class::VERIFICATION)
+            .await
+            .unwrap();
         assert_eq!(response.status, crate::dimse::status::SUCCESS);
         connection.release().await.unwrap();
     }
 
     #[tokio::test]
     async fn aborting_is_recorded_and_ends_the_association() {
-        let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), ServerOptions::default())
-            .await
-            .unwrap();
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(VerificationProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
         let addr = server.local_addr();
         let handle = tokio::spawn(async move { server.accept_one().await });
 
         let mut connection = Connection::new("SCU", "SCP", addr.to_string());
-        connection.open_association(vec![echo_context()]).await.unwrap();
+        connection
+            .open_association(vec![echo_context()])
+            .await
+            .unwrap();
         connection.abort(3).await.unwrap();
         assert!(!connection.is_associated());
-        assert_eq!(connection.events().last(), Some(&ConnectionEvent::Aborted { reason: 3 }));
+        assert_eq!(
+            connection.events().last(),
+            Some(&ConnectionEvent::Aborted { reason: 3 })
+        );
         // §2.16: the server reports the peer's abort instead of a clean close
         match handle.await.unwrap() {
-            Err(NetworkError::Abort { source_code, reason }) => assert_eq!((source_code, reason), (0, 3)),
+            Err(NetworkError::Abort {
+                source_code,
+                reason,
+            }) => assert_eq!((source_code, reason), (0, 3)),
             other => panic!("expected an abort error, got {other:?}"),
         }
     }

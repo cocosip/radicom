@@ -36,7 +36,13 @@ impl<R: Read + Seek> ByteSourceReader<R> {
             }
             Err(_) => u64::MAX,
         };
-        ByteSourceReader { inner, endian, window_file: None, len, pos }
+        ByteSourceReader {
+            inner,
+            endian,
+            window_file: None,
+            len,
+            pos,
+        }
     }
 
     /// Attaches a shared file handle so large values can stay off-heap (FILE-02).
@@ -50,7 +56,11 @@ impl<R: Read + Seek> ByteSourceReader<R> {
     pub fn window_at_current(&mut self, len: u64) -> io::Result<Option<SharedBuffer>> {
         let pos = self.pos;
         match &self.window_file {
-            Some(file) => Ok(Some(Arc::new(FileWindow::from_shared(file.clone(), pos, len)))),
+            Some(file) => Ok(Some(Arc::new(FileWindow::from_shared(
+                file.clone(),
+                pos,
+                len,
+            )))),
             None => Ok(None),
         }
     }
@@ -80,7 +90,10 @@ impl<R: Read + Seek> ByteSourceReader<R> {
     /// True when fewer than `n` bytes remain.
     pub fn require(&mut self, n: u64) -> Result<(), ReaderError> {
         if self.len.saturating_sub(self.pos) < n {
-            return Err(ReaderError::Eof { position: self.pos, needed: n });
+            return Err(ReaderError::Eof {
+                position: self.pos,
+                needed: n,
+            });
         }
         Ok(())
     }
@@ -155,7 +168,9 @@ impl<R: Read + Seek> ByteSourceReader<R> {
     /// (`File`/`Stream` buffers, ReadLargeOnDemand) arrive with the
     /// file-level reader; the parser routes through this hook.
     pub fn read_buffer(&mut self, n: u64) -> io::Result<SharedBuffer> {
-        Ok(std::sync::Arc::new(MemoryBuffer::from(self.read_bytes(n as usize)?)))
+        Ok(std::sync::Arc::new(MemoryBuffer::from(
+            self.read_bytes(n as usize)?,
+        )))
     }
 }
 
@@ -173,7 +188,11 @@ pub const WRITE_CHUNK: usize = 1024 * 1024;
 
 impl<W: Write> ByteTargetWriter<W> {
     pub fn new(inner: W, endian: Endian) -> Self {
-        ByteTargetWriter { inner, endian, scratch: Vec::new() }
+        ByteTargetWriter {
+            inner,
+            endian,
+            scratch: Vec::new(),
+        }
     }
 
     pub fn into_inner(self) -> W {
@@ -219,7 +238,10 @@ impl<W: Write> ByteTargetWriter<W> {
 
     /// Streams a buffer in 1 MiB chunks (spec: large values never buffer
     /// wholesale).
-    pub fn write_buffer(&mut self, buffer: &dyn crate::model::buffer::ByteBuffer) -> io::Result<u64> {
+    pub fn write_buffer(
+        &mut self,
+        buffer: &dyn crate::model::buffer::ByteBuffer,
+    ) -> io::Result<u64> {
         self.write_buffer_with_chunk(buffer, WRITE_CHUNK)
     }
 
@@ -307,13 +329,18 @@ mod tests {
         src.read_u32().unwrap();
         assert_eq!(src.position().unwrap(), 9);
         assert!(src.read_u32().is_err(), "one byte short");
-        assert_eq!(src.position().unwrap(), 10, "the position re-syncs after a short read");
+        assert_eq!(
+            src.position().unwrap(),
+            10,
+            "the position re-syncs after a short read"
+        );
         assert!(src.is_eof().unwrap());
     }
 
     #[test]
     fn byte_reads_and_buffers() {
-        let mut src = ByteSourceReader::new(io::Cursor::new(vec![0xFF, 10, 20, 30]), Endian::Little);
+        let mut src =
+            ByteSourceReader::new(io::Cursor::new(vec![0xFF, 10, 20, 30]), Endian::Little);
         assert_eq!(src.read_u8().unwrap(), 0xFF);
         let bytes = src.read_bytes(3).unwrap();
         assert_eq!(bytes, vec![10, 20, 30]);

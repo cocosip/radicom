@@ -51,13 +51,19 @@ pub struct MatchRuleSet {
 
 impl Default for MatchRuleSet {
     fn default() -> Self {
-        MatchRuleSet { operator: MatchOperator::And, rules: Vec::new() }
+        MatchRuleSet {
+            operator: MatchOperator::And,
+            rules: Vec::new(),
+        }
     }
 }
 
 impl MatchRuleSet {
     pub fn new(operator: MatchOperator) -> Self {
-        MatchRuleSet { operator, rules: Vec::new() }
+        MatchRuleSet {
+            operator,
+            rules: Vec::new(),
+        }
     }
 
     pub fn with(mut self, rule: MatchRule) -> Self {
@@ -126,7 +132,10 @@ fn wildcard_rec(value: &[char], pattern: &[char]) -> bool {
             }
             false
         }
-        Some(('?', rest)) => value.split_first().map(|(_, tail)| wildcard_rec(tail, rest)).unwrap_or(false),
+        Some(('?', rest)) => value
+            .split_first()
+            .map(|(_, tail)| wildcard_rec(tail, rest))
+            .unwrap_or(false),
         Some((c, rest)) => value
             .split_first()
             .map(|(v, tail)| v == c && wildcard_rec(tail, rest))
@@ -151,7 +160,10 @@ mod tests {
     fn exists_and_is_empty() {
         assert!(MatchRule::Exists(Tag::PATIENT_NAME).matches(&dataset()));
         assert!(!MatchRule::Exists(Tag::PATIENT_ID).matches(&dataset()));
-        assert!(MatchRule::IsEmpty(Tag::PATIENT_ID).matches(&dataset()), "missing is empty");
+        assert!(
+            MatchRule::IsEmpty(Tag::PATIENT_ID).matches(&dataset()),
+            "missing is empty"
+        );
         assert!(!MatchRule::IsEmpty(Tag::PATIENT_NAME).matches(&dataset()));
     }
 

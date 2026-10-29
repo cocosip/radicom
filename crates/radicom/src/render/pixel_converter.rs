@@ -18,8 +18,17 @@ mod tests {
 
     #[test]
     fn reverse_bits_flips_bit_order() {
-        assert_eq!(PixelDataConverter::reverse_bits(&[0b1000_0000]), vec![0b0000_0001]);
-        assert_eq!(PixelDataConverter::reverse_bits(&[0b0000_1111]), vec![0b1111_0000]);
-        assert_eq!(PixelDataConverter::reverse_bits(&[0x00, 0xFF]), vec![0x00, 0xFF]);
+        assert_eq!(
+            PixelDataConverter::reverse_bits(&[0b1000_0000]),
+            vec![0b0000_0001]
+        );
+        assert_eq!(
+            PixelDataConverter::reverse_bits(&[0b0000_1111]),
+            vec![0b1111_0000]
+        );
+        assert_eq!(
+            PixelDataConverter::reverse_bits(&[0x00, 0xFF]),
+            vec![0x00, 0xFF]
+        );
     }
 }

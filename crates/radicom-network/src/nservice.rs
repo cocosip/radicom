@@ -33,7 +33,10 @@ pub fn is_n_request(field: CommandField) -> bool {
 pub fn uses_requested_uids(field: CommandField) -> bool {
     matches!(
         field,
-        CommandField::NGetRq | CommandField::NSetRq | CommandField::NActionRq | CommandField::NDeleteRq
+        CommandField::NGetRq
+            | CommandField::NSetRq
+            | CommandField::NActionRq
+            | CommandField::NDeleteRq
     )
 }
 
@@ -105,7 +108,10 @@ impl NServiceRequest {
             message_id: command.message_id,
             sop_class_uid,
             sop_instance_uid,
-            attribute_identifier_list: command.attribute_identifier_list.clone().unwrap_or_default(),
+            attribute_identifier_list: command
+                .attribute_identifier_list
+                .clone()
+                .unwrap_or_default(),
             event_type_id: command.event_type_id,
             action_type_id: command.action_type_id,
             dataset,
@@ -153,8 +159,7 @@ impl NServiceResponse {
 
     fn from_request(request: &NServiceRequest, status: u16) -> Self {
         NServiceResponse {
-            field: crate::dimse::response_field(request.field)
-                .unwrap_or(request.field),
+            field: crate::dimse::response_field(request.field).unwrap_or(request.field),
             message_id_being_responded_to: request.message_id,
             // PS3.7 §10.1: responses always name the instance as Affected
             affected_sop_class_uid: request.sop_class_uid.clone(),
@@ -223,20 +228,29 @@ mod tests {
         assert_eq!(back.sop_instance_uid.as_deref(), Some("1.2.3.4"));
         assert_eq!(back.action_type_id, Some(1));
         assert!(back.dataset.is_none());
-        assert!(parsed.no_dataset, "a request without a dataset sets the flag");
+        assert!(
+            parsed.no_dataset,
+            "a request without a dataset sets the flag"
+        );
     }
 
     #[test]
     fn requested_services_encode_the_requested_tags() {
         // PS3.7 §10.1 / Table E.1-1: N-GET, N-SET, N-ACTION and N-DELETE name
         // their target in (0000,0003)/(0000,1001) Requested, not Affected.
-        for field in [CommandField::NGetRq, CommandField::NSetRq, CommandField::NActionRq, CommandField::NDeleteRq] {
+        for field in [
+            CommandField::NGetRq,
+            CommandField::NSetRq,
+            CommandField::NActionRq,
+            CommandField::NDeleteRq,
+        ] {
             let mut request = NServiceRequest::new(field, 1);
             request.sop_class_uid = Some("1.2.840.10008.5.1.4.1.1.88.1".into());
             request.sop_instance_uid = Some("1.2.3.4".into());
             let bytes = command_bytes(&request.to_command());
             assert_eq!(
-                element_text(&bytes, 0x0000, 0x0003).as_deref(), Some("1.2.840.10008.5.1.4.1.1.88.1"),
+                element_text(&bytes, 0x0000, 0x0003).as_deref(),
+                Some("1.2.840.10008.5.1.4.1.1.88.1"),
                 "{field:?} must carry (0000,0003) Requested SOP Class UID"
             );
             assert_eq!(
@@ -244,7 +258,11 @@ mod tests {
                 Some("1.2.3.4"),
                 "{field:?} must carry (0000,1001) Requested SOP Instance UID"
             );
-            assert_eq!(element_value(&bytes, 0x0000, 0x0002), None, "{field:?} must not carry Affected SOP Class UID");
+            assert_eq!(
+                element_value(&bytes, 0x0000, 0x0002),
+                None,
+                "{field:?} must not carry Affected SOP Class UID"
+            );
             assert_eq!(
                 element_value(&bytes, 0x0000, 0x1000),
                 None,
@@ -269,7 +287,10 @@ mod tests {
 
         let parsed = Command::from_dataset(&request.to_command().to_dataset()).unwrap();
         let back = NServiceRequest::from_command(&parsed, None);
-        assert_eq!(back.attribute_identifier_list, request.attribute_identifier_list);
+        assert_eq!(
+            back.attribute_identifier_list,
+            request.attribute_identifier_list
+        );
     }
 
     #[test]
@@ -332,9 +353,19 @@ mod tests {
         request.sop_class_uid = Some("1.2.3".into());
         request.sop_instance_uid = Some("1.2.3.4".into());
         let bytes = command_bytes(&NServiceResponse::success(&request, None).to_command());
-        assert_eq!(element_text(&bytes, 0x0000, 0x0002).as_deref(), Some("1.2.3"));
-        assert_eq!(element_text(&bytes, 0x0000, 0x1000).as_deref(), Some("1.2.3.4"));
-        assert_eq!(element_value(&bytes, 0x0000, 0x0003), None, "a response is not a request");
+        assert_eq!(
+            element_text(&bytes, 0x0000, 0x0002).as_deref(),
+            Some("1.2.3")
+        );
+        assert_eq!(
+            element_text(&bytes, 0x0000, 0x1000).as_deref(),
+            Some("1.2.3.4")
+        );
+        assert_eq!(
+            element_value(&bytes, 0x0000, 0x0003),
+            None,
+            "a response is not a request"
+        );
     }
 
     #[test]
@@ -344,8 +375,14 @@ mod tests {
         let response = NServiceResponse::success_with_new_instance(&request, "1.2.3.4", None);
         let bytes = command_bytes(&response.to_command());
 
-        assert_eq!(element_text(&bytes, 0x0000, 0x0002).as_deref(), Some("1.2.3"));
-        assert_eq!(element_text(&bytes, 0x0000, 0x1000).as_deref(), Some("1.2.3.4"));
+        assert_eq!(
+            element_text(&bytes, 0x0000, 0x0002).as_deref(),
+            Some("1.2.3")
+        );
+        assert_eq!(
+            element_text(&bytes, 0x0000, 0x1000).as_deref(),
+            Some("1.2.3.4")
+        );
     }
 
     #[test]
@@ -366,6 +403,9 @@ mod tests {
         assert_eq!(back.field, CommandField::NCreateRsp);
         assert_eq!(back.message_id_being_responded_to, 4);
         assert_eq!(back.status, status::SUCCESS);
-        assert!(!parsed.no_dataset, "a response carrying a dataset clears the flag");
+        assert!(
+            !parsed.no_dataset,
+            "a response carrying a dataset clears the flag"
+        );
     }
 }

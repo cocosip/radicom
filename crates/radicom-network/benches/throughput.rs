@@ -57,7 +57,10 @@ fn multiframe_file(frames: u32) -> (DicomFile, u64) {
             pixel.add_frame(&data).expect("add frame");
         }
     }
-    (DicomFile::from_dataset(ds), (frame_bytes * frames as usize) as u64)
+    (
+        DicomFile::from_dataset(ds),
+        (frame_bytes * frames as usize) as u64,
+    )
 }
 
 #[tokio::main]
@@ -74,15 +77,30 @@ async fn main() {
     // Two rows: the shipped default (`Memory`) and the on-disk `SpoolToTemp`
     // alternative, so the reported numbers include the production default
     // rather than only the fast non-default path (§4.9).
-    run_case("default_memory", StoreSink::default(), &file, per_store_bytes).await;
-    run_case("spool_to_temp", StoreSink::SpoolToTemp, &file, per_store_bytes).await;
+    run_case(
+        "default_memory",
+        StoreSink::default(),
+        &file,
+        per_store_bytes,
+    )
+    .await;
+    run_case(
+        "spool_to_temp",
+        StoreSink::SpoolToTemp,
+        &file,
+        per_store_bytes,
+    )
+    .await;
 }
 
 async fn run_case(label: &str, sink: StoreSink, file: &DicomFile, per_store_bytes: u64) {
     let server = DicomServer::bind(
         "127.0.0.1:0",
         Arc::new(StoreProvider),
-        ServerOptions { store_sink: sink, ..Default::default() },
+        ServerOptions {
+            store_sink: sink,
+            ..Default::default()
+        },
     )
     .await
     .expect("bind server");

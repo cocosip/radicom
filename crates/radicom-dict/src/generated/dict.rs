@@ -22,6 +22,7 @@ pub struct RawDictEntry {
 }
 
 /// Public data dictionary, exact entries, sorted by (group, element).
+#[rustfmt::skip]
 pub static DICTIONARY: &[RawDictEntry] = &[
         RawDictEntry { group: 0x0000, element: 0x0000, group_mask: 0xFFFF, element_mask: 0xFFFF, creator: "", keyword: "CommandGroupLength", name: "Command Group Length", vr: "UL", vm: "1", retired: false },
         RawDictEntry { group: 0x0000, element: 0x0001, group_mask: 0xFFFF, element_mask: 0xFFFF, creator: "", keyword: "CommandLengthToEnd", name: "Command Length to End", vr: "UL", vm: "1", retired: false },
@@ -5285,6 +5286,7 @@ pub static DICTIONARY: &[RawDictEntry] = &[
 ];
 
 /// Public data dictionary, masked (repeating-group) entries.
+#[rustfmt::skip]
 pub static MASKED_DICTIONARY: &[RawDictEntry] = &[
         RawDictEntry { group: 0x0020, element: 0x3100, group_mask: 0xFFFF, element_mask: 0xFF00, creator: "", keyword: "SourceImageIDs", name: "Source Image IDs", vr: "CS", vm: "1-n", retired: true },
         RawDictEntry { group: 0x0028, element: 0x0400, group_mask: 0xFFFF, element_mask: 0xFF0F, creator: "", keyword: "RowsForNthOrderCoefficients", name: "Rows For Nth Order Coefficients", vr: "US", vm: "1", retired: true },
@@ -5377,6 +5379,7 @@ pub static MASKED_DICTIONARY: &[RawDictEntry] = &[
 ];
 
 /// Private dictionary rows grouped by their creator string.
+#[rustfmt::skip]
 pub static PRIVATE_DICTIONARY: &[RawDictEntry] = &[
         RawDictEntry { group: 0x0011, element: 0x0010, group_mask: 0xFFFF, element_mask: 0x00FF, creator: "MED NM", keyword: "", name: "Unknown", vr: "UN", vm: "1", retired: false },
         RawDictEntry { group: 0x0017, element: 0x0020, group_mask: 0xFFFF, element_mask: 0x00FF, creator: "MED NM", keyword: "", name: "Unknown", vr: "UN", vm: "1", retired: false },

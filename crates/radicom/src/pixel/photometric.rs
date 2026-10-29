@@ -9,7 +9,8 @@ use crate::model::vr::Vr;
 
 /// How the samples of a pixel map to colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PhotometricInterpretation {    Monochrome1,
+pub enum PhotometricInterpretation {
+    Monochrome1,
     Monochrome2,
     PaletteColor,
     Rgb,
@@ -60,7 +61,10 @@ impl ColorSpace {
 
     /// True for single-sample monochrome / one-bit data.
     pub fn is_grayscale(&self) -> bool {
-        matches!(self.kind, ColorSpaceType::Grayscale | ColorSpaceType::OneBit)
+        matches!(
+            self.kind,
+            ColorSpaceType::Grayscale | ColorSpaceType::OneBit
+        )
     }
 
     /// True for palette-indexed data.
@@ -142,7 +146,11 @@ impl PhotometricInterpretation {
             Self::YbrPartial420 => (YCbCr, 3, [(1, 1), (2, 2), (2, 2)]),
             Self::Hsv | Self::Argb | Self::Cmyk | Self::Other => return None,
         };
-        Some(ColorSpace { kind, components, subsampling })
+        Some(ColorSpace {
+            kind,
+            components,
+            subsampling,
+        })
     }
 
     /// True for the subsampled YCbCr values (PIX-03 frame-size rules).
@@ -152,7 +160,8 @@ impl PhotometricInterpretation {
 
     /// True for 4:2:0, where both dimensions are chroma-halved.
     pub fn is_420(self) -> bool {
-        self.color_space().is_some_and(|cs| cs.chroma_subsampling() == (2, 2))
+        self.color_space()
+            .is_some_and(|cs| cs.chroma_subsampling() == (2, 2))
     }
 
     /// Infers the photometric interpretation for legacy (ACR-NEMA) files whose
@@ -210,8 +219,15 @@ mod tests {
 
     #[test]
     fn unknown_and_padded_values() {
-        assert_eq!(PhotometricInterpretation::parse("VENDOR "), PhotometricInterpretation::Other);
-        assert_eq!(PhotometricInterpretation::parse("RGB "), PhotometricInterpretation::Rgb, "padding trimmed");
+        assert_eq!(
+            PhotometricInterpretation::parse("VENDOR "),
+            PhotometricInterpretation::Other
+        );
+        assert_eq!(
+            PhotometricInterpretation::parse("RGB "),
+            PhotometricInterpretation::Rgb,
+            "padding trimmed"
+        );
         assert_eq!(PhotometricInterpretation::Other.as_str(), None);
     }
 
@@ -221,12 +237,17 @@ mod tests {
         assert!(PhotometricInterpretation::YbrFull422.is_subsampled());
         assert!(PhotometricInterpretation::YbrPartial420.is_420());
         assert!(!PhotometricInterpretation::Rgb.is_ybr());
-        assert!(!PhotometricInterpretation::YbrFull.is_subsampled(), "4:4:4 is not subsampled");
+        assert!(
+            !PhotometricInterpretation::YbrFull.is_subsampled(),
+            "4:4:4 is not subsampled"
+        );
     }
 
     #[test]
     fn colour_space_descriptors() {
-        let mono = PhotometricInterpretation::Monochrome2.color_space().unwrap();
+        let mono = PhotometricInterpretation::Monochrome2
+            .color_space()
+            .unwrap();
         assert_eq!(mono.kind, ColorSpaceType::Grayscale);
         assert_eq!(mono.components, 1);
         assert!(mono.is_grayscale() && !mono.is_subsampled());
@@ -235,7 +256,9 @@ mod tests {
         assert_eq!((rgb.kind, rgb.components), (ColorSpaceType::Rgb, 3));
         assert!(!rgb.is_subsampled());
 
-        let pal = PhotometricInterpretation::PaletteColor.color_space().unwrap();
+        let pal = PhotometricInterpretation::PaletteColor
+            .color_space()
+            .unwrap();
         assert!(pal.is_palette());
 
         let y444 = PhotometricInterpretation::YbrFull.color_space().unwrap();
@@ -243,10 +266,15 @@ mod tests {
         assert!(!y444.is_subsampled());
 
         let y422 = PhotometricInterpretation::YbrFull422.color_space().unwrap();
-        assert_eq!((y422.kind, y422.chroma_subsampling()), (ColorSpaceType::YCbCr, (2, 1)));
+        assert_eq!(
+            (y422.kind, y422.chroma_subsampling()),
+            (ColorSpaceType::YCbCr, (2, 1))
+        );
         assert!(y422.is_subsampled());
 
-        let y420 = PhotometricInterpretation::YbrPartial420.color_space().unwrap();
+        let y420 = PhotometricInterpretation::YbrPartial420
+            .color_space()
+            .unwrap();
         assert_eq!(y420.chroma_subsampling(), (2, 2));
         assert!(y420.is_subsampled());
 
@@ -274,6 +302,9 @@ mod tests {
         // multi-sample → RGB
         let mut rgb = Dataset::new();
         rgb.insert_value(Tag::SAMPLES_PER_PIXEL, 3u16);
-        assert_eq!(PhotometricInterpretation::infer_from_dataset(&rgb), PhotometricInterpretation::Rgb);
+        assert_eq!(
+            PhotometricInterpretation::infer_from_dataset(&rgb),
+            PhotometricInterpretation::Rgb
+        );
     }
 }

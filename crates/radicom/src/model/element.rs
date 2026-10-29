@@ -56,16 +56,32 @@ pub struct DicomElement {
 
 impl DicomElement {
     pub fn new_str(tag: Tag, vr: Vr, text: impl Into<String>) -> Self {
-        debug_assert!(vr.is_string() || vr == Vr::Implicit, "{} is not a string VR", vr);
-        DicomElement { tag, vr, value: ElementValue::Str(text.into()) }
+        debug_assert!(
+            vr.is_string() || vr == Vr::Implicit,
+            "{} is not a string VR",
+            vr
+        );
+        DicomElement {
+            tag,
+            vr,
+            value: ElementValue::Str(text.into()),
+        }
     }
 
     pub fn new_bytes(tag: Tag, vr: Vr, buffer: SharedBuffer) -> Self {
-        DicomElement { tag, vr, value: ElementValue::Bytes(buffer) }
+        DicomElement {
+            tag,
+            vr,
+            value: ElementValue::Bytes(buffer),
+        }
     }
 
     pub fn new_empty(tag: Tag, vr: Vr) -> Self {
-        DicomElement { tag, vr, value: ElementValue::Bytes(crate::model::buffer::EmptyBuffer::shared()) }
+        DicomElement {
+            tag,
+            vr,
+            value: ElementValue::Bytes(crate::model::buffer::EmptyBuffer::shared()),
+        }
     }
 
     pub fn tag(&self) -> &Tag {
@@ -194,7 +210,11 @@ fn select(e: &DicomElement, index: Option<usize>) -> Result<String, Error> {
 /// Reads the `index`-th `unit_size` group of a binary value as a
 /// little-endian integer/float (spec: byte order is fixed at parse time via
 /// EndianBuffer wrapping; in-memory values are native LE).
-fn read_le_unit<T: FromLeBytes>(e: &DicomElement, b: &SharedBuffer, index: Option<usize>) -> Result<T, Error> {
+fn read_le_unit<T: FromLeBytes>(
+    e: &DicomElement,
+    b: &SharedBuffer,
+    index: Option<usize>,
+) -> Result<T, Error> {
     // Read at the VR's natural unit size, then widen to T. Using
     // `unit_size().max(T::SIZE)` forced a 4-byte stride for a `u32` read of a
     // US element (2-byte stride), so every such read landed out of range and
@@ -271,7 +291,10 @@ macro_rules! impl_from_int {
                     Vr::Ds => parse_ds(&s).and_then(|f| {
                         <$t>::try_from(f as i64).map_err(|_| type_err(e, stringify!($t)))
                     }),
-                    _ => s.trim().parse::<$t>().map_err(|_| type_err(e, stringify!($t))),
+                    _ => s
+                        .trim()
+                        .parse::<$t>()
+                        .map_err(|_| type_err(e, stringify!($t))),
                 }
             }
         }
@@ -375,7 +398,11 @@ impl FromElement for DtPoint {
 
 impl<T: FromElement> FromElement for Vec<T> {
     fn from_element(e: &DicomElement, _index: Option<usize>) -> Result<Self, Error> {
-        let count = if e.vr().is_string() { e.count() } else { e.count().max(1) };
+        let count = if e.vr().is_string() {
+            e.count()
+        } else {
+            e.count().max(1)
+        };
         (0..count).map(|i| T::from_element(e, Some(i))).collect()
     }
 }
@@ -394,7 +421,9 @@ impl FromElement for SharedBuffer {
 
 /// Re-exports used by the dataset layer's date-time composition (DS-08).
 pub mod temporal {
-    pub use crate::model::dicom_datetime::{format_da, format_dt, format_tm, parse_da, parse_dt, parse_tm, DtPoint};
+    pub use crate::model::dicom_datetime::{
+        format_da, format_dt, format_tm, parse_da, parse_dt, parse_tm, DtPoint,
+    };
     pub use crate::model::range::Range;
 }
 
@@ -506,16 +535,14 @@ mod tests {
     /// An empty element must report an error rather than a bogus zero.
     #[test]
     fn empty_numeric_element_errors() {
-        let empty = DicomElement::new_bytes(
-            Tag::ROWS,
-            Vr::Us,
-            Arc::new(MemoryBuffer::from(Vec::new())),
-        );
+        let empty =
+            DicomElement::new_bytes(Tag::ROWS, Vr::Us, Arc::new(MemoryBuffer::from(Vec::new())));
         assert!(empty.get::<u16>(None).is_err());
     }
 
     #[test]
-    fn get_uid_and_transfer_syntax() {        let ui = el(Vr::Ui, "1.2.840.10008.1.2");
+    fn get_uid_and_transfer_syntax() {
+        let ui = el(Vr::Ui, "1.2.840.10008.1.2");
         let uid: Uid = ui.first().unwrap();
         assert_eq!(uid.uid_type(), crate::model::uid::UidType::TransferSyntax);
         let ts: Arc<TransferSyntax> = ui.first().unwrap();
@@ -555,9 +582,7 @@ mod tests {
         let ui_odd = el(Vr::Ui, "1.2");
         assert_eq!(&*ui_odd.encoded().data(), b"1.2\x00");
     }
-
 }
-
 
 // -- content equality (DS-07) -----------------------------------------------
 
@@ -565,7 +590,9 @@ impl PartialEq for ElementValue {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (ElementValue::Str(a), ElementValue::Str(b)) => a == b,
-            (ElementValue::Bytes(a), ElementValue::Bytes(b)) => a.size() == b.size() && a.data() == b.data(),
+            (ElementValue::Bytes(a), ElementValue::Bytes(b)) => {
+                a.size() == b.size() && a.data() == b.data()
+            }
             _ => false,
         }
     }
@@ -657,20 +684,30 @@ macro_rules! impl_into_int_string {
             }
             fn into_element(self, tag: Tag, vr: Vr) -> DicomElement {
                 match vr {
-                    Vr::Is | Vr::Ds => {
-                        DicomElement::new_str(tag, vr, self.to_string())
-                    }
+                    Vr::Is | Vr::Ds => DicomElement::new_str(tag, vr, self.to_string()),
                     Vr::Ss | Vr::Us => {
                         let v = self as i64 as i16;
-                        DicomElement::new_bytes(tag, vr, Arc::new(MemoryBuffer::from(v.to_le_bytes().to_vec())))
+                        DicomElement::new_bytes(
+                            tag,
+                            vr,
+                            Arc::new(MemoryBuffer::from(v.to_le_bytes().to_vec())),
+                        )
                     }
                     Vr::Sl | Vr::Ul => {
                         let v = self as i64 as i32;
-                        DicomElement::new_bytes(tag, vr, Arc::new(MemoryBuffer::from(v.to_le_bytes().to_vec())))
+                        DicomElement::new_bytes(
+                            tag,
+                            vr,
+                            Arc::new(MemoryBuffer::from(v.to_le_bytes().to_vec())),
+                        )
                     }
                     Vr::Sv | Vr::Uv => {
                         let v = self as i64;
-                        DicomElement::new_bytes(tag, vr, Arc::new(MemoryBuffer::from(v.to_le_bytes().to_vec())))
+                        DicomElement::new_bytes(
+                            tag,
+                            vr,
+                            Arc::new(MemoryBuffer::from(v.to_le_bytes().to_vec())),
+                        )
                     }
                     _ => DicomElement::new_str(tag, vr, self.to_string()),
                 }
@@ -697,13 +734,25 @@ macro_rules! impl_into_float {
                 match vr {
                     Vr::Fl => {
                         let v = self as f32;
-                        DicomElement::new_bytes(tag, vr, Arc::new(MemoryBuffer::from(v.to_le_bytes().to_vec())))
+                        DicomElement::new_bytes(
+                            tag,
+                            vr,
+                            Arc::new(MemoryBuffer::from(v.to_le_bytes().to_vec())),
+                        )
                     }
                     Vr::Fd => {
                         let v = self as f64;
-                        DicomElement::new_bytes(tag, vr, Arc::new(MemoryBuffer::from(v.to_le_bytes().to_vec())))
+                        DicomElement::new_bytes(
+                            tag,
+                            vr,
+                            Arc::new(MemoryBuffer::from(v.to_le_bytes().to_vec())),
+                        )
                     }
-                    _ => DicomElement::new_str(tag, vr, crate::model::person_name::format_ds(self as f64)),
+                    _ => DicomElement::new_str(
+                        tag,
+                        vr,
+                        crate::model::person_name::format_ds(self as f64),
+                    ),
                 }
             }
         }

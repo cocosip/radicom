@@ -3,13 +3,13 @@
 
 pub mod buffer;
 pub mod dataset;
-pub mod item;
 pub mod dicom_datetime;
-pub mod element;
-pub mod person_name;
 pub mod dictionary;
-pub mod masked_tag;
+pub mod element;
 pub mod endian;
+pub mod item;
+pub mod masked_tag;
+pub mod person_name;
 pub mod private_creator;
 pub mod range;
 pub mod tag;

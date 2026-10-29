@@ -32,7 +32,9 @@ impl Rng {
 }
 
 fn corpus(rel: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests-data").join(rel)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests-data")
+        .join(rel)
 }
 
 #[test]

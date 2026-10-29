@@ -25,7 +25,12 @@ pub struct DumpOptions {
 
 impl Default for DumpOptions {
     fn default() -> Self {
-        DumpOptions { max_value_chars: 64, max_binary_bytes: 16, indent: 2, show_private: true }
+        DumpOptions {
+            max_value_chars: 64,
+            max_binary_bytes: 16,
+            indent: 2,
+            show_private: true,
+        }
     }
 }
 
@@ -40,7 +45,13 @@ pub fn dump_dataset(dataset: &Dataset, options: &DumpOptions) -> String {
 ///
 /// The dictionary is resolved once per dump, and the tag is borrowed from the
 /// item instead of cloned (§3.3).
-fn write_level(dataset: &Dataset, depth: usize, options: &DumpOptions, dictionary: &Dictionary, out: &mut String) {
+fn write_level(
+    dataset: &Dataset,
+    depth: usize,
+    options: &DumpOptions,
+    dictionary: &Dictionary,
+    out: &mut String,
+) {
     let pad = " ".repeat(depth * options.indent);
     for item in dataset.items() {
         let tag = item.tag();
@@ -53,12 +64,21 @@ fn write_level(dataset: &Dataset, depth: usize, options: &DumpOptions, dictionar
         match item {
             DicomItem::Element(e) => {
                 let value = render_value(e.value(), e.vr(), options);
-                out.push_str(&format!("{pad}{tag_text} {:<2} {name:<30} {value}\n", e.vr().code()));
+                out.push_str(&format!(
+                    "{pad}{tag_text} {:<2} {name:<30} {value}\n",
+                    e.vr().code()
+                ));
             }
             DicomItem::Sequence(s) => {
-                out.push_str(&format!("{pad}{tag_text} SQ {name:<30} ({} item(s))\n", s.items().len()));
+                out.push_str(&format!(
+                    "{pad}{tag_text} SQ {name:<30} ({} item(s))\n",
+                    s.items().len()
+                ));
                 for (index, item_ds) in s.items().iter().enumerate() {
-                    out.push_str(&format!("{pad}{}item #{index}\n", " ".repeat(options.indent)));
+                    out.push_str(&format!(
+                        "{pad}{}item #{index}\n",
+                        " ".repeat(options.indent)
+                    ));
                     write_level(item_ds, depth + 2, options, dictionary, out);
                 }
             }
@@ -98,7 +118,11 @@ fn render_value(value: &ElementValue, vr: crate::model::vr::Vr, options: &DumpOp
                     if text.is_empty() {
                         return "(empty)".to_string();
                     }
-                    if text.chars().take(options.max_value_chars).all(|c| !c.is_control() || c == '\n') {
+                    if text
+                        .chars()
+                        .take(options.max_value_chars)
+                        .all(|c| !c.is_control() || c == '\n')
+                    {
                         return render_str(text, options);
                     }
                 }
@@ -108,7 +132,11 @@ fn render_value(value: &ElementValue, vr: crate::model::vr::Vr, options: &DumpOp
             }
             let shown = bytes.len().min(options.max_binary_bytes);
             let hex: Vec<String> = bytes[..shown].iter().map(|b| format!("{b:02X}")).collect();
-            let suffix = if bytes.len() > shown { format!(" … ({} bytes)", bytes.len()) } else { String::new() };
+            let suffix = if bytes.len() > shown {
+                format!(" … ({} bytes)", bytes.len())
+            } else {
+                String::new()
+            };
             format!("[{}]{suffix}", hex.join(" "))
         }
     }
@@ -138,7 +166,12 @@ impl PixelSummary {
     pub fn one_line(&self) -> String {
         format!(
             "{}x{} × {} frame(s), {} bits, {} sample(s)/pixel, {}",
-            self.columns, self.rows, self.frames, self.bits_allocated, self.samples_per_pixel, self.photometric_interpretation
+            self.columns,
+            self.rows,
+            self.frames,
+            self.bits_allocated,
+            self.samples_per_pixel,
+            self.photometric_interpretation
         )
     }
 }
@@ -153,7 +186,9 @@ pub fn pixel_summary(dataset: &Dataset) -> Option<PixelSummary> {
         .try_get_str(Tag::NUMBER_OF_FRAMES)
         .and_then(|s| s.trim().parse::<u32>().ok())
         .unwrap_or(1);
-    let photometric = dataset.try_get_str(Tag::PHOTOMETRIC_INTERPRETATION).unwrap_or_else(|| "?".to_string());
+    let photometric = dataset
+        .try_get_str(Tag::PHOTOMETRIC_INTERPRETATION)
+        .unwrap_or_else(|| "?".to_string());
     Some(PixelSummary {
         rows,
         columns,
@@ -176,7 +211,8 @@ mod tests {
         ds.insert_str(Tag::MODALITY, Vr::Cs, "CT");
         let mut item = Dataset::new();
         item.insert_str(Tag::CODE_VALUE, Vr::Sh, "1");
-        ds.insert_sequence(Tag::REFERENCED_IMAGE_SEQUENCE).push(item);
+        ds.insert_sequence(Tag::REFERENCED_IMAGE_SEQUENCE)
+            .push(item);
         ds
     }
 
@@ -194,7 +230,10 @@ mod tests {
         let out = dump_dataset(&sample_dataset(), &DumpOptions::default());
         assert!(out.contains("SQ"), "marks the sequence");
         assert!(out.contains("item #0"), "shows the nested item");
-        assert!(out.contains("ReferencedImageSequence") || out.contains("(0008,1140)"), "shows the SQ tag");
+        assert!(
+            out.contains("ReferencedImageSequence") || out.contains("(0008,1140)"),
+            "shows the SQ tag"
+        );
     }
 
     #[test]
@@ -206,11 +245,20 @@ mod tests {
         ds.insert_str(Tag::SERIES_DESCRIPTION, Vr::Lo, "SHORT");
         let long = format!("{}{}", "PREFIX-", "A".repeat(94));
         ds.insert_str(Tag::IMAGE_TYPE, Vr::Cs, long.clone());
-        let options = DumpOptions { max_value_chars: 10, ..Default::default() };
+        let options = DumpOptions {
+            max_value_chars: 10,
+            ..Default::default()
+        };
         let out = dump_dataset(&ds, &options);
 
-        assert!(out.contains("SHORT"), "a value under the limit is printed in full");
-        assert!(out.contains("PREFIX-"), "the printed prefix is the value's real start");
+        assert!(
+            out.contains("SHORT"),
+            "a value under the limit is printed in full"
+        );
+        assert!(
+            out.contains("PREFIX-"),
+            "the printed prefix is the value's real start"
+        );
         assert!(!out.contains(&long), "the full long value is not printed");
         assert!(out.contains('…'), "the elision is marked");
     }
@@ -219,12 +267,17 @@ mod tests {
     fn binary_data_shows_a_hex_preview() {
         let mut ds = Dataset::new();
         let bytes: Vec<u8> = (0u8..32).collect();
-        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
-            Tag::PIXEL_DATA,
-            Vr::Ob,
-            Arc::new(crate::model::buffer::MemoryBuffer::from(bytes)),
-        )));
-        let options = DumpOptions { max_binary_bytes: 4, ..Default::default() };
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::PIXEL_DATA,
+                Vr::Ob,
+                Arc::new(crate::model::buffer::MemoryBuffer::from(bytes)),
+            ),
+        ));
+        let options = DumpOptions {
+            max_binary_bytes: 4,
+            ..Default::default()
+        };
         let out = dump_dataset(&ds, &options);
         assert!(out.contains("00 01 02 03"), "shows the bounded hex preview");
         assert!(out.contains("32 bytes"), "reports the full size");
@@ -242,37 +295,64 @@ mod tests {
     fn private_elements_can_be_hidden() {
         let mut ds = Dataset::new();
         ds.insert_str(Tag::new(0x0009, 0x0010), Vr::Lo, "PRIVATE");
-        let shown = dump_dataset(&ds, &DumpOptions { show_private: true, ..Default::default() });
+        let shown = dump_dataset(
+            &ds,
+            &DumpOptions {
+                show_private: true,
+                ..Default::default()
+            },
+        );
         assert!(shown.contains("PRIVATE"));
-        let hidden = dump_dataset(&ds, &DumpOptions { show_private: false, ..Default::default() });
-        assert!(!hidden.contains("PRIVATE"), "private element is filtered out");
+        let hidden = dump_dataset(
+            &ds,
+            &DumpOptions {
+                show_private: false,
+                ..Default::default()
+            },
+        );
+        assert!(
+            !hidden.contains("PRIVATE"),
+            "private element is filtered out"
+        );
     }
 
     #[test]
     fn byte_strings_and_fragments_are_rendered() {
         let mut ds = Dataset::new();
-        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
-            Tag::OTHER_PATIENT_I_DS,
-            Vr::Lo,
-            Arc::new(crate::model::buffer::MemoryBuffer::from(b"HELLO".to_vec())),
-        )));
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::OTHER_PATIENT_I_DS,
+                Vr::Lo,
+                Arc::new(crate::model::buffer::MemoryBuffer::from(b"HELLO".to_vec())),
+            ),
+        ));
         let out = dump_dataset(&ds, &DumpOptions::default());
-        assert!(out.contains("HELLO"), "printable byte strings render as text");
+        assert!(
+            out.contains("HELLO"),
+            "printable byte strings render as text"
+        );
 
         let mut empty = Dataset::new();
-        empty.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
-            Tag::OTHER_PATIENT_I_DS,
-            Vr::Lo,
-            Arc::new(crate::model::buffer::MemoryBuffer::from(Vec::<u8>::new())),
-        )));
+        empty.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::OTHER_PATIENT_I_DS,
+                Vr::Lo,
+                Arc::new(crate::model::buffer::MemoryBuffer::from(Vec::<u8>::new())),
+            ),
+        ));
         assert!(dump_dataset(&empty, &DumpOptions::default()).contains("(empty)"));
 
         let mut fragments = Dataset::new();
         fragments
             .insert_fragments(Tag::FLOAT_PIXEL_DATA, Vr::Ob)
-            .push_fragment(Arc::new(crate::model::buffer::MemoryBuffer::from(vec![1, 2])));
+            .push_fragment(Arc::new(crate::model::buffer::MemoryBuffer::from(vec![
+                1, 2,
+            ])));
         let out = dump_dataset(&fragments, &DumpOptions::default());
-        assert!(out.contains("fragment(s)"), "fragment sequence is rendered: {out}");
+        assert!(
+            out.contains("fragment(s)"),
+            "fragment sequence is rendered: {out}"
+        );
     }
 
     #[test]

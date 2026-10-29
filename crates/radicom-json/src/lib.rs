@@ -23,7 +23,6 @@ use radicom::model::buffer::{MemoryBuffer, SharedBuffer};
 
 pub mod xml;
 
-pub use xml::dataset_to_xml;
 use radicom::model::dataset::Dataset;
 use radicom::model::element::DicomElement;
 use radicom::model::item::{DicomItem, DicomSequence};
@@ -32,6 +31,7 @@ use radicom::model::tag::Tag;
 use radicom::model::vr::Vr;
 use serde_json::{Map, Number, Value};
 use std::sync::Arc;
+pub use xml::dataset_to_xml;
 
 /// Errors of the JSON model (§1).
 #[derive(Debug, thiserror::Error)]
@@ -140,10 +140,16 @@ pub fn dataset_to_value(dataset: &Dataset, options: &JsonOptions) -> Result<Valu
         }
         match item {
             DicomItem::Element(element) => {
-                object.insert(key_for(element.tag(), options), element_to_value(element, options)?);
+                object.insert(
+                    key_for(element.tag(), options),
+                    element_to_value(element, options)?,
+                );
             }
             DicomItem::Sequence(sequence) => {
-                object.insert(key_for(sequence.tag(), options), sequence_to_value(sequence, options)?);
+                object.insert(
+                    key_for(sequence.tag(), options),
+                    sequence_to_value(sequence, options)?,
+                );
             }
             DicomItem::Fragments(_) => return Err(JsonError::Fragments),
         }
@@ -177,7 +183,10 @@ fn sequence_to_value(sequence: &DicomSequence, options: &JsonOptions) -> Result<
 
 /// True for VRs carried as a base64 `InlineBinary` (§1.1).
 fn is_binary(vr: Vr) -> bool {
-    matches!(vr, Vr::Ob | Vr::Od | Vr::Of | Vr::Ol | Vr::Ov | Vr::Ow | Vr::Un)
+    matches!(
+        vr,
+        Vr::Ob | Vr::Od | Vr::Of | Vr::Ol | Vr::Ov | Vr::Ow | Vr::Un
+    )
 }
 
 fn element_to_value(element: &DicomElement, options: &JsonOptions) -> Result<Value> {
@@ -194,7 +203,8 @@ fn element_to_value(element: &DicomElement, options: &JsonOptions) -> Result<Val
             }
             // an empty binary value carries no carrier at all (§1.1)
             if buffer.size() > 0 {
-                let encoded = base64::engine::general_purpose::STANDARD.encode(buffer.data().as_ref());
+                let encoded =
+                    base64::engine::general_purpose::STANDARD.encode(buffer.data().as_ref());
                 object.insert("InlineBinary".to_string(), Value::String(encoded));
             }
         }
@@ -228,25 +238,36 @@ fn element_values(element: &DicomElement, vr: Vr, options: &JsonOptions) -> Resu
     }
 
     match vr {
-        Vr::Pn => Ok(vec![person_name_value(text)]),
+        Vr::Pn => Ok(text.split('\\').map(person_name_value).collect()),
         Vr::At => Ok(text
             .split('\\')
             .filter(|part| !part.is_empty())
             .map(|part| Value::String(part.trim().to_ascii_uppercase()))
             .collect()),
-        Vr::Is | Vr::Ds | Vr::Sv | Vr::Uv => {
-            Ok(text.split('\\').map(|part| numeric_value(part, options.numbers)).collect())
-        }
-        Vr::Us | Vr::Ul | Vr::Sl | Vr::Ss => {
-            Ok(text.split('\\').filter(|p| !p.is_empty()).map(|part| parse_int_value(part, vr)).collect())
-        }
-        Vr::Fl | Vr::Fd => {
-            Ok(text.split('\\').filter(|p| !p.is_empty()).map(parse_float_value).collect())
-        }
+        Vr::Is | Vr::Ds | Vr::Sv | Vr::Uv => Ok(text
+            .split('\\')
+            .map(|part| numeric_value(part, options.numbers))
+            .collect()),
+        Vr::Us | Vr::Ul | Vr::Sl | Vr::Ss => Ok(text
+            .split('\\')
+            .filter(|p| !p.is_empty())
+            .map(|part| parse_int_value(part, vr))
+            .collect()),
+        Vr::Fl | Vr::Fd => Ok(text
+            .split('\\')
+            .filter(|p| !p.is_empty())
+            .map(parse_float_value)
+            .collect()),
         // a zero-length component is `null`, not `""` (§1.1, PS3.18 Annex F)
         _ => Ok(text
             .split('\\')
-            .map(|part| if part.is_empty() { Value::Null } else { Value::String(part.to_string()) })
+            .map(|part| {
+                if part.is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(part.to_string())
+                }
+            })
             .collect()),
     }
 }
@@ -258,7 +279,9 @@ fn raw_value_array(raw: &SharedBuffer, vr: Vr, _tag: &Tag) -> Vec<Value> {
     let unit = vr.unit_size().max(1);
     match vr {
         Vr::At => bytes
-            .as_chunks::<4>().0.iter()
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|chunk| {
                 let group = u16::from_le_bytes([chunk[0], chunk[1]]);
                 let element = u16::from_le_bytes([chunk[2], chunk[3]]);
@@ -284,15 +307,40 @@ fn binary_number(chunk: &[u8], vr: Vr) -> Option<Value> {
     // integers become integer JSON numbers; only the float VRs use f64, so
     // "512" is not written as "512.0"
     let value = match vr {
-        Vr::Us if chunk.len() >= 2 => return Some(Value::Number(u16::from_le_bytes([chunk[0], chunk[1]]).into())),
-        Vr::Ss if chunk.len() >= 2 => return Some(Value::Number(i16::from_le_bytes([chunk[0], chunk[1]]).into())),
+        Vr::Us if chunk.len() >= 2 => {
+            return Some(Value::Number(
+                u16::from_le_bytes([chunk[0], chunk[1]]).into(),
+            ))
+        }
+        Vr::Ss if chunk.len() >= 2 => {
+            return Some(Value::Number(
+                i16::from_le_bytes([chunk[0], chunk[1]]).into(),
+            ))
+        }
         Vr::Ul if chunk.len() >= 4 => {
-            return Some(Value::Number(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).into()))
+            return Some(Value::Number(
+                u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).into(),
+            ))
         }
         Vr::Sl if chunk.len() >= 4 => {
-            return Some(Value::Number(i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).into()))
+            return Some(Value::Number(
+                i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).into(),
+            ))
         }
-        Vr::Fl if chunk.len() >= 4 => f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f64,
+        // 64-bit integers stay exact (no f64 hop) (review #12)
+        Vr::Sv if chunk.len() >= 8 => {
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(&chunk[..8]);
+            return Some(Value::Number(i64::from_le_bytes(bytes).into()));
+        }
+        Vr::Uv if chunk.len() >= 8 => {
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(&chunk[..8]);
+            return Some(Value::Number(u64::from_le_bytes(bytes).into()));
+        }
+        Vr::Fl if chunk.len() >= 4 => {
+            f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f64
+        }
         Vr::Fd if chunk.len() >= 8 => f64::from_le_bytes([
             chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
         ]),
@@ -332,9 +380,8 @@ fn numeric_value(part: &str, mode: NumberMode) -> Value {
         NumberMode::AsString => Value::String(part.to_string()),
         NumberMode::AsNumber => match trimmed.parse::<f64>() {
             // NaN and infinities always stay strings (§1.2)
-            Ok(value) if value.is_finite() => {
-                integer_aware_number(trimmed, value).unwrap_or_else(|| Value::String(part.to_string()))
-            }
+            Ok(value) if value.is_finite() => integer_aware_number(trimmed, value)
+                .unwrap_or_else(|| Value::String(part.to_string())),
             _ => Value::String(part.to_string()),
         },
         NumberMode::PreferablyAsNumber => {
@@ -342,7 +389,8 @@ fn numeric_value(part: &str, mode: NumberMode) -> Value {
             // "1.50" stays a string because a number would lose the zero
             match trimmed.parse::<f64>() {
                 Ok(value) if value.is_finite() && format_number_like(value) == trimmed => {
-                    integer_aware_number(trimmed, value).unwrap_or_else(|| Value::String(part.to_string()))
+                    integer_aware_number(trimmed, value)
+                        .unwrap_or_else(|| Value::String(part.to_string()))
                 }
                 _ => Value::String(part.to_string()),
             }
@@ -377,10 +425,16 @@ fn person_name_value(text: &str) -> Value {
     let mut object = Map::new();
     let alphabetic = name.alphabetic();
     if !alphabetic.is_empty() {
-        object.insert("Alphabetic".to_string(), Value::String(alphabetic.to_string()));
+        object.insert(
+            "Alphabetic".to_string(),
+            Value::String(alphabetic.to_string()),
+        );
     }
     if let Some(ideographic) = name.ideographic().filter(|s| !s.is_empty()) {
-        object.insert("Ideographic".to_string(), Value::String(ideographic.to_string()));
+        object.insert(
+            "Ideographic".to_string(),
+            Value::String(ideographic.to_string()),
+        );
     }
     if let Some(phonetic) = name.phonetic().filter(|s| !s.is_empty()) {
         object.insert("Phonetic".to_string(), Value::String(phonetic.to_string()));
@@ -427,7 +481,9 @@ pub fn json_to_datasets(json: &str, options: &JsonOptions) -> Result<Vec<Dataset
 /// Deserializes a dataset from a JSON value tree (§1.4).
 pub fn value_to_dataset(value: &Value) -> Result<Dataset> {
     let Value::Object(object) = value else {
-        return Err(JsonError::Unsupported("a DICOM JSON dataset must be an object"));
+        return Err(JsonError::Unsupported(
+            "a DICOM JSON dataset must be an object",
+        ));
     };
     let mut dataset = Dataset::new();
 
@@ -453,10 +509,14 @@ fn attribute_to_item(tag: Tag, attribute: &Value) -> Result<Option<DicomItem>> {
     };
     // "vr" may sit at any property position (§1.3)
     let Some(vr_code) = object.get("vr").and_then(Value::as_str) else {
-        return Err(JsonError::MissingVr { tag: tag.to_json_string() });
+        return Err(JsonError::MissingVr {
+            tag: tag.to_json_string(),
+        });
     };
-    let vr = Vr::parse_str(vr_code)
-        .map_err(|_| JsonError::UnknownVr { tag: tag.to_json_string(), vr: vr_code.to_string() })?;
+    let vr = Vr::parse_str(vr_code).map_err(|_| JsonError::UnknownVr {
+        tag: tag.to_json_string(),
+        vr: vr_code.to_string(),
+    })?;
 
     if let Some(uri) = object.get("BulkDataURI").and_then(Value::as_str) {
         // JSON-02: keep the reference as a BulkDataUri buffer; the resolver that
@@ -471,7 +531,10 @@ fn attribute_to_item(tag: Tag, attribute: &Value) -> Result<Option<DicomItem>> {
     if let Some(encoded) = object.get("InlineBinary").and_then(Value::as_str) {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(encoded)
-            .map_err(|e| JsonError::Malformed { tag: tag.to_json_string(), reason: format!("bad base64: {e}") })?;
+            .map_err(|e| JsonError::Malformed {
+                tag: tag.to_json_string(),
+                reason: format!("bad base64: {e}"),
+            })?;
         return Ok(Some(DicomItem::Element(DicomElement::new_bytes(
             tag,
             vr,
@@ -526,11 +589,19 @@ fn text_element(tag: Tag, vr: Vr, text: String) -> Result<DicomElement> {
             bytes.extend_from_slice(&parsed.group().to_le_bytes());
             bytes.extend_from_slice(&parsed.element().to_le_bytes());
         }
-        return Ok(DicomElement::new_bytes(tag, vr, Arc::new(MemoryBuffer::from(bytes))));
+        return Ok(DicomElement::new_bytes(
+            tag,
+            vr,
+            Arc::new(MemoryBuffer::from(bytes)),
+        ));
     }
-    if vr == Vr::Pn || !vr.is_string() {
+    if !vr.is_string() {
         let bytes = encode_numeric_or_text(vr, &text)?;
-        return Ok(DicomElement::new_bytes(tag, vr, Arc::new(MemoryBuffer::from(bytes))));
+        return Ok(DicomElement::new_bytes(
+            tag,
+            vr,
+            Arc::new(MemoryBuffer::from(bytes)),
+        ));
     }
     Ok(DicomElement::new_str(tag, vr, text))
 }
@@ -547,12 +618,54 @@ fn encode_numeric_or_text(vr: Vr, text: &str) -> Result<Vec<u8>> {
             reason: format!("\"{part}\" is not a valid {kind}"),
         };
         match vr {
-            Vr::Us => bytes.extend_from_slice(&part.parse::<u16>().map_err(|_| malformed("US"))?.to_le_bytes()),
-            Vr::Ss => bytes.extend_from_slice(&part.parse::<i16>().map_err(|_| malformed("SS"))?.to_le_bytes()),
-            Vr::Ul => bytes.extend_from_slice(&part.parse::<u32>().map_err(|_| malformed("UL"))?.to_le_bytes()),
-            Vr::Sl => bytes.extend_from_slice(&part.parse::<i32>().map_err(|_| malformed("SL"))?.to_le_bytes()),
-            Vr::Fl => bytes.extend_from_slice(&part.parse::<f32>().map_err(|_| malformed("FL"))?.to_le_bytes()),
-            Vr::Fd => bytes.extend_from_slice(&part.parse::<f64>().map_err(|_| malformed("FD"))?.to_le_bytes()),
+            Vr::Us => bytes.extend_from_slice(
+                &part
+                    .parse::<u16>()
+                    .map_err(|_| malformed("US"))?
+                    .to_le_bytes(),
+            ),
+            Vr::Ss => bytes.extend_from_slice(
+                &part
+                    .parse::<i16>()
+                    .map_err(|_| malformed("SS"))?
+                    .to_le_bytes(),
+            ),
+            Vr::Ul => bytes.extend_from_slice(
+                &part
+                    .parse::<u32>()
+                    .map_err(|_| malformed("UL"))?
+                    .to_le_bytes(),
+            ),
+            Vr::Sl => bytes.extend_from_slice(
+                &part
+                    .parse::<i32>()
+                    .map_err(|_| malformed("SL"))?
+                    .to_le_bytes(),
+            ),
+            Vr::Sv => bytes.extend_from_slice(
+                &part
+                    .parse::<i64>()
+                    .map_err(|_| malformed("SV"))?
+                    .to_le_bytes(),
+            ),
+            Vr::Uv => bytes.extend_from_slice(
+                &part
+                    .parse::<u64>()
+                    .map_err(|_| malformed("UV"))?
+                    .to_le_bytes(),
+            ),
+            Vr::Fl => bytes.extend_from_slice(
+                &part
+                    .parse::<f32>()
+                    .map_err(|_| malformed("FL"))?
+                    .to_le_bytes(),
+            ),
+            Vr::Fd => bytes.extend_from_slice(
+                &part
+                    .parse::<f64>()
+                    .map_err(|_| malformed("FD"))?
+                    .to_le_bytes(),
+            ),
             // PN keeps its UTF-8 text; the charset layer encodes for the wire
             _ => bytes.extend_from_slice(part.as_bytes()),
         }
@@ -562,7 +675,12 @@ fn encode_numeric_or_text(vr: Vr, text: &str) -> Result<Vec<u8>> {
 
 /// A `Value` carrier needs a string-backed VR; binary VRs use InlineBinary.
 fn check_value_vr(vr: Vr, tag: &Tag) -> Result<()> {
-    if vr.is_string() || matches!(vr, Vr::Us | Vr::Sl | Vr::Ss | Vr::Ul | Vr::Fl | Vr::Fd | Vr::At) {
+    if vr.is_string()
+        || matches!(
+            vr,
+            Vr::Us | Vr::Sl | Vr::Ss | Vr::Ul | Vr::Sv | Vr::Uv | Vr::Fl | Vr::Fd | Vr::At
+        )
+    {
         return Ok(());
     }
     Err(JsonError::Malformed {
@@ -590,15 +708,23 @@ fn value_to_text(vr: Vr, value: &Value, tag: &Tag) -> Result<String> {
             Ok(text.clone())
         }
         Value::Number(number) => Ok(number.to_string()),
-        // PN groups (§1.1)
+        // PN groups (§1.1): missing leading groups keep their `=` placeholders
         Value::Object(object) if vr == Vr::Pn => {
-            let mut groups = Vec::new();
-            for key in ["Alphabetic", "Ideographic", "Phonetic"] {
-                if let Some(part) = object.get(key).and_then(Value::as_str) {
-                    groups.push(part.to_string());
-                }
+            let parts: Vec<String> = ["Alphabetic", "Ideographic", "Phonetic"]
+                .iter()
+                .map(|key| {
+                    object
+                        .get(*key)
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string()
+                })
+                .collect();
+            let mut joined = parts.join("=");
+            while joined.ends_with('=') {
+                joined.pop();
             }
-            Ok(groups.join("="))
+            Ok(joined)
         }
         Value::Object(_) => Err(JsonError::Malformed {
             tag: tag_key(tag),
@@ -654,7 +780,10 @@ mod tests {
         let value: Value = serde_json::from_str(&json).unwrap();
         let patient = &value["00100010"];
         assert_eq!(patient["vr"], "PN");
-        assert_eq!(patient["Value"][0]["Alphabetic"], "Doe^John", "PN uses the three-group form");
+        assert_eq!(
+            patient["Value"][0]["Alphabetic"], "Doe^John",
+            "PN uses the three-group form"
+        );
         assert_eq!(value["00100020"]["Value"][0], "PID-1");
         assert_eq!(value["00080060"]["vr"], "CS");
     }
@@ -672,7 +801,10 @@ mod tests {
         let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
         assert_eq!(back.get_str(Tag::PATIENT_NAME).unwrap(), "Doe^John");
         assert_eq!(back.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
-        assert_eq!(back.get_str(Tag::SOP_CLASS_UID).unwrap(), "1.2.840.10008.5.1.4.1.1.7");
+        assert_eq!(
+            back.get_str(Tag::SOP_CLASS_UID).unwrap(),
+            "1.2.840.10008.5.1.4.1.1.7"
+        );
         assert_eq!(back.get_str(Tag::INSTANCE_NUMBER).unwrap(), "42");
         assert_eq!(back.len(), ds.len(), "no element is lost");
     }
@@ -680,7 +812,11 @@ mod tests {
     #[test]
     fn person_name_groups_round_trip() {
         let mut ds = Dataset::new();
-        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Yamada^Tarou=山田^太郎=やまだ^たろう");
+        ds.insert_str(
+            Tag::PATIENT_NAME,
+            Vr::Pn,
+            "Yamada^Tarou=山田^太郎=やまだ^たろう",
+        );
         let json = dataset_to_json(&ds, &JsonOptions::default()).unwrap();
         let value: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["00100010"]["Value"][0]["Ideographic"], "山田^太郎");
@@ -709,7 +845,10 @@ mod tests {
         let json = dataset_to_json(&ds, &JsonOptions::default()).unwrap();
         let value: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["00100020"]["vr"], "LO");
-        assert!(value["00100020"].get("Value").is_none(), "empty elements carry no Value");
+        assert!(
+            value["00100020"].get("Value").is_none(),
+            "empty elements carry no Value"
+        );
 
         let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
         assert!(back.get_element(Tag::PATIENT_ID).unwrap().is_empty());
@@ -730,7 +869,10 @@ mod tests {
 
         let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
         let bytes = back.get_element(Tag::PIXEL_DATA).unwrap();
-        assert_eq!(bytes.value().as_buffer().unwrap().data().to_vec(), vec![1u8, 2, 3, 4]);
+        assert_eq!(
+            bytes.value().as_buffer().unwrap().data().to_vec(),
+            vec![1u8, 2, 3, 4]
+        );
     }
 
     #[test]
@@ -754,7 +896,11 @@ mod tests {
             512u16.to_le_bytes(),
             "a US element stays byte-backed after a round-trip"
         );
-        assert_eq!(element.value().as_buffer().unwrap().size(), 2, "one US value");
+        assert_eq!(
+            element.value().as_buffer().unwrap().size(),
+            2,
+            "one US value"
+        );
     }
 
     #[test]
@@ -774,7 +920,11 @@ mod tests {
         let back = json_to_dataset(lower, &JsonOptions::default()).unwrap();
         let element = back.get_element(Tag::SERIES_DESCRIPTION).unwrap();
         let bytes = element.value().as_buffer().unwrap();
-        assert_eq!(bytes.data().as_ref(), &[0x10, 0x00, 0x10, 0x00], "AT round-trips as 4-byte pairs");
+        assert_eq!(
+            bytes.data().as_ref(),
+            &[0x10, 0x00, 0x10, 0x00],
+            "AT round-trips as 4-byte pairs"
+        );
     }
 
     #[test]
@@ -787,12 +937,18 @@ mod tests {
         let json = dataset_to_json(&ds, &JsonOptions::default()).unwrap();
         let value: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["0040A730"]["vr"], "SQ");
-        assert_eq!(value["0040A730"]["Value"][0]["00080100"]["Value"][0], "113100");
+        assert_eq!(
+            value["0040A730"]["Value"][0]["00080100"]["Value"][0],
+            "113100"
+        );
 
         let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
         let sequence = back.get_sequence(Tag::CONTENT_SEQUENCE).unwrap();
         assert_eq!(sequence.items().len(), 1);
-        assert_eq!(sequence.items()[0].get_str(Tag::CODE_VALUE).unwrap(), "113100");
+        assert_eq!(
+            sequence.items()[0].get_str(Tag::CODE_VALUE).unwrap(),
+            "113100"
+        );
     }
 
     #[test]
@@ -801,7 +957,10 @@ mod tests {
         ds.insert_fragments(Tag::PIXEL_DATA, Vr::Ob);
         let error = dataset_to_json(&ds, &JsonOptions::default()).unwrap_err();
         assert!(matches!(error, JsonError::Fragments));
-        assert!(error.to_string().contains("transcode"), "the message suggests transcoding: {error}");
+        assert!(
+            error.to_string().contains("transcode"),
+            "the message suggests transcoding: {error}"
+        );
     }
 
     #[test]
@@ -810,29 +969,50 @@ mod tests {
         ds.insert_str(Tag::INSTANCE_NUMBER, Vr::Is, "42");
         ds.insert_str(Tag::SLICE_THICKNESS, Vr::Ds, "1.50");
 
-        let as_number = JsonOptions { numbers: NumberMode::AsNumber, ..Default::default() };
-        let value: Value = serde_json::from_str(&dataset_to_json(&ds, &as_number).unwrap()).unwrap();
+        let as_number = JsonOptions {
+            numbers: NumberMode::AsNumber,
+            ..Default::default()
+        };
+        let value: Value =
+            serde_json::from_str(&dataset_to_json(&ds, &as_number).unwrap()).unwrap();
         assert_eq!(value["00200013"]["Value"][0], 42, "numbers by request");
         assert_eq!(value["00180050"]["Value"][0], 1.5, "numbers by request");
 
-        let as_string = JsonOptions { numbers: NumberMode::AsString, ..Default::default() };
-        let value: Value = serde_json::from_str(&dataset_to_json(&ds, &as_string).unwrap()).unwrap();
+        let as_string = JsonOptions {
+            numbers: NumberMode::AsString,
+            ..Default::default()
+        };
+        let value: Value =
+            serde_json::from_str(&dataset_to_json(&ds, &as_string).unwrap()).unwrap();
         assert_eq!(value["00200013"]["Value"][0], "42");
-        assert_eq!(value["00180050"]["Value"][0], "1.50", "the string form is preserved");
+        assert_eq!(
+            value["00180050"]["Value"][0], "1.50",
+            "the string form is preserved"
+        );
 
         // the default keeps DS trailing zeros, but writes plain integers as numbers
-        let value: Value = serde_json::from_str(&dataset_to_json(&ds, &JsonOptions::default()).unwrap()).unwrap();
+        let value: Value =
+            serde_json::from_str(&dataset_to_json(&ds, &JsonOptions::default()).unwrap()).unwrap();
         assert_eq!(value["00200013"]["Value"][0], 42);
-        assert_eq!(value["00180050"]["Value"][0], "1.50", "1.50 would lose its trailing zero");
+        assert_eq!(
+            value["00180050"]["Value"][0], "1.50",
+            "1.50 would lose its trailing zero"
+        );
     }
 
     #[test]
     fn nan_and_infinity_stay_strings() {
         let mut ds = Dataset::new();
         ds.insert_str(Tag::SLICE_THICKNESS, Vr::Ds, "NaN");
-        let options = JsonOptions { numbers: NumberMode::AsNumber, ..Default::default() };
+        let options = JsonOptions {
+            numbers: NumberMode::AsNumber,
+            ..Default::default()
+        };
         let value: Value = serde_json::from_str(&dataset_to_json(&ds, &options).unwrap()).unwrap();
-        assert_eq!(value["00180050"]["Value"][0], "NaN", "NaN can never be a JSON number");
+        assert_eq!(
+            value["00180050"]["Value"][0], "NaN",
+            "NaN can never be a JSON number"
+        );
     }
 
     #[test]
@@ -854,7 +1034,11 @@ mod tests {
     fn reading_skips_unknown_keys() {
         let json = r#"{"PatientID":{"vr":"LO","Value":["PID-1"]},"00100020":{"vr":"LO","Value":["PID-1"]}}"#;
         let ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
-        assert_eq!(ds.len(), 1, "the keyword key is skipped, the tag key is read");
+        assert_eq!(
+            ds.len(),
+            1,
+            "the keyword key is skipped, the tag key is read"
+        );
     }
 
     #[test]
@@ -869,12 +1053,18 @@ mod tests {
     #[test]
     fn an_unknown_vr_is_a_hard_error() {
         let json = r#"{"00100020":{"vr":"ZZ","Value":["x"]}}"#;
-        assert!(matches!(json_to_dataset(json, &JsonOptions::default()), Err(JsonError::UnknownVr { .. })));
+        assert!(matches!(
+            json_to_dataset(json, &JsonOptions::default()),
+            Err(JsonError::UnknownVr { .. })
+        ));
     }
 
     #[test]
     fn indented_output_is_readable() {
-        let options = JsonOptions { format_indented: true, ..Default::default() };
+        let options = JsonOptions {
+            format_indented: true,
+            ..Default::default()
+        };
         let json = dataset_to_json(&sample(), &options).unwrap();
         assert!(json.contains('\n'), "pretty printing inserts newlines");
         assert!(json_to_dataset(&json, &JsonOptions::default()).is_ok());
@@ -898,7 +1088,10 @@ mod tests {
         let out = dataset_to_json(&ds, &JsonOptions::default()).unwrap();
         let value: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(value["7FE00010"]["BulkDataURI"], "http://example/x");
-        assert!(value["7FE00010"].get("InlineBinary").is_none(), "no bytes were materialized");
+        assert!(
+            value["7FE00010"].get("InlineBinary").is_none(),
+            "no bytes were materialized"
+        );
     }
 
     #[test]
@@ -939,19 +1132,29 @@ mod tests {
         // reading is tolerant by default (§1.3)
         assert!(json_to_dataset(json, &JsonOptions::default()).is_ok());
 
-        let strict = JsonOptions { validate_on_read: true, ..Default::default() };
+        let strict = JsonOptions {
+            validate_on_read: true,
+            ..Default::default()
+        };
         match json_to_dataset(json, &strict) {
             Err(JsonError::Dataset(error)) => {
                 assert!(matches!(error, radicom::Error::Validation(_)), "{error}");
-                assert!(error.to_string().contains("0008,0060"), "the failure names the tag: {error}");
+                assert!(
+                    error.to_string().contains("0008,0060"),
+                    "the failure names the tag: {error}"
+                );
             }
             other => panic!("expected a validation failure, got {other:?}"),
         }
 
         // a valid dataset passes, but an invalid value nested in an item fails
         assert!(json_to_dataset(r#"{"00080060":{"vr":"CS","Value":["CT"]}}"#, &strict).is_ok());
-        let nested = r#"{"0040A730":{"vr":"SQ","Value":[{"00080060":{"vr":"CS","Value":["lower case"]}}]}}"#;
-        assert!(json_to_dataset(nested, &strict).is_err(), "validation recurses into items");
+        let nested =
+            r#"{"0040A730":{"vr":"SQ","Value":[{"00080060":{"vr":"CS","Value":["lower case"]}}]}}"#;
+        assert!(
+            json_to_dataset(nested, &strict).is_err(),
+            "validation recurses into items"
+        );
     }
 
     #[test]
@@ -964,7 +1167,9 @@ mod tests {
 
         // and the bare form reads back as an empty sequence, not an SQ element
         let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
-        let sequence = back.get_sequence(Tag::CONTENT_SEQUENCE).expect("an empty SQ is a sequence");
+        let sequence = back
+            .get_sequence(Tag::CONTENT_SEQUENCE)
+            .expect("an empty SQ is a sequence");
         assert!(sequence.items().is_empty());
     }
 
@@ -974,11 +1179,17 @@ mod tests {
         let mut ds = Dataset::new();
         ds.insert_str(Tag::SPECIFIC_CHARACTER_SET, Vr::Cs, "\\ISO 2022 IR 58");
         let json = dataset_to_json(&ds, &JsonOptions::default()).unwrap();
-        assert_eq!(json, r#"{"00080005":{"Value":[null,"ISO 2022 IR 58"],"vr":"CS"}}"#);
+        assert_eq!(
+            json,
+            r#"{"00080005":{"Value":[null,"ISO 2022 IR 58"],"vr":"CS"}}"#
+        );
 
         // reading the null back restores the empty first component
         let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
-        assert_eq!(back.get_str(Tag::SPECIFIC_CHARACTER_SET).unwrap(), "\\ISO 2022 IR 58");
+        assert_eq!(
+            back.get_str(Tag::SPECIFIC_CHARACTER_SET).unwrap(),
+            "\\ISO 2022 IR 58"
+        );
     }
 
     #[test]
@@ -993,10 +1204,19 @@ mod tests {
             r#"{"00200013":{"Value":["0001"],"vr":"IS"}}"#
         );
 
-        let as_number = JsonOptions { numbers: NumberMode::AsNumber, ..Default::default() };
-        assert_eq!(dataset_to_json(&ds, &as_number).unwrap(), r#"{"00200013":{"Value":[1],"vr":"IS"}}"#);
+        let as_number = JsonOptions {
+            numbers: NumberMode::AsNumber,
+            ..Default::default()
+        };
+        assert_eq!(
+            dataset_to_json(&ds, &as_number).unwrap(),
+            r#"{"00200013":{"Value":[1],"vr":"IS"}}"#
+        );
 
-        let as_string = JsonOptions { numbers: NumberMode::AsString, ..Default::default() };
+        let as_string = JsonOptions {
+            numbers: NumberMode::AsString,
+            ..Default::default()
+        };
         assert_eq!(
             dataset_to_json(&ds, &as_string).unwrap(),
             r#"{"00200013":{"Value":["0001"],"vr":"IS"}}"#
@@ -1024,11 +1244,9 @@ mod tests {
     fn empty_dataset_collection_is_an_empty_array() {
         let json = datasets_to_json(&[], &JsonOptions::default()).unwrap();
         assert_eq!(json, "[]");
-        assert!(
-            json_to_datasets(&json, &JsonOptions::default())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(json_to_datasets(&json, &JsonOptions::default())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1080,6 +1298,53 @@ mod tests {
             json_to_datasets(invalid, &options),
             Err(JsonError::Dataset(_))
         ));
+    }
+
+    #[test]
+    fn imported_person_name_survives_a_dicom_file_round_trip() {
+        // review #9: PN must be a normal string element so the writer does not
+        // emit an empty value for a byte-backed element.
+        let json = r#"{"00100010":{"vr":"PN","Value":[{"Alphabetic":"Doe^Jane"}]}}"#;
+        let mut ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
+        ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        let bytes = radicom::io::file::DicomFile::from_dataset(ds)
+            .to_bytes(&radicom::io::writer::WriteOptions::default())
+            .unwrap();
+        let back = radicom::io::file::DicomFile::from_bytes(
+            &bytes,
+            &radicom::io::file::ReadOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(back.dataset.get_str(Tag::PATIENT_NAME).unwrap(), "Doe^Jane");
+    }
+
+    #[test]
+    fn person_name_multi_value_and_missing_groups_keep_their_shape() {
+        // multi-value export splits on '\'
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^Jane\\Roe^John");
+        let value = dataset_to_value(&ds, &JsonOptions::default()).unwrap();
+        let names = value["00100010"]["Value"].as_array().unwrap();
+        assert_eq!(names.len(), 2, "one object per PN value");
+        assert_eq!(names[1]["Alphabetic"], "Roe^John");
+
+        // a missing Alphabetic group keeps its leading '=' placeholder
+        let json = r#"{"00100010":{"vr":"PN","Value":[{"Ideographic":"山田"}]}}"#;
+        let ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
+        assert_eq!(ds.get_str(Tag::PATIENT_NAME).unwrap(), "=山田");
+    }
+
+    #[test]
+    fn signed_and_unsigned_64bit_values_round_trip_exactly() {
+        // review #12: SV/UV must not degrade to null or lose 64-bit precision.
+        let json = r#"{"00720010":{"vr":"SV","Value":[-1]},"00720012":{"vr":"UV","Value":[18446744073709551615]}}"#;
+        let ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
+        let out = dataset_to_value(&ds, &JsonOptions::default()).unwrap();
+        assert_eq!(out["00720010"]["Value"][0], serde_json::json!(-1));
+        assert_eq!(
+            out["00720012"]["Value"][0],
+            serde_json::json!(18446744073709551615u64)
+        );
     }
 
     #[test]

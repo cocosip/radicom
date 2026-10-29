@@ -83,7 +83,8 @@ pub fn bilinear_color24(
             let x1 = ox1 * 3;
             let x2 = ox2 * 3;
             for c in 0..3 {
-                let v = dy2 * (dx2 * input[row1 + x1 + c] as f64 + dx1 * input[row1 + x2 + c] as f64)
+                let v = dy2
+                    * (dx2 * input[row1 + x1 + c] as f64 + dx1 * input[row1 + x2 + c] as f64)
                     + dy1 * (dx2 * input[row2 + x1 + c] as f64 + dx1 * input[row2 + x2 + c] as f64);
                 output[(output_width * y + x) * 3 + c] = v as u8;
             }
@@ -129,7 +130,8 @@ pub fn bilinear_bgra32(
             let x2 = ox2 * 4;
             let base = (output_width * y + x) * 4;
             for c in 0..3 {
-                let v = dy2 * (dx2 * input[row1 + x1 + c] as f64 + dx1 * input[row1 + x2 + c] as f64)
+                let v = dy2
+                    * (dx2 * input[row1 + x1 + c] as f64 + dx1 * input[row1 + x2 + c] as f64)
                     + dy1 * (dx2 * input[row2 + x1 + c] as f64 + dx1 * input[row2 + x2 + c] as f64);
                 output[base + c] = v as u8;
             }
@@ -226,7 +228,11 @@ mod tests {
         assert_eq!(out[6], 255, "bottom-left corner preserved");
         assert_eq!(out[8], 0, "bottom-right corner preserved");
         // the exact centre of a 0/255 checkerboard is a 50/50 mix
-        assert!((127..=128).contains(&out[4]), "centre is mid-grey, got {}", out[4]);
+        assert!(
+            (127..=128).contains(&out[4]),
+            "centre is mid-grey, got {}",
+            out[4]
+        );
     }
 
     #[test]

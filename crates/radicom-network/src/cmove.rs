@@ -86,9 +86,9 @@ impl CMoveRequest {
         destination_ae: impl Into<String>,
         message_id: u16,
     ) -> Result<Self> {
-        let sop_class_uid = level
-            .move_sop_class(root)
-            .ok_or(NetworkError::protocol("C-MOVE has no worklist information model"))?;
+        let sop_class_uid = level.move_sop_class(root).ok_or(NetworkError::protocol(
+            "C-MOVE has no worklist information model",
+        ))?;
         let mut identifier = Dataset::new();
         identifier.insert_str(Tag::QUERY_RETRIEVE_LEVEL, Vr::Cs, level.as_str());
         Ok(CMoveRequest {
@@ -101,7 +101,11 @@ impl CMoveRequest {
     }
 
     /// A study-level retrieve under the Study Root model.
-    pub fn study(study_instance_uid: impl Into<String>, destination_ae: impl Into<String>, message_id: u16) -> Self {
+    pub fn study(
+        study_instance_uid: impl Into<String>,
+        destination_ae: impl Into<String>,
+        message_id: u16,
+    ) -> Self {
         Self::level_with_keys(
             QueryRetrieveLevel::Study,
             destination_ae,
@@ -158,14 +162,17 @@ impl CMoveRequest {
         let mut request = CMoveRequest::new(level, QueryRoot::Study, destination_ae, message_id)
             .expect("Q/R levels have a retrieve model");
         for (group, element, vr, value) in keys {
-            request.identifier.insert_str(Tag::new(*group, *element), *vr, value.clone());
+            request
+                .identifier
+                .insert_str(Tag::new(*group, *element), *vr, value.clone());
         }
         request
     }
 
     /// Adds a matching key.
     pub fn with_key(mut self, group: u16, element: u16, vr: Vr, value: impl Into<String>) -> Self {
-        self.identifier.insert_str(Tag::new(group, element), vr, value);
+        self.identifier
+            .insert_str(Tag::new(group, element), vr, value);
         self
     }
 
@@ -248,7 +255,8 @@ impl CMoveResponse {
 
     /// The command for this response; a C-MOVE response never carries a dataset.
     pub fn to_command(&self) -> Command {
-        let mut command = Command::request(CommandField::CMoveRsp, self.message_id_being_responded_to);
+        let mut command =
+            Command::request(CommandField::CMoveRsp, self.message_id_being_responded_to);
         command.message_id_being_responded_to = Some(self.message_id_being_responded_to);
         command.affected_sop_class_uid = Some(self.affected_sop_class_uid.clone());
         command.status = Some(self.status);
@@ -307,16 +315,28 @@ pub async fn store_to_destination(
             .map(|s| s.trim().to_string())
             .ok_or(NetworkError::protocol("instance has no SOP class UID"))?;
         let syntax = file.dataset.transfer_syntax().uid().to_string();
-        contexts.add(sop_class, crate::services::c_store_transfer_syntaxes(&syntax, &[], false))?;
+        contexts.add(
+            sop_class,
+            crate::services::c_store_transfer_syntaxes(&syntax, &[], false),
+        )?;
     }
 
-    let mut association = Association::open(destination, calling_ae, called_ae, contexts.to_wire(), options).await?;
+    let mut association = Association::open(
+        destination,
+        calling_ae,
+        called_ae,
+        contexts.to_wire(),
+        options,
+    )
+    .await?;
     let (originator_ae, originator_id) = match originator {
         Some((ae, id)) => (Some(ae), Some(id)),
         None => (None, None),
     };
     for file in files {
-        let response = association.send_c_store_with_originator(file, originator_ae, originator_id).await?;
+        let response = association
+            .send_c_store_with_originator(file, originator_ae, originator_id)
+            .await?;
         summary.record(response.state());
     }
     // the deliveries above are the result; a peer that fumbles the release
@@ -334,7 +354,9 @@ mod tests {
         let mut dataset = Dataset::new();
         dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
         dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, instance_uid);
-        dataset.set_transfer_syntax(radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        dataset.set_transfer_syntax(
+            radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
         DicomFile::from_dataset(dataset)
     }
 
@@ -366,7 +388,10 @@ mod tests {
         let request = CMoveRequest::study("1.2.3", "ARCHIVE", 7);
         assert_eq!(request.level(), Some(QueryRetrieveLevel::Study));
         assert_eq!(request.sop_class_uid, sop_class::STUDY_ROOT_QR_MOVE);
-        assert_eq!(request.identifier.get_str(Tag::STUDY_INSTANCE_UID).unwrap(), "1.2.3");
+        assert_eq!(
+            request.identifier.get_str(Tag::STUDY_INSTANCE_UID).unwrap(),
+            "1.2.3"
+        );
 
         let command = request.to_command();
         assert_eq!(command.field, CommandField::CMoveRq);
@@ -378,22 +403,35 @@ mod tests {
     fn series_and_image_retrieves_add_their_keys() {
         let series = CMoveRequest::series("1.1", "1.2", "DEST", 1);
         assert_eq!(series.level(), Some(QueryRetrieveLevel::Series));
-        assert_eq!(series.identifier.get_str(Tag::SERIES_INSTANCE_UID).unwrap(), "1.2");
+        assert_eq!(
+            series.identifier.get_str(Tag::SERIES_INSTANCE_UID).unwrap(),
+            "1.2"
+        );
 
         let image = CMoveRequest::image("1.1", "1.2", "1.3", "DEST", 2);
         assert_eq!(image.level(), Some(QueryRetrieveLevel::Image));
-        assert_eq!(image.identifier.get_str(Tag::SOP_INSTANCE_UID).unwrap(), "1.3");
+        assert_eq!(
+            image.identifier.get_str(Tag::SOP_INSTANCE_UID).unwrap(),
+            "1.3"
+        );
         assert_eq!(image.message_id, 2);
     }
 
     #[test]
     fn pending_response_reports_progress() {
         let request = CMoveRequest::study("1.2.3", "ARCHIVE", 4);
-        let summary = SubOperationSummary { completed: 1, failed: 0, warning: 0 };
+        let summary = SubOperationSummary {
+            completed: 1,
+            failed: 0,
+            warning: 0,
+        };
         let response = CMoveResponse::pending(&request, 2, summary);
         assert!(response.is_pending());
         assert_eq!(response.remaining, 2);
-        assert_eq!(response.affected_sop_class_uid, sop_class::STUDY_ROOT_QR_MOVE);
+        assert_eq!(
+            response.affected_sop_class_uid,
+            sop_class::STUDY_ROOT_QR_MOVE
+        );
         let command = response.to_command();
         assert!(command.no_dataset);
         assert_eq!(command.remaining_suboperations, Some(2));
@@ -403,17 +441,48 @@ mod tests {
     #[test]
     fn terminal_status_follows_the_counters() {
         let request = CMoveRequest::study("1.2.3", "ARCHIVE", 4);
-        let ok = CMoveResponse::completed(&request, SubOperationSummary { completed: 3, failed: 0, warning: 0 });
+        let ok = CMoveResponse::completed(
+            &request,
+            SubOperationSummary {
+                completed: 3,
+                failed: 0,
+                warning: 0,
+            },
+        );
         assert_eq!(ok.status, status::SUCCESS);
 
-        let warned = CMoveResponse::completed(&request, SubOperationSummary { completed: 2, failed: 0, warning: 1 });
+        let warned = CMoveResponse::completed(
+            &request,
+            SubOperationSummary {
+                completed: 2,
+                failed: 0,
+                warning: 1,
+            },
+        );
         assert_eq!(warned.status, status::SUBOPERATIONS_COMPLETED_WITH_WARNINGS);
         assert_eq!(warned.state(), StatusState::Warning);
 
-        let partial = CMoveResponse::completed(&request, SubOperationSummary { completed: 1, failed: 1, warning: 0 });
-        assert_eq!(partial.status, status::SUBOPERATIONS_COMPLETED_WITH_WARNINGS);
+        let partial = CMoveResponse::completed(
+            &request,
+            SubOperationSummary {
+                completed: 1,
+                failed: 1,
+                warning: 0,
+            },
+        );
+        assert_eq!(
+            partial.status,
+            status::SUBOPERATIONS_COMPLETED_WITH_WARNINGS
+        );
 
-        let nothing = CMoveResponse::completed(&request, SubOperationSummary { completed: 0, failed: 2, warning: 0 });
+        let nothing = CMoveResponse::completed(
+            &request,
+            SubOperationSummary {
+                completed: 0,
+                failed: 2,
+                warning: 0,
+            },
+        );
         assert_eq!(nothing.status, status::UNABLE_TO_PERFORM_SUBOPERATIONS);
         assert_eq!(nothing.state(), StatusState::Failure);
     }
@@ -421,7 +490,14 @@ mod tests {
     #[test]
     fn responses_round_trip_through_a_command() {
         let request = CMoveRequest::study("1.2.3", "ARCHIVE", 9);
-        let response = CMoveResponse::completed(&request, SubOperationSummary { completed: 2, failed: 1, warning: 0 });
+        let response = CMoveResponse::completed(
+            &request,
+            SubOperationSummary {
+                completed: 2,
+                failed: 1,
+                warning: 0,
+            },
+        );
         let back = CMoveResponse::from_command(&response.to_command()).unwrap();
         assert_eq!(back, response);
     }
@@ -429,7 +505,8 @@ mod tests {
     #[test]
     fn failure_truncates_the_comment() {
         let request = CMoveRequest::study("1.2.3", "ARCHIVE", 1);
-        let response = CMoveResponse::failure(&request, status::MOVE_DESTINATION_UNKNOWN, "x".repeat(500));
+        let response =
+            CMoveResponse::failure(&request, status::MOVE_DESTINATION_UNKNOWN, "x".repeat(500));
         assert_eq!(response.error_comment.as_ref().unwrap().len(), 64);
         assert_eq!(response.state(), StatusState::Failure);
     }
@@ -480,7 +557,10 @@ mod tests {
         }
         assert_eq!(summary.completed, 3);
         assert_eq!(summary.failed, 0);
-        assert_eq!(summary.final_status(), status::SUBOPERATIONS_COMPLETED_WITH_WARNINGS);
+        assert_eq!(
+            summary.final_status(),
+            status::SUBOPERATIONS_COMPLETED_WITH_WARNINGS
+        );
     }
 
     #[tokio::test]
@@ -502,6 +582,9 @@ mod tests {
     #[test]
     fn sample_file_helper_is_usable() {
         let file = sample_file("1.2.3.4");
-        assert_eq!(file.dataset.get_str(Tag::SOP_INSTANCE_UID).unwrap(), "1.2.3.4");
+        assert_eq!(
+            file.dataset.get_str(Tag::SOP_INSTANCE_UID).unwrap(),
+            "1.2.3.4"
+        );
     }
 }

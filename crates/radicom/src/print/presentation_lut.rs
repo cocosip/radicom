@@ -35,7 +35,9 @@ impl PresentationLutShape {
             "IDENTITY" => Ok(PresentationLutShape::Identity),
             "LIN OD" => Ok(PresentationLutShape::LinOd),
             "INVERSE" => Ok(PresentationLutShape::Inverse),
-            other => Err(data_error(format!("unknown Presentation LUT Shape \"{other}\""))),
+            other => Err(data_error(format!(
+                "unknown Presentation LUT Shape \"{other}\""
+            ))),
         }
     }
 
@@ -71,23 +73,34 @@ impl PresentationLutTable {
             .ok_or_else(|| data_error("Presentation LUT Descriptor is not byte-backed"))?
             .data();
         if desc.len() < 6 {
-            return Err(data_error("Presentation LUT Descriptor is shorter than 3 US values"));
+            return Err(data_error(
+                "Presentation LUT Descriptor is shorter than 3 US values",
+            ));
         }
         let raw_entries = match descriptor.vr() {
             Vr::Ss => i16::from_le_bytes([desc[0], desc[1]]) as i32,
             _ => u16::from_le_bytes([desc[0], desc[1]]) as i32,
         };
         // fo-dicom treats a nonsensical negative entry count as its absolute value.
-        let count = if raw_entries == 0 { 65536usize } else { raw_entries.unsigned_abs() as usize };
+        let count = if raw_entries == 0 {
+            65536usize
+        } else {
+            raw_entries.unsigned_abs() as usize
+        };
         let first_mapped = i16::from_le_bytes([desc[2], desc[3]]) as i32;
         let bits = u16::from_le_bytes([desc[4], desc[5]]);
         if !matches!(bits, 8 | 16) {
-            return Err(data_error(format!("Presentation LUT Descriptor bit depth {bits} is not 8 or 16")));
+            return Err(data_error(format!(
+                "Presentation LUT Descriptor bit depth {bits} is not 8 or 16"
+            )));
         }
 
         let data = element_bytes(item, Tag::LUT_DATA)
             .ok_or_else(|| data_error("Presentation LUT Sequence item has no LUT Data"))?;
-        let data_vr = item.get_element(Tag::LUT_DATA).map(|e| e.vr()).unwrap_or(Vr::Ow);
+        let data_vr = item
+            .get_element(Tag::LUT_DATA)
+            .map(|e| e.vr())
+            .unwrap_or(Vr::Ow);
 
         let mut entries = Vec::with_capacity(count);
         if data.len() == count {
@@ -109,7 +122,11 @@ impl PresentationLutTable {
                 });
             }
         }
-        Ok(PresentationLutTable { first_mapped, bits, entries })
+        Ok(PresentationLutTable {
+            first_mapped,
+            bits,
+            entries,
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -194,13 +211,18 @@ impl PresentationLut {
 
 fn element_bytes(dataset: &Dataset, tag: Tag) -> Option<Vec<u8>> {
     match dataset.item(&tag)? {
-        DicomItem::Element(element) => element.value().as_buffer().map(|buffer| buffer.data().to_vec()),
+        DicomItem::Element(element) => element
+            .value()
+            .as_buffer()
+            .map(|buffer| buffer.data().to_vec()),
         _ => None,
     }
 }
 
 fn data_error(message: impl Into<String>) -> Error {
-    Error::Data(DataError::Other { message: message.into() })
+    Error::Data(DataError::Other {
+        message: message.into(),
+    })
 }
 
 #[cfg(test)]
@@ -248,7 +270,8 @@ mod tests {
         )));
 
         let mut film = Dataset::new();
-        film.insert_sequence(Tag::PRESENTATION_LUT_SEQUENCE).push(item);
+        film.insert_sequence(Tag::PRESENTATION_LUT_SEQUENCE)
+            .push(item);
         let lut = FilmBox::from_dataset(film).presentation_lut().unwrap();
         let table = lut.table().expect("table parsed");
         assert_eq!(table.len(), 4);
@@ -275,7 +298,8 @@ mod tests {
             Arc::new(MemoryBuffer::from(vec![0u8, 0])),
         )));
         let mut film = Dataset::new();
-        film.insert_sequence(Tag::PRESENTATION_LUT_SEQUENCE).push(item);
+        film.insert_sequence(Tag::PRESENTATION_LUT_SEQUENCE)
+            .push(item);
         assert!(FilmBox::from_dataset(film).presentation_lut().is_err());
     }
 
@@ -296,7 +320,8 @@ mod tests {
         )));
 
         let mut film = Dataset::new();
-        film.insert_sequence(Tag::PRESENTATION_LUT_SEQUENCE).push(item);
+        film.insert_sequence(Tag::PRESENTATION_LUT_SEQUENCE)
+            .push(item);
         assert!(FilmBox::from_dataset(film).presentation_lut().is_err());
     }
 }

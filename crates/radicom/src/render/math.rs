@@ -34,7 +34,11 @@ pub struct Point3 {
 }
 
 impl Point3 {
-    pub const ORIGIN: Point3 = Point3 { x: 0.0, y: 0.0, z: 0.0 };
+    pub const ORIGIN: Point3 = Point3 {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
 
     pub fn new(x: f64, y: f64, z: f64) -> Self {
         Point3 { x, y, z }
@@ -51,10 +55,26 @@ pub struct Vector3 {
 }
 
 impl Vector3 {
-    pub const ZERO: Vector3 = Vector3 { x: 0.0, y: 0.0, z: 0.0 };
-    pub const AXIS_X: Vector3 = Vector3 { x: 1.0, y: 0.0, z: 0.0 };
-    pub const AXIS_Y: Vector3 = Vector3 { x: 0.0, y: 1.0, z: 0.0 };
-    pub const AXIS_Z: Vector3 = Vector3 { x: 0.0, y: 0.0, z: 1.0 };
+    pub const ZERO: Vector3 = Vector3 {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
+    pub const AXIS_X: Vector3 = Vector3 {
+        x: 1.0,
+        y: 0.0,
+        z: 0.0,
+    };
+    pub const AXIS_Y: Vector3 = Vector3 {
+        x: 0.0,
+        y: 1.0,
+        z: 0.0,
+    };
+    pub const AXIS_Z: Vector3 = Vector3 {
+        x: 0.0,
+        y: 0.0,
+        z: 1.0,
+    };
 
     pub fn new(x: f64, y: f64, z: f64) -> Self {
         Vector3 { x, y, z }
@@ -109,7 +129,12 @@ impl Rect {
     /// Creates a rectangle, clamping negative sizes to zero (fo-dicom rejects
     /// them; clamping is the safe choice at a trust boundary).
     pub fn new(x: f64, y: f64, width: f64, height: f64) -> Self {
-        Rect { x, y, width: width.max(0.0), height: height.max(0.0) }
+        Rect {
+            x,
+            y,
+            width: width.max(0.0),
+            height: height.max(0.0),
+        }
     }
 
     /// Grows the rectangle by `(dx, dy)` on each side (fo-dicom `Inflate`).
@@ -363,7 +388,11 @@ pub struct MovingAverage {
 impl MovingAverage {
     pub fn new(window: usize) -> Self {
         let window = window.max(1);
-        MovingAverage { window, values: vec![0; window], count: 0 }
+        MovingAverage {
+            window,
+            values: vec![0; window],
+            count: 0,
+        }
     }
 
     pub fn count(&self) -> usize {
@@ -392,7 +421,11 @@ pub struct Matrix {
 impl Matrix {
     /// A zero-filled `rows × cols` matrix.
     pub fn zero(rows: usize, cols: usize) -> Self {
-        Matrix { rows, cols, data: vec![0; rows * cols] }
+        Matrix {
+            rows,
+            cols,
+            data: vec![0; rows * cols],
+        }
     }
 
     /// The `n × n` identity matrix.
@@ -483,7 +516,16 @@ impl std::ops::Add for &Matrix {
         if self.rows != rhs.rows || self.cols != rhs.cols {
             return None;
         }
-        Some(Matrix { rows: self.rows, cols: self.cols, data: self.data.iter().zip(&rhs.data).map(|(a, b)| a + b).collect() })
+        Some(Matrix {
+            rows: self.rows,
+            cols: self.cols,
+            data: self
+                .data
+                .iter()
+                .zip(&rhs.data)
+                .map(|(a, b)| a + b)
+                .collect(),
+        })
     }
 }
 
@@ -541,7 +583,10 @@ mod tests {
     fn rect_inflate_grows_symmetrically() {
         let mut rect = Rect::new(10.0, 10.0, 20.0, 20.0);
         rect.inflate(5.0, 5.0);
-        assert_eq!((rect.x, rect.y, rect.width, rect.height), (5.0, 5.0, 30.0, 30.0));
+        assert_eq!(
+            (rect.x, rect.y, rect.width, rect.height),
+            (5.0, 5.0, 30.0, 30.0)
+        );
         // shrinking past zero clamps width/height to zero
         let mut r = Rect::new(0.0, 0.0, 4.0, 4.0);
         r.inflate(-100.0, -100.0);
@@ -574,7 +619,11 @@ mod tests {
         h.add(2);
         h.add(7);
         h.apply_window(0, 5);
-        assert_eq!(h.window_total(), 2, "only the two values in [0,5] are counted");
+        assert_eq!(
+            h.window_total(),
+            2,
+            "only the two values in [0,5] are counted"
+        );
         assert_eq!((h.window_start(), h.window_end()), (0, 5));
     }
 
@@ -613,9 +662,15 @@ mod tests {
     fn matrix_multiply_add_and_transpose() {
         let a = Matrix::from_rows(2, 2, vec![1, 2, 3, 4]).unwrap();
         let b = Matrix::identity(2);
-        assert!((&a * &b).unwrap() == a, "multiplying by identity is a no-op");
+        assert!(
+            (&a * &b).unwrap() == a,
+            "multiplying by identity is a no-op"
+        );
         assert!((&a + &b).unwrap() == Matrix::from_rows(2, 2, vec![2, 2, 3, 5]).unwrap());
-        assert_eq!(a.transpose(), Matrix::from_rows(2, 2, vec![1, 3, 2, 4]).unwrap());
+        assert_eq!(
+            a.transpose(),
+            Matrix::from_rows(2, 2, vec![1, 3, 2, 4]).unwrap()
+        );
         // dimension mismatch yields None instead of panicking
         assert!((&a + &Matrix::zero(3, 3)).is_none());
         assert!((&a * &Matrix::zero(3, 3)).is_none());
@@ -623,8 +678,17 @@ mod tests {
 
     #[test]
     fn matrix_determinant() {
-        assert_eq!(Matrix::from_rows(2, 2, vec![1, 2, 3, 4]).unwrap().determinant(), Some(-2));
+        assert_eq!(
+            Matrix::from_rows(2, 2, vec![1, 2, 3, 4])
+                .unwrap()
+                .determinant(),
+            Some(-2)
+        );
         assert_eq!(Matrix::identity(3).determinant(), Some(1));
-        assert_eq!(Matrix::zero(3, 2).determinant(), None, "non-square has no determinant");
+        assert_eq!(
+            Matrix::zero(3, 2).determinant(),
+            None,
+            "non-square has no determinant"
+        );
     }
 }

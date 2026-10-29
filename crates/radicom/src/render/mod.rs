@@ -33,21 +33,24 @@ pub mod pixel_converter;
 pub mod reconstruction;
 pub mod spatial;
 
-pub use color_table::ColorTable;
 pub use bit_depth::BitDepth;
-pub use pixel_converter::PixelDataConverter;
+pub use color_table::ColorTable;
 pub use geometry::{
-    can_draw_localizer, intersection_localizer, projection_localizer, FrameGeometry, FrameGeometryType,
-    FrameOrientation,
+    can_draw_localizer, intersection_localizer, projection_localizer, FrameGeometry,
+    FrameGeometryType, FrameOrientation,
 };
 pub use icon::IconImage;
 pub use interpolation::{bilinear_bgra32, bilinear_color24, bilinear_grayscale, nearest_grayscale};
-pub use math::{BitList, Histogram, Interval, Matrix, MovingAverage, Point2, Point3, Rect, Vector3};
+pub use math::{
+    BitList, Histogram, Interval, Matrix, MovingAverage, Point2, Point3, Rect, Vector3,
+};
+pub use pixel_converter::PixelDataConverter;
 pub use reconstruction::{DicomGenerator, ImageData, Slice, Stack, StackType, VolumeData};
 pub use spatial::SpatialTransform;
 
 /// Default overlay colour: magenta `0xFF_FF00FF` (docs §1.2).
-pub const DEFAULT_OVERLAY_COLOR: crate::pixel::Color32 = crate::pixel::Color32::new(0xFF, 0x00, 0xFF);
+pub const DEFAULT_OVERLAY_COLOR: crate::pixel::Color32 =
+    crate::pixel::Color32::new(0xFF, 0x00, 0xFF);
 
 /// A parsed LUT table shared by the VOI (`(0028,3010)`) and modality
 /// (`(0028,3000)`) LUT sequences (PS3.3 C.11.2.1.1 / C.11.2.1.1): a descriptor
@@ -74,7 +77,11 @@ impl LutTable {
         };
         // fo-dicom `VOISequenceLUT.GetLUTDescriptor`: a negative entry count
         // "makes no sense" but is accepted as its absolute value
-        let count = if raw_entries == 0 { 65536usize } else { raw_entries.unsigned_abs() as usize };
+        let count = if raw_entries == 0 {
+            65536usize
+        } else {
+            raw_entries.unsigned_abs() as usize
+        };
         // first mapped pixel value is SS (signed) per PS3.3
         let first_mapped = u16::from_le_bytes([desc[2], desc[3]]) as i16 as i32;
         let bits = u16::from_le_bytes([desc[4], desc[5]]);
@@ -82,7 +89,10 @@ impl LutTable {
             return None;
         }
         let data = element_bytes(item, Tag::LUT_DATA)?;
-        let data_vr = item.get_element(Tag::LUT_DATA).map(|e| e.vr()).unwrap_or(Vr::Ow);
+        let data_vr = item
+            .get_element(Tag::LUT_DATA)
+            .map(|e| e.vr())
+            .unwrap_or(Vr::Ow);
 
         let mut out = Vec::with_capacity(count);
         if data.len() == count {
@@ -104,7 +114,10 @@ impl LutTable {
                 out.push(v);
             }
         }
-        Some(LutTable { first_mapped, entries: out })
+        Some(LutTable {
+            first_mapped,
+            entries: out,
+        })
     }
 
     /// The entry for `value`, clamped to the table's ends; `None` when empty.
@@ -252,8 +265,14 @@ impl GrayscaleRenderOptions {
         voi_lut: Option<Arc<VoiLut>>,
         modality_lut: Option<Arc<ModalityLut>>,
     ) -> Result<Self, Error> {
-        let rescale_intercept = dataset.try_get::<String>(Tag::RESCALE_INTERCEPT).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
-        let rescale_slope = dataset.try_get::<String>(Tag::RESCALE_SLOPE).and_then(|s| s.trim().parse().ok()).unwrap_or(1.0);
+        let rescale_intercept = dataset
+            .try_get::<String>(Tag::RESCALE_INTERCEPT)
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0.0);
+        let rescale_slope = dataset
+            .try_get::<String>(Tag::RESCALE_SLOPE)
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(1.0);
 
         // A VOI LUT Sequence takes precedence over WindowCenter/Width (docs §4):
         // when its first item is usable, no window is required.
@@ -416,7 +435,7 @@ impl GrayscaleRenderOptions {
     /// docs §4): a window over `[0, 2^bitsStored-1]` (unsigned) or
     /// `[-2^(bitsStored-1), 2^(bitsStored-1)-1]` (signed).
     pub fn from_bit_range(dataset: &Dataset) -> Result<Self, Error> {
-                let pixel = PixelDataRef::from_dataset(dataset)?;
+        let pixel = PixelDataRef::from_dataset(dataset)?;
         let bits = match pixel.bits_stored() {
             0 => pixel.bits_allocated()?,
             b => b,
@@ -427,7 +446,8 @@ impl GrayscaleRenderOptions {
         let signed = pixel.pixel_representation() != 0;
         let depth = BitDepth::new(pixel.bits_allocated()?, bits, pixel.high_bit(), signed);
         let (min, max) = (depth.min_value() as f64, depth.max_value() as f64);
-        let mut base = GrayscaleRenderOptions::from_window_level((min + max) / 2.0, (max - min).max(1.0));
+        let mut base =
+            GrayscaleRenderOptions::from_window_level((min + max) / 2.0, (max - min).max(1.0));
         base.apply_dataset_modality_and_invert(dataset);
         Ok(base)
     }
@@ -436,7 +456,10 @@ impl GrayscaleRenderOptions {
     /// flattens enhanced-multiframe functional groups for `frame` (DS-06) and
     /// reads the `(0028,9132)` FrameVOILUTSequence item's WindowCenter/Width,
     /// falling back to top-level values in the flattened set. Errors when absent.
-    pub fn from_functional_window_level(dataset: &Dataset, frame: u32) -> Result<(f64, f64), Error> {
+    pub fn from_functional_window_level(
+        dataset: &Dataset,
+        frame: u32,
+    ) -> Result<(f64, f64), Error> {
         let fg = dataset.functional_groups(frame)?;
         // (0028,9132) FrameVOILUTSequence item carries the per-frame window
         if let Some(seq) = fg.try_get_sequence(Tag::FRAME_VOILUT_SEQUENCE) {
@@ -483,7 +506,8 @@ impl GrayscaleRenderOptions {
     }
 
     /// Options from an explicit window (REND-04 `from_window_level`).
-    pub fn from_window_level(center: f64, width: f64) -> Self {        GrayscaleRenderOptions {
+    pub fn from_window_level(center: f64, width: f64) -> Self {
+        GrayscaleRenderOptions {
             rescale_slope: 1.0,
             rescale_intercept: 0.0,
             voi_lut_function: VoiFunction::Linear,
@@ -537,7 +561,11 @@ impl GrayscaleRenderOptions {
             }
             VoiFunction::LinearExact => linear_exact(value, self.window_center, self.window_width),
             VoiFunction::Sigmoid => {
-                let w = if self.window_width == 0.0 { 1.0 } else { self.window_width };
+                let w = if self.window_width == 0.0 {
+                    1.0
+                } else {
+                    self.window_width
+                };
                 255.0 / (1.0 + (-4.0 * ((value - self.window_center) / w)).exp())
             }
         };
@@ -650,14 +678,21 @@ fn first_number(dataset: &Dataset, tag: Tag) -> Option<f64> {
 /// dataset is borrowed, not cloned.
 /// read-only pixel accessor in `pixel/` would remove that clone, but it is out
 /// of this module's scope (§3.4 ceiling, documented at `render_grayscale_with_options`).
-fn frame_sample_buffer(dataset: &Dataset, frame: u32) -> Result<(crate::model::buffer::SharedBuffer, BitDepth, usize, usize), Error> {
-        let pixel = PixelDataRef::from_dataset(dataset)?;
+fn frame_sample_buffer(
+    dataset: &Dataset,
+    frame: u32,
+) -> Result<(crate::model::buffer::SharedBuffer, BitDepth, usize, usize), Error> {
+    let pixel = PixelDataRef::from_dataset(dataset)?;
     let bits = pixel.bits_allocated()?;
     if bits == 64 {
-        return Err(unsupported("64-bit grayscale samples are not supported (supported: 1, 8, 16, 32)"));
+        return Err(unsupported(
+            "64-bit grayscale samples are not supported (supported: 1, 8, 16, 32)",
+        ));
     }
     if !matches!(bits, 1 | 8 | 16 | 32) || pixel.transfer_syntax().is_encapsulated() {
-        return Err(unsupported("frame values need native 1/8/16/32-bit samples"));
+        return Err(unsupported(
+            "frame values need native 1/8/16/32-bit samples",
+        ));
     }
     let stored = match pixel.bits_stored() {
         0 => bits,
@@ -674,7 +709,11 @@ fn frame_sample_buffer(dataset: &Dataset, frame: u32) -> Result<(crate::model::b
 /// ever materialising the frame as a `Vec` (§3.9). Values are normalised and
 /// sign-extended from the stored depth, matching the previous whole-frame
 /// `Vec<f64>` result exactly.
-fn visit_frame_stored_values(dataset: &Dataset, frame: u32, mut f: impl FnMut(f64)) -> Result<(), Error> {
+fn visit_frame_stored_values(
+    dataset: &Dataset,
+    frame: u32,
+    mut f: impl FnMut(f64),
+) -> Result<(), Error> {
     let (buffer, depth, width, height) = frame_sample_buffer(dataset, frame)?;
     let raw = buffer.data();
     let raw: &[u8] = raw.as_ref();
@@ -698,7 +737,10 @@ fn visit_frame_stored_values(dataset: &Dataset, frame: u32, mut f: impl FnMut(f6
         }
     } else if depth.allocated == 32 {
         for c in raw.as_chunks::<4>().0 {
-            f(sample32_value(u32::from_le_bytes([c[0], c[1], c[2], c[3]]), depth));
+            f(sample32_value(
+                u32::from_le_bytes([c[0], c[1], c[2], c[3]]),
+                depth,
+            ));
         }
     } else {
         for c in raw.as_chunks::<2>().0 {
@@ -708,19 +750,15 @@ fn visit_frame_stored_values(dataset: &Dataset, frame: u32, mut f: impl FnMut(f6
     Ok(())
 }
 
-/// Unpacks `width`×`height` one-bit samples packed 8 per byte, most-significant
-/// bit first, each row padded to a byte boundary (PS3.3 C.7.6.3.1.1). Reversing
-/// each byte turns the MSB-first stream into an LSB-first one for indexing.
+/// Unpacks `width`×`height` one-bit samples packed continuously, least
+/// significant bit first; row boundaries do not force byte alignment (PS3.5
+/// §8.1.1). `PixelData::get_frame` already split the frame into its own
+/// LSB-first byte buffer (review #5).
 fn unpack_single_bit(raw: &[u8], width: usize, height: usize) -> Vec<u16> {
-    let flipped = PixelDataConverter::reverse_bits(raw);
-    let row_bytes = width.div_ceil(8);
     let mut out = Vec::with_capacity(width * height);
-    for y in 0..height {
-        let base = y * row_bytes;
-        for x in 0..width {
-            let byte = flipped.get(base + x / 8).copied().unwrap_or(0);
-            out.push(((byte >> (x % 8)) & 1) as u16);
-        }
+    for index in 0..width * height {
+        let byte = raw.get(index / 8).copied().unwrap_or(0);
+        out.push(((byte >> (index % 8)) & 1) as u16);
     }
     out
 }
@@ -753,7 +791,11 @@ pub struct RawImage {
 
 impl RawImage {
     pub fn new(width: u32, height: u32, bytes: Vec<u8>) -> Self {
-        RawImage { width, height, bytes }
+        RawImage {
+            width,
+            height,
+            bytes,
+        }
     }
 
     pub fn width(&self) -> u32 {
@@ -778,7 +820,9 @@ impl RawImage {
     /// The BGRA pixels as `u32` (0xAARRGGBB, matching fo-dicom's Image).
     pub fn pixels(&self) -> Vec<u32> {
         self.bytes
-            .as_chunks::<4>().0.iter()
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|p| u32::from_le_bytes([p[0], p[1], p[2], p[3]]))
             .collect()
     }
@@ -877,7 +921,7 @@ impl RawImage {
         out.extend_from_slice(&0u16.to_le_bytes()); // reserved 1
         out.extend_from_slice(&0u16.to_le_bytes()); // reserved 2
         out.extend_from_slice(&54u32.to_le_bytes()); // pixel-data offset
-        // BITMAPINFOHEADER (40 bytes)
+                                                     // BITMAPINFOHEADER (40 bytes)
         out.extend_from_slice(&40u32.to_le_bytes()); // header size
         out.extend_from_slice(&(self.width as i32).to_le_bytes());
         out.extend_from_slice(&(self.height as i32).to_le_bytes()); // positive → bottom-up
@@ -889,7 +933,7 @@ impl RawImage {
         out.extend_from_slice(&2835i32.to_le_bytes()); // y pixels/metre
         out.extend_from_slice(&0u32.to_le_bytes()); // colours used
         out.extend_from_slice(&0u32.to_le_bytes()); // important colours
-        // pixel data: bottom-up rows, B,G,R per pixel, row padded to 4 bytes
+                                                    // pixel data: bottom-up rows, B,G,R per pixel, row padded to 4 bytes
         let pad = padded_row - row_bytes;
         for y in (0..h).rev() {
             for x in 0..w {
@@ -925,7 +969,11 @@ impl RawImage {
 
     /// True when every pixel has equal R, G and B (so grayscale PNG is lossless).
     fn pixels_are_gray(&self) -> bool {
-        self.bytes.as_chunks::<4>().0.iter().all(|p| p[0] == p[1] && p[1] == p[2])
+        self.bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| p[0] == p[1] && p[1] == p[2])
     }
 
     /// Wraps filtered scanlines in the PNG container with the given colour type.
@@ -1023,7 +1071,9 @@ fn write_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
 fn zlib_compress(input: &[u8]) -> Vec<u8> {
     use std::io::Write;
     let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-    encoder.write_all(input).expect("in-memory zlib write never fails");
+    encoder
+        .write_all(input)
+        .expect("in-memory zlib write never fails");
     encoder.finish().expect("in-memory zlib finish never fails")
 }
 
@@ -1041,7 +1091,11 @@ impl Crc32 {
         for &b in bytes {
             let mut c = (self.value ^ b as u32) & 0xFF;
             for _ in 0..8 {
-                c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+                c = if c & 1 != 0 {
+                    0xEDB8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
             }
             self.value = (self.value >> 8) ^ c;
         }
@@ -1092,10 +1146,14 @@ fn render_grayscale_with_threshold(
     }
     let bits = pixel.bits_allocated()?;
     if bits == 64 {
-        return Err(unsupported("64-bit grayscale samples are not supported (supported: 1, 8, 16, 32)"));
+        return Err(unsupported(
+            "64-bit grayscale samples are not supported (supported: 1, 8, 16, 32)",
+        ));
     }
     if !matches!(bits, 1 | 8 | 16 | 32) {
-        return Err(unsupported(&format!("bits allocated {bits} is not rendered")));
+        return Err(unsupported(&format!(
+            "bits allocated {bits} is not rendered"
+        )));
     }
     if pixel.transfer_syntax().is_encapsulated() {
         return Err(unsupported("compressed frames need the codec layer"));
@@ -1109,8 +1167,8 @@ fn render_grayscale_with_threshold(
     let raw = buffer.data();
     let raw: &[u8] = raw.as_ref();
 
-    // 1-bit (bilevel) frames are packed 8 pixels per byte, MSB first (PS3.3
-    // C.7.6.3.1.1). They are display-black/white, not windowed data.
+    // 1-bit (bilevel) frames are packed continuously, LSB first (PS3.5 §8.1.1).
+    // They are display-black/white, not windowed data.
     if bits == 1 {
         let (w, h) = (width as usize, height as usize);
         let samples = unpack_single_bit(raw, w, h);
@@ -1154,10 +1212,10 @@ fn render_grayscale_with_threshold(
         }
     }
     let to_grey = |v: u16| -> u8 {
-        // the sign handling matches the per-pixel form exactly: reinterpret the
-        // allocated width, do not sign-extend from BitsStored
+        // Sign-extend from BitsStored, exactly like the per-sample path, so the
+        // window LUT agrees with min/max and the display mapping (review #6).
         let stored = if signed {
-            if bits == 8 { (v as i8) as f64 } else { (v as i16) as f64 }
+            signed_from_stored(v, depth.stored)
         } else {
             v as f64
         };
@@ -1184,7 +1242,11 @@ fn frame_sample_at(raw: &[u8], index: usize, depth: BitDepth) -> u16 {
 /// sub-bit padding) and sign-extended when Pixel Representation is 1.
 fn sample32_value(value: u32, depth: BitDepth) -> f64 {
     if depth.stored == 0 || depth.stored > 32 || depth.high_bit >= 32 {
-        return if depth.signed { (value as i32) as f64 } else { value as f64 };
+        return if depth.signed {
+            (value as i32) as f64
+        } else {
+            value as f64
+        };
     }
     let up = (32 - depth.high_bit - 1) as u32;
     let down = (32 - depth.stored) as u32;
@@ -1257,7 +1319,10 @@ fn render_pixel_rows(
 ) -> Vec<u8> {
     let (w, h) = (width as usize, height as usize);
     let mut bytes = vec![0u8; w * h * 4];
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(h.max(1));
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(h.max(1));
     if threads <= 1 || w * h < parallel_min_pixels {
         emit_rows(&mut bytes, raw, depth, lut, min, w, 0..h);
         return bytes;
@@ -1276,7 +1341,9 @@ fn render_pixel_rows(
 }
 
 fn unsupported(message: &str) -> Error {
-    Error::Data(DataError::Other { message: message.to_string() })
+    Error::Data(DataError::Other {
+        message: message.to_string(),
+    })
 }
 
 /// Converts one full-range YCbCr sample (Cb/Cr centred on 128) to 8-bit RGB
@@ -1300,7 +1367,11 @@ pub fn ybr_partial_to_rgb(y: f64, cb: f64, cr: f64) -> (u8, u8, u8) {
 /// The shared YCbCr→RGB matrix for already-centred chroma (ITU-R BT.601).
 fn ycbcr_to_rgb(y: f64, cb: f64, cr: f64) -> (u8, u8, u8) {
     let cl = |v: f64| v.round().clamp(0.0, 255.0) as u8;
-    (cl(y + 1.402 * cr), cl(y - 0.344_136 * cb - 0.714_136 * cr), cl(y + 1.772 * cb))
+    (
+        cl(y + 1.402 * cr),
+        cl(y - 0.344_136 * cb - 0.714_136 * cr),
+        cl(y + 1.772 * cb),
+    )
 }
 
 /// Renders one frame, choosing the pipeline by photometric interpretation
@@ -1321,7 +1392,9 @@ pub fn render_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error> {
         Pi::YbrFull => render_ybr_frame(dataset, frame, false, false),
         Pi::YbrFull422 => render_ybr_frame(dataset, frame, false, true),
         Pi::YbrPartial422 => render_ybr_frame(dataset, frame, true, true),
-        _ => Err(unsupported("this photometric interpretation is not rendered yet")),
+        _ => Err(unsupported(
+            "this photometric interpretation is not rendered yet",
+        )),
     }
 }
 
@@ -1402,7 +1475,12 @@ impl DicomImage {
         let owned = dataset.clone();
         let (width, height, number_of_frames, samples_per_pixel) = {
             let pixel = PixelDataRef::from_dataset(&owned)?;
-            (pixel.width(), pixel.height(), pixel.number_of_frames(), pixel.samples_per_pixel())
+            (
+                pixel.width(),
+                pixel.height(),
+                pixel.number_of_frames(),
+                pixel.samples_per_pixel(),
+            )
         };
         Ok(DicomImage {
             dataset: owned,
@@ -1508,7 +1586,10 @@ impl DicomImage {
     /// scale in order.
     pub fn render_frame(&self, frame: u32) -> Result<RawImage, Error> {
         use crate::pixel::photometric::PhotometricInterpretation as Pi;
-        let pi = match self.dataset.try_get_str_ref(Tag::PHOTOMETRIC_INTERPRETATION) {
+        let pi = match self
+            .dataset
+            .try_get_str_ref(Tag::PHOTOMETRIC_INTERPRETATION)
+        {
             Some(s) => Pi::parse(s),
             None => Pi::infer_from_dataset(&self.dataset),
         };
@@ -1570,14 +1651,13 @@ fn overlay_covers_frame(overlay: &OverlayData, frame: u32) -> bool {
 ///
 /// Returns `(samples, width, height)`; samples are raw stored values, in the
 /// dataset's sample order (interleaved or planar as stored).
-fn read_frame_samples(
-    pixel: &PixelDataRef<'_>,
-    frame: u32,
-) -> Result<(Vec<u16>, u32, u32), Error> {
+fn read_frame_samples(pixel: &PixelDataRef<'_>, frame: u32) -> Result<(Vec<u16>, u32, u32), Error> {
     let (width, height) = (pixel.width(), pixel.height());
     let bits = pixel.bits_allocated()?;
     if !matches!(bits, 8 | 16) {
-        return Err(unsupported(&format!("bits allocated {bits} is not rendered")));
+        return Err(unsupported(&format!(
+            "bits allocated {bits} is not rendered"
+        )));
     }
     if pixel.transfer_syntax().is_encapsulated() {
         return Err(unsupported("compressed frames need the codec layer"));
@@ -1588,14 +1668,18 @@ fn read_frame_samples(
     let samples = if bits == 8 {
         raw.iter().map(|b| *b as u16).collect()
     } else {
-        raw.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
+        raw.as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect()
     };
     Ok((samples, width, height))
 }
 
 /// RgbColorPipeline (docs §2): 3 samples per pixel → BGRA directly.
 fn render_rgb_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error> {
-        let pixel = PixelDataRef::from_dataset(dataset)?;
+    let pixel = PixelDataRef::from_dataset(dataset)?;
     if pixel.samples_per_pixel() != 3 {
         return Err(unsupported("RGB expects 3 samples per pixel"));
     }
@@ -1644,7 +1728,7 @@ fn render_rgb_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error> {
 
 /// PaletteColorPipeline (docs §2): palette index → 256-entry R/G/B LUT.
 fn render_palette_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error> {
-        let pixel = PixelDataRef::from_dataset(dataset)?;
+    let pixel = PixelDataRef::from_dataset(dataset)?;
     if pixel.samples_per_pixel() != 1 {
         return Err(unsupported("PALETTE COLOR expects 1 sample per pixel"));
     }
@@ -1673,13 +1757,16 @@ fn render_palette_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error
         let color = if entry < 0 {
             palette.first().copied().unwrap_or(black)
         } else {
-            palette.get(entry as usize).copied().or_else(|| palette.last().copied()).unwrap_or(black)
+            palette
+                .get(entry as usize)
+                .copied()
+                .or_else(|| palette.last().copied())
+                .unwrap_or(black)
         };
         bytes.extend_from_slice(&[color.b, color.g, color.r, 0xFF]);
     }
     Ok(RawImage::new(width, height, bytes))
 }
-
 
 /// YCbCr → RGB pipelines (docs §2, PS3.3 C.7.6.3.1.2): YBR_FULL (4:4:4 full
 /// range), YBR_FULL_422 (4:2:2, full range) and YBR_PARTIAL_422 (4:2:2,
@@ -1691,19 +1778,23 @@ fn render_ybr_frame(
     partial: bool,
     subsampled: bool,
 ) -> Result<RawImage, Error> {
-        let pixel = PixelDataRef::from_dataset(dataset)?;
+    let pixel = PixelDataRef::from_dataset(dataset)?;
     // PS3.3 C.7.6.3.1.3: YBR_FULL may be planar (configuration 1); subsampled
     // YBR (4:2:2) is defined only interleaved.
     let planar = pixel.planar_configuration() == 1;
     if planar && subsampled {
-        return Err(unsupported("subsampled YBR must be interleaved (planar configuration 0)"));
+        return Err(unsupported(
+            "subsampled YBR must be interleaved (planar configuration 0)",
+        ));
     }
     if pixel.transfer_syntax().is_encapsulated() {
         return Err(unsupported("compressed YBR frames need the codec layer"));
     }
     let bits = pixel.bits_allocated()?;
     if !matches!(bits, 8 | 16) {
-        return Err(unsupported(&format!("bits allocated {bits} is not rendered")));
+        return Err(unsupported(&format!(
+            "bits allocated {bits} is not rendered"
+        )));
     }
     let (width, height) = (pixel.width(), pixel.height());
     let buffer = pixel.get_frame(frame)?;
@@ -1755,7 +1846,9 @@ fn render_ybr_frame(
         // an even pixel count in the stored data.
         let row_bytes = (width as usize).div_ceil(2) * 4 * unit;
         if raw.len() < row_bytes * height as usize {
-            return Err(unsupported("4:2:2 frame is shorter than its subsampled layout"));
+            return Err(unsupported(
+                "4:2:2 frame is shorter than its subsampled layout",
+            ));
         }
         for row in 0..height as usize {
             let row_start = row * row_bytes;
@@ -1799,13 +1892,19 @@ fn render_ybr_frame(
     Ok(RawImage::new(width, height, bytes))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::vr::Vr;
 
-    fn gray_image(width: u16, height: u16, bits: u16, samples: &[u16], center: Option<f64>, width_ds: Option<f64>) -> Dataset {
+    fn gray_image(
+        width: u16,
+        height: u16,
+        bits: u16,
+        samples: &[u16],
+        center: Option<f64>,
+        width_ds: Option<f64>,
+    ) -> Dataset {
         let mut ds = Dataset::new();
         ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16);
         ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
@@ -1836,7 +1935,9 @@ mod tests {
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(bytes)),
             ),
         ));
-        ds.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        ds.set_transfer_syntax(
+            crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
         ds
     }
 
@@ -1849,9 +1950,17 @@ mod tests {
         let a = render_frame(&m2, 0).unwrap();
         let b = render_frame(&m1, 0).unwrap();
         assert_eq!(a.as_bytes()[0], 0, "MONOCHROME2: value 0 → black");
-        assert_eq!(b.as_bytes()[0], 255, "MONOCHROME1: value 0 → white (inverted)");
+        assert_eq!(
+            b.as_bytes()[0],
+            255,
+            "MONOCHROME1: value 0 → white (inverted)"
+        );
         assert_eq!(a.as_bytes()[4], 255, "MONOCHROME2: value 255 → white");
-        assert_eq!(b.as_bytes()[4], 0, "MONOCHROME1: value 255 → black (inverted)");
+        assert_eq!(
+            b.as_bytes()[4],
+            0,
+            "MONOCHROME1: value 255 → black (inverted)"
+        );
     }
 
     #[test]
@@ -1939,7 +2048,14 @@ mod tests {
 
     /// Inserts a VOI LUT item with an explicit descriptor `entries`/`bits` and
     /// explicit data VR, so malformed/SS tables can be exercised precisely.
-    fn put_voi_lut_raw(ds: &mut Dataset, entries: u16, first: i16, bits: u16, data_vr: Vr, data: &[u8]) {
+    fn put_voi_lut_raw(
+        ds: &mut Dataset,
+        entries: u16,
+        first: i16,
+        bits: u16,
+        data_vr: Vr,
+        data: &[u8],
+    ) {
         let seq = ds.insert_sequence(Tag::VOILUT_SEQUENCE);
         let mut item = Dataset::new();
         let mut desc = Vec::new();
@@ -2013,8 +2129,15 @@ mod tests {
         let mut ds = gray_image(1, 1, 8, &[100], Some(128.0), Some(256.0));
         put_voi_lut_raw(&mut ds, 4, 0, 16, Vr::Ow, &[0, 0, 255]);
         let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
-        assert!(o.voi_lut.is_none() && !o.use_voi_lut, "a truncated LUT is not applied");
-        assert_eq!((o.window_center, o.window_width), (128.0, 256.0), "falls back to the window tags");
+        assert!(
+            o.voi_lut.is_none() && !o.use_voi_lut,
+            "a truncated LUT is not applied"
+        );
+        assert_eq!(
+            (o.window_center, o.window_width),
+            (128.0, 256.0),
+            "falls back to the window tags"
+        );
     }
 
     #[test]
@@ -2024,10 +2147,17 @@ mod tests {
         let mut ds = gray_image(1, 1, 8, &[0], None, None);
         put_voi_lut_raw(&mut ds, (-3i16) as u16, -1, 8, Vr::Ow, &[10, 20, 30]);
         let options = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
-        let lut = options.voi_lut.as_ref().expect("the three-entry LUT is accepted");
+        let lut = options
+            .voi_lut
+            .as_ref()
+            .expect("the three-entry LUT is accepted");
         assert_eq!(lut.map(-1.0), 0, "the first entry remains the low endpoint");
         assert_eq!(lut.map(0.0), 134, "the middle entry remains the midpoint");
-        assert_eq!(lut.map(1.0), 255, "the last entry remains the high endpoint");
+        assert_eq!(
+            lut.map(1.0),
+            255,
+            "the last entry remains the high endpoint"
+        );
     }
 
     #[test]
@@ -2055,7 +2185,11 @@ mod tests {
         put_voi_lut(&mut ds, -1, &[0, 255]);
         let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
         assert_eq!(o.map(-1.0), 0, "-1 selects the first entry");
-        assert_eq!(o.map(0.0), 255, "0 selects the last entry (signed first-mapped)");
+        assert_eq!(
+            o.map(0.0),
+            255,
+            "0 selects the last entry (signed first-mapped)"
+        );
     }
 
     #[test]
@@ -2070,12 +2204,22 @@ mod tests {
 
         let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
         assert!(o.modality_lut.is_some(), "modality LUT detected");
-        assert_eq!((o.rescale_slope, o.rescale_intercept), (1.0, 0.0), "rescale neutralised");
+        assert_eq!(
+            (o.rescale_slope, o.rescale_intercept),
+            (1.0, 0.0),
+            "rescale neutralised"
+        );
         // modality LUT: 5 → 200, then window(200,400) → ~128 (mid grey)
         let mapped = o.map(5.0);
-        assert!(mapped.abs_diff(128) <= 1, "200 through the window is mid grey: {mapped}");
+        assert!(
+            mapped.abs_diff(128) <= 1,
+            "200 through the window is mid grey: {mapped}"
+        );
         // without the modality LUT the raw 5*2=10 would render near black
-        assert!(mapped > 100, "the modality LUT, not rescale, drove the value");
+        assert!(
+            mapped > 100,
+            "the modality LUT, not rescale, drove the value"
+        );
     }
 
     #[test]
@@ -2086,8 +2230,16 @@ mod tests {
         put_modality_lut(&mut ds, 8, &[200]);
         put_voi_lut(&mut ds, 200, &[0, 255]);
         let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
-        assert_eq!(o.modality_lut.as_ref().unwrap().map(8.0), 200.0, "modality output");
-        assert_eq!(o.map(8.0), 0, "modality output lands on the VOI LUT's first entry");
+        assert_eq!(
+            o.modality_lut.as_ref().unwrap().map(8.0),
+            200.0,
+            "modality output"
+        );
+        assert_eq!(
+            o.map(8.0),
+            0,
+            "modality output lands on the VOI LUT's first entry"
+        );
     }
 
     #[test]
@@ -2100,8 +2252,15 @@ mod tests {
         ds.insert_str(Tag::RESCALE_INTERCEPT, Vr::Ds, "0");
         put_modality_lut(&mut ds, 5, &[200]);
         let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
-        assert!(o.modality_lut.is_none(), "XA display ignores the modality LUT");
-        assert_eq!((o.rescale_slope, o.rescale_intercept), (3.0, 0.0), "rescale kept");
+        assert!(
+            o.modality_lut.is_none(),
+            "XA display ignores the modality LUT"
+        );
+        assert_eq!(
+            (o.rescale_slope, o.rescale_intercept),
+            (3.0, 0.0),
+            "rescale kept"
+        );
 
         // The same dataset as a CT class does apply the modality LUT.
         ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.2");
@@ -2117,7 +2276,10 @@ mod tests {
         let full = GrayscaleRenderOptions::from_histogram(&ds, 0, 100).unwrap();
         let full_end = full.window_center + full.window_width / 2.0;
         let full_start = full.window_center - full.window_width / 2.0;
-        assert!(full_start <= 0.0 && full_end >= 9.0, "100% covers the full range");
+        assert!(
+            full_start <= 0.0 && full_end >= 9.0,
+            "100% covers the full range"
+        );
 
         let narrow = GrayscaleRenderOptions::from_histogram(&ds, 0, 50).unwrap();
         assert!(
@@ -2134,14 +2296,25 @@ mod tests {
         // excluded the 100% window is the cluster itself (centre 102, width 4),
         // identical to the same data without the spike. Without trimming the 9
         // zeros would stretch the range to 0..104 (centre 52, width 104).
-        let padded = gray_image(14, 1, 8, &[0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 101, 102, 103, 104], None, None);
+        let padded = gray_image(
+            14,
+            1,
+            8,
+            &[0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 101, 102, 103, 104],
+            None,
+            None,
+        );
         let mut padded = padded;
         padded.insert_value(Tag::PIXEL_PADDING_VALUE, 0u16);
         let clean = gray_image(5, 1, 8, &[100, 101, 102, 103, 104], None, None);
 
         let a = GrayscaleRenderOptions::from_histogram(&padded, 0, 100).unwrap();
         let b = GrayscaleRenderOptions::from_histogram(&clean, 0, 100).unwrap();
-        assert_eq!((a.window_center, a.window_width), (102.0, 4.0), "window is the real cluster, not 0..104");
+        assert_eq!(
+            (a.window_center, a.window_width),
+            (102.0, 4.0),
+            "window is the real cluster, not 0..104"
+        );
         assert_eq!(
             (a.window_center, a.window_width),
             (b.window_center, b.window_width),
@@ -2171,14 +2344,18 @@ mod tests {
         let mut ds2 = gray_image(1, 1, 16, &[0], Some(40.0), Some(400.0));
         ds2.insert_str(Tag::VOILUT_FUNCTION, Vr::Cs, "LINEAR_EXACT");
         assert_eq!(
-            GrayscaleRenderOptions::from_dataset(&ds2).unwrap().voi_lut_function,
+            GrayscaleRenderOptions::from_dataset(&ds2)
+                .unwrap()
+                .voi_lut_function,
             VoiFunction::LinearExact
         );
 
         // Absent tag → LINEAR.
         let ds3 = gray_image(1, 1, 16, &[0], Some(40.0), Some(400.0));
         assert_eq!(
-            GrayscaleRenderOptions::from_dataset(&ds3).unwrap().voi_lut_function,
+            GrayscaleRenderOptions::from_dataset(&ds3)
+                .unwrap()
+                .voi_lut_function,
             VoiFunction::Linear
         );
     }
@@ -2203,7 +2380,11 @@ mod tests {
         let image = render_grayscale_frame(&ds, 0).unwrap();
         assert_eq!((image.width(), image.height()), (2, 2));
         assert_eq!(image.as_bytes().len(), 2 * 2 * 4);
-        assert_eq!(greys(&image), vec![0, 64, 128, 255], "each stored value maps to its documented grey");
+        assert_eq!(
+            greys(&image),
+            vec![0, 64, 128, 255],
+            "each stored value maps to its documented grey"
+        );
         // BGRA layout: grey in B/G/R, opaque alpha
         assert_eq!(&image.as_bytes()[4..8], &[64, 64, 64, 0xFF]);
     }
@@ -2226,27 +2407,61 @@ mod tests {
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(packed.to_vec())),
             ),
         ));
-        ds.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        ds.set_transfer_syntax(
+            crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
         ds
     }
 
     fn greys(image: &RawImage) -> Vec<u8> {
-        image.as_bytes().as_chunks::<4>().0.iter().map(|p| p[0]).collect()
+        image
+            .as_bytes()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| p[0])
+            .collect()
     }
 
     #[test]
-    fn single_bit_frames_unpack_msb_first_as_black_and_white() {
-        // 2x2, one byte per row: 0b1010_0000 → pixels 1,0,1,0 (PS3.3 C.7.6.3.1.1)
-        let image = render_frame(&single_bit_image(2, 2, &[0b1010_0000, 0b1010_0000]), 0).unwrap();
-        assert_eq!(greys(&image), vec![255, 0, 255, 0], "bit 1 is white, 0 is black");
-        // 8x1, byte 0b1000_0000: the first pixel is the most significant bit
-        let image = render_frame(&single_bit_image(8, 1, &[0b1000_0000]), 0).unwrap();
+    fn signed_stored_bits_are_sign_extended_in_the_window_lut() {
+        // review #6: allocated 16, stored 12, high bit 11, signed -> 0x0FFF is -1.
+        let mut ds = gray_image(1, 1, 16, &[0x0FFF], Some(0.0), Some(4096.0));
+        ds.insert_value(Tag::BITS_STORED, 12u16);
+        ds.insert_value(Tag::HIGH_BIT, 11u16);
+        ds.insert_value(Tag::PIXEL_REPRESENTATION, 1u16);
+        let image = render_frame(&ds, 0).unwrap();
+        let grey = image.as_bytes()[0];
+        assert!(
+            grey.abs_diff(127) <= 1,
+            "signed -1 maps near mid-grey, got {grey}"
+        );
+    }
+
+    #[test]
+    fn single_bit_frames_unpack_lsb_first_as_black_and_white() {
+        // 2x2: four pixels in one byte, LSB first: 0b0000_0101 → pixels 1,0,1,0
+        let image = render_frame(&single_bit_image(2, 2, &[0b0000_0101]), 0).unwrap();
+        assert_eq!(
+            greys(&image),
+            vec![255, 0, 255, 0],
+            "bit 1 is white, 0 is black"
+        );
+        // 8x1, byte 0b0000_0001: the first pixel is the least significant bit
+        let image = render_frame(&single_bit_image(8, 1, &[0b0000_0001]), 0).unwrap();
         assert_eq!(greys(&image), vec![255, 0, 0, 0, 0, 0, 0, 0]);
     }
 
     /// Builds a 32-bit MONOCHROME2 frame from raw `u32` sample bits (signed
     /// values are passed as their two's-complement `u32`).
-    fn gray_image_32(width: u16, height: u16, signed: bool, samples: &[u32], center: f64, width_ds: f64) -> Dataset {
+    fn gray_image_32(
+        width: u16,
+        height: u16,
+        signed: bool,
+        samples: &[u32],
+        center: f64,
+        width_ds: f64,
+    ) -> Dataset {
         let mut ds = Dataset::new();
         ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16);
         ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
@@ -2269,7 +2484,9 @@ mod tests {
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(bytes)),
             ),
         ));
-        ds.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        ds.set_transfer_syntax(
+            crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
         ds
     }
 
@@ -2297,13 +2514,19 @@ mod tests {
         ds.insert_value(Tag::BITS_STORED, 64u16);
         ds.insert_value(Tag::HIGH_BIT, 63u16);
         let err = render_frame(&ds, 0).unwrap_err();
-        assert!(format!("{err}").contains("64-bit"), "error names 64-bit explicitly, got: {err}");
+        assert!(
+            format!("{err}").contains("64-bit"),
+            "error names 64-bit explicitly, got: {err}"
+        );
 
         // also explicit when there is no window tag (the min/max derivation path)
         ds.remove(Tag::WINDOW_CENTER);
         ds.remove(Tag::WINDOW_WIDTH);
         let err = render_frame(&ds, 0).unwrap_err();
-        assert!(format!("{err}").contains("64-bit"), "auto-window path also names 64-bit, got: {err}");
+        assert!(
+            format!("{err}").contains("64-bit"),
+            "auto-window path also names 64-bit, got: {err}"
+        );
     }
 
     #[test]
@@ -2311,15 +2534,25 @@ mod tests {
         // 512x512 = 262144 px exceeds PARALLEL_MIN_PIXELS: threshold 0 takes the
         // threaded path, usize::MAX forces serial. Output must match byte for byte.
         let (w, h) = (512u16, 512u16);
-        let samples: Vec<u16> = (0..(w as usize * h as usize)).map(|i| ((i * 37) % 4096) as u16).collect();
+        let samples: Vec<u16> = (0..(w as usize * h as usize))
+            .map(|i| ((i * 37) % 4096) as u16)
+            .collect();
         let ds = gray_image(w, h, 16, &samples, Some(2048.0), Some(4096.0));
         let options = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
         let serial = render_grayscale_with_threshold(&ds, 0, &options, usize::MAX).unwrap();
         let parallel = render_grayscale_with_threshold(&ds, 0, &options, 0).unwrap();
-        assert_eq!(parallel.as_bytes(), serial.as_bytes(), "threaded bands match the serial bytes");
+        assert_eq!(
+            parallel.as_bytes(),
+            serial.as_bytes(),
+            "threaded bands match the serial bytes"
+        );
         // the shipped entry point (real threshold) also matches on this large frame
         let shipped = render_grayscale_with_options(&ds, 0, &options).unwrap();
-        assert_eq!(shipped.as_bytes(), serial.as_bytes(), "shipped threshold preserves the bytes");
+        assert_eq!(
+            shipped.as_bytes(),
+            serial.as_bytes(),
+            "shipped threshold preserves the bytes"
+        );
     }
 
     #[test]
@@ -2390,7 +2623,11 @@ mod tests {
         ds.insert_value(Tag::BITS_STORED, 12u16);
         ds.insert_value(Tag::HIGH_BIT, 15u16);
         let o = GrayscaleRenderOptions::from_min_max(&ds, 0).unwrap();
-        assert_eq!((o.window_center, o.window_width), (128.0, 224.0), "window is derived from normalised samples");
+        assert_eq!(
+            (o.window_center, o.window_width),
+            (128.0, 224.0),
+            "window is derived from normalised samples"
+        );
     }
 
     /// Wraps one window pair per frame in a PerFrameFunctionalGroupsSequence,
@@ -2417,9 +2654,17 @@ mod tests {
         put_per_frame_windows(&mut ds, &[(100.0, 50.0), (200.0, 20.0)]);
 
         let pair0 = GrayscaleRenderOptions::from_functional_window_level(&ds, 0).unwrap();
-        assert_eq!(pair0, (100.0, 50.0), "frame 0 window from its functional group");
+        assert_eq!(
+            pair0,
+            (100.0, 50.0),
+            "frame 0 window from its functional group"
+        );
         let pair1 = GrayscaleRenderOptions::from_functional_window_level(&ds, 1).unwrap();
-        assert_eq!(pair1, (200.0, 20.0), "frame 1 window from its functional group");
+        assert_eq!(
+            pair1,
+            (200.0, 20.0),
+            "frame 1 window from its functional group"
+        );
 
         // priority: from_dataset_frame picks the per-frame window over min/max
         let o = GrayscaleRenderOptions::from_dataset_frame(&ds, 1).unwrap();
@@ -2463,7 +2708,8 @@ mod tests {
     }
 
     #[test]
-    fn from_image_pixel_value_tags_uses_smallest_and_largest() {        let mut ds = gray_image(1, 1, 16, &[0], None, None);
+    fn from_image_pixel_value_tags_uses_smallest_and_largest() {
+        let mut ds = gray_image(1, 1, 16, &[0], None, None);
         ds.insert_value(Tag::SMALLEST_IMAGE_PIXEL_VALUE, 0u16); // SmallestImagePixelValue
         ds.insert_value(Tag::LARGEST_IMAGE_PIXEL_VALUE, 1000u16); // LargestImagePixelValue
         let o = GrayscaleRenderOptions::from_image_pixel_value_tags(&ds).unwrap();
@@ -2487,7 +2733,10 @@ mod tests {
         ds.insert_str(Tag::WINDOW_WIDTH, Vr::Ds, "4095"); // full 12-bit width
         let image = render_frame(&ds, 0).unwrap();
         let g = image.as_bytes()[0];
-        assert!(g.abs_diff(128) <= 1, "0x7FF0 normalises to 2047 → mid grey: {g}");
+        assert!(
+            g.abs_diff(128) <= 1,
+            "0x7FF0 normalises to 2047 → mid grey: {g}"
+        );
     }
 
     #[test]
@@ -2498,7 +2747,13 @@ mod tests {
         assert_eq!(crc.finish(), 0xCBF4_3926);
     }
 
-    fn color_image(pi: &str, samples_per_pixel: u16, bits: u16, samples: &[u16], planar: u16) -> Dataset {
+    fn color_image(
+        pi: &str,
+        samples_per_pixel: u16,
+        bits: u16,
+        samples: &[u16],
+        planar: u16,
+    ) -> Dataset {
         let count = samples.len() as u16 / samples_per_pixel.max(1);
         let mut ds = Dataset::new();
         ds.insert_value(Tag::SAMPLES_PER_PIXEL, samples_per_pixel);
@@ -2528,7 +2783,9 @@ mod tests {
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(bytes)),
             ),
         ));
-        ds.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        ds.set_transfer_syntax(
+            crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
         ds
     }
 
@@ -2567,7 +2824,11 @@ mod tests {
         let ds = color_image("YBR_FULL", 3, 8, &[76, 85, 255], 0);
         let image = render_frame(&ds, 0).unwrap();
         let b = image.as_bytes();
-        assert!(b[2] > 240 && b[1] < 16 && b[0] < 16, "red-ish BGRA: {:?}", &b[0..4]);
+        assert!(
+            b[2] > 240 && b[1] < 16 && b[0] < 16,
+            "red-ish BGRA: {:?}",
+            &b[0..4]
+        );
     }
 
     #[test]
@@ -2580,7 +2841,10 @@ mod tests {
         assert_eq!(ybr_partial_to_rgb(16.0, 128.0, 128.0), (0, 0, 0));
         assert_eq!(ybr_partial_to_rgb(235.0, 128.0, 128.0), (255, 255, 255));
         let (r, g, b) = ybr_partial_to_rgb(126.0, 128.0, 128.0);
-        assert!(r == g && g == b, "neutral partial chroma stays grey: {r},{g},{b}");
+        assert!(
+            r == g && g == b,
+            "neutral partial chroma stays grey: {r},{g},{b}"
+        );
     }
 
     /// Builds a `width`×`height` 8-bit YBR_FULL frame with explicit stored order.
@@ -2602,7 +2866,9 @@ mod tests {
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(samples.to_vec())),
             ),
         ));
-        ds.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        ds.set_transfer_syntax(
+            crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
         ds
     }
 
@@ -2614,8 +2880,16 @@ mod tests {
         let planar: &[u8] = &[128, 100, 200, 50, 128, 150, 100, 128, 128, 200, 50, 128];
         let a = render_frame(&ybr_full_image(2, 2, 0, interleaved), 0).unwrap();
         let b = render_frame(&ybr_full_image(2, 2, 1, planar), 0).unwrap();
-        assert_eq!(a.as_bytes(), b.as_bytes(), "planar 1 de-interleaves to the same pixels");
-        assert_eq!(&a.as_bytes()[0..4], &[128, 128, 128, 0xFF], "neutral YCbCr is grey");
+        assert_eq!(
+            a.as_bytes(),
+            b.as_bytes(),
+            "planar 1 de-interleaves to the same pixels"
+        );
+        assert_eq!(
+            &a.as_bytes()[0..4],
+            &[128, 128, 128, 0xFF],
+            "neutral YCbCr is grey"
+        );
     }
 
     /// Builds a 4:2:2 YBR image of `width`×1 with explicit stored bytes.
@@ -2637,7 +2911,9 @@ mod tests {
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(bytes.to_vec())),
             ),
         ));
-        ds.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        ds.set_transfer_syntax(
+            crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
         ds
     }
 
@@ -2648,7 +2924,10 @@ mod tests {
         let mut ds = ybr422_image("YBR_FULL_422", 2, &[76, 76, 85, 255]);
         ds.insert_value(Tag::PLANAR_CONFIGURATION, 1u16); // PlanarConfiguration = 1
         let err = render_frame(&ds, 0).unwrap_err();
-        assert!(format!("{err}").to_lowercase().contains("planar"), "expected a planar error, got: {err}");
+        assert!(
+            format!("{err}").to_lowercase().contains("planar"),
+            "expected a planar error, got: {err}"
+        );
     }
 
     #[test]
@@ -2661,7 +2940,10 @@ mod tests {
         let b = image.as_bytes();
         for p in 0..3 {
             let px = &b[p * 4..p * 4 + 4];
-            assert!(px[2] > 240 && px[1] < 16 && px[0] < 16, "pixel {p} red-ish: {px:?}");
+            assert!(
+                px[2] > 240 && px[1] < 16 && px[0] < 16,
+                "pixel {p} red-ish: {px:?}"
+            );
         }
     }
 
@@ -2674,7 +2956,10 @@ mod tests {
         let b = image.as_bytes();
         for p in 0..2 {
             let px = &b[p * 4..p * 4 + 4];
-            assert!(px[2] > 240 && px[1] < 16 && px[0] < 16, "pixel {p} red-ish: {px:?}");
+            assert!(
+                px[2] > 240 && px[1] < 16 && px[0] < 16,
+                "pixel {p} red-ish: {px:?}"
+            );
         }
     }
 
@@ -2699,7 +2984,11 @@ mod tests {
         ds.insert_value(Tag::BITS_STORED, 12u16); // BitsStored
         ds.insert_value(Tag::HIGH_BIT, 11u16); // HighBit
         let img = render_frame(&ds, 0).unwrap();
-        assert_eq!(&img.as_bytes()[0..4], &[255, 255, 255, 255], "low-aligned 12-bit RGB → white");
+        assert_eq!(
+            &img.as_bytes()[0..4],
+            &[255, 255, 255, 255],
+            "low-aligned 12-bit RGB → white"
+        );
     }
 
     #[test]
@@ -2729,24 +3018,51 @@ mod tests {
         // 6-byte descriptor: [count=2, first=0, bits=8]
         let desc = || us_bytes(&[2, 0, 8]);
         ds.insert_or_update(crate::model::item::DicomItem::Element(
-            crate::model::element::DicomElement::new_bytes(Tag::RED_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR, Vr::Us, desc()),
+            crate::model::element::DicomElement::new_bytes(
+                Tag::RED_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR,
+                Vr::Us,
+                desc(),
+            ),
         ));
         ds.insert_or_update(crate::model::item::DicomItem::Element(
-            crate::model::element::DicomElement::new_bytes(Tag::GREEN_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR, Vr::Us, desc()),
+            crate::model::element::DicomElement::new_bytes(
+                Tag::GREEN_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR,
+                Vr::Us,
+                desc(),
+            ),
         ));
         ds.insert_or_update(crate::model::item::DicomItem::Element(
-            crate::model::element::DicomElement::new_bytes(Tag::BLUE_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR, Vr::Us, desc()),
+            crate::model::element::DicomElement::new_bytes(
+                Tag::BLUE_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR,
+                Vr::Us,
+                desc(),
+            ),
         ));
         // 8-bit data: index 0 → red (255,0,0), index 1 → blue (0,0,255)
-        let data = |vals: [u8; 2]| std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vals.to_vec())) as crate::model::buffer::SharedBuffer;
+        let data = |vals: [u8; 2]| {
+            std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vals.to_vec()))
+                as crate::model::buffer::SharedBuffer
+        };
         ds.insert_or_update(crate::model::item::DicomItem::Element(
-            crate::model::element::DicomElement::new_bytes(Tag::RED_PALETTE_COLOR_LOOKUP_TABLE_DATA, Vr::Ow, data([255, 0])),
+            crate::model::element::DicomElement::new_bytes(
+                Tag::RED_PALETTE_COLOR_LOOKUP_TABLE_DATA,
+                Vr::Ow,
+                data([255, 0]),
+            ),
         ));
         ds.insert_or_update(crate::model::item::DicomItem::Element(
-            crate::model::element::DicomElement::new_bytes(Tag::GREEN_PALETTE_COLOR_LOOKUP_TABLE_DATA, Vr::Ow, data([0, 0])),
+            crate::model::element::DicomElement::new_bytes(
+                Tag::GREEN_PALETTE_COLOR_LOOKUP_TABLE_DATA,
+                Vr::Ow,
+                data([0, 0]),
+            ),
         ));
         ds.insert_or_update(crate::model::item::DicomItem::Element(
-            crate::model::element::DicomElement::new_bytes(Tag::BLUE_PALETTE_COLOR_LOOKUP_TABLE_DATA, Vr::Ow, data([0, 255])),
+            crate::model::element::DicomElement::new_bytes(
+                Tag::BLUE_PALETTE_COLOR_LOOKUP_TABLE_DATA,
+                Vr::Ow,
+                data([0, 255]),
+            ),
         ));
         let image = render_frame(&ds, 0).unwrap();
         let b = image.as_bytes();
@@ -2765,13 +3081,18 @@ mod tests {
             (0x1103, 0x1203, [0u8, 255]),       // blue: entry0=black, entry1=blue
         ] {
             ds.insert_or_update(crate::model::item::DicomItem::Element(
-                crate::model::element::DicomElement::new_bytes(Tag::new(0x0028, desc_tag), Vr::Us, us_bytes(&[2, 10, 8])),
+                crate::model::element::DicomElement::new_bytes(
+                    Tag::new(0x0028, desc_tag),
+                    Vr::Us,
+                    us_bytes(&[2, 10, 8]),
+                ),
             ));
             ds.insert_or_update(crate::model::item::DicomItem::Element(
                 crate::model::element::DicomElement::new_bytes(
                     Tag::new(0x0028, data_tag),
                     Vr::Ow,
-                    std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vals.to_vec())) as crate::model::buffer::SharedBuffer,
+                    std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vals.to_vec()))
+                        as crate::model::buffer::SharedBuffer,
                 ),
             ));
         }
@@ -2780,8 +3101,16 @@ mod tests {
         let px = |i: usize| &b[i * 4..i * 4 + 4];
         assert_eq!(px(0), &[0, 0, 255, 255], "value 10 → entry 0 red");
         assert_eq!(px(1), &[255, 0, 0, 255], "value 11 → entry 1 blue");
-        assert_eq!(px(2), &[0, 0, 255, 255], "value 5 (< first) clamps to entry 0 red");
-        assert_eq!(px(3), &[255, 0, 0, 255], "value 200 (> last) clamps to entry 1 blue");
+        assert_eq!(
+            px(2),
+            &[0, 0, 255, 255],
+            "value 5 (< first) clamps to entry 0 red"
+        );
+        assert_eq!(
+            px(3),
+            &[255, 0, 0, 255],
+            "value 200 (> last) clamps to entry 1 blue"
+        );
     }
 
     #[test]
@@ -2797,15 +3126,35 @@ mod tests {
         );
         let up = img.scaled(2.0);
         assert_eq!((up.width(), up.height()), (4, 4), "2x2 scaled by 2 is 4x4");
-        assert_eq!(&up.as_bytes()[0..4], &[0, 0, 255, 255], "top-left red preserved");
+        assert_eq!(
+            &up.as_bytes()[0..4],
+            &[0, 0, 255, 255],
+            "top-left red preserved"
+        );
         let n = up.as_bytes().len();
-        assert_eq!(&up.as_bytes()[n - 4..], &[255, 255, 255, 255], "bottom-right white preserved");
+        assert_eq!(
+            &up.as_bytes()[n - 4..],
+            &[255, 255, 255, 255],
+            "bottom-right white preserved"
+        );
 
         let down = up.scaled(0.5);
-        assert_eq!((down.width(), down.height()), (2, 2), "4x4 scaled by 0.5 is 2x2");
+        assert_eq!(
+            (down.width(), down.height()),
+            (2, 2),
+            "4x4 scaled by 0.5 is 2x2"
+        );
 
-        assert_eq!(img.scaled(1.0).as_bytes(), img.as_bytes(), "unit factor is identity");
-        assert_eq!(img.scaled(0.0).as_bytes(), img.as_bytes(), "non-positive factor is identity");
+        assert_eq!(
+            img.scaled(1.0).as_bytes(),
+            img.as_bytes(),
+            "unit factor is identity"
+        );
+        assert_eq!(
+            img.scaled(0.0).as_bytes(),
+            img.as_bytes(),
+            "non-positive factor is identity"
+        );
     }
 
     #[test]
@@ -2820,16 +3169,30 @@ mod tests {
             (b[i * 4], b[i * 4 + 1], b[i * 4 + 2], b[i * 4 + 3])
         };
         assert_eq!(px(0), (0, 0, 0, 255), "left edge keeps the dark end");
-        assert_eq!(px(2), (250, 250, 250, 255), "right edge keeps the light end");
+        assert_eq!(
+            px(2),
+            (250, 250, 250, 255),
+            "right edge keeps the light end"
+        );
         let (b, g, r, a) = px(1);
-        assert!(b > 0 && b < 250, "the middle pixel is interpolated, got {b}");
+        assert!(
+            b > 0 && b < 250,
+            "the middle pixel is interpolated, got {b}"
+        );
         assert_eq!((g, r), (b, b), "grey stays grey, so no channel was swapped");
         assert_eq!(a, 255, "alpha is opaque");
     }
 
     #[test]
     fn dicom_image_exposes_geometry_and_renders_like_render_frame() {
-        let ds = gray_image(3, 2, 16, &[0, 1000, 2000, 3000, 4000, 5000], Some(2500.0), Some(5000.0));
+        let ds = gray_image(
+            3,
+            2,
+            16,
+            &[0, 1000, 2000, 3000, 4000, 5000],
+            Some(2500.0),
+            Some(5000.0),
+        );
         let img = DicomImage::from_dataset(&ds).unwrap();
         assert_eq!(img.width().unwrap(), 3);
         assert_eq!(img.height().unwrap(), 2);
@@ -2837,30 +3200,56 @@ mod tests {
         assert!(img.is_grayscale().unwrap());
         assert_eq!(img.current_frame(), 0);
         // no overrides → identical to the low-level render
-        assert_eq!(img.render().unwrap().as_bytes(), render_frame(&ds, 0).unwrap().as_bytes());
+        assert_eq!(
+            img.render().unwrap().as_bytes(),
+            render_frame(&ds, 0).unwrap().as_bytes()
+        );
     }
 
     #[test]
     fn dicom_image_geometry_matches_the_dataset_attributes() {
         // §3.5: the cached accessors must agree with the dataset's own tags.
-        let ds = gray_image(3, 2, 16, &[0, 1000, 2000, 3000, 4000, 5000], Some(2500.0), Some(5000.0));
+        let ds = gray_image(
+            3,
+            2,
+            16,
+            &[0, 1000, 2000, 3000, 4000, 5000],
+            Some(2500.0),
+            Some(5000.0),
+        );
         let img = DicomImage::from_dataset(&ds).unwrap();
         assert_eq!(img.width().unwrap(), ds.get_or(Tag::COLUMNS, 0u32));
         assert_eq!(img.height().unwrap(), ds.get_or(Tag::ROWS, 0u32));
         assert_eq!(img.number_of_frames().unwrap(), 1);
-        assert_eq!(img.is_grayscale().unwrap(), ds.get_or(Tag::SAMPLES_PER_PIXEL, 1u16) == 1);
+        assert_eq!(
+            img.is_grayscale().unwrap(),
+            ds.get_or(Tag::SAMPLES_PER_PIXEL, 1u16) == 1
+        );
     }
 
     #[test]
     fn rendering_the_same_dataset_twice_yields_identical_bytes() {
         // §3.4: with the dataset borrowed (cloned per render for now) a second
         // render of the same frame must be byte-identical — no state leaks.
-        let ds = gray_image(4, 3, 16, &[0, 100, 500, 1000, 2048, 4000, 5000, 6000, 7000, 8000, 9000, 10000], Some(5000.0), Some(10000.0));
+        let ds = gray_image(
+            4,
+            3,
+            16,
+            &[
+                0, 100, 500, 1000, 2048, 4000, 5000, 6000, 7000, 8000, 9000, 10000,
+            ],
+            Some(5000.0),
+            Some(10000.0),
+        );
         let first = render_frame(&ds, 0).unwrap();
         let second = render_frame(&ds, 0).unwrap();
         assert_eq!(first.as_bytes(), second.as_bytes());
         let img = DicomImage::from_dataset(&ds).unwrap();
-        assert_eq!(img.render().unwrap().as_bytes(), first.as_bytes(), "DicomImage agrees too");
+        assert_eq!(
+            img.render().unwrap().as_bytes(),
+            first.as_bytes(),
+            "DicomImage agrees too"
+        );
     }
 
     #[test]
@@ -2888,9 +3277,16 @@ mod tests {
         let default = img.render().unwrap().as_bytes()[0];
         img.set_window(1000.0, 2.0); // tight window centred on the value → bright
         let overridden = img.render().unwrap().as_bytes()[0];
-        assert!(overridden > default, "tight override brightens: {overridden} vs {default}");
+        assert!(
+            overridden > default,
+            "tight override brightens: {overridden} vs {default}"
+        );
         img.clear_window();
-        assert_eq!(img.render().unwrap().as_bytes()[0], default, "clearing restores the dataset window");
+        assert_eq!(
+            img.render().unwrap().as_bytes()[0],
+            default,
+            "clearing restores the dataset window"
+        );
     }
 
     #[test]
@@ -2904,19 +3300,28 @@ mod tests {
             (0x1103, 0x1203, [0u8, 255]),
         ] {
             ds.insert_or_update(crate::model::item::DicomItem::Element(
-                crate::model::element::DicomElement::new_bytes(Tag::new(0x0028, desc_tag), Vr::Us, us_bytes(&[2, 0, 8])),
+                crate::model::element::DicomElement::new_bytes(
+                    Tag::new(0x0028, desc_tag),
+                    Vr::Us,
+                    us_bytes(&[2, 0, 8]),
+                ),
             ));
             ds.insert_or_update(crate::model::item::DicomItem::Element(
                 crate::model::element::DicomElement::new_bytes(
                     Tag::new(0x0028, data_tag),
                     Vr::Ow,
-                    std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vals.to_vec())) as crate::model::buffer::SharedBuffer,
+                    std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vals.to_vec()))
+                        as crate::model::buffer::SharedBuffer,
                 ),
             ));
         }
         let img = DicomImage::from_dataset(&ds).unwrap();
         let a = img.render().unwrap();
-        assert_eq!(a.as_bytes(), render_frame(&ds, 0).unwrap().as_bytes(), "palette path matches render_frame");
+        assert_eq!(
+            a.as_bytes(),
+            render_frame(&ds, 0).unwrap().as_bytes(),
+            "palette path matches render_frame"
+        );
         assert_eq!(&a.as_bytes()[0..4], &[0, 0, 255, 255], "index 0 red");
         assert_eq!(&a.as_bytes()[4..8], &[255, 0, 0, 255], "index 1 blue");
     }
@@ -2925,7 +3330,10 @@ mod tests {
     fn dicom_image_renders_rgb_through_the_colour_pipeline() {
         let ds = color_image("RGB", 3, 8, &[255, 0, 0, 0, 255, 0], 0);
         let img = DicomImage::from_dataset(&ds).unwrap();
-        assert_eq!(img.render().unwrap().as_bytes(), render_frame(&ds, 0).unwrap().as_bytes());
+        assert_eq!(
+            img.render().unwrap().as_bytes(),
+            render_frame(&ds, 0).unwrap().as_bytes()
+        );
     }
 
     #[test]
@@ -2936,7 +3344,11 @@ mod tests {
         assert_eq!((base.width(), base.height()), (2, 2));
         img.set_scale(2.0);
         let scaled = img.render().unwrap();
-        assert_eq!((scaled.width(), scaled.height()), (4, 4), "scale 2 doubles both dimensions");
+        assert_eq!(
+            (scaled.width(), scaled.height()),
+            (4, 4),
+            "scale 2 doubles both dimensions"
+        );
     }
 
     #[test]
@@ -2946,9 +3358,15 @@ mod tests {
         let base = img.render().unwrap();
         // The ascending (MONOCHROME2) colormap reproduces the plain grey output.
         img.set_colormap(Some(ColorTable::monochrome2()));
-        assert_eq!(img.render().unwrap().as_bytes(), base.as_bytes(), "monochrome2 is identity");
+        assert_eq!(
+            img.render().unwrap().as_bytes(),
+            base.as_bytes(),
+            "monochrome2 is identity"
+        );
         // An all-red colormap paints every pixel red (BGRA [0,0,255,255]).
-        img.set_colormap(Some(ColorTable::from_entries([crate::pixel::Color32::new(255, 0, 0); 256])));
+        img.set_colormap(Some(ColorTable::from_entries(
+            [crate::pixel::Color32::new(255, 0, 0); 256],
+        )));
         let red = img.render().unwrap();
         for px in red.as_bytes().as_chunks::<4>().0 {
             assert_eq!(&px[..3], &[0, 0, 255], "BGRA red");
@@ -2964,16 +3382,24 @@ mod tests {
         // default overlays shown in magenta == render_frame_with_overlays default
         assert_eq!(
             img.render().unwrap().as_bytes(),
-            render_frame_with_overlays(&ds, 0, DEFAULT_OVERLAY_COLOR).unwrap().as_bytes(),
+            render_frame_with_overlays(&ds, 0, DEFAULT_OVERLAY_COLOR)
+                .unwrap()
+                .as_bytes(),
         );
         // disabled → identical to the plain render (no overlay pixel)
         img.set_show_overlays(false);
-        assert_eq!(img.render().unwrap().as_bytes(), render_frame(&ds, 0).unwrap().as_bytes());
+        assert_eq!(
+            img.render().unwrap().as_bytes(),
+            render_frame(&ds, 0).unwrap().as_bytes()
+        );
         // custom colour paints the overlay pixel green (BGRA [0,255,0,255])
         img.set_show_overlays(true);
         img.set_overlay_color(crate::pixel::Color32::new(0, 255, 0));
         // OR-composited: green 255 over grey 128 keeps the red/blue channels
-        assert_eq!(&img.render().unwrap().as_bytes()[0..4], &[128, 255, 128, 255]);
+        assert_eq!(
+            &img.render().unwrap().as_bytes()[0..4],
+            &[128, 255, 128, 255]
+        );
     }
 
     #[test]
@@ -2994,7 +3420,11 @@ mod tests {
         let img = render_frame(&ds, 0).unwrap();
         assert_eq!(img.width(), 2);
         assert_eq!(&img.as_bytes()[0..4], &[0, 0, 255, 255], "first pixel red");
-        assert_eq!(&img.as_bytes()[4..8], &[0, 255, 0, 255], "second pixel green");
+        assert_eq!(
+            &img.as_bytes()[4..8],
+            &[0, 255, 0, 255],
+            "second pixel green"
+        );
     }
 
     #[test]
@@ -3010,17 +3440,45 @@ mod tests {
         );
         let bmp = img.to_bmp();
         assert_eq!(&bmp[0..2], b"BM");
-        assert_eq!(u32::from_le_bytes([bmp[2], bmp[3], bmp[4], bmp[5]]) as usize, bmp.len(), "file size field");
-        assert_eq!(u32::from_le_bytes([bmp[10], bmp[11], bmp[12], bmp[13]]), 54, "pixel-data offset");
-        assert_eq!(i32::from_le_bytes([bmp[18], bmp[19], bmp[20], bmp[21]]), 2, "width");
-        assert_eq!(i32::from_le_bytes([bmp[22], bmp[23], bmp[24], bmp[25]]), 2, "height");
-        assert_eq!(u16::from_le_bytes([bmp[28], bmp[29]]), 24, "24 bits per pixel");
+        assert_eq!(
+            u32::from_le_bytes([bmp[2], bmp[3], bmp[4], bmp[5]]) as usize,
+            bmp.len(),
+            "file size field"
+        );
+        assert_eq!(
+            u32::from_le_bytes([bmp[10], bmp[11], bmp[12], bmp[13]]),
+            54,
+            "pixel-data offset"
+        );
+        assert_eq!(
+            i32::from_le_bytes([bmp[18], bmp[19], bmp[20], bmp[21]]),
+            2,
+            "width"
+        );
+        assert_eq!(
+            i32::from_le_bytes([bmp[22], bmp[23], bmp[24], bmp[25]]),
+            2,
+            "height"
+        );
+        assert_eq!(
+            u16::from_le_bytes([bmp[28], bmp[29]]),
+            24,
+            "24 bits per pixel"
+        );
         // 2 px * 3 bytes = 6, padded to 8 per row × 2 rows = 16 + 54 header
         assert_eq!(bmp.len(), 54 + 16);
         // bottom-up: the first stored row is the BOTTOM row (blue, white) as B,G,R.
-        assert_eq!(&bmp[54..60], &[255, 0, 0, 255, 255, 255], "bottom row blue,white in BGR");
+        assert_eq!(
+            &bmp[54..60],
+            &[255, 0, 0, 255, 255, 255],
+            "bottom row blue,white in BGR"
+        );
         // top row (red, green) follows, then 2 padding bytes per row
-        assert_eq!(&bmp[62..68], &[0, 0, 255, 0, 255, 0], "top row red,green in BGR");
+        assert_eq!(
+            &bmp[62..68],
+            &[0, 0, 255, 0, 255, 0],
+            "top row red,green in BGR"
+        );
     }
 
     #[test]
@@ -3071,7 +3529,7 @@ mod tests {
         ds.insert_str(Tag::new(0x6000, 0x0040), Vr::Cs, "G"); // type
         ds.insert_value(Tag::new(0x6000, 0x0100), 1u16); // bits allocated
         ds.insert_value(Tag::new(0x6000, 0x0102), 8u16); // bit position = stored bits
-        // OverlayOrigin (6000,0050) is row\column, 1-based: row 1 \ column 1
+                                                         // OverlayOrigin (6000,0050) is row\column, 1-based: row 1 \ column 1
         let mut origin = Vec::new();
         origin.extend_from_slice(&1i16.to_le_bytes());
         origin.extend_from_slice(&1i16.to_le_bytes());
@@ -3083,7 +3541,7 @@ mod tests {
             ),
         ));
         ds.insert_value(Tag::new(0x6000, 0x0051), 1u16); // ImageFrameOrigin: frame 1
-        // 16-bit pixel data: base value 128, with overlay bit set at the specified pixels
+                                                         // 16-bit pixel data: base value 128, with overlay bit set at the specified pixels
         let mut bytes = Vec::new();
         for y in 0..h {
             for x in 0..w {
@@ -3101,7 +3559,9 @@ mod tests {
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(bytes)),
             ),
         ));
-        ds.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        ds.set_transfer_syntax(
+            crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
         ds
     }
 
@@ -3112,12 +3572,20 @@ mod tests {
         let image = render_frame_with_overlays(&ds, 0, DEFAULT_OVERLAY_COLOR).unwrap();
         let b = image.as_bytes();
         // pixel (0,0) → index 0: magenta OR grey 128 → BGRA [255,128,255,255]
-        assert_eq!(&b[0..4], &[255, 128, 255, 255], "overlay pixel is OR-composited magenta");
+        assert_eq!(
+            &b[0..4],
+            &[255, 128, 255, 255],
+            "overlay pixel is OR-composited magenta"
+        );
         // pixel (1,0) has no overlay bit → stays grey (128)
         assert_eq!(b[4], 128, "non-overlay pixel keeps its grey value");
         // pixel (2,1) is overlay: row 1, col 2 → index (1*4+2)
         let i = (4 + 2) * 4; // row 1, col 2
-        assert_eq!(&b[i..i + 4], &[255, 128, 255, 255], "second overlay pixel is magenta");
+        assert_eq!(
+            &b[i..i + 4],
+            &[255, 128, 255, 255],
+            "second overlay pixel is magenta"
+        );
     }
 
     #[test]
@@ -3137,7 +3605,11 @@ mod tests {
         ));
         let image = render_frame_with_overlays(&ds, 0, DEFAULT_OVERLAY_COLOR).unwrap();
         let b = image.as_bytes();
-        assert_eq!(&b[4..8], &[255, 128, 255, 255], "bit 1 is the second pixel (LSB first)");
+        assert_eq!(
+            &b[4..8],
+            &[255, 128, 255, 255],
+            "bit 1 is the second pixel (LSB first)"
+        );
         assert_eq!(b[0], 128, "bit 0 was not set");
     }
 
@@ -3168,17 +3640,31 @@ mod tests {
         origin.extend_from_slice(&1i16.to_le_bytes());
         origin.extend_from_slice(&1i16.to_le_bytes());
         ds.insert_or_update(crate::model::item::DicomItem::Element(
-            crate::model::element::DicomElement::new_bytes(Tag::new(0x6000, 0x0050), Vr::Ss, std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(origin))),
+            crate::model::element::DicomElement::new_bytes(
+                Tag::new(0x6000, 0x0050),
+                Vr::Ss,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(origin)),
+            ),
         ));
         let mut plane = vec![0u8; 4];
         plane[0] = 0b0000_0001; // (0,0)
         ds.insert_or_update(crate::model::item::DicomItem::Element(
-            crate::model::element::DicomElement::new_bytes(Tag::new(0x6000, 0x3000), Vr::Ob, std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(plane))),
+            crate::model::element::DicomElement::new_bytes(
+                Tag::new(0x6000, 0x3000),
+                Vr::Ob,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(plane)),
+            ),
         ));
         ds.insert_or_update(crate::model::item::DicomItem::Element(
-            crate::model::element::DicomElement::new_bytes(Tag::PIXEL_DATA, Vr::Ob, std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![128u8; 32]))),
+            crate::model::element::DicomElement::new_bytes(
+                Tag::PIXEL_DATA,
+                Vr::Ob,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![128u8; 32])),
+            ),
         ));
-        ds.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        ds.set_transfer_syntax(
+            crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
         ds
     }
 
@@ -3186,9 +3672,17 @@ mod tests {
     fn image_frame_origin_selects_the_frame_the_overlay_covers() {
         let ds = two_frame_gray_with_standalone_overlay();
         let frame0 = render_frame_with_overlays(&ds, 0, DEFAULT_OVERLAY_COLOR).unwrap();
-        assert_eq!(frame0.as_bytes()[0], 128, "frame 0 is not covered by an overlay whose origin is frame 2");
+        assert_eq!(
+            frame0.as_bytes()[0],
+            128,
+            "frame 0 is not covered by an overlay whose origin is frame 2"
+        );
         let frame1 = render_frame_with_overlays(&ds, 1, DEFAULT_OVERLAY_COLOR).unwrap();
-        assert_eq!(&frame1.as_bytes()[0..4], &[255, 128, 255, 255], "frame 1 is covered and composited");
+        assert_eq!(
+            &frame1.as_bytes()[0..4],
+            &[255, 128, 255, 255],
+            "frame 1 is covered and composited"
+        );
     }
 
     #[test]
@@ -3220,27 +3714,54 @@ mod tests {
             ),
         ));
         let image = render_frame_with_overlays(&ds, 0, DEFAULT_OVERLAY_COLOR).unwrap();
-        assert_eq!((image.width(), image.height()), (4, 4), "rendered without panic");
+        assert_eq!(
+            (image.width(), image.height()),
+            (4, 4),
+            "rendered without panic"
+        );
         let at = |x: usize, y: usize| {
             let b = image.as_bytes();
             let i = (y * 4 + x) * 4;
             [b[i], b[i + 1], b[i + 2], b[i + 3]]
         };
-        assert_eq!(at(2, 2), [255, 128, 255, 255], "the in-image overlay bit is composited at (2,2)");
+        assert_eq!(
+            at(2, 2),
+            [255, 128, 255, 255],
+            "the in-image overlay bit is composited at (2,2)"
+        );
         assert_eq!(at(3, 2)[0], 128, "the clipped bit never draws at (3,2)");
-        assert_eq!(at(0, 0)[0], 128, "the plane did not stay at its default origin");
+        assert_eq!(
+            at(0, 0)[0],
+            128,
+            "the plane did not stay at its default origin"
+        );
     }
 
     #[test]
     fn a_parsed_file_renders_a_real_frame() {
         // End-to-end: a real 256x256 16-bit file must render, not report
         // "frame has zero width or height".
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests-data/explicit-le/GH626.dcm");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests-data/explicit-le/GH626.dcm"
+        );
         let file = crate::io::file::DicomFile::open(path).expect("GH626 opens");
         let image = render_frame(&file.dataset, 0).expect("frame renders");
         assert_eq!((image.width(), image.height()), (256, 256));
-        assert_eq!(image.as_bytes().len(), 256 * 256 * 4, "BGRA bytes for the whole frame");
-        assert!(image.as_bytes().as_chunks::<4>().0.iter().any(|px| px[0] != 0), "not a blank image");
+        assert_eq!(
+            image.as_bytes().len(),
+            256 * 256 * 4,
+            "BGRA bytes for the whole frame"
+        );
+        assert!(
+            image
+                .as_bytes()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|px| px[0] != 0),
+            "not a blank image"
+        );
     }
 
     #[test]
@@ -3250,7 +3771,11 @@ mod tests {
         ds.insert_value(Tag::BITS_STORED, 12u16);
         ds.insert_value(Tag::HIGH_BIT, 11u16);
         let image = render_frame(&ds, 0).unwrap();
-        assert_eq!(&image.as_bytes()[0..4], &[128, 128, 128, 255], "neutral YCbCr is mid grey");
+        assert_eq!(
+            &image.as_bytes()[0..4],
+            &[128, 128, 128, 255],
+            "neutral YCbCr is mid grey"
+        );
     }
 
     #[test]
@@ -3265,7 +3790,11 @@ mod tests {
             (0x1103, 0x1203, [0u8, 0, 0, 50]),
         ] {
             ds.insert_or_update(crate::model::item::DicomItem::Element(
-                crate::model::element::DicomElement::new_bytes(Tag::new(0x0028, desc_tag), Vr::Us, us_bytes(&[4, 0, 8])),
+                crate::model::element::DicomElement::new_bytes(
+                    Tag::new(0x0028, desc_tag),
+                    Vr::Us,
+                    us_bytes(&[4, 0, 8]),
+                ),
             ));
             ds.insert_or_update(crate::model::item::DicomItem::Element(
                 crate::model::element::DicomElement::new_bytes(
@@ -3277,7 +3806,11 @@ mod tests {
             ));
         }
         let image = render_frame(&ds, 0).unwrap();
-        assert_eq!(&image.as_bytes()[0..4], &[50, 100, 200, 255], "0x3000 >> 4 is entry 3");
+        assert_eq!(
+            &image.as_bytes()[0..4],
+            &[50, 100, 200, 255],
+            "0x3000 >> 4 is entry 3"
+        );
     }
 
     #[test]
@@ -3342,7 +3875,11 @@ mod tests {
         ));
         let overlays = crate::pixel::overlay::OverlayData::from_dataset(&ds);
         let data = overlays[0].load(&ds).unwrap();
-        assert_eq!(data.data().as_ref(), &[0x01, 0x02], "bits at (1,1) and (2,2) of the image");
+        assert_eq!(
+            data.data().as_ref(),
+            &[0x01, 0x02],
+            "bits at (1,1) and (2,2) of the image"
+        );
     }
 
     #[test]
@@ -3353,25 +3890,35 @@ mod tests {
         for (bits, signed, samples) in [
             (8u16, false, vec![0u16, 1, 127, 128, 255, 255, 0, 64]),
             (16u16, false, vec![0u16, 4095, 2048, 1, 4095, 100, 0, 3999]),
-            (16u16, true, vec![0x0001u16, 0xFFFF, 0x0F00, 0x8000, 0x7FFF, 5, 0x0100, 0x0FFF]),
+            (
+                16u16,
+                true,
+                vec![0x0001u16, 0xFFFF, 0x0F00, 0x8000, 0x7FFF, 5, 0x0100, 0x0FFF],
+            ),
         ] {
             let mut ds = gray_image(8, 1, bits, &samples, Some(2000.0), Some(4000.0));
             ds.insert_value(Tag::BITS_STORED, if bits == 8 { 8u16 } else { 12u16 });
             ds.insert_value(Tag::HIGH_BIT, if bits == 8 { 7u16 } else { 11u16 });
             ds.insert_value(Tag::PIXEL_REPRESENTATION, if signed { 1u16 } else { 0u16 });
-            let options =
-                GrayscaleRenderOptions { invert: true, ..GrayscaleRenderOptions::from_dataset(&ds).unwrap() };
+            let options = GrayscaleRenderOptions {
+                invert: true,
+                ..GrayscaleRenderOptions::from_dataset(&ds).unwrap()
+            };
             let image = render_grayscale_with_options(&ds, 0, &options).unwrap();
 
             let depth = BitDepth::new(bits, options_stored(&ds), options_high_bit(&ds), signed);
             for (i, &raw) in samples.iter().enumerate() {
                 let stored = if signed {
-                    if bits == 8 { (depth.normalize(raw) as i8) as f64 } else { (depth.normalize(raw) as i16) as f64 }
+                    signed_from_stored(depth.normalize(raw), options_stored(&ds))
                 } else {
                     depth.normalize(raw) as f64
                 };
                 let expected = options.map(stored);
-                assert_eq!(image.as_bytes()[i * 4], expected, "pixel {i} of {bits}-bit signed={signed}");
+                assert_eq!(
+                    image.as_bytes()[i * 4],
+                    expected,
+                    "pixel {i} of {bits}-bit signed={signed}"
+                );
             }
         }
     }
@@ -3387,10 +3934,15 @@ mod tests {
     }
 
     #[test]
-    fn a_non_right_angle_rotation_is_ignored() {        let image = RawImage::new(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 255]);
+    fn a_non_right_angle_rotation_is_ignored() {
+        let image = RawImage::new(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 255]);
         let mut transform = SpatialTransform::new();
         transform.rotate(45);
         let rotated = transform.apply_to(&image);
-        assert_eq!(rotated.as_bytes(), image.as_bytes(), "45° is not a right angle");
+        assert_eq!(
+            rotated.as_bytes(),
+            image.as_bytes(),
+            "45° is not a right angle"
+        );
     }
 }

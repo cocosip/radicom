@@ -10,9 +10,7 @@ pub mod photometric;
 pub mod transcoder;
 
 use crate::error::{Error, ImagingError};
-use crate::model::buffer::{
-    CompositeBuffer, EmptyBuffer, EndianBuffer, MemoryBuffer, RangeBuffer, SharedBuffer,
-};
+use crate::model::buffer::{CompositeBuffer, EmptyBuffer, MemoryBuffer, RangeBuffer, SharedBuffer};
 use crate::model::dataset::Dataset;
 use crate::model::item::{DicomFragmentSequence, DicomItem};
 use crate::model::tag::Tag;
@@ -85,356 +83,399 @@ pub struct PixelData<'a> {
 
 macro_rules! pixel_read_methods {
     () => {
-
-
-    pub fn kind(&self) -> PixelDataKind {
-        self.kind
-    }
-
-    pub fn dataset(&self) -> &Dataset {
-        &*self.dataset
-    }
-
-    // -- properties backed by tags (§1.2) -----------------------------------
-
-    pub fn width(&self) -> u32 {
-        self.dataset.get_or(COLUMNS, 0u32)
-    }
-
-    pub fn height(&self) -> u32 {
-        self.dataset.get_or(ROWS, 0u32)
-    }
-
-    /// `(0028,0008)`; absent means one frame.
-    pub fn number_of_frames(&self) -> u32 {
-        self.dataset.try_get_str_ref(NUMBER_OF_FRAMES).and_then(|s| s.trim().parse().ok()).unwrap_or(1).max(1)
-    }
-
-    /// `(0028,0100)`, validated to 1/8/16/32/64.
-    pub fn bits_allocated(&self) -> Result<u16, Error> {
-        let bits = self.dataset.get_or(BITS_ALLOCATED, 8u16);
-        if matches!(bits, 1 | 8 | 16 | 32 | 64) {
-            Ok(bits)
-        } else {
-            Err(pixel_err(format!("unsupported bits allocated {bits}")))
+        pub fn kind(&self) -> PixelDataKind {
+            self.kind
         }
-    }
 
-    pub fn bits_stored(&self) -> u16 {
-        self.dataset.get_or(BITS_STORED, 0u16)
-    }
-
-    pub fn high_bit(&self) -> u16 {
-        self.dataset.get_or(HIGH_BIT, 0u16)
-    }
-
-    pub fn samples_per_pixel(&self) -> u16 {
-        self.dataset.get_or(SAMPLES_PER_PIXEL, 1u16).max(1)
-    }
-
-    /// `(0028,0103)`: 1 = signed.
-    pub fn pixel_representation(&self) -> u16 {
-        self.dataset.get_or(PIXEL_REPRESENTATION, 0u16)
-    }
-
-    pub fn planar_configuration(&self) -> u16 {
-        self.dataset.get_or(PLANAR_CONFIGURATION, 0u16)
-    }
-
-    pub fn photometric_interpretation(&self) -> Option<PhotometricInterpretation> {
-        self.dataset.try_get_str_ref(PHOTOMETRIC_INTERPRETATION).map(PhotometricInterpretation::parse)
-    }
-
-    pub fn transfer_syntax(&self) -> Arc<TransferSyntax> {
-        self.dataset.transfer_syntax()
-    }
-
-    // -- frame size (PIX-03, §1.6) ------------------------------------------
-
-    /// Size of one frame once decoded.
-    pub fn uncompressed_frame_size(&self) -> Result<u64, Error> {
-        let bits = self.bits_allocated()? as u64;
-        let samples = self.samples_per_pixel() as u64;
-        let mut columns = self.width() as u64;
-        let rows = self.height() as u64;
-        // A zero dimension is always a broken dataset, never a zero-byte
-        // frame: returning Ok(0) would let the frame bounds check pass and
-        // yield an empty frame instead of an error.
-        if columns == 0 || rows == 0 {
-            return Err(pixel_err(format!("image has zero dimensions ({columns}x{rows})")));
+        pub fn dataset(&self) -> &Dataset {
+            &*self.dataset
         }
-        let pi = self.photometric_interpretation();
 
-        if bits == 1 {
-            // bit-packed rows
-            return Ok(columns.div_ceil(8) * rows * samples.max(1));
+        // -- properties backed by tags (§1.2) -----------------------------------
+
+        pub fn width(&self) -> u32 {
+            self.dataset.get_or(COLUMNS, 0u32)
         }
-        if pi.is_some_and(|p| p.is_subsampled()) {
-            // chroma subsampling: 4:2:2 halves the chroma samples, 4:2:0 both
-            columns = columns.div_ceil(2) * 2;
-            let plane = columns * rows * bits / 8;
-            let chroma = if pi.is_some_and(|p| p.is_420()) {
-                plane / 4
+
+        pub fn height(&self) -> u32 {
+            self.dataset.get_or(ROWS, 0u32)
+        }
+
+        /// `(0028,0008)`; absent means one frame.
+        pub fn number_of_frames(&self) -> u32 {
+            self.dataset
+                .try_get_str_ref(NUMBER_OF_FRAMES)
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(1)
+                .max(1)
+        }
+
+        /// `(0028,0100)`, validated to 1/8/16/32/64.
+        pub fn bits_allocated(&self) -> Result<u16, Error> {
+            let bits = self.dataset.get_or(BITS_ALLOCATED, 8u16);
+            if matches!(bits, 1 | 8 | 16 | 32 | 64) {
+                Ok(bits)
             } else {
-                plane / 2
+                Err(pixel_err(format!("unsupported bits allocated {bits}")))
+            }
+        }
+
+        pub fn bits_stored(&self) -> u16 {
+            self.dataset.get_or(BITS_STORED, 0u16)
+        }
+
+        pub fn high_bit(&self) -> u16 {
+            self.dataset.get_or(HIGH_BIT, 0u16)
+        }
+
+        pub fn samples_per_pixel(&self) -> u16 {
+            self.dataset.get_or(SAMPLES_PER_PIXEL, 1u16).max(1)
+        }
+
+        /// `(0028,0103)`: 1 = signed.
+        pub fn pixel_representation(&self) -> u16 {
+            self.dataset.get_or(PIXEL_REPRESENTATION, 0u16)
+        }
+
+        pub fn planar_configuration(&self) -> u16 {
+            self.dataset.get_or(PLANAR_CONFIGURATION, 0u16)
+        }
+
+        pub fn photometric_interpretation(&self) -> Option<PhotometricInterpretation> {
+            self.dataset
+                .try_get_str_ref(PHOTOMETRIC_INTERPRETATION)
+                .map(PhotometricInterpretation::parse)
+        }
+
+        pub fn transfer_syntax(&self) -> Arc<TransferSyntax> {
+            self.dataset.transfer_syntax()
+        }
+
+        // -- frame size (PIX-03, §1.6) ------------------------------------------
+
+        /// Size of one frame once decoded.
+        pub fn uncompressed_frame_size(&self) -> Result<u64, Error> {
+            let bits = self.bits_allocated()? as u64;
+            let samples = self.samples_per_pixel() as u64;
+            let mut columns = self.width() as u64;
+            let rows = self.height() as u64;
+            // A zero dimension is always a broken dataset, never a zero-byte
+            // frame: returning Ok(0) would let the frame bounds check pass and
+            // yield an empty frame instead of an error.
+            if columns == 0 || rows == 0 {
+                return Err(pixel_err(format!(
+                    "image has zero dimensions ({columns}x{rows})"
+                )));
+            }
+            let pi = self.photometric_interpretation();
+
+            if bits == 1 {
+                // Single-bit samples pack continuously, least-significant bit first;
+                // row boundaries do not force byte alignment. Only the whole frame
+                // rounds up to a byte (§1.6, review #5).
+                return Ok((columns * rows * samples.max(1)).div_ceil(8));
+            }
+            if pi.is_some_and(|p| p.is_subsampled()) {
+                // chroma subsampling: 4:2:2 halves the chroma samples, 4:2:0 both
+                columns = columns.div_ceil(2) * 2;
+                let plane = columns * rows * bits / 8;
+                let chroma = if pi.is_some_and(|p| p.is_420()) {
+                    plane / 4
+                } else {
+                    plane / 2
+                };
+                return Ok(plane + 2 * chroma);
+            }
+            let bytes_per_sample = bits.div_ceil(8);
+            Ok(columns * rows * samples * bytes_per_sample)
+        }
+
+        // -- frames (PIX-02, §1.4) ----------------------------------------------
+
+        /// One frame's bytes, endianness-normalized (§1.2 guarantee).
+        pub fn get_frame(&self, index: u32) -> Result<SharedBuffer, Error> {
+            match self.kind {
+                PixelDataKind::Encapsulated => self.encapsulated_frame(index),
+                PixelDataKind::OtherByte | PixelDataKind::OtherWord => self.native_frame(index),
+            }
+        }
+
+        /// Native (uncompressed) frame: a zero-copy window over the element.
+        fn native_frame(&self, index: u32) -> Result<SharedBuffer, Error> {
+            let buffer = match self.dataset.item(&PIXEL_DATA) {
+                Some(DicomItem::Element(e)) => e.value().as_buffer().cloned(),
+                Some(_) => return Err(pixel_err("pixel data is not a byte value")),
+                None => return Err(pixel_err("dataset has no pixel data")),
+            }
+            .ok_or_else(|| pixel_err("pixel data element holds a string value"))?;
+
+            let frames = self.number_of_frames() as u64;
+            if index as u64 >= frames {
+                return Err(pixel_err(format!(
+                    "frame {index} out of range (0..{frames})"
+                )));
+            }
+            if self.bits_allocated()? == 1 {
+                // Bits are packed continuously, so a frame may start mid-byte.
+                // Repack this frame into its own byte-aligned LSB-first buffer.
+                let frame_bits = (self.width() as usize)
+                    * (self.height() as usize)
+                    * (self.samples_per_pixel() as usize);
+                let start_bit = index as usize * frame_bits;
+                let frame_bytes = frame_bits.div_ceil(8);
+                if (start_bit + frame_bits) as u64 > buffer.size() * 8 {
+                    return Err(pixel_err(format!(
+                        "frame {index} needs bits {start_bit}..{} but pixel data holds {} bits",
+                        start_bit + frame_bits,
+                        buffer.size() * 8
+                    )));
+                }
+                let raw = buffer.data();
+                let raw: &[u8] = raw.as_ref();
+                let mut out = vec![0u8; frame_bytes];
+                for bit_index in 0..frame_bits {
+                    let pos = start_bit + bit_index;
+                    if (raw[pos / 8] >> (pos % 8)) & 1 == 1 {
+                        out[bit_index / 8] |= 1 << (bit_index % 8);
+                    }
+                }
+                return Ok(Arc::new(MemoryBuffer::from(out)));
+            }
+            let frame_size = self.uncompressed_frame_size()?;
+            let offset = index as u64 * frame_size;
+            if offset + frame_size > buffer.size() {
+                return Err(pixel_err(format!(
+                    "frame {index} needs bytes {offset}..{} but pixel data holds {}",
+                    offset + frame_size,
+                    buffer.size()
+                )));
+            }
+            let window: SharedBuffer = Arc::new(RangeBuffer::new(buffer, offset, frame_size));
+            Ok(window)
+        }
+
+        /// Encapsulated frame per the §1.4 decision list.
+        fn encapsulated_frame(&self, index: u32) -> Result<SharedBuffer, Error> {
+            let Some(DicomItem::Fragments(f)) = self.dataset.item(&PIXEL_DATA) else {
+                return Err(pixel_err("dataset has no encapsulated pixel data"));
             };
-            return Ok(plane + 2 * chroma);
-        }
-        let bytes_per_sample = bits.div_ceil(8);
-        Ok(columns * rows * samples * bytes_per_sample)
-    }
-
-    // -- frames (PIX-02, §1.4) ----------------------------------------------
-
-    /// One frame's bytes, endianness-normalized (§1.2 guarantee).
-    pub fn get_frame(&self, index: u32) -> Result<SharedBuffer, Error> {
-        match self.kind {
-            PixelDataKind::Encapsulated => self.encapsulated_frame(index),
-            PixelDataKind::OtherByte | PixelDataKind::OtherWord => self.native_frame(index),
-        }
-    }
-
-    /// Native (uncompressed) frame: a zero-copy window over the element.
-    fn native_frame(&self, index: u32) -> Result<SharedBuffer, Error> {
-        let buffer = match self.dataset.item(&PIXEL_DATA) {
-            Some(DicomItem::Element(e)) => e.value().as_buffer().cloned(),
-            Some(_) => return Err(pixel_err("pixel data is not a byte value")),
-            None => return Err(pixel_err("dataset has no pixel data")),
-        }
-        .ok_or_else(|| pixel_err("pixel data element holds a string value"))?;
-
-        let frames = self.number_of_frames() as u64;
-        let frame_size = self.uncompressed_frame_size()?;
-        if index as u64 >= frames {
-            return Err(pixel_err(format!("frame {index} out of range (0..{frames})")));
-        }
-        let offset = index as u64 * frame_size;
-        if offset + frame_size > buffer.size() {
-            return Err(pixel_err(format!(
-                "frame {index} needs bytes {offset}..{} but pixel data holds {}",
-                offset + frame_size,
-                buffer.size()
-            )));
-        }
-        let window: SharedBuffer = Arc::new(RangeBuffer::new(buffer, offset, frame_size));
-        Ok(self.normalize(window))
-    }
-
-    /// Encapsulated frame per the §1.4 decision list.
-    fn encapsulated_frame(&self, index: u32) -> Result<SharedBuffer, Error> {
-        let Some(DicomItem::Fragments(f)) = self.dataset.item(&PIXEL_DATA) else {
-            return Err(pixel_err("dataset has no encapsulated pixel data"));
-        };
-        let fragments = f.fragments();
-        // rule 1: a single fragment is the whole data
-        if fragments.len() == 1 {
-            return Ok(self.normalize(fragments[0].clone()));
-        }
-        let frames = self.number_of_frames();
-        // rule 2: one fragment per frame
-        if fragments.len() as u32 == frames {
-            let fragment = fragments.get(index as usize).ok_or_else(|| {
-                pixel_err(format!("frame {index} out of range (0..{frames})"))
-            })?;
-            return Ok(self.normalize(fragment.clone()));
-        }
-        // rule 3: the basic offset table
-        if !f.offset_table().is_empty() {
-            return self.frame_from_offset_table(f, index, frames);
-        }
-        // rule 4
-        Err(Error::Imaging(ImagingError(
-            "encapsulated pixel data has neither an offset table nor one fragment per frame".into(),
-        )))
-    }
-
-    fn frame_from_offset_table(
-        &self,
-        f: &DicomFragmentSequence,
-        index: u32,
-        frames: u32,
-    ) -> Result<SharedBuffer, Error> {
-        let table = f.offset_table();
-        let start = *table.get(index as usize).ok_or_else(|| {
-            pixel_err(format!("offset table has no entry for frame {index} (of {frames})"))
-        })? as u64;
-        let end = table.get(index as usize + 1).map(|v| *v as u64).unwrap_or_else(|| {
-            // last frame runs to the end of the fragment stream
-            f.fragments().iter().map(|b| b.size() + b.size() % 2).sum::<u64>() + 8 * f.fragments().len() as u64
-        });
-        if !start.is_multiple_of(2) {
-            return Err(pixel_err(format!("offset table entry {start} is not even")));
-        }
-        if end < start {
-            return Err(pixel_err(format!("offset table is not monotonic at frame {index}")));
+            let fragments = f.fragments();
+            // rule 1: a single fragment is the whole data
+            if fragments.len() == 1 {
+                return Ok(fragments[0].clone());
+            }
+            let frames = self.number_of_frames();
+            // rule 2: one fragment per frame
+            if fragments.len() as u32 == frames {
+                let fragment = fragments.get(index as usize).ok_or_else(|| {
+                    pixel_err(format!("frame {index} out of range (0..{frames})"))
+                })?;
+                return Ok(fragment.clone());
+            }
+            // rule 3: the basic offset table
+            if !f.offset_table().is_empty() {
+                return self.frame_from_offset_table(f, index, frames);
+            }
+            // rule 4
+            Err(Error::Imaging(ImagingError(
+                "encapsulated pixel data has neither an offset table nor one fragment per frame"
+                    .into(),
+            )))
         }
 
-        // Walk the fragments, collecting the byte ranges the frame spans.
-        // Offsets are measured from the first fragment's item tag.
-        let mut cursor = 0u64;
-        let mut parts: Vec<SharedBuffer> = Vec::new();
-        for fragment in f.fragments() {
-            let item_start = cursor;
-            let padded = fragment.size() + fragment.size() % 2;
-            let item_end = item_start + 8 + padded;
-            if item_end > start && item_start < end {
-                let data_start = item_start + 8;
-                let local_start = start.saturating_sub(data_start);
-                let local_end = (end.min(item_end) - data_start).min(fragment.size());
-                if local_end > local_start {
-                    parts.push(Arc::new(RangeBuffer::new(
-                        fragment.clone(),
-                        local_start,
-                        local_end - local_start,
+        fn frame_from_offset_table(
+            &self,
+            f: &DicomFragmentSequence,
+            index: u32,
+            frames: u32,
+        ) -> Result<SharedBuffer, Error> {
+            let table = f.offset_table();
+            let start = *table.get(index as usize).ok_or_else(|| {
+                pixel_err(format!(
+                    "offset table has no entry for frame {index} (of {frames})"
+                ))
+            })? as u64;
+            let end = table
+                .get(index as usize + 1)
+                .map(|v| *v as u64)
+                .unwrap_or_else(|| {
+                    // last frame runs to the end of the fragment stream
+                    f.fragments()
+                        .iter()
+                        .map(|b| b.size() + b.size() % 2)
+                        .sum::<u64>()
+                        + 8 * f.fragments().len() as u64
+                });
+            if !start.is_multiple_of(2) {
+                return Err(pixel_err(format!("offset table entry {start} is not even")));
+            }
+            if end < start {
+                return Err(pixel_err(format!(
+                    "offset table is not monotonic at frame {index}"
+                )));
+            }
+
+            // Walk the fragments, collecting the byte ranges the frame spans.
+            // Offsets are measured from the first fragment's item tag.
+            let mut cursor = 0u64;
+            let mut parts: Vec<SharedBuffer> = Vec::new();
+            for fragment in f.fragments() {
+                let item_start = cursor;
+                let padded = fragment.size() + fragment.size() % 2;
+                let item_end = item_start + 8 + padded;
+                if item_end > start && item_start < end {
+                    let data_start = item_start + 8;
+                    let local_start = start.saturating_sub(data_start);
+                    let local_end = (end.min(item_end) - data_start).min(fragment.size());
+                    if local_end > local_start {
+                        parts.push(Arc::new(RangeBuffer::new(
+                            fragment.clone(),
+                            local_start,
+                            local_end - local_start,
+                        )));
+                    }
+                }
+                cursor = item_end;
+            }
+            match parts.len() {
+                0 => Err(pixel_err(format!("frame {index} spans no fragment bytes"))),
+                1 => Ok(parts.pop().expect("len 1")),
+                _ => Ok(Arc::new(CompositeBuffer::new(parts))),
+            }
+        }
+
+        /// Frames currently present: an absent element holds none, otherwise
+        /// `(0028,0008)` (which reads as 1 when the tag is absent) is trusted.
+        #[allow(dead_code)] // used by PixelData::add_frame; unused in the read-only view
+        fn stored_frame_count(&self) -> u32 {
+            if self.dataset.contains(&PIXEL_DATA) {
+                self.number_of_frames()
+            } else {
+                0
+            }
+        }
+
+        // In-memory pixel buffers are always host byte order: the reader normalises
+        // binary VRs on read (`io::reader`), `add_frame` stores host order and the
+        // writer swaps to the target transfer syntax on write. `get_frame` must not
+        // re-apply the file's endianness (§1.2, review #3).
+
+        // -- palette (PIX-04) ---------------------------------------------------
+
+        /// Resolves `PALETTE COLOR` LUTs into colour tables (§1.2).
+        ///
+        /// Returns `None` when the LUT is missing or fails validation; use
+        /// [`palette_color_lut_checked`](Self::palette_color_lut_checked) to surface
+        /// the typed error.
+        pub fn palette_color_lut(&self) -> Option<Vec<Color32>> {
+            self.palette_color_lut_checked().ok()
+        }
+
+        /// Resolves `PALETTE COLOR` LUTs, validating each descriptor and data length
+        /// (§2.3 / PS3.3 C.7.6.3.1.5) instead of fabricating zero entries.
+        pub fn palette_color_lut_checked(&self) -> Result<Vec<Color32>, Error> {
+            if self.photometric_interpretation() != Some(PhotometricInterpretation::PaletteColor) {
+                return Err(pixel_err(
+                    "palette LUT requested for a non-PALETTE COLOR image",
+                ));
+            }
+            let red = self.read_lut(RED_DESCRIPTOR, RED_DATA)?;
+            let green = self.read_lut(GREEN_DESCRIPTOR, GREEN_DATA)?;
+            let blue = self.read_lut(BLUE_DESCRIPTOR, BLUE_DATA)?;
+            let len = red.len().min(green.len()).min(blue.len());
+            Ok((0..len)
+                .map(|i| Color32::new(red[i], green[i], blue[i]))
+                .collect())
+        }
+
+        /// The first input value mapped by the palette LUTs (PS3.3 C.7.6.3.1.5),
+        /// read from the red descriptor. A PALETTE COLOR input value `v` maps to
+        /// entry `v - first` (all three channels share the descriptor's first value).
+        pub fn palette_first_mapped(&self) -> Option<i32> {
+            let DicomItem::Element(element) = self.dataset.item(&RED_DESCRIPTOR)? else {
+                return None;
+            };
+            let descriptor = element.value().as_buffer()?;
+            let desc = descriptor.data();
+            if desc.len() < 6 {
+                return None;
+            }
+            let first = [desc[2], desc[3]];
+            Some(match element.vr() {
+                Vr::Ss => i16::from_le_bytes(first) as i32,
+                _ => u16::from_le_bytes(first) as i32,
+            })
+        }
+
+        /// One LUT channel: descriptor-driven 8-bit expansion, validated against the
+        /// descriptor entry count and the stored data length (§2.3).
+        ///
+        /// The LUT Descriptor (PS3.3 C.7.6.3.1.5) is three US values: `[0]` number of
+        /// entries (0 ⇒ 65536), `[1]` first mapped pixel value, `[2]` bits per entry.
+        /// Each US is little-endian, so the byte layout is entries@0..2, first@2..4,
+        /// bits@4..6 — a 6-byte descriptor.
+        fn read_lut(&self, descriptor_tag: Tag, data_tag: Tag) -> Result<Vec<u8>, Error> {
+            let descriptor = self
+                .dataset
+                .item(&descriptor_tag)
+                .and_then(DicomItem::as_element_buffer)
+                .ok_or_else(|| pixel_err("palette LUT descriptor missing"))?;
+            let desc = descriptor.data();
+            if desc.len() < 6 {
+                return Err(pixel_err("palette LUT descriptor is shorter than 6 bytes"));
+            }
+            let entries = u16::from_le_bytes([desc[0], desc[1]]);
+            // a descriptor count of 0 means 65536 entries (PS3.3 C.7.6.3.1.5)
+            let count = if entries == 0 {
+                65536usize
+            } else {
+                entries as usize
+            };
+            let _first_mapped = u16::from_le_bytes([desc[2], desc[3]]);
+            let bits = u16::from_le_bytes([desc[4], desc[5]]);
+            if !matches!(bits, 8 | 16) {
+                return Err(pixel_err(format!(
+                    "palette LUT bits per entry {bits} is not 8 or 16"
+                )));
+            }
+            // An explicit count may not exceed the index range BitsStored addresses.
+            // A descriptor count of 0 is exempt (it means the full 65536 table).
+            let bits_stored = self.bits_stored();
+            if entries != 0 && bits_stored > 0 && bits_stored < 31 {
+                let addressable = 1usize << bits_stored;
+                if count > addressable {
+                    return Err(pixel_err(format!(
+                        "palette LUT entry count {count} exceeds 2^BitsStored ({addressable})"
                     )));
                 }
             }
-            cursor = item_end;
-        }
-        match parts.len() {
-            0 => Err(pixel_err(format!("frame {index} spans no fragment bytes"))),
-            1 => Ok(self.normalize(parts.pop().expect("len 1"))),
-            _ => Ok(self.normalize(Arc::new(CompositeBuffer::new(parts)))),
-        }
-    }
 
-    /// Frames currently present: an absent element holds none, otherwise
-    /// `(0028,0008)` (which reads as 1 when the tag is absent) is trusted.
-    #[allow(dead_code)] // used by PixelData::add_frame; unused in the read-only view
-    fn stored_frame_count(&self) -> u32 {
-        if self.dataset.contains(&PIXEL_DATA) {
-            self.number_of_frames()
-        } else {
-            0
-        }
-    }
+            let data = self
+                .dataset
+                .item(&data_tag)
+                .and_then(DicomItem::as_element_buffer)
+                .ok_or_else(|| pixel_err("palette LUT data missing"))?;
+            let raw = data.data();
 
-    /// Wraps a frame so callers always see native byte order (§1.2).
-    fn normalize(&self, buffer: SharedBuffer) -> SharedBuffer {
-        let unit = match self.bits_allocated() {
-            Ok(16) => 2,
-            Ok(32) => 4,
-            Ok(64) => 8,
-            _ => 1,
-        };
-        let syntax = self.dataset.transfer_syntax();
-        let native_big = cfg!(target_endian = "big");
-        let swap = unit > 1
-            && ((syntax.endian() == crate::model::endian::Endian::Big) != native_big)
-            && !syntax.is_encapsulated();
-        if swap {
-            EndianBuffer::wrap_if_needed(buffer, unit)
-        } else {
-            buffer
-        }
-    }
-
-    // -- palette (PIX-04) ---------------------------------------------------
-
-    /// Resolves `PALETTE COLOR` LUTs into colour tables (§1.2).
-    ///
-    /// Returns `None` when the LUT is missing or fails validation; use
-    /// [`palette_color_lut_checked`](Self::palette_color_lut_checked) to surface
-    /// the typed error.
-    pub fn palette_color_lut(&self) -> Option<Vec<Color32>> {
-        self.palette_color_lut_checked().ok()
-    }
-
-    /// Resolves `PALETTE COLOR` LUTs, validating each descriptor and data length
-    /// (§2.3 / PS3.3 C.7.6.3.1.5) instead of fabricating zero entries.
-    pub fn palette_color_lut_checked(&self) -> Result<Vec<Color32>, Error> {
-        if self.photometric_interpretation() != Some(PhotometricInterpretation::PaletteColor) {
-            return Err(pixel_err("palette LUT requested for a non-PALETTE COLOR image"));
-        }
-        let red = self.read_lut(RED_DESCRIPTOR, RED_DATA)?;
-        let green = self.read_lut(GREEN_DESCRIPTOR, GREEN_DATA)?;
-        let blue = self.read_lut(BLUE_DESCRIPTOR, BLUE_DATA)?;
-        let len = red.len().min(green.len()).min(blue.len());
-        Ok((0..len).map(|i| Color32::new(red[i], green[i], blue[i])).collect())
-    }
-
-    /// The first input value mapped by the palette LUTs (PS3.3 C.7.6.3.1.5),
-    /// read from the red descriptor. A PALETTE COLOR input value `v` maps to
-    /// entry `v - first` (all three channels share the descriptor's first value).
-    pub fn palette_first_mapped(&self) -> Option<i32> {
-        let DicomItem::Element(element) = self.dataset.item(&RED_DESCRIPTOR)? else {
-            return None;
-        };
-        let descriptor = element.value().as_buffer()?;
-        let desc = descriptor.data();
-        if desc.len() < 6 {
-            return None;
-        }
-        let first = [desc[2], desc[3]];
-        Some(match element.vr() {
-            Vr::Ss => i16::from_le_bytes(first) as i32,
-            _ => u16::from_le_bytes(first) as i32,
-        })
-    }
-
-    /// One LUT channel: descriptor-driven 8-bit expansion, validated against the
-    /// descriptor entry count and the stored data length (§2.3).
-    ///
-    /// The LUT Descriptor (PS3.3 C.7.6.3.1.5) is three US values: `[0]` number of
-    /// entries (0 ⇒ 65536), `[1]` first mapped pixel value, `[2]` bits per entry.
-    /// Each US is little-endian, so the byte layout is entries@0..2, first@2..4,
-    /// bits@4..6 — a 6-byte descriptor.
-    fn read_lut(&self, descriptor_tag: Tag, data_tag: Tag) -> Result<Vec<u8>, Error> {
-        let descriptor = self
-            .dataset
-            .item(&descriptor_tag)
-            .and_then(DicomItem::as_element_buffer)
-            .ok_or_else(|| pixel_err("palette LUT descriptor missing"))?;
-        let desc = descriptor.data();
-        if desc.len() < 6 {
-            return Err(pixel_err("palette LUT descriptor is shorter than 6 bytes"));
-        }
-        let entries = u16::from_le_bytes([desc[0], desc[1]]);
-        // a descriptor count of 0 means 65536 entries (PS3.3 C.7.6.3.1.5)
-        let count = if entries == 0 { 65536usize } else { entries as usize };
-        let _first_mapped = u16::from_le_bytes([desc[2], desc[3]]);
-        let bits = u16::from_le_bytes([desc[4], desc[5]]);
-        if !matches!(bits, 8 | 16) {
-            return Err(pixel_err(format!("palette LUT bits per entry {bits} is not 8 or 16")));
-        }
-        // An explicit count may not exceed the index range BitsStored addresses.
-        // A descriptor count of 0 is exempt (it means the full 65536 table).
-        let bits_stored = self.bits_stored();
-        if entries != 0 && bits_stored > 0 && bits_stored < 31 {
-            let addressable = 1usize << bits_stored;
-            if count > addressable {
+            let mut out = Vec::with_capacity(count);
+            if raw.len() == count {
+                // 8-bit entries (one byte per entry)
+                out.extend_from_slice(&raw[..count]);
+            } else if raw.len() >= count * 2 {
+                // data is two bytes per entry: fo-dicom takes one byte per entry,
+                // the high byte (offset 1) when 16-bit-allocated, else the low byte
+                let offset = if bits == 16 { 1 } else { 0 };
+                for i in 0..count {
+                    out.push(raw[i * 2 + offset]);
+                }
+            } else {
                 return Err(pixel_err(format!(
-                    "palette LUT entry count {count} exceeds 2^BitsStored ({addressable})"
+                    "palette LUT data length {} does not cover {count} entries",
+                    raw.len()
                 )));
             }
+            Ok(out)
         }
-
-        let data = self
-            .dataset
-            .item(&data_tag)
-            .and_then(DicomItem::as_element_buffer)
-            .ok_or_else(|| pixel_err("palette LUT data missing"))?;
-        let raw = data.data();
-
-        let mut out = Vec::with_capacity(count);
-        if raw.len() == count {
-            // 8-bit entries (one byte per entry)
-            out.extend_from_slice(&raw[..count]);
-        } else if raw.len() >= count * 2 {
-            // data is two bytes per entry: fo-dicom takes one byte per entry,
-            // the high byte (offset 1) when 16-bit-allocated, else the low byte
-            let offset = if bits == 16 { 1 } else { 0 };
-            for i in 0..count {
-                out.push(raw[i * 2 + offset]);
-            }
-        } else {
-            return Err(pixel_err(format!(
-                "palette LUT data length {} does not cover {count} entries",
-                raw.len()
-            )));
-        }
-        Ok(out)
-    }
     };
 }
 
@@ -449,7 +490,6 @@ pub struct PixelDataRef<'a> {
 }
 
 impl<'a> PixelData<'a> {
-
     /// Chooses the storage kind for a dataset that is about to receive pixel
     /// data (§1.3).
     pub fn create_new(ds: &'a mut Dataset) -> Result<Self, Error> {
@@ -457,7 +497,9 @@ impl<'a> PixelData<'a> {
         let bits = ds.get_or(BITS_ALLOCATED, 8u16);
         let kind = if syntax.is_encapsulated() {
             if bits > 16 {
-                return Err(pixel_err("encapsulated pixel data supports at most 16 bits allocated"));
+                return Err(pixel_err(
+                    "encapsulated pixel data supports at most 16 bits allocated",
+                ));
             }
             PixelDataKind::Encapsulated
         } else if matches!(bits, 16 | 32 | 64) {
@@ -479,17 +521,26 @@ impl<'a> PixelData<'a> {
     }
 
     /// Appends a frame, returning its index (§1.5).
+    ///
+    /// Encapsulated fragments are padded individually. Native frames are
+    /// concatenated with no per-frame padding: only the whole Pixel Data value
+    /// is kept to an even length, and a pad left by the previous append is
+    /// dropped first (§1.5, review #4).
     pub fn add_frame(&mut self, data: impl AsRef<[u8]>) -> Result<u32, Error> {
-        let mut bytes = data.as_ref().to_vec();
-        if bytes.len() % 2 == 1 {
-            bytes.push(0);
-        }
         // the index comes from the frames actually stored, not from
         // `(0028,0008)`, which reads as 1 when absent
         let index = self.stored_frame_count();
         match self.kind {
             PixelDataKind::Encapsulated => {
-                let vr = if self.bits_allocated().unwrap_or(8) <= 8 { Vr::Ob } else { Vr::Ow };
+                let mut bytes = data.as_ref().to_vec();
+                if bytes.len() % 2 == 1 {
+                    bytes.push(0);
+                }
+                let vr = if self.bits_allocated().unwrap_or(8) <= 8 {
+                    Vr::Ob
+                } else {
+                    Vr::Ow
+                };
                 let buffer: SharedBuffer = Arc::new(MemoryBuffer::from(bytes));
                 let frags = self.dataset.insert_fragments(PIXEL_DATA, vr);
                 frags.push_fragment(buffer);
@@ -502,10 +553,55 @@ impl<'a> PixelData<'a> {
                     _ => Vr::Ob,
                 };
                 let mut combined = match self.dataset.item(&PIXEL_DATA) {
-                    Some(DicomItem::Element(e)) => e.value().as_buffer().map(|b| b.data().to_vec()).unwrap_or_default(),
+                    Some(DicomItem::Element(e)) => e
+                        .value()
+                        .as_buffer()
+                        .map(|b| b.data().to_vec())
+                        .unwrap_or_default(),
                     _ => Vec::new(),
                 };
-                combined.extend_from_slice(&bytes);
+                if self.bits_allocated()? == 1 {
+                    // Single-bit frames share bytes: place this frame's bits at
+                    // bit offset `index * frame_bits`, LSB first (review #5).
+                    let frame_bits = (self.width() as usize)
+                        * (self.height() as usize)
+                        * (self.samples_per_pixel() as usize);
+                    let start_bit = index as usize * frame_bits;
+                    let needed = start_bit.div_ceil(8);
+                    combined.truncate(needed);
+                    if combined.len() < needed {
+                        combined.resize(needed, 0);
+                    }
+                    let src = data.as_ref();
+                    for bit_index in 0..frame_bits {
+                        let bit =
+                            (src.get(bit_index / 8).copied().unwrap_or(0) >> (bit_index % 8)) & 1;
+                        let pos = start_bit + bit_index;
+                        if pos / 8 >= combined.len() {
+                            combined.push(0);
+                        }
+                        if bit == 1 {
+                            combined[pos / 8] |= 1u8 << (pos % 8);
+                        } else {
+                            combined[pos / 8] &= !(1u8 << (pos % 8));
+                        }
+                    }
+                    combined.truncate((start_bit + frame_bits).div_ceil(8));
+                } else {
+                    // `index * frame_size` data bytes are stored, plus at most
+                    // one trailing pad from the previous append; drop that pad
+                    // so the new frame starts on a frame boundary (review #4).
+                    let natural = if index == 0 {
+                        0
+                    } else {
+                        (index as usize).saturating_mul(self.uncompressed_frame_size()? as usize)
+                    };
+                    combined.truncate(natural.min(combined.len()));
+                    combined.extend_from_slice(data.as_ref());
+                }
+                if combined.len() % 2 == 1 {
+                    combined.push(0);
+                }
                 let buffer: SharedBuffer = Arc::new(MemoryBuffer::from(combined));
                 self.dataset.insert_or_update(DicomItem::Element(
                     crate::model::element::DicomElement::new_bytes(PIXEL_DATA, vr, buffer),
@@ -528,7 +624,11 @@ impl<'a> PixelData<'a> {
         let index = self.stored_frame_count();
         match self.kind {
             PixelDataKind::Encapsulated => {
-                let vr = if self.bits_allocated().unwrap_or(8) <= 8 { Vr::Ob } else { Vr::Ow };
+                let vr = if self.bits_allocated().unwrap_or(8) <= 8 {
+                    Vr::Ob
+                } else {
+                    Vr::Ow
+                };
                 let fragments = self.dataset.insert_fragments(PIXEL_DATA, vr);
                 fragments.push_fragment(frame);
                 self.bump_frame_count(index + 1);
@@ -556,7 +656,8 @@ impl<'a> PixelData<'a> {
     /// Sets `(0028,0008)` when there is more than one frame.
     fn bump_frame_count(&mut self, frames: u32) {
         if frames > 1 {
-            self.dataset.insert_str(NUMBER_OF_FRAMES, Vr::Is, frames.to_string());
+            self.dataset
+                .insert_str(NUMBER_OF_FRAMES, Vr::Is, frames.to_string());
         } else {
             self.dataset.remove(NUMBER_OF_FRAMES);
         }
@@ -569,18 +670,14 @@ impl<'a> PixelData<'a> {
                 self.dataset.remove(PIXEL_DATA);
             }
             PixelDataKind::OtherWord => {
-                self.dataset
-                    .insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_empty(
-                        PIXEL_DATA,
-                        Vr::Ow,
-                    )));
+                self.dataset.insert_or_update(DicomItem::Element(
+                    crate::model::element::DicomElement::new_empty(PIXEL_DATA, Vr::Ow),
+                ));
             }
             PixelDataKind::OtherByte => {
-                self.dataset
-                    .insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_empty(
-                        PIXEL_DATA,
-                        Vr::Ob,
-                    )));
+                self.dataset.insert_or_update(DicomItem::Element(
+                    crate::model::element::DicomElement::new_empty(PIXEL_DATA, Vr::Ob),
+                ));
             }
         }
         self.dataset.remove(NUMBER_OF_FRAMES);
@@ -592,7 +689,10 @@ impl<'a> PixelData<'a> {
 impl<'a> PixelDataRef<'a> {
     /// Binds to an existing pixel data element through a shared borrow.
     pub fn from_dataset(ds: &'a Dataset) -> Result<Self, Error> {
-        Ok(PixelDataRef { dataset: ds, kind: kind_of(ds)? })
+        Ok(PixelDataRef {
+            dataset: ds,
+            kind: kind_of(ds)?,
+        })
     }
 
     pixel_read_methods!();
@@ -640,23 +740,26 @@ pub fn ensure_pixel_element(ds: &mut Dataset, kind: PixelDataKind) -> Result<(),
     }
     match kind {
         PixelDataKind::Encapsulated | PixelDataKind::OtherByte => {
-            ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
-                PIXEL_DATA,
-                Vr::Ob,
-                EmptyBuffer::shared(),
-            )));
+            ds.insert_or_update(DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(
+                    PIXEL_DATA,
+                    Vr::Ob,
+                    EmptyBuffer::shared(),
+                ),
+            ));
         }
         PixelDataKind::OtherWord => {
-            ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
-                PIXEL_DATA,
-                Vr::Ow,
-                EmptyBuffer::shared(),
-            )));
+            ds.insert_or_update(DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(
+                    PIXEL_DATA,
+                    Vr::Ow,
+                    EmptyBuffer::shared(),
+                ),
+            ));
         }
     }
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -665,6 +768,10 @@ mod tests {
 
     fn mono_dataset(width: u32, height: u32, bits: u16, frames: u32) -> Dataset {
         let mut ds = Dataset::new();
+        // a real image instance always names its SOP class; the file meta group
+        // is built from it (review #8)
+        ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.2");
+        ds.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5.6.7");
         ds.insert_value(ROWS, height);
         ds.insert_value(COLUMNS, width);
         ds.insert_value(BITS_ALLOCATED, bits);
@@ -682,12 +789,21 @@ mod tests {
     #[test]
     fn create_new_picks_the_storage_kind() {
         let mut ds = mono_dataset(2, 2, 8, 1);
-        assert_eq!(PixelData::create_new(&mut ds).unwrap().kind(), PixelDataKind::OtherByte);
+        assert_eq!(
+            PixelData::create_new(&mut ds).unwrap().kind(),
+            PixelDataKind::OtherByte
+        );
         let mut ds = mono_dataset(2, 2, 16, 1);
-        assert_eq!(PixelData::create_new(&mut ds).unwrap().kind(), PixelDataKind::OtherWord);
+        assert_eq!(
+            PixelData::create_new(&mut ds).unwrap().kind(),
+            PixelDataKind::OtherWord
+        );
         let mut ds = mono_dataset(2, 2, 16, 1);
         ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
-        assert_eq!(PixelData::create_new(&mut ds).unwrap().kind(), PixelDataKind::Encapsulated);
+        assert_eq!(
+            PixelData::create_new(&mut ds).unwrap().kind(),
+            PixelDataKind::Encapsulated
+        );
 
         // encapsulated above 16 bits is rejected
         let mut ds = mono_dataset(2, 2, 32, 1);
@@ -698,12 +814,39 @@ mod tests {
     #[test]
     fn frame_size_for_monochrome() {
         let mut ds = mono_dataset(4, 3, 8, 1);
-        assert_eq!(PixelData::from_dataset(&mut ds).unwrap().uncompressed_frame_size().unwrap(), 12);
+        assert_eq!(
+            PixelData::from_dataset(&mut ds)
+                .unwrap()
+                .uncompressed_frame_size()
+                .unwrap(),
+            12
+        );
         let mut ds = mono_dataset(4, 3, 16, 1);
-        assert_eq!(PixelData::from_dataset(&mut ds).unwrap().uncompressed_frame_size().unwrap(), 24);
-        // packed 1-bit rows round up to whole bytes
+        assert_eq!(
+            PixelData::from_dataset(&mut ds)
+                .unwrap()
+                .uncompressed_frame_size()
+                .unwrap(),
+            24
+        );
+        // single-bit samples pack continuously (LSB first), so only the whole
+        // frame rounds up to a byte, not each row
         let mut ds = mono_dataset(9, 2, 1, 1);
-        assert_eq!(PixelData::from_dataset(&mut ds).unwrap().uncompressed_frame_size().unwrap(), 4);
+        assert_eq!(
+            PixelData::from_dataset(&mut ds)
+                .unwrap()
+                .uncompressed_frame_size()
+                .unwrap(),
+            3
+        );
+        let mut ds = mono_dataset(1, 9, 1, 1);
+        assert_eq!(
+            PixelData::from_dataset(&mut ds)
+                .unwrap()
+                .uncompressed_frame_size()
+                .unwrap(),
+            2
+        );
     }
 
     #[test]
@@ -711,10 +854,19 @@ mod tests {
         let mut ds = mono_dataset(4, 4, 8, 1);
         ds.insert_value(SAMPLES_PER_PIXEL, 3u16);
         ds.insert_str(PHOTOMETRIC_INTERPRETATION, Vr::Cs, "RGB");
-        assert_eq!(PixelData::from_dataset(&mut ds).unwrap().uncompressed_frame_size().unwrap(), 48);
+        assert_eq!(
+            PixelData::from_dataset(&mut ds)
+                .unwrap()
+                .uncompressed_frame_size()
+                .unwrap(),
+            48
+        );
 
         ds.insert_str(PHOTOMETRIC_INTERPRETATION, Vr::Cs, "YBR_FULL_422");
-        let size = PixelData::from_dataset(&mut ds).unwrap().uncompressed_frame_size().unwrap();
+        let size = PixelData::from_dataset(&mut ds)
+            .unwrap()
+            .uncompressed_frame_size()
+            .unwrap();
         // 4:2:2: 16 luma + 2 * 8 chroma
         assert_eq!(size, 32);
     }
@@ -723,11 +875,13 @@ mod tests {
     fn native_frames_are_zero_copy_windows() {
         let mut ds = mono_dataset(2, 2, 8, 2);
         let bytes = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
-        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
-            PIXEL_DATA,
-            Vr::Ob,
-            Arc::new(MemoryBuffer::from(bytes)),
-        )));
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                PIXEL_DATA,
+                Vr::Ob,
+                Arc::new(MemoryBuffer::from(bytes)),
+            ),
+        ));
         let pd = PixelData::from_dataset(&mut ds).unwrap();
         assert_eq!(pd.get_frame(0).unwrap().data().as_ref(), &[1, 2, 3, 4]);
         assert_eq!(pd.get_frame(1).unwrap().data().as_ref(), &[5, 6, 7, 8]);
@@ -735,15 +889,106 @@ mod tests {
     }
 
     #[test]
+    fn native_odd_length_frames_are_not_padded_between() {
+        // review #4: two 1x1 8-bit frames are one byte each and must stay
+        // contiguous; only the whole Pixel Data value is padded.
+        let mut ds = mono_dataset(1, 1, 8, 2);
+        {
+            let mut pd = PixelData::create_new(&mut ds).unwrap();
+            assert_eq!(pd.add_frame([0x11]).unwrap(), 0);
+            assert_eq!(pd.add_frame([0x22]).unwrap(), 1);
+        }
+        let view = PixelDataRef::from_dataset(&ds).unwrap();
+        assert_eq!(view.get_frame(0).unwrap().data().as_ref(), &[0x11]);
+        assert_eq!(
+            view.get_frame(1).unwrap().data().as_ref(),
+            &[0x22],
+            "no padding between odd native frames"
+        );
+
+        // 3-byte frames: [1,2,3] then [4,5,6] (total even, no trailing pad)
+        let mut ds = mono_dataset(3, 1, 8, 2);
+        {
+            let mut pd = PixelData::create_new(&mut ds).unwrap();
+            pd.add_frame([1u8, 2, 3]).unwrap();
+            pd.add_frame([4u8, 5, 6]).unwrap();
+        }
+        let view = PixelDataRef::from_dataset(&ds).unwrap();
+        assert_eq!(view.get_frame(0).unwrap().data().as_ref(), &[1, 2, 3]);
+        assert_eq!(view.get_frame(1).unwrap().data().as_ref(), &[4, 5, 6]);
+    }
+
+    #[test]
+    fn single_bit_frames_pack_continuously_across_byte_boundaries() {
+        // review #5: 1-bit frames are a continuous LSB-first bit stream, so a
+        // frame can start mid-byte; they must not be located by
+        // index * ceil(frame_bits / 8).
+        let mut ds = mono_dataset(1, 1, 1, 2);
+        {
+            let mut pd = PixelData::create_new(&mut ds).unwrap();
+            pd.add_frame([0x01]).unwrap();
+            pd.add_frame([0x00]).unwrap();
+        }
+        let view = PixelDataRef::from_dataset(&ds).unwrap();
+        assert_eq!(view.get_frame(0).unwrap().data().as_ref(), &[0x01]);
+        assert_eq!(view.get_frame(1).unwrap().data().as_ref(), &[0x00]);
+
+        // 3x1: frame 0 = pixels 1,0,1; frame 1 = pixels 0,1,1, sharing byte 0.
+        let mut ds = mono_dataset(3, 1, 1, 2);
+        {
+            let mut pd = PixelData::create_new(&mut ds).unwrap();
+            pd.add_frame([0b0000_0101]).unwrap();
+            pd.add_frame([0b0000_0110]).unwrap();
+        }
+        let view = PixelDataRef::from_dataset(&ds).unwrap();
+        assert_eq!(view.get_frame(0).unwrap().data().as_ref(), &[0b0000_0101]);
+        assert_eq!(view.get_frame(1).unwrap().data().as_ref(), &[0b0000_0110]);
+    }
+
+    #[test]
+    fn big_endian_pixels_survive_a_file_round_trip_without_a_second_swap() {
+        // review #3: the reader normalises binary VRs to host order, so
+        // get_frame must not re-apply the file's big-endian byte order.
+        let mut ds = mono_dataset(1, 1, 16, 1);
+        ds.set_transfer_syntax(syntaxes::EXPLICIT_VR_BIG_ENDIAN.clone());
+        PixelData::create_new(&mut ds)
+            .unwrap()
+            .add_frame(0x0102u16.to_ne_bytes())
+            .unwrap();
+        let bytes = crate::io::file::DicomFile::from_dataset(ds)
+            .to_bytes(&crate::io::writer::WriteOptions::default())
+            .unwrap();
+        let back = crate::io::file::DicomFile::from_bytes(
+            &bytes,
+            &crate::io::file::ReadOptions::default(),
+        )
+        .unwrap();
+        let frame = PixelDataRef::from_dataset(&back.dataset)
+            .unwrap()
+            .get_frame(0)
+            .unwrap();
+        assert_eq!(
+            frame.data().as_ref(),
+            &0x0102u16.to_ne_bytes(),
+            "host-order 0x0102 once, not swapped twice"
+        );
+    }
+
+    #[test]
     fn short_pixel_data_is_reported() {
         let mut ds = mono_dataset(4, 4, 8, 1);
-        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
-            PIXEL_DATA,
-            Vr::Ob,
-            Arc::new(MemoryBuffer::from(vec![0u8; 4])),
-        )));
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                PIXEL_DATA,
+                Vr::Ob,
+                Arc::new(MemoryBuffer::from(vec![0u8; 4])),
+            ),
+        ));
         let pd = PixelData::from_dataset(&mut ds).unwrap();
-        assert!(pd.get_frame(0).is_err(), "declared frame does not fit the buffer");
+        assert!(
+            pd.get_frame(0).is_err(),
+            "declared frame does not fit the buffer"
+        );
     }
 
     #[test]
@@ -782,7 +1027,11 @@ mod tests {
         frags.set_offset_table(vec![0, 20]);
         let pd = PixelData::from_dataset(&mut ds).unwrap();
         // frame 0 spans fragments 0 and 1
-        assert_eq!(pd.get_frame(0).unwrap().data().as_ref(), &[1, 2, 3, 4], "frame spans fragments");
+        assert_eq!(
+            pd.get_frame(0).unwrap().data().as_ref(),
+            &[1, 2, 3, 4],
+            "frame spans fragments"
+        );
         assert_eq!(pd.get_frame(1).unwrap().data().as_ref(), &[5, 6]);
     }
 
@@ -864,16 +1113,20 @@ mod tests {
             (GREEN_DESCRIPTOR, GREEN_DATA, [10u8, 110, 210]),
             (BLUE_DESCRIPTOR, BLUE_DATA, [20u8, 120, 220]),
         ] {
-            ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
-                desc_tag,
-                Vr::Us,
-                Arc::new(MemoryBuffer::from(vec![3u8, 0, 0, 0, 8, 0])),
-            )));
-            ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
-                data_tag,
-                Vr::Ow,
-                Arc::new(MemoryBuffer::from(values.to_vec())),
-            )));
+            ds.insert_or_update(DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(
+                    desc_tag,
+                    Vr::Us,
+                    Arc::new(MemoryBuffer::from(vec![3u8, 0, 0, 0, 8, 0])),
+                ),
+            ));
+            ds.insert_or_update(DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(
+                    data_tag,
+                    Vr::Ow,
+                    Arc::new(MemoryBuffer::from(values.to_vec())),
+                ),
+            ));
         }
         let pd = PixelData::from_dataset(&mut ds).unwrap();
         let lut = pd.palette_color_lut().expect("palette LUT");
@@ -904,18 +1157,37 @@ mod tests {
             }
             Arc::new(MemoryBuffer::from(b)) as SharedBuffer
         };
-        for (d, t, v) in [(RED_DESCRIPTOR, RED_DATA, [50u16, 100, 150]), (GREEN_DESCRIPTOR, GREEN_DATA, [60u16, 110, 160]), (BLUE_DESCRIPTOR, BLUE_DATA, [70u16, 120, 170])] {
-            ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(d, Vr::Us, us(&[3, 0, 16]))));
-            ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(t, Vr::Ow, words(v))));
+        for (d, t, v) in [
+            (RED_DESCRIPTOR, RED_DATA, [50u16, 100, 150]),
+            (GREEN_DESCRIPTOR, GREEN_DATA, [60u16, 110, 160]),
+            (BLUE_DESCRIPTOR, BLUE_DATA, [70u16, 120, 170]),
+        ] {
+            ds.insert_or_update(DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(d, Vr::Us, us(&[3, 0, 16])),
+            ));
+            ds.insert_or_update(DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(t, Vr::Ow, words(v)),
+            ));
         }
-        let palette = PixelData::from_dataset(&mut ds).unwrap().palette_color_lut().unwrap();
+        let palette = PixelData::from_dataset(&mut ds)
+            .unwrap()
+            .palette_color_lut()
+            .unwrap();
         assert_eq!(palette.len(), 3);
-        assert_eq!((palette[1].r, palette[1].g, palette[1].b), (100, 110, 120), "high byte is the entry value");
+        assert_eq!(
+            (palette[1].r, palette[1].g, palette[1].b),
+            (100, 110, 120),
+            "high byte is the entry value"
+        );
     }
 
     #[test]
-    fn palette_lut_is_none_for_other_interpretations() {        let mut ds = mono_dataset(4, 1, 8, 1);
-        assert!(PixelData::from_dataset(&mut ds).unwrap().palette_color_lut().is_none());
+    fn palette_lut_is_none_for_other_interpretations() {
+        let mut ds = mono_dataset(4, 1, 8, 1);
+        assert!(PixelData::from_dataset(&mut ds)
+            .unwrap()
+            .palette_color_lut()
+            .is_none());
     }
 
     #[test]
@@ -939,18 +1211,42 @@ mod tests {
             std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(b)) as SharedBuffer
         };
         let ds8 = |vals: [u8; 3]| {
-            std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vals.to_vec())) as SharedBuffer
+            std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vals.to_vec()))
+                as SharedBuffer
         };
-        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(RED_DESCRIPTOR, Vr::Us, us(&[3, 0, 8]))));
-        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(GREEN_DESCRIPTOR, Vr::Us, us(&[3, 0, 8]))));
-        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(BLUE_DESCRIPTOR, Vr::Us, us(&[3, 0, 8]))));
-        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(RED_DATA, Vr::Ow, ds8([10, 20, 30]))));
-        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(GREEN_DATA, Vr::Ow, ds8([1, 2, 3]))));
-        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(BLUE_DATA, Vr::Ow, ds8([100, 110, 120]))));
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(RED_DESCRIPTOR, Vr::Us, us(&[3, 0, 8])),
+        ));
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                GREEN_DESCRIPTOR,
+                Vr::Us,
+                us(&[3, 0, 8]),
+            ),
+        ));
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(BLUE_DESCRIPTOR, Vr::Us, us(&[3, 0, 8])),
+        ));
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(RED_DATA, Vr::Ow, ds8([10, 20, 30])),
+        ));
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(GREEN_DATA, Vr::Ow, ds8([1, 2, 3])),
+        ));
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(BLUE_DATA, Vr::Ow, ds8([100, 110, 120])),
+        ));
 
-        let palette = PixelData::from_dataset(&mut ds).unwrap().palette_color_lut().unwrap();
+        let palette = PixelData::from_dataset(&mut ds)
+            .unwrap()
+            .palette_color_lut()
+            .unwrap();
         assert_eq!(palette.len(), 3, "the 6-byte descriptor yields 3 entries");
-        assert_eq!((palette[2].r, palette[2].g, palette[2].b), (30, 3, 120), "last entry maps right");
+        assert_eq!(
+            (palette[2].r, palette[2].g, palette[2].b),
+            (30, 3, 120),
+            "last entry maps right"
+        );
     }
 
     #[test]
@@ -966,12 +1262,24 @@ mod tests {
             std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(b)) as SharedBuffer
         };
         // 65536 one-byte entries
-        let big = std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![0u8; 65536])) as SharedBuffer;
-        for (d, t) in [(RED_DESCRIPTOR, RED_DATA), (GREEN_DESCRIPTOR, GREEN_DATA), (BLUE_DESCRIPTOR, BLUE_DATA)] {
-            ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(d, Vr::Us, us(&[0, 0, 8]))));
-            ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(t, Vr::Ow, big.clone())));
+        let big = std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![0u8; 65536]))
+            as SharedBuffer;
+        for (d, t) in [
+            (RED_DESCRIPTOR, RED_DATA),
+            (GREEN_DESCRIPTOR, GREEN_DATA),
+            (BLUE_DESCRIPTOR, BLUE_DATA),
+        ] {
+            ds.insert_or_update(DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(d, Vr::Us, us(&[0, 0, 8])),
+            ));
+            ds.insert_or_update(DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(t, Vr::Ow, big.clone()),
+            ));
         }
-        let palette = PixelData::from_dataset(&mut ds).unwrap().palette_color_lut().unwrap();
+        let palette = PixelData::from_dataset(&mut ds)
+            .unwrap()
+            .palette_color_lut()
+            .unwrap();
         assert_eq!(palette.len(), 65536, "zero entries expands to 65536");
     }
 
@@ -986,9 +1294,17 @@ mod tests {
         desc.extend_from_slice(&bits.to_le_bytes());
         let desc: SharedBuffer = Arc::new(MemoryBuffer::from(desc));
         let data: SharedBuffer = Arc::new(MemoryBuffer::from(data.to_vec()));
-        for (d, t) in [(RED_DESCRIPTOR, RED_DATA), (GREEN_DESCRIPTOR, GREEN_DATA), (BLUE_DESCRIPTOR, BLUE_DATA)] {
-            ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(d, Vr::Us, desc.clone())));
-            ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(t, Vr::Ow, data.clone())));
+        for (d, t) in [
+            (RED_DESCRIPTOR, RED_DATA),
+            (GREEN_DESCRIPTOR, GREEN_DATA),
+            (BLUE_DESCRIPTOR, BLUE_DATA),
+        ] {
+            ds.insert_or_update(DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(d, Vr::Us, desc.clone()),
+            ));
+            ds.insert_or_update(DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(t, Vr::Ow, data.clone()),
+            ));
         }
         ds
     }
@@ -996,16 +1312,26 @@ mod tests {
     #[test]
     fn palette_lut_accepts_exactly_the_descriptor_length() {
         let mut ds = palette_dataset(4, 8, &[10, 20, 30, 40]);
-        let lut = PixelData::from_dataset(&mut ds).unwrap().palette_color_lut_checked().unwrap();
+        let lut = PixelData::from_dataset(&mut ds)
+            .unwrap()
+            .palette_color_lut_checked()
+            .unwrap();
         assert_eq!(lut.len(), 4);
-        assert_eq!(lut[2], Color32::new(30, 30, 30), "the third entry of every channel is 30");
+        assert_eq!(
+            lut[2],
+            Color32::new(30, 30, 30),
+            "the third entry of every channel is 30"
+        );
     }
 
     #[test]
     fn palette_lut_rejects_short_data() {
         // descriptor says 4 entries but only 2 bytes are present per channel
         let mut ds = palette_dataset(4, 8, &[10, 20]);
-        assert!(PixelData::from_dataset(&mut ds).unwrap().palette_color_lut_checked().is_err());
+        assert!(PixelData::from_dataset(&mut ds)
+            .unwrap()
+            .palette_color_lut_checked()
+            .is_err());
     }
 
     #[test]
@@ -1013,7 +1339,10 @@ mod tests {
         // BitsStored=8 addresses at most 2^8 = 256 entries; 300 is malformed.
         let data = vec![0u8; 300];
         let mut ds = palette_dataset(300, 8, &data);
-        assert!(PixelData::from_dataset(&mut ds).unwrap().palette_color_lut_checked().is_err());
+        assert!(PixelData::from_dataset(&mut ds)
+            .unwrap()
+            .palette_color_lut_checked()
+            .is_err());
     }
 
     #[test]
@@ -1023,11 +1352,13 @@ mod tests {
             .into_iter()
             .flat_map(u16::to_le_bytes)
             .collect::<Vec<_>>();
-        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
-            RED_DESCRIPTOR,
-            Vr::Ss,
-            Arc::new(MemoryBuffer::from(descriptor)),
-        )));
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                RED_DESCRIPTOR,
+                Vr::Ss,
+                Arc::new(MemoryBuffer::from(descriptor)),
+            ),
+        ));
 
         let pixel = PixelData::from_dataset(&mut ds).unwrap();
         assert_eq!(pixel.palette_first_mapped(), Some(-2));
@@ -1039,14 +1370,19 @@ mod tests {
         let mut ds = Dataset::new();
         ds.insert_value(BITS_ALLOCATED, 16u16);
         ds.insert_str(PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
-        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
-            PIXEL_DATA,
-            Vr::Ow,
-            Arc::new(MemoryBuffer::from(vec![0u8; 8])),
-        )));
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                PIXEL_DATA,
+                Vr::Ow,
+                Arc::new(MemoryBuffer::from(vec![0u8; 8])),
+            ),
+        ));
         let pd = PixelData::from_dataset(&mut ds).unwrap();
         assert_eq!((pd.width(), pd.height()), (0, 0));
-        assert!(pd.uncompressed_frame_size().is_err(), "zero dimensions are an error");
+        assert!(
+            pd.uncompressed_frame_size().is_err(),
+            "zero dimensions are an error"
+        );
         assert!(pd.get_frame(0).is_err(), "no silent empty frame");
 
         // a lone Columns or Rows is equally broken (width known, height 0)
@@ -1056,19 +1392,33 @@ mod tests {
         half.insert_str(PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
         let hp = PixelData::from_dataset(&mut half).unwrap();
         assert_eq!((hp.width(), hp.height()), (4, 0));
-        assert!(hp.uncompressed_frame_size().is_err(), "a missing height is an error, not Ok(0)");
+        assert!(
+            hp.uncompressed_frame_size().is_err(),
+            "a missing height is an error, not Ok(0)"
+        );
     }
 
     #[test]
     fn a_parsed_file_reports_real_dimensions_and_a_full_frame() {
         // Regression for the byte-path geometry bug: a parsed file stores
         // Rows/Columns as US bytes, which used to read back as 0.
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests-data/explicit-le/GH626.dcm");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests-data/explicit-le/GH626.dcm"
+        );
         let file = crate::io::file::DicomFile::open(path).expect("GH626 opens");
         let mut ds = file.dataset;
         let pd = PixelData::from_dataset(&mut ds).unwrap();
-        assert_eq!((pd.width(), pd.height()), (256, 256), "US geometry reads back");
+        assert_eq!(
+            (pd.width(), pd.height()),
+            (256, 256),
+            "US geometry reads back"
+        );
         let frame = pd.get_frame(0).expect("frame 0 available");
-        assert_eq!(frame.size(), 256 * 256 * 2, "full 16-bit frame, not an empty window");
+        assert_eq!(
+            frame.size(),
+            256 * 256 * 2,
+            "full 16-bit frame, not an empty window"
+        );
     }
 }

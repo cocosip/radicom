@@ -77,12 +77,13 @@ impl FrameGeometry {
 
         // spacing: top-level ImagerPixelSpacing, PixelSpacing, Nominal... , then
         // the flattened functional-group values (row, column order in each pair).
-        let (spacing_between_rows, spacing_between_columns) = read_pair(dataset, Tag::IMAGER_PIXEL_SPACING)
-            .or_else(|| read_pair(dataset, Tag::PIXEL_SPACING))
-            .or_else(|| read_pair(dataset, Tag::NOMINAL_SCANNED_PIXEL_SPACING))
-            .or_else(|| read_pair(&functional, Tag::PIXEL_SPACING))
-            .or_else(|| read_pair(&functional, Tag::IMAGER_PIXEL_SPACING))
-            .unwrap_or((0.0, 0.0));
+        let (spacing_between_rows, spacing_between_columns) =
+            read_pair(dataset, Tag::IMAGER_PIXEL_SPACING)
+                .or_else(|| read_pair(dataset, Tag::PIXEL_SPACING))
+                .or_else(|| read_pair(dataset, Tag::NOMINAL_SCANNED_PIXEL_SPACING))
+                .or_else(|| read_pair(&functional, Tag::PIXEL_SPACING))
+                .or_else(|| read_pair(&functional, Tag::IMAGER_PIXEL_SPACING))
+                .unwrap_or((0.0, 0.0));
 
         let position = read_vector(dataset, Tag::IMAGE_POSITION_PATIENT)
             .or_else(|| read_vector(&functional, Tag::IMAGE_POSITION_PATIENT));
@@ -133,7 +134,8 @@ impl FrameGeometry {
                 geometry.point_top_left = Point3::new(p[0], p[1], p[2]);
                 geometry.direction_row = Vector3::new(o[0], o[1], o[2]);
                 geometry.direction_column = Vector3::new(o[3], o[4], o[5]);
-                geometry.direction_normal = geometry.direction_row.cross(&geometry.direction_column);
+                geometry.direction_normal =
+                    geometry.direction_row.cross(&geometry.direction_column);
                 geometry.orientation = if geometry.direction_normal.is_zero() {
                     FrameOrientation::None
                 } else {
@@ -262,9 +264,18 @@ impl FrameGeometry {
             corners.iter().map(|p| p.z).fold(f64::INFINITY, f64::min),
         );
         let max = Point3::new(
-            corners.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max),
-            corners.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max),
-            corners.iter().map(|p| p.z).fold(f64::NEG_INFINITY, f64::max),
+            corners
+                .iter()
+                .map(|p| p.x)
+                .fold(f64::NEG_INFINITY, f64::max),
+            corners
+                .iter()
+                .map(|p| p.y)
+                .fold(f64::NEG_INFINITY, f64::max),
+            corners
+                .iter()
+                .map(|p| p.z)
+                .fold(f64::NEG_INFINITY, f64::max),
         );
         (min, max)
     }
@@ -278,9 +289,15 @@ impl FrameGeometry {
         let col = self.spacing_between_columns;
         let row = self.spacing_between_rows;
         Ok(Point3::new(
-            self.point_top_left.x + image.x * col * self.direction_row.x + image.y * row * self.direction_column.x,
-            self.point_top_left.y + image.x * col * self.direction_row.y + image.y * row * self.direction_column.y,
-            self.point_top_left.z + image.x * col * self.direction_row.z + image.y * row * self.direction_column.z,
+            self.point_top_left.x
+                + image.x * col * self.direction_row.x
+                + image.y * row * self.direction_column.x,
+            self.point_top_left.y
+                + image.x * col * self.direction_row.y
+                + image.y * row * self.direction_column.y,
+            self.point_top_left.z
+                + image.x * col * self.direction_row.z
+                + image.y * row * self.direction_column.z,
         ))
     }
 
@@ -318,7 +335,9 @@ impl FrameGeometry {
 /// `ImageLocalizer.CanDrawLocalizer`): valid 3D geometry, different orientations
 /// and the same frame of reference.
 pub fn can_draw_localizer(source: &FrameGeometry, destination: &FrameGeometry) -> bool {
-    if source.orientation == FrameOrientation::None || destination.orientation == FrameOrientation::None {
+    if source.orientation == FrameOrientation::None
+        || destination.orientation == FrameOrientation::None
+    {
         return false;
     }
     if source.orientation == destination.orientation {
@@ -336,7 +355,10 @@ pub fn can_draw_localizer(source: &FrameGeometry, destination: &FrameGeometry) -
 /// Returns an empty vector when either frame lacks 3D geometry. The four points
 /// form the projected rectangle; for orthogonal frames it collapses to a line.
 pub fn projection_localizer(source: &FrameGeometry, destination: &FrameGeometry) -> Vec<Point2> {
-    if !source.has_geometry_data() || !destination.has_geometry_data() || destination.direction_normal.is_zero() {
+    if !source.has_geometry_data()
+        || !destination.has_geometry_data()
+        || destination.direction_normal.is_zero()
+    {
         return Vec::new();
     }
     // the four source corners in patient space (TLHC, TRHC, BRHC, BLHC)
@@ -375,7 +397,10 @@ pub fn projection_localizer(source: &FrameGeometry, destination: &FrameGeometry)
 ///
 /// Returns `None` when the planes do not cross the source rectangle at exactly
 /// two edge points (no, parallel, or tangential intersection).
-pub fn intersection_localizer(source: &FrameGeometry, destination: &FrameGeometry) -> Option<(Point2, Point2)> {
+pub fn intersection_localizer(
+    source: &FrameGeometry,
+    destination: &FrameGeometry,
+) -> Option<(Point2, Point2)> {
     if destination.direction_normal.is_zero() {
         return None;
     }
@@ -394,7 +419,12 @@ pub fn intersection_localizer(source: &FrameGeometry, destination: &FrameGeometr
     let edges = [
         (source.point_top_left, source.point_top_right, n_a, n_b),
         (source.point_top_right, source.point_bottom_right, n_b, n_c),
-        (source.point_bottom_right, source.point_bottom_left, n_c, n_d),
+        (
+            source.point_bottom_right,
+            source.point_bottom_left,
+            n_c,
+            n_d,
+        ),
         (source.point_bottom_left, source.point_top_left, n_d, n_a),
     ];
     for (from, to, na, nb) in edges {
@@ -414,7 +444,10 @@ pub fn intersection_localizer(source: &FrameGeometry, destination: &FrameGeometr
     }
     let start = destination.transform_patient_to_image(crossings[0]).ok()?;
     let end = destination.transform_patient_to_image(crossings[1]).ok()?;
-    Some((Point2::new(start.x.round(), start.y.round()), Point2::new(end.x.round(), end.y.round())))
+    Some((
+        Point2::new(start.x.round(), start.y.round()),
+        Point2::new(end.x.round(), end.y.round()),
+    ))
 }
 
 /// Classifies a normal vector by its nearest axis (fo-dicom `NearestAxis`):
@@ -432,7 +465,11 @@ fn classify(normal: Vector3) -> FrameOrientation {
 }
 
 fn add_scaled(base: Point3, dir: Vector3, scale: f64) -> Point3 {
-    Point3::new(base.x + dir.x * scale, base.y + dir.y * scale, base.z + dir.z * scale)
+    Point3::new(
+        base.x + dir.x * scale,
+        base.y + dir.y * scale,
+        base.z + dir.z * scale,
+    )
 }
 
 fn nearly_zero(v: f64) -> bool {
@@ -493,7 +530,10 @@ fn read_pair(dataset: &Dataset, tag: Tag) -> Option<(f64, f64)> {
 /// Reads three DS values (ImagePositionPatient).
 fn read_vector(dataset: &Dataset, tag: Tag) -> Option<[f64; 3]> {
     let text = dataset.try_get_str(tag)?;
-    let values: Vec<f64> = text.split('\\').filter_map(|p| p.trim().parse::<f64>().ok()).collect();
+    let values: Vec<f64> = text
+        .split('\\')
+        .filter_map(|p| p.trim().parse::<f64>().ok())
+        .collect();
     if values.len() >= 3 {
         Some([values[0], values[1], values[2]])
     } else {
@@ -504,9 +544,14 @@ fn read_vector(dataset: &Dataset, tag: Tag) -> Option<[f64; 3]> {
 /// Reads six DS values (ImageOrientationPatient).
 fn read_orientation(dataset: &Dataset, tag: Tag) -> Option<[f64; 6]> {
     let text = dataset.try_get_str(tag)?;
-    let values: Vec<f64> = text.split('\\').filter_map(|p| p.trim().parse::<f64>().ok()).collect();
+    let values: Vec<f64> = text
+        .split('\\')
+        .filter_map(|p| p.trim().parse::<f64>().ok())
+        .collect();
     if values.len() >= 6 {
-        Some([values[0], values[1], values[2], values[3], values[4], values[5]])
+        Some([
+            values[0], values[1], values[2], values[3], values[4], values[5],
+        ])
     } else {
         None
     }
@@ -541,10 +586,26 @@ mod tests {
 
     #[test]
     fn sagittal_and_coronal_classification() {
-        let sag = FrameGeometry::build(String::new(), 1, 1, 1.0, 1.0, Some([0.0; 3]), Some([0.0, 1.0, 0.0, 0.0, 0.0, 1.0]));
+        let sag = FrameGeometry::build(
+            String::new(),
+            1,
+            1,
+            1.0,
+            1.0,
+            Some([0.0; 3]),
+            Some([0.0, 1.0, 0.0, 0.0, 0.0, 1.0]),
+        );
         // normal = Ŷ × Ẑ = X̂ → Sagittal
         assert_eq!(sag.orientation(), FrameOrientation::Sagittal);
-        let cor = FrameGeometry::build(String::new(), 1, 1, 1.0, 1.0, Some([0.0; 3]), Some([1.0, 0.0, 0.0, 0.0, 0.0, 1.0]));
+        let cor = FrameGeometry::build(
+            String::new(),
+            1,
+            1,
+            1.0,
+            1.0,
+            Some([0.0; 3]),
+            Some([1.0, 0.0, 0.0, 0.0, 0.0, 1.0]),
+        );
         // normal = X̂ × Ẑ = -Ŷ → Coronal
         assert_eq!(cor.orientation(), FrameOrientation::Coronal);
     }
@@ -556,7 +617,11 @@ mod tests {
         assert!((tl.x + 100.0).abs() < 1e-9 && (tl.z - 50.0).abs() < 1e-9);
         // TR = TL + rowDir * colSpacing * width = +0.5*512 along X
         let tr = geometry.point_top_right();
-        assert!((tr.x - (-100.0 + 0.5 * 512.0)).abs() < 1e-6, "TR x = {tr_x}", tr_x = tr.x);
+        assert!(
+            (tr.x - (-100.0 + 0.5 * 512.0)).abs() < 1e-6,
+            "TR x = {tr_x}",
+            tr_x = tr.x
+        );
         // BL = TL + colDir * rowSpacing * height = +0.5*512 along Y
         let bl = geometry.point_bottom_left();
         assert!((bl.y - (-100.0 + 0.5 * 512.0)).abs() < 1e-6);
@@ -582,9 +647,19 @@ mod tests {
 
     #[test]
     fn missing_spacing_yields_no_geometry_and_transform_errors() {
-        let geometry = FrameGeometry::build(String::new(), 10, 10, 0.0, 0.0, Some([0.0; 3]), Some([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]));
+        let geometry = FrameGeometry::build(
+            String::new(),
+            10,
+            10,
+            0.0,
+            0.0,
+            Some([0.0; 3]),
+            Some([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
+        );
         assert!(!geometry.has_geometry_data());
-        assert!(geometry.transform_image_to_patient(Point2::new(0.0, 0.0)).is_err());
+        assert!(geometry
+            .transform_image_to_patient(Point2::new(0.0, 0.0))
+            .is_err());
     }
 
     #[test]
@@ -594,10 +669,16 @@ mod tests {
         sagittal_ds.insert_str(Tag::IMAGE_ORIENTATION_PATIENT, Vr::Ds, "0\\1\\0\\0\\0\\1");
         let sagittal = FrameGeometry::from_dataset(&sagittal_ds).unwrap();
 
-        assert!(can_draw_localizer(&axial, &sagittal), "different orientations, same frame of reference");
+        assert!(
+            can_draw_localizer(&axial, &sagittal),
+            "different orientations, same frame of reference"
+        );
 
         // same orientation → not drawn
-        assert!(!can_draw_localizer(&axial, &axial), "parallel planes get no localizer");
+        assert!(
+            !can_draw_localizer(&axial, &axial),
+            "parallel planes get no localizer"
+        );
 
         // different frame of reference → not drawn
         let mut other = sagittal.clone();
@@ -641,8 +722,12 @@ mod tests {
         // [-100, 156], so the plane x=0 crosses it → a two-point line.
         let axial = FrameGeometry::from_dataset(&axial_dataset()).unwrap();
         let sagittal = sagittal_at_origin();
-        let line = intersection_localizer(&sagittal, &axial).expect("the planes cross the source rectangle");
-        assert_ne!(line.0, line.1, "the crossing is a real segment, not one point");
+        let line = intersection_localizer(&sagittal, &axial)
+            .expect("the planes cross the source rectangle");
+        assert_ne!(
+            line.0, line.1,
+            "the crossing is a real segment, not one point"
+        );
     }
 
     #[test]
@@ -666,7 +751,10 @@ mod tests {
             Some([10000.0, -100.0, 50.0]),
             Some([0.0, 1.0, 0.0, 0.0, 0.0, 1.0]),
         );
-        assert!(intersection_localizer(&far, &axial).is_none(), "the plane never crosses the source rectangle");
+        assert!(
+            intersection_localizer(&far, &axial).is_none(),
+            "the plane never crosses the source rectangle"
+        );
     }
 
     #[test]
@@ -678,8 +766,16 @@ mod tests {
         ds.insert_value(Tag::COLUMNS, 2u16);
         ds.insert_str(Tag::NOMINAL_SCANNED_PIXEL_SPACING, Vr::Ds, "0.3\\0.4");
         let geometry = FrameGeometry::from_dataset(&ds).unwrap();
-        assert_eq!(geometry.spacing_between_rows(), 0.3, "rows from the first value");
-        assert_eq!(geometry.spacing_between_columns(), 0.4, "columns from the second value");
+        assert_eq!(
+            geometry.spacing_between_rows(),
+            0.3,
+            "rows from the first value"
+        );
+        assert_eq!(
+            geometry.spacing_between_columns(),
+            0.4,
+            "columns from the second value"
+        );
     }
 
     #[test]
@@ -693,12 +789,21 @@ mod tests {
             let mut frame_item = Dataset::new();
             let mut measures = Dataset::new();
             measures.insert_str(Tag::PIXEL_SPACING, Vr::Ds, spacing);
-            frame_item.insert_sequence(Tag::PIXEL_MEASURES_SEQUENCE).push(measures);
+            frame_item
+                .insert_sequence(Tag::PIXEL_MEASURES_SEQUENCE)
+                .push(measures);
             per_frame.push(frame_item);
         }
         let f0 = FrameGeometry::from_dataset_frame(&ds, 0).unwrap();
-        assert_eq!((f0.spacing_between_rows(), f0.spacing_between_columns()), (0.5, 0.6));
+        assert_eq!(
+            (f0.spacing_between_rows(), f0.spacing_between_columns()),
+            (0.5, 0.6)
+        );
         let f1 = FrameGeometry::from_dataset_frame(&ds, 1).unwrap();
-        assert_eq!((f1.spacing_between_rows(), f1.spacing_between_columns()), (0.7, 0.8), "frame 1 uses its own Pixel Measures");
+        assert_eq!(
+            (f1.spacing_between_rows(), f1.spacing_between_columns()),
+            (0.7, 0.8),
+            "frame 1 uses its own Pixel Measures"
+        );
     }
 }

@@ -24,8 +24,16 @@ impl<T: PartialOrd<T> + Clone> Range<T> {
             return None;
         }
         Some(Range {
-            min: if self.min <= other.min { self.min.clone() } else { other.min.clone() },
-            max: if self.max >= other.max { self.max.clone() } else { other.max.clone() },
+            min: if self.min <= other.min {
+                self.min.clone()
+            } else {
+                other.min.clone()
+            },
+            max: if self.max >= other.max {
+                self.max.clone()
+            } else {
+                other.max.clone()
+            },
         })
     }
 }

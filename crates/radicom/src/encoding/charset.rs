@@ -62,7 +62,10 @@ static REGISTRY: Lazy<RwLock<HashMap<String, &'static Encoding>>> = Lazy::new(||
 /// Term matching is case/space/punctuation tolerant: `iso-ir 192`,
 /// `ISO_IR192` and `ISO IR 192` all hit (ENC-01 tolerance).
 fn normalize_term(term: &str) -> String {
-    term.chars().filter(|c| !matches!(c, ' ' | '-' | '_')).map(|c| c.to_ascii_uppercase()).collect()
+    term.chars()
+        .filter(|c| !matches!(c, ' ' | '-' | '_'))
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
 }
 
 /// Calls `f` with the normalized term, using a small stack buffer for the
@@ -86,12 +89,17 @@ fn with_normalized_term<R>(term: &str, f: impl FnOnce(&str) -> R) -> R {
 /// Registers or remaps a character set term (ENC-04 extension point).
 pub fn register_charset(term: &str, encoding_name: &str) -> Result<(), Error> {
     let enc = Encoding::for_label(encoding_name.as_bytes()).ok_or_else(|| {
-        Error::Data(DataError::Other { message: format!("unknown encoding \"{encoding_name}\"") })
+        Error::Data(DataError::Other {
+            message: format!("unknown encoding \"{encoding_name}\""),
+        })
     })?;
     // leak the name once: registry values must be 'static
     let leaked: &'static str = Box::leak(encoding_name.to_string().into_boxed_str());
     let enc = Encoding::for_label(leaked.as_bytes()).unwrap_or(enc);
-    REGISTRY.write().expect("registry lock").insert(normalize_term(term), enc);
+    REGISTRY
+        .write()
+        .expect("registry lock")
+        .insert(normalize_term(term), enc);
     Ok(())
 }
 
@@ -107,14 +115,21 @@ pub fn register_charset(term: &str, encoding_name: &str) -> Result<(), Error> {
 pub fn charset_encoding(term: &str) -> &'static Encoding {
     ensure_registry();
     with_normalized_term(term, |key| {
-        REGISTRY.read().expect("registry lock").get(key).copied().unwrap_or(encoding_rs::WINDOWS_1252)
+        REGISTRY
+            .read()
+            .expect("registry lock")
+            .get(key)
+            .copied()
+            .unwrap_or(encoding_rs::WINDOWS_1252)
     })
 }
 
 /// True when the term is a known charset (used to decide whether to warn).
 pub fn is_known_charset(term: &str) -> bool {
     ensure_registry();
-    with_normalized_term(term, |key| REGISTRY.read().expect("registry lock").contains_key(key))
+    with_normalized_term(term, |key| {
+        REGISTRY.read().expect("registry lock").contains_key(key)
+    })
 }
 
 fn ensure_registry() {
@@ -197,8 +212,7 @@ pub fn decode_multi_charset(bytes: &[u8], first: &'static Encoding, pn: bool) ->
                 continue;
             }
         }
-        let reset = (pn && (b == b'^' || b == b'='))
-            || matches!(b, b'\r' | b'\n' | b'\t' | 0x0C);
+        let reset = (pn && (b == b'^' || b == b'=')) || matches!(b, b'\r' | b'\n' | b'\t' | 0x0C);
         if reset {
             flush(&mut out, bytes, segment_start..i, current, korean);
             segment_start = i;
@@ -261,20 +275,20 @@ fn encoding_for_escape(seq: &[u8]) -> Option<&'static Encoding> {
     };
     let label = match designator.as_str() {
         "(B" => "ASCII",
-        "(J" | "(I" => "Shift_JIS",                    // JIS X 0201 romaji / katakana
-        "-A" => "iso-8859-1",                          // Latin 1 (ISO 2022 IR 100)
-        "-B" => "iso-8859-2",                          // Latin 2 (ISO 2022 IR 101)
-        "-C" => "iso-8859-3",                          // Latin 3 (ISO 2022 IR 109)
-        "-D" => "iso-8859-4",                          // Latin 4 (ISO 2022 IR 110)
-        "-F" => "iso-8859-7",                          // Greek (ISO 2022 IR 126)
-        "-G" => "iso-8859-6",                          // Arabic (ISO 2022 IR 127)
-        "-H" => "iso-8859-8",                          // Hebrew (ISO 2022 IR 138)
-        "-L" => "iso-8859-5",                          // Cyrillic (ISO 2022 IR 144)
-        "-M" => "iso-8859-9",                          // Latin 5 (ISO 2022 IR 148)
-        "-T" => "windows-874",                         // Thai (ISO 2022 IR 166)
-        "$B" | "$@" | "$(D" => "ISO-2022-JP",          // JIS X 0208 / 0212
-        "$)A" => "gb2312",                             // GB 2312 (ISO 2022 IR 58)
-        "$)C" => "EUC-KR",                             // KS X 1001 (ISO 2022 IR 149)
+        "(J" | "(I" => "Shift_JIS", // JIS X 0201 romaji / katakana
+        "-A" => "iso-8859-1",       // Latin 1 (ISO 2022 IR 100)
+        "-B" => "iso-8859-2",       // Latin 2 (ISO 2022 IR 101)
+        "-C" => "iso-8859-3",       // Latin 3 (ISO 2022 IR 109)
+        "-D" => "iso-8859-4",       // Latin 4 (ISO 2022 IR 110)
+        "-F" => "iso-8859-7",       // Greek (ISO 2022 IR 126)
+        "-G" => "iso-8859-6",       // Arabic (ISO 2022 IR 127)
+        "-H" => "iso-8859-8",       // Hebrew (ISO 2022 IR 138)
+        "-L" => "iso-8859-5",       // Cyrillic (ISO 2022 IR 144)
+        "-M" => "iso-8859-9",       // Latin 5 (ISO 2022 IR 148)
+        "-T" => "windows-874",      // Thai (ISO 2022 IR 166)
+        "$B" | "$@" | "$(D" => "ISO-2022-JP", // JIS X 0208 / 0212
+        "$)A" => "gb2312",          // GB 2312 (ISO 2022 IR 58)
+        "$)C" => "EUC-KR",          // KS X 1001 (ISO 2022 IR 149)
         _ => return None,
     };
     Encoding::for_label(label.as_bytes())
@@ -302,7 +316,10 @@ pub fn encode_multi_charset(
     // Per-segment fallback: split at VR-appropriate delimiters, pick the
     // first encoding that encodes the segment strictly, inject its escape.
     let reset_points: Vec<usize> = if pn {
-        text.char_indices().filter(|(_, c)| *c == '^' || *c == '=').map(|(i, _)| i).collect()
+        text.char_indices()
+            .filter(|(_, c)| *c == '^' || *c == '=')
+            .map(|(i, _)| i)
+            .collect()
     } else {
         text.char_indices()
             .filter(|(_, c)| matches!(c, '\r' | '\n' | '\t' | '\u{0C}'))
@@ -318,7 +335,9 @@ pub fn encode_multi_charset(
     }
     segments.push(&text[start..]);
 
-    let candidates: Vec<&'static Encoding> = std::iter::once(first).chain(alternates.iter().copied()).collect();
+    let candidates: Vec<&'static Encoding> = std::iter::once(first)
+        .chain(alternates.iter().copied())
+        .collect();
     let mut bytes = Vec::with_capacity(text.len());
     let mut active = first;
     for (i, segment) in segments.iter().enumerate() {
@@ -391,7 +410,12 @@ mod tests {
     fn ascii_text_is_returned_without_the_segment_scan() {
         // §3.9: the ASCII fast path must agree with the general path for plain
         // text, including PN delimiters and resets.
-        for text in ["", "SMITH^JOHN=DOE", "line one\r\nline two", "0123456789 ^="] {
+        for text in [
+            "",
+            "SMITH^JOHN=DOE",
+            "line one\r\nline two",
+            "0123456789 ^=",
+        ] {
             for encoding in ["ISO_IR 100", "ISO_IR 192", "ISO 2022 IR 87", "GB18030"] {
                 let enc = charset_encoding(encoding);
                 assert_eq!(
@@ -409,7 +433,10 @@ mod tests {
         let base = charset_encoding("ISO 2022 IR 87");
         let bytes = [0x1Bu8, 0x24, 0x42, 0x24, 0x22, 0x1B, 0x28, 0x42];
         let out = decode_multi_charset(&bytes, base, false);
-        assert_eq!(out, "あ", "JIS X 0208 must decode to the Japanese char, not ASCII");
+        assert_eq!(
+            out, "あ",
+            "JIS X 0208 must decode to the Japanese char, not ASCII"
+        );
     }
 
     #[test]
@@ -427,7 +454,10 @@ mod tests {
         let base = charset_encoding("ISO 2022 IR 149");
         let bytes = [0x1Bu8, 0x24, 0x29, 0x43, 0x30, 0x21, 0x1B, 0x28, 0x42];
         let out = decode_multi_charset(&bytes, base, false);
-        assert_eq!(out, "가", "Korean ISO 2022 must decode, not fall back to ASCII");
+        assert_eq!(
+            out, "가",
+            "Korean ISO 2022 must decode, not fall back to ASCII"
+        );
     }
 
     #[test]
@@ -458,7 +488,11 @@ mod tests {
         }
         assert_eq!(charset_encoding("ISO_IR 149").name(), "EUC-KR");
         assert_eq!(charset_encoding("GBK").name(), "GBK");
-        assert_eq!(charset_encoding(" Totally Unknown ").name(), "windows-1252", "unknown falls back");
+        assert_eq!(
+            charset_encoding(" Totally Unknown ").name(),
+            "windows-1252",
+            "unknown falls back"
+        );
         assert!(!is_known_charset(" Totally Unknown "));
     }
 
@@ -489,8 +523,13 @@ mod tests {
     fn iso_ir_127_decodes_arabic_as_iso_8859_6() {
         // bytes from fo-dicom's chrArab.dcm
         let enc = charset_encoding("ISO_IR 127");
-        let bytes = [0xE2u8, 0xC8, 0xC7, 0xE6, 0xEA, 0x5E, 0xE4, 0xE6, 0xD2, 0xC7, 0xD1, 0x20];
-        assert_eq!(decode_multi_charset(&bytes, enc, true).trim_end(), "قباني^لنزار");
+        let bytes = [
+            0xE2u8, 0xC8, 0xC7, 0xE6, 0xEA, 0x5E, 0xE4, 0xE6, 0xD2, 0xC7, 0xD1, 0x20,
+        ];
+        assert_eq!(
+            decode_multi_charset(&bytes, enc, true).trim_end(),
+            "قباني^لنزار"
+        );
     }
 
     #[test]
@@ -518,14 +557,23 @@ mod tests {
         let out = decode_multi_charset(b"\x1B-L\xBB\xEE\xDA", base, false);
         assert_eq!(out, "Люк");
         // ESC - C is Latin-3, not a Chinese designator
-        assert_eq!(encoding_for_escape(b"\x1B-C").map(|e| e.name()), Some("ISO-8859-3"));
-        assert_eq!(encoding_for_escape(b"\x1B$)A").map(|e| e.name()), Some("GBK"));
+        assert_eq!(
+            encoding_for_escape(b"\x1B-C").map(|e| e.name()),
+            Some("ISO-8859-3")
+        );
+        assert_eq!(
+            encoding_for_escape(b"\x1B$)A").map(|e| e.name()),
+            Some("GBK")
+        );
     }
 
     #[test]
     fn plain_decode() {
         let enc = charset_encoding("ISO_IR 192");
-        assert_eq!(decode_multi_charset("héllo".as_bytes(), enc, false), "héllo");
+        assert_eq!(
+            decode_multi_charset("héllo".as_bytes(), enc, false),
+            "héllo"
+        );
     }
 
     #[test]
@@ -561,7 +609,10 @@ mod tests {
         let latin = charset_encoding("ISO_IR 100");
         let gbk = charset_encoding("GBK");
         let out = encode_multi_charset("ok:参数", latin, &[gbk], false);
-        assert!(out.starts_with(b"\x1B"), "escape injected before the GBK segment");
+        assert!(
+            out.starts_with(b"\x1B"),
+            "escape injected before the GBK segment"
+        );
         // round-trips: the escape switch makes the decode recover the text
         let decoded = decode_multi_charset(&out, latin, false);
         assert_eq!(decoded, "ok:参数");

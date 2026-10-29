@@ -11,6 +11,9 @@ use radicom::model::vr::Vr;
 
 fn write_sample(path: &std::path::Path) {
     let mut ds = Dataset::new();
+    // the file meta group is built from the dataset's own SOP class (#8)
+    ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.2");
+    ds.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5.6.7");
     ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "DOE^JANE");
     ds.insert_str(Tag::MODALITY, Vr::Cs, "CT");
     ds.insert_value(Tag::ROWS, 4u16);
@@ -24,7 +27,10 @@ fn write_sample(path: &std::path::Path) {
         radicom::model::element::DicomElement::new_bytes(
             Tag::PIXEL_DATA,
             Vr::Ob,
-            std::sync::Arc::new(radicom::model::buffer::MemoryBuffer::from(vec![0u8; 4 * 4 * 2])),
+            std::sync::Arc::new(radicom::model::buffer::MemoryBuffer::from(vec![
+                0u8;
+                4 * 4 * 2
+            ])),
         ),
     ));
     DicomFile::from_dataset(ds).save(path).unwrap();

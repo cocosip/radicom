@@ -55,11 +55,19 @@ impl PdvAssembler {
 
     /// Feeds one PDV, returning a unit when this PDV completes one.
     pub fn push_pdv(&mut self, pdv: &Pdv) -> Result<Option<MessageUnit>> {
-        let stream = if pdv.is_command { Stream::Command } else { Stream::Data };
+        let stream = if pdv.is_command {
+            Stream::Command
+        } else {
+            Stream::Data
+        };
         let key = (pdv.context_id, stream);
         // Fast path: a complete message arriving in one PDV is shared, not copied.
         if pdv.is_last && !self.buffers.contains_key(&key) {
-            return Ok(Some(MessageUnit { context_id: pdv.context_id, stream, bytes: pdv.data.clone() }));
+            return Ok(Some(MessageUnit {
+                context_id: pdv.context_id,
+                stream,
+                bytes: pdv.data.clone(),
+            }));
         }
         let buffer = self.buffers.entry(key).or_default();
         buffer.extend_from_slice(&pdv.data);
@@ -69,7 +77,11 @@ impl PdvAssembler {
 
         // the message is complete: drop the buffer so idle contexts cost nothing
         let bytes = self.buffers.remove(&key).unwrap_or_default().freeze();
-        Ok(Some(MessageUnit { context_id: pdv.context_id, stream, bytes }))
+        Ok(Some(MessageUnit {
+            context_id: pdv.context_id,
+            stream,
+            bytes,
+        }))
     }
 
     /// Bytes buffered for a stream that has not completed yet, over all
@@ -103,14 +115,20 @@ impl PduSplitter {
     /// `max_pdu` is the peer's maximum PDU length; `max_pdvs_per_pdu` exists
     /// for buggy peers that only accept one PDV per PDU.
     pub fn new(max_pdu: u32, max_pdvs_per_pdu: usize) -> Self {
-        PduSplitter { max_pdu, max_pdvs_per_pdu: max_pdvs_per_pdu.max(1) }
+        PduSplitter {
+            max_pdu,
+            max_pdvs_per_pdu: max_pdvs_per_pdu.max(1),
+        }
     }
 
     /// The largest PDV value that fits in one PDU, accounting for the 6-byte
     /// PDU header and the 6-byte PDV header (length, context, message header).
     pub fn max_pdv_value(&self) -> usize {
-        // a whole PDU must stay within max_pdu, which counts the body only
-        (self.max_pdu as usize).saturating_sub(6)
+        // a whole PDU must stay within max_pdu, which counts the body only.
+        // PDV values are even-padded on the wire, so the usable size is even
+        // too: an odd maximum must not become an odd fragment plus a pad byte
+        // (review #17).
+        ((self.max_pdu as usize).saturating_sub(6)) & !1
     }
 
     /// Splits one message stream into PDUs (§5.3).
@@ -123,10 +141,17 @@ impl PduSplitter {
 
     /// Splits an owned message into PDUs without copying its bytes: every PDV
     /// is a `Bytes::slice` of `data` (§3.3).
-    pub fn split_bytes(&self, context_id: u8, is_command: bool, data: bytes::Bytes) -> Result<Vec<PData>> {
+    pub fn split_bytes(
+        &self,
+        context_id: u8,
+        is_command: bool,
+        data: bytes::Bytes,
+    ) -> Result<Vec<PData>> {
         let body_limit = self.max_pdu as usize;
         if body_limit <= 6 {
-            return Err(NetworkError::protocol("maximum PDU length leaves no room for a PDV"));
+            return Err(NetworkError::protocol(
+                "maximum PDU length leaves no room for a PDV",
+            ));
         }
         let mut pdus: Vec<PData> = Vec::new();
         let mut current = PData::default();
@@ -134,15 +159,29 @@ impl PduSplitter {
         let mut used = 0usize;
 
         if data.is_empty() {
-            current.pdvs.push(Pdv { context_id, is_command, is_last: true, data: bytes::Bytes::new() });
+            current.pdvs.push(Pdv {
+                context_id,
+                is_command,
+                is_last: true,
+                data: bytes::Bytes::new(),
+            });
             pdus.push(current);
             return Ok(pdus);
         }
 
         let mut offset = 0usize;
         while offset < data.len() {
-            // each PDV costs 6 header bytes plus its even-padded value
-            let room = body_limit.saturating_sub(used).saturating_sub(6);
+            // A PDV costs 6 header bytes plus its value, which is even-padded on
+            // the wire. Keep the slice itself even so the padding it would need
+            // is already counted in the limit (review #17).
+            let available = body_limit.saturating_sub(used);
+            if available <= 6 {
+                pdus.push(std::mem::take(&mut current));
+                used = 0;
+                continue;
+            }
+            let mut room = available - 6;
+            room &= !1;
             if room == 0 {
                 pdus.push(std::mem::take(&mut current));
                 used = 0;
@@ -206,14 +245,21 @@ mod tests {
     use super::*;
 
     fn pdv(context_id: u8, is_command: bool, is_last: bool, data: &[u8]) -> Pdv {
-        Pdv { context_id, is_command, is_last, data: bytes::Bytes::copy_from_slice(data) }
+        Pdv {
+            context_id,
+            is_command,
+            is_last,
+            data: bytes::Bytes::copy_from_slice(data),
+        }
     }
 
     #[test]
     fn assembles_a_single_command_unit() {
         let mut assembler = PdvAssembler::new();
         let units = assembler
-            .push_pdata(&PData { pdvs: vec![pdv(1, true, true, &[1, 2, 3])] })
+            .push_pdata(&PData {
+                pdvs: vec![pdv(1, true, true, &[1, 2, 3])],
+            })
             .unwrap();
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].stream, Stream::Command);
@@ -226,9 +272,18 @@ mod tests {
     fn a_single_pdv_message_is_shared_not_copied() {
         let mut assembler = PdvAssembler::new();
         let source = bytes::Bytes::from_static(b"single");
-        let p = Pdv { context_id: 1, is_command: true, is_last: true, data: source.clone() };
+        let p = Pdv {
+            context_id: 1,
+            is_command: true,
+            is_last: true,
+            data: source.clone(),
+        };
         let unit = assembler.push_pdv(&p).unwrap().unwrap();
-        assert_eq!(unit.bytes.as_ptr(), source.as_ptr(), "a one-PDV message shares its bytes");
+        assert_eq!(
+            unit.bytes.as_ptr(),
+            source.as_ptr(),
+            "a one-PDV message shares its bytes"
+        );
         assert!(assembler.is_idle());
     }
 
@@ -236,29 +291,43 @@ mod tests {
     fn assembles_a_command_split_across_pdvs() {
         let mut assembler = PdvAssembler::new();
         assert!(assembler
-            .push_pdata(&PData { pdvs: vec![pdv(1, true, false, &[1, 2])] })
+            .push_pdata(&PData {
+                pdvs: vec![pdv(1, true, false, &[1, 2])]
+            })
             .unwrap()
             .is_empty());
         assert_eq!(assembler.pending_len(Stream::Command), 2);
         let units = assembler
-            .push_pdata(&PData { pdvs: vec![pdv(1, true, true, &[3, 4])] })
+            .push_pdata(&PData {
+                pdvs: vec![pdv(1, true, true, &[3, 4])],
+            })
             .unwrap();
-        assert_eq!(units[0].bytes, vec![1, 2, 3, 4], "fragments concatenate in order");
+        assert_eq!(
+            units[0].bytes,
+            vec![1, 2, 3, 4],
+            "fragments concatenate in order"
+        );
     }
 
     #[test]
     fn assembles_a_command_split_across_pdus() {
         let mut assembler = PdvAssembler::new();
         assert!(assembler
-            .push_pdata(&PData { pdvs: vec![pdv(1, true, false, &[1])] })
+            .push_pdata(&PData {
+                pdvs: vec![pdv(1, true, false, &[1])]
+            })
             .unwrap()
             .is_empty());
         assert!(assembler
-            .push_pdata(&PData { pdvs: vec![pdv(1, true, false, &[2])] })
+            .push_pdata(&PData {
+                pdvs: vec![pdv(1, true, false, &[2])]
+            })
             .unwrap()
             .is_empty());
         let units = assembler
-            .push_pdata(&PData { pdvs: vec![pdv(1, true, true, &[3])] })
+            .push_pdata(&PData {
+                pdvs: vec![pdv(1, true, true, &[3])],
+            })
             .unwrap();
         assert_eq!(units[0].bytes, vec![1, 2, 3]);
     }
@@ -279,7 +348,11 @@ mod tests {
         assert_eq!(units[0].stream, Stream::Command);
         assert_eq!(units[0].bytes, vec![0xAA]);
         assert_eq!(units[1].stream, Stream::Data);
-        assert_eq!(units[1].bytes, vec![1, 2, 3], "the dataset unit spans both PDVs");
+        assert_eq!(
+            units[1].bytes,
+            vec![1, 2, 3],
+            "the dataset unit spans both PDVs"
+        );
     }
 
     #[test]
@@ -296,7 +369,10 @@ mod tests {
             })
             .unwrap();
         assert_eq!(units.len(), 4, "two complete messages in one P-DATA-TF");
-        assert_eq!(units.iter().map(|u| u.bytes[0]).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+        assert_eq!(
+            units.iter().map(|u| u.bytes[0]).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
     }
 
     #[test]
@@ -306,24 +382,48 @@ mod tests {
         // one that splices the two together.
         let mut assembler = PdvAssembler::new();
         assert!(assembler
-            .push_pdata(&PData { pdvs: vec![pdv(1, true, false, &[0x10, 0x11])] })
+            .push_pdata(&PData {
+                pdvs: vec![pdv(1, true, false, &[0x10, 0x11])]
+            })
             .unwrap()
             .is_empty());
         assert!(assembler
-            .push_pdata(&PData { pdvs: vec![pdv(3, true, false, &[0x30, 0x31])] })
+            .push_pdata(&PData {
+                pdvs: vec![pdv(3, true, false, &[0x30, 0x31])]
+            })
             .unwrap()
             .is_empty());
-        assert_eq!(assembler.pending_len(Stream::Command), 4, "both contexts hold a fragment");
+        assert_eq!(
+            assembler.pending_len(Stream::Command),
+            4,
+            "both contexts hold a fragment"
+        );
 
         // context 3 finishes first
-        let units = assembler.push_pdata(&PData { pdvs: vec![pdv(3, true, true, &[0x32])] }).unwrap();
+        let units = assembler
+            .push_pdata(&PData {
+                pdvs: vec![pdv(3, true, true, &[0x32])],
+            })
+            .unwrap();
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].context_id, 3);
-        assert_eq!(units[0].bytes, vec![0x30, 0x31, 0x32], "context 3 keeps its own bytes");
+        assert_eq!(
+            units[0].bytes,
+            vec![0x30, 0x31, 0x32],
+            "context 3 keeps its own bytes"
+        );
 
-        let units = assembler.push_pdata(&PData { pdvs: vec![pdv(1, true, true, &[0x12])] }).unwrap();
+        let units = assembler
+            .push_pdata(&PData {
+                pdvs: vec![pdv(1, true, true, &[0x12])],
+            })
+            .unwrap();
         assert_eq!(units[0].context_id, 1);
-        assert_eq!(units[0].bytes, vec![0x10, 0x11, 0x12], "context 1 keeps its own bytes");
+        assert_eq!(
+            units[0].bytes,
+            vec![0x10, 0x11, 0x12],
+            "context 1 keeps its own bytes"
+        );
         assert!(assembler.is_idle());
     }
 
@@ -333,7 +433,9 @@ mod tests {
         // is still arriving on the storage context
         let mut assembler = PdvAssembler::new();
         assert!(assembler
-            .push_pdata(&PData { pdvs: vec![pdv(1, false, false, &[0x01, 0x02])] })
+            .push_pdata(&PData {
+                pdvs: vec![pdv(1, false, false, &[0x01, 0x02])]
+            })
             .unwrap()
             .is_empty());
         let units = assembler
@@ -342,9 +444,20 @@ mod tests {
             })
             .unwrap();
         assert_eq!(units.len(), 2);
-        assert_eq!((units[0].context_id, units[0].stream, units[0].bytes.to_vec()), (3, Stream::Command, vec![0xAA]));
         assert_eq!(
-            (units[1].context_id, units[1].stream, units[1].bytes.to_vec()),
+            (
+                units[0].context_id,
+                units[0].stream,
+                units[0].bytes.to_vec()
+            ),
+            (3, Stream::Command, vec![0xAA])
+        );
+        assert_eq!(
+            (
+                units[1].context_id,
+                units[1].stream,
+                units[1].bytes.to_vec()
+            ),
             (1, Stream::Data, vec![0x01, 0x02, 0x03]),
             "the dataset on context 1 is not touched by the command on context 3"
         );
@@ -359,11 +472,22 @@ mod tests {
         let data = vec![0xAB; 40];
         let pdus = splitter.split(1, true, &data).unwrap();
         assert_eq!(pdus.len(), 3, "each PDV fills its PDU");
-        assert_eq!(pdus.iter().map(|p| p.pdvs[0].data.len()).collect::<Vec<_>>(), vec![18, 18, 4]);
-        let total: usize = pdus.iter().flat_map(|p| p.pdvs.iter().map(|d| d.data.len())).sum();
+        assert_eq!(
+            pdus.iter()
+                .map(|p| p.pdvs[0].data.len())
+                .collect::<Vec<_>>(),
+            vec![18, 18, 4]
+        );
+        let total: usize = pdus
+            .iter()
+            .flat_map(|p| p.pdvs.iter().map(|d| d.data.len()))
+            .sum();
         assert_eq!(total, 40, "every byte is carried exactly once");
         // only the very last PDV carries the last bit
-        let last_flags: Vec<bool> = pdus.iter().flat_map(|p| p.pdvs.iter().map(|d| d.is_last)).collect();
+        let last_flags: Vec<bool> = pdus
+            .iter()
+            .flat_map(|p| p.pdvs.iter().map(|d| d.is_last))
+            .collect();
         assert_eq!(last_flags, vec![false, false, true]);
     }
 
@@ -374,7 +498,9 @@ mod tests {
         let splitter = PduSplitter::new(24, 4);
         let data: Vec<u8> = (0..80u8).collect();
         let borrowed = splitter.split(7, true, &data).unwrap();
-        let owned = splitter.split_bytes(7, true, bytes::Bytes::from(data.clone())).unwrap();
+        let owned = splitter
+            .split_bytes(7, true, bytes::Bytes::from(data.clone()))
+            .unwrap();
         assert_eq!(borrowed, owned);
 
         let command = &data[..10];
@@ -396,7 +522,10 @@ mod tests {
         let data = vec![0xCD; 40];
         let pdus = splitter.split(1, false, &data).unwrap();
         assert_eq!(pdus.len(), 3, "one PDV per PDU");
-        assert!(pdus.iter().all(|p| p.pdvs.len() == 1), "one PDV per PDU mode");
+        assert!(
+            pdus.iter().all(|p| p.pdvs.len() == 1),
+            "one PDV per PDU mode"
+        );
     }
 
     #[test]
@@ -406,7 +535,10 @@ mod tests {
         let data = vec![0xEE; 3000];
         let pdus = splitter.split(1, true, &data).unwrap();
         assert!(pdus.iter().all(|p| p.pdvs.len() <= 4));
-        let total: usize = pdus.iter().flat_map(|p| p.pdvs.iter().map(|d| d.data.len())).sum();
+        let total: usize = pdus
+            .iter()
+            .flat_map(|p| p.pdvs.iter().map(|d| d.data.len()))
+            .sum();
         assert_eq!(total, 3000);
     }
 
@@ -423,7 +555,9 @@ mod tests {
     #[test]
     fn split_message_sends_the_command_first_in_its_own_pdu() {
         let splitter = PduSplitter::new(16384, 16);
-        let pdus = splitter.split_message(1, &[0xAA; 10], Some(&[0xBB; 10])).unwrap();
+        let pdus = splitter
+            .split_message(1, &[0xAA; 10], Some(&[0xBB; 10]))
+            .unwrap();
         assert_eq!(pdus.len(), 2, "command and dataset are separate P-DATA-TFs");
         assert!(pdus[0].pdvs.iter().all(|d| d.is_command));
         assert!(pdus[1].pdvs.iter().all(|d| !d.is_command));
@@ -440,6 +574,39 @@ mod tests {
     fn zero_max_pdu_is_rejected() {
         let splitter = PduSplitter::new(0, 16);
         assert!(splitter.split(1, true, &[1, 2]).is_err());
+    }
+
+    #[test]
+    fn an_odd_maximum_pdu_survives_a_real_encode_decode_round_trip() {
+        // review #17: with an odd negotiated maximum the fragments used to be
+        // odd, so the encoder added a pad byte per fragment, the first PDU
+        // exceeded the limit, and the reassembled data grew by the padding.
+        let splitter = PduSplitter::new(16385, 1);
+        let input: Vec<u8> = (0..20000).map(|i| (i % 251) as u8).collect();
+        let pdus = splitter.split(1, false, &input).unwrap();
+
+        let mut joined = Vec::new();
+        for pdu in pdus {
+            let wire = crate::pdu::encode(&crate::pdu::Pdu::PData(pdu)).unwrap();
+            assert!(
+                wire.len() - 6 <= 16385,
+                "a PDU body of {} exceeds the negotiated 16385 bytes",
+                wire.len() - 6
+            );
+            let decoded = crate::pdu::decode(&wire).unwrap();
+            let crate::pdu::Pdu::PData(back) = decoded else {
+                panic!("expected a P-DATA-TF");
+            };
+            for pdv in back.pdvs {
+                joined.extend_from_slice(&pdv.data);
+            }
+        }
+        assert_eq!(
+            joined.len(),
+            input.len(),
+            "no padding leaked into the message"
+        );
+        assert_eq!(joined, input, "the data round-trips unchanged");
     }
 
     #[test]

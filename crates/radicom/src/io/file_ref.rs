@@ -162,7 +162,10 @@ impl TempFileProvider {
         let dir = dir.into();
         // Best-effort: a failure here surfaces on the first create().
         let _ = fs::create_dir_all(&dir);
-        TempFileProvider { dir, pending: Mutex::new(Vec::new()) }
+        TempFileProvider {
+            dir,
+            pending: Mutex::new(Vec::new()),
+        }
     }
 
     /// The directory in which this provider creates files.

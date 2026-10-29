@@ -26,7 +26,10 @@ pub struct DicomSequence {
 
 impl DicomSequence {
     pub fn new(tag: Tag) -> Self {
-        DicomSequence { tag, items: Vec::new() }
+        DicomSequence {
+            tag,
+            items: Vec::new(),
+        }
     }
 
     pub fn with_items(tag: Tag, items: Vec<Dataset>) -> Self {
@@ -128,10 +131,12 @@ impl DicomFragmentSequence {
     pub fn set_offset_table(&mut self, table: Vec<u32>) {
         self.offset_table = table;
         // re-sync the incremental counter with whatever was installed
-        self.next_offset = self.fragments.iter().map(|f| 8 + f.size() + f.size() % 2).sum();
+        self.next_offset = self
+            .fragments
+            .iter()
+            .map(|f| 8 + f.size() + f.size() % 2)
+            .sum();
     }
-
-
 }
 
 impl DicomItem {
@@ -173,7 +178,6 @@ impl DicomItem {
         }
     }
 }
-
 
 impl PartialEq for DicomSequence {
     fn eq(&self, other: &Self) -> bool {
@@ -220,7 +224,7 @@ impl From<DicomElement> for DicomItem {
 mod tests {
     use super::*;
     use crate::model::buffer::MemoryBuffer;
-use std::sync::Arc;
+    use std::sync::Arc;
 
     #[test]
     fn sequence_container() {

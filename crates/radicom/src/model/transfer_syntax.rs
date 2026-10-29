@@ -144,7 +144,10 @@ impl std::fmt::Display for TransferSyntax {
 
 // Helper chains keep each entry on one conceptual line.
 fn jpeg_lossy(uid: &'static str, name: &'static str) -> TransferSyntax {
-    TransferSyntax::new(uid, name).encapsulated().lossy("ISO_10918_1").retired()
+    TransferSyntax::new(uid, name)
+        .encapsulated()
+        .lossy("ISO_10918_1")
+        .retired()
 }
 
 fn jpeg_lossless(uid: &'static str, name: &'static str, retired: bool) -> TransferSyntax {
@@ -171,9 +174,14 @@ pub fn builtin_entries() -> Vec<TransferSyntax> {
     let v = vec![
         TransferSyntax::new("1.2.840.10008.1.2", "Implicit VR Little Endian").implicit(),
         TransferSyntax::new("1.2.840.10008.1.2.1", "Explicit VR Little Endian"),
-        TransferSyntax::new("1.2.840.10008.1.2.1.99", "Deflated Explicit VR Little Endian")
-            .deflate(),
-        TransferSyntax::new("1.2.840.10008.1.2.2", "Explicit VR Big Endian").big().retired(),
+        TransferSyntax::new(
+            "1.2.840.10008.1.2.1.99",
+            "Deflated Explicit VR Little Endian",
+        )
+        .deflate(),
+        TransferSyntax::new("1.2.840.10008.1.2.2", "Explicit VR Big Endian")
+            .big()
+            .retired(),
         // JPEG still image family
         TransferSyntax::new("1.2.840.10008.1.2.4.50", "JPEG Baseline (Process 1)")
             .encapsulated()
@@ -182,8 +190,14 @@ pub fn builtin_entries() -> Vec<TransferSyntax> {
             .encapsulated()
             .lossy("ISO_10918_1"),
         jpeg_lossy("1.2.840.10008.1.2.4.52", "JPEG Extended (Process 3 & 5)"),
-        jpeg_lossy("1.2.840.10008.1.2.4.53", "JPEG Spectral Selection (Process 6 & 8)"),
-        jpeg_lossy("1.2.840.10008.1.2.4.54", "JPEG Full Progression (Process 7 & 9)"),
+        jpeg_lossy(
+            "1.2.840.10008.1.2.4.53",
+            "JPEG Spectral Selection (Process 6 & 8)",
+        ),
+        jpeg_lossy(
+            "1.2.840.10008.1.2.4.54",
+            "JPEG Full Progression (Process 7 & 9)",
+        ),
         jpeg_lossy("1.2.840.10008.1.2.4.55", "JPEG Lossless (Process 10 & 12)"),
         jpeg_lossy("1.2.840.10008.1.2.4.56", "JPEG Extended (Process 13 & 15)"),
         jpeg_lossless("1.2.840.10008.1.2.4.57", "JPEG Lossless (Process 14)", true),
@@ -192,22 +206,50 @@ pub fn builtin_entries() -> Vec<TransferSyntax> {
         jpeg_lossy("1.2.840.10008.1.2.4.60", "JPEG Extended (Process 17 & 19)"),
         jpeg_lossy("1.2.840.10008.1.2.4.61", "JPEG Extended (Process 20 & 22)"),
         jpeg_lossy("1.2.840.10008.1.2.4.62", "JPEG Extended (Process 23 & 25)"),
-        jpeg_lossy("1.2.840.10008.1.2.4.63", "JPEG Spectral Selection (Process 26 & 28)"),
-        jpeg_lossy("1.2.840.10008.1.2.4.64", "JPEG Full Progression (Process 29 & 31)"),
-        jpeg_lossy("1.2.840.10008.1.2.4.65", "JPEG Lossless (Process 16 & 18) (Hierarchical)"),
-        jpeg_lossy("1.2.840.10008.1.2.4.66", "JPEG Lossless (Process 17 & 19) (Hierarchical)"),
-        jpeg_lossy("1.2.840.10008.1.2.4.67", "JPEG Lossless (Process 20 & 22) (Hierarchical)"),
-        jpeg_lossy("1.2.840.10008.1.2.4.68", "JPEG Lossless (Process 23 & 25) (Hierarchical)"),
-        jpeg_lossy("1.2.840.10008.1.2.4.69", "JPEG Lossless (Process 26 & 28) (Hierarchical)"),
-        jpeg_lossless("1.2.840.10008.1.2.4.70", "JPEG Lossless (Process 14 Selection Value 1)", false),
+        jpeg_lossy(
+            "1.2.840.10008.1.2.4.63",
+            "JPEG Spectral Selection (Process 26 & 28)",
+        ),
+        jpeg_lossy(
+            "1.2.840.10008.1.2.4.64",
+            "JPEG Full Progression (Process 29 & 31)",
+        ),
+        jpeg_lossy(
+            "1.2.840.10008.1.2.4.65",
+            "JPEG Lossless (Process 16 & 18) (Hierarchical)",
+        ),
+        jpeg_lossy(
+            "1.2.840.10008.1.2.4.66",
+            "JPEG Lossless (Process 17 & 19) (Hierarchical)",
+        ),
+        jpeg_lossy(
+            "1.2.840.10008.1.2.4.67",
+            "JPEG Lossless (Process 20 & 22) (Hierarchical)",
+        ),
+        jpeg_lossy(
+            "1.2.840.10008.1.2.4.68",
+            "JPEG Lossless (Process 23 & 25) (Hierarchical)",
+        ),
+        jpeg_lossy(
+            "1.2.840.10008.1.2.4.69",
+            "JPEG Lossless (Process 26 & 28) (Hierarchical)",
+        ),
+        jpeg_lossless(
+            "1.2.840.10008.1.2.4.70",
+            "JPEG Lossless (Process 14 Selection Value 1)",
+            false,
+        ),
         // JPEG-LS
         TransferSyntax::new("1.2.840.10008.1.2.4.80", "JPEG-LS Lossless").encapsulated(),
         TransferSyntax::new("1.2.840.10008.1.2.4.81", "JPEG-LS Near Lossless")
             .encapsulated()
             .lossy("ISO_14495_1"),
         // JPEG 2000
-        TransferSyntax::new("1.2.840.10008.1.2.4.90", "JPEG 2000 Image Compression (Lossless Only)")
-            .encapsulated(),
+        TransferSyntax::new(
+            "1.2.840.10008.1.2.4.90",
+            "JPEG 2000 Image Compression (Lossless Only)",
+        )
+        .encapsulated(),
         TransferSyntax::new("1.2.840.10008.1.2.4.91", "JPEG 2000 Image Compression")
             .encapsulated()
             .lossy("ISO_15444_1"),
@@ -223,24 +265,74 @@ pub fn builtin_entries() -> Vec<TransferSyntax> {
         .encapsulated()
         .lossy("ISO_15444_2"),
         // JPIP
-        TransferSyntax::new("1.2.840.10008.1.2.4.94", "JPIP Referenced").encapsulated().retired(),
+        TransferSyntax::new("1.2.840.10008.1.2.4.94", "JPIP Referenced")
+            .encapsulated()
+            .retired(),
         TransferSyntax::new("1.2.840.10008.1.2.4.95", "JPIP Referenced (Deflate)")
             .encapsulated()
             .deflate()
             .retired(),
         // Video
-        video("1.2.840.10008.1.2.4.96", "MPEG2 Main Profile @ Main Level", false),
-        video("1.2.840.10008.1.2.4.97", "MPEG2 Main Profile @ High Level", true),
-        video("1.2.840.10008.1.2.4.98", "MPEG4 AVC/H.264 High Profile / Level 4.1", true),
-        video("1.2.840.10008.1.2.4.99", "MPEG4 AVC/H.264 BD-compatible High Profile / Level 4.1", false),
-        video("1.2.840.10008.1.2.4.100", "MPEG4 AVC/H.264 High Profile / Level 4.2 For 2D Video", false),
-        video("1.2.840.10008.1.2.4.101", "MPEG4 AVC/H.264 High Profile / Level 4.2 For 3D Video", false),
-        video("1.2.840.10008.1.2.4.102", "MPEG4 AVC/H.264 Stereo High Profile / Level 4.2", false),
-        video("1.2.840.10008.1.2.4.103", "HEVC/H.265 Main Profile @ Level 5.1", false),
-        video("1.2.840.10008.1.2.4.104", "HEVC/H.265 Main 10 Profile @ Level 5.1", false),
-        video("1.2.840.10008.1.2.4.105", "HEVC/H.265 Main Profile @ Level 5.1 for 4D Video", false),
-        video("1.2.840.10008.1.2.4.106", "HEVC/H.265 Main 10 Profile @ Level 5.1 for 4D Video", false),
-        video("1.2.840.10008.1.2.4.107", "HEVC/H.265 Main Profile @ Level 5.1 for 3D Video", false),
+        video(
+            "1.2.840.10008.1.2.4.96",
+            "MPEG2 Main Profile @ Main Level",
+            false,
+        ),
+        video(
+            "1.2.840.10008.1.2.4.97",
+            "MPEG2 Main Profile @ High Level",
+            true,
+        ),
+        video(
+            "1.2.840.10008.1.2.4.98",
+            "MPEG4 AVC/H.264 High Profile / Level 4.1",
+            true,
+        ),
+        video(
+            "1.2.840.10008.1.2.4.99",
+            "MPEG4 AVC/H.264 BD-compatible High Profile / Level 4.1",
+            false,
+        ),
+        video(
+            "1.2.840.10008.1.2.4.100",
+            "MPEG4 AVC/H.264 High Profile / Level 4.2 For 2D Video",
+            false,
+        ),
+        video(
+            "1.2.840.10008.1.2.4.101",
+            "MPEG4 AVC/H.264 High Profile / Level 4.2 For 3D Video",
+            false,
+        ),
+        video(
+            "1.2.840.10008.1.2.4.102",
+            "MPEG4 AVC/H.264 Stereo High Profile / Level 4.2",
+            false,
+        ),
+        video(
+            "1.2.840.10008.1.2.4.103",
+            "HEVC/H.265 Main Profile @ Level 5.1",
+            false,
+        ),
+        video(
+            "1.2.840.10008.1.2.4.104",
+            "HEVC/H.265 Main 10 Profile @ Level 5.1",
+            false,
+        ),
+        video(
+            "1.2.840.10008.1.2.4.105",
+            "HEVC/H.265 Main Profile @ Level 5.1 for 4D Video",
+            false,
+        ),
+        video(
+            "1.2.840.10008.1.2.4.106",
+            "HEVC/H.265 Main 10 Profile @ Level 5.1 for 4D Video",
+            false,
+        ),
+        video(
+            "1.2.840.10008.1.2.4.107",
+            "HEVC/H.265 Main Profile @ Level 5.1 for 3D Video",
+            false,
+        ),
         // HTJ2K
         TransferSyntax::new("1.2.840.10008.1.2.4.108", "HTJ2K Lossless").encapsulated(),
         TransferSyntax::new("1.2.840.10008.1.2.4.109", "HTJ2K Lossless RPCL").encapsulated(),
@@ -252,8 +344,12 @@ pub fn builtin_entries() -> Vec<TransferSyntax> {
         TransferSyntax::new("1.2.840.10008.1.2.6.1", "RFC 2557 MIME encapsulation")
             .encapsulated()
             .retired(),
-        TransferSyntax::new("1.2.840.10008.1.2.6.2", "XML Encoding").encapsulated().retired(),
-        TransferSyntax::new("1.2.840.10008.1.2.7.1", "JPIP HTJ2K Referenced").encapsulated().retired(),
+        TransferSyntax::new("1.2.840.10008.1.2.6.2", "XML Encoding")
+            .encapsulated()
+            .retired(),
+        TransferSyntax::new("1.2.840.10008.1.2.7.1", "JPIP HTJ2K Referenced")
+            .encapsulated()
+            .retired(),
         TransferSyntax::new("1.2.840.10008.1.2.7.2", "JPIP HTJ2K Referenced (Deflate)")
             .encapsulated()
             .deflate()
@@ -284,7 +380,7 @@ static EXTENSIONS: Lazy<RwLock<HashMap<Arc<str>, Arc<TransferSyntax>>>> =
 
 /// Well-known built-in syntaxes as lazily resolved constants.
 pub mod syntaxes {
-    use super::{ENTRIES, TransferSyntax};
+    use super::{TransferSyntax, ENTRIES};
     use once_cell::sync::Lazy;
     use std::sync::Arc;
 
@@ -333,9 +429,12 @@ pub fn lookup(uid: &Uid) -> Result<Arc<TransferSyntax>, Error> {
         return Ok(ts.clone());
     }
     if uid.uid_type() == UidType::TransferSyntax {
-        let ts = TransferSyntax::new("1.2.840.10008.1.2.1", "Explicit VR Little Endian")
-            .encapsulated();
-        let ts = Arc::new(TransferSyntax { uid: Arc::from(uid.value()), ..ts });
+        let ts =
+            TransferSyntax::new("1.2.840.10008.1.2.1", "Explicit VR Little Endian").encapsulated();
+        let ts = Arc::new(TransferSyntax {
+            uid: Arc::from(uid.value()),
+            ..ts
+        });
         return Ok(ts);
     }
     Err(Error::Data(DataError::Other {
@@ -377,7 +476,11 @@ pub fn register(
 
 /// Removes a runtime registration; built-ins cannot be unregistered.
 pub fn unregister(uid: &str) -> bool {
-    EXTENSIONS.write().expect("extensions lock").remove(uid).is_some()
+    EXTENSIONS
+        .write()
+        .expect("extensions lock")
+        .remove(uid)
+        .is_some()
 }
 
 #[cfg(test)]
@@ -422,7 +525,10 @@ mod tests {
         assert!(!jls_lossless.is_lossy());
 
         let mpeg = query("1.2.840.10008.1.2.4.96").unwrap();
-        assert!(mpeg.is_encapsulated() && !mpeg.is_lossy(), "video is encapsulated, not flagged lossy");
+        assert!(
+            mpeg.is_encapsulated() && !mpeg.is_lossy(),
+            "video is encapsulated, not flagged lossy"
+        );
 
         let jpip = query("1.2.840.10008.1.2.4.95").unwrap();
         assert!(jpip.is_deflate() && jpip.is_retired());
@@ -431,12 +537,19 @@ mod tests {
     #[test]
     fn virtual_syntaxes() {
         let implicit_be = IMPLICIT_VR_BIG_ENDIAN.clone();
-        assert_eq!(implicit_be.uid(), "1.2.840.10008.1.2.2.123456", "pseudo UID");
+        assert_eq!(
+            implicit_be.uid(),
+            "1.2.840.10008.1.2.2.123456",
+            "pseudo UID"
+        );
         assert!(!implicit_be.is_explicit_vr() && implicit_be.endian() == Endian::Big);
 
         let ge = GE_PRIVATE_IMPLICIT_VR_BIG_ENDIAN.clone();
         assert!(ge.swap_pixel_data());
-        assert!(ge.is_explicit_vr() && ge.endian() == Endian::Little, "LE syntax with pixel swap");
+        assert!(
+            ge.is_explicit_vr() && ge.endian() == Endian::Little,
+            "LE syntax with pixel swap"
+        );
     }
 
     #[test]
@@ -482,12 +595,18 @@ mod tests {
         assert_eq!(found, custom);
         assert!(unregister("1.2.999.9"));
         assert!(query("1.2.999.9").is_none());
-        assert!(!unregister("1.2.840.10008.1.2"), "built-ins cannot be unregistered");
+        assert!(
+            !unregister("1.2.840.10008.1.2"),
+            "built-ins cannot be unregistered"
+        );
     }
 
     #[test]
     fn parse_string() {
-        assert_eq!(parse("1.2.840.10008.1.2").unwrap(), *IMPLICIT_VR_LITTLE_ENDIAN);
+        assert_eq!(
+            parse("1.2.840.10008.1.2").unwrap(),
+            *IMPLICIT_VR_LITTLE_ENDIAN
+        );
         assert!(parse("not-a-uid").is_err());
     }
 }

@@ -30,7 +30,11 @@ pub trait IconGenerator {
     ///
     /// Implementors that do not support frame selection retain their existing
     /// behaviour through the default method.
-    fn generate_frame(&self, dataset: &Dataset, _frame_index: u32) -> Result<Option<Dataset>, Error> {
+    fn generate_frame(
+        &self,
+        dataset: &Dataset,
+        _frame_index: u32,
+    ) -> Result<Option<Dataset>, Error> {
         self.generate(dataset)
     }
 }
@@ -47,7 +51,11 @@ impl IconGenerator for BasicIconGenerator {
         Ok(Some(icon))
     }
 
-    fn generate_frame(&self, dataset: &Dataset, frame_index: u32) -> Result<Option<Dataset>, Error> {
+    fn generate_frame(
+        &self,
+        dataset: &Dataset,
+        frame_index: u32,
+    ) -> Result<Option<Dataset>, Error> {
         let Some(icon) = build_icon(dataset, Some(frame_index))? else {
             return Ok(None);
         };
@@ -73,7 +81,8 @@ fn build_icon(dataset: &Dataset, requested_frame: Option<u32>) -> Result<Option<
     }
 
     let frames = pixel.number_of_frames().max(1);
-    let frame_index = requested_frame.unwrap_or_else(|| representative_frame(pixel.dataset(), frames));
+    let frame_index =
+        requested_frame.unwrap_or_else(|| representative_frame(pixel.dataset(), frames));
     let frame = pixel.get_frame(frame_index)?;
     let raw = frame.data();
     let raw: &[u8] = raw.as_ref();
@@ -92,13 +101,17 @@ fn build_icon(dataset: &Dataset, requested_frame: Option<u32>) -> Result<Option<
         }
         let up = bits - high_bit - 1;
         let down = bits - stored;
-        v.checked_shl(up as u32).unwrap_or(0).wrapping_shr(down as u32)
+        v.checked_shl(up as u32)
+            .unwrap_or(0)
+            .wrapping_shr(down as u32)
     };
     // decode samples to 16-bit values in the low `stored` bits
     let samples: Vec<u16> = if bits == 8 {
         raw.iter().map(|&b| normalise(b as u16)).collect()
     } else {
-        raw.as_chunks::<2>().0.iter()
+        raw.as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| normalise(u16::from_le_bytes([c[0], c[1]])))
             .collect()
     };
@@ -113,7 +126,14 @@ fn build_icon(dataset: &Dataset, requested_frame: Option<u32>) -> Result<Option<
     let scale = 255.0 / ((1u32 << stored) - 1).max(1) as f64;
     let icon_pixels = downsample(&samples, width, height, icon_w, icon_h, scale);
 
-    Ok(Some(icon_dataset(width, height, icon_w, icon_h, bits, &icon_pixels)))
+    Ok(Some(icon_dataset(
+        width,
+        height,
+        icon_w,
+        icon_h,
+        bits,
+        &icon_pixels,
+    )))
 }
 
 /// The frame to preview: RepresentativeFrameNumber in range, else the midpoint.
@@ -140,14 +160,25 @@ fn icon_dimensions(width: u32, height: u32) -> (u32, u32) {
 }
 
 /// Box-averages the source into the target size (§3.4, a simple downscale).
-fn downsample(samples: &[u16], width: u32, height: u32, target_w: u32, target_h: u32, scale: f64) -> Vec<u8> {
+fn downsample(
+    samples: &[u16],
+    width: u32,
+    height: u32,
+    target_w: u32,
+    target_h: u32,
+    scale: f64,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity((target_w * target_h) as usize);
     for ty in 0..target_h {
         let y0 = (ty as u64 * height as u64 / target_h as u64) as u32;
-        let y1 = (((ty + 1) as u64 * height as u64 / target_h as u64) as u32).max(y0 + 1).min(height);
+        let y1 = (((ty + 1) as u64 * height as u64 / target_h as u64) as u32)
+            .max(y0 + 1)
+            .min(height);
         for tx in 0..target_w {
             let x0 = (tx as u64 * width as u64 / target_w as u64) as u32;
-            let x1 = (((tx + 1) as u64 * width as u64 / target_w as u64) as u32).max(x0 + 1).min(width);
+            let x1 = (((tx + 1) as u64 * width as u64 / target_w as u64) as u32)
+                .max(x0 + 1)
+                .min(width);
             let mut sum = 0u64;
             let mut count = 0u64;
             for y in y0..y1 {
@@ -203,7 +234,13 @@ mod tests {
     use super::*;
     use crate::model::tag::Tag;
 
-    fn source(width: u16, height: u16, frames: u16, bits: u16, fill: impl Fn(u32, u32) -> u16) -> Dataset {
+    fn source(
+        width: u16,
+        height: u16,
+        frames: u16,
+        bits: u16,
+        fill: impl Fn(u32, u32) -> u16,
+    ) -> Dataset {
         let mut ds = Dataset::new();
         ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16);
         ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
@@ -241,10 +278,17 @@ mod tests {
     fn a_small_image_becomes_an_eight_bit_icon() {
         let ds = source(64, 32, 1, 8, |x, _| (x * 4) as u16);
         let icon = BasicIconGenerator.generate(&ds).unwrap().unwrap();
-        assert_eq!(icon.try_get_str(Tag::PHOTOMETRIC_INTERPRETATION).as_deref(), Some("MONOCHROME2"));
+        assert_eq!(
+            icon.try_get_str(Tag::PHOTOMETRIC_INTERPRETATION).as_deref(),
+            Some("MONOCHROME2")
+        );
         assert_eq!(icon.try_get::<u16>(Tag::COLUMNS), Some(64), "columns");
         assert_eq!(icon.try_get::<u16>(Tag::ROWS), Some(32), "rows");
-        assert_eq!(icon.try_get::<u16>(Tag::BITS_ALLOCATED), Some(8), "8-bit icon");
+        assert_eq!(
+            icon.try_get::<u16>(Tag::BITS_ALLOCATED),
+            Some(8),
+            "8-bit icon"
+        );
         // NumberOfFrames (0028,0008) must be IS, not CS (PS3.6)
         assert_eq!(
             icon.get_element(Tag::NUMBER_OF_FRAMES).unwrap().vr(),
@@ -259,7 +303,10 @@ mod tests {
         let icon = BasicIconGenerator.generate(&ds).unwrap().unwrap();
         let columns: u32 = icon.try_get::<u16>(Tag::COLUMNS).unwrap() as u32;
         let rows: u32 = icon.try_get::<u16>(Tag::ROWS).unwrap() as u32;
-        assert!(columns <= 128 && rows <= 128, "icon is at most 128x128, got {columns}x{rows}");
+        assert!(
+            columns <= 128 && rows <= 128,
+            "icon is at most 128x128, got {columns}x{rows}"
+        );
         assert_eq!(columns, 128, "the longer side hits the cap");
         assert!(rows < 128, "the shorter side keeps aspect ratio");
     }
@@ -273,7 +320,10 @@ mod tests {
         assert_eq!(element.value().as_buffer().unwrap().size(), 16 * 16);
         // 1000 of 65535 scales to ~4, NOT clipped to 255 (the old white-icon bug)
         let bytes = element.value().as_buffer().unwrap().data();
-        assert_eq!(bytes[0], 4, "16-bit value scales to 8-bit, not clipped white");
+        assert_eq!(
+            bytes[0], 4,
+            "16-bit value scales to 8-bit, not clipped white"
+        );
     }
 
     #[test]
@@ -282,7 +332,13 @@ mod tests {
         let mut ds = source(8, 8, 1, 16, |_, _| 0x8000);
         ds.insert_value(Tag::BITS_STORED, 12u16); // BitsStored; HighBit stays 15
         let icon = BasicIconGenerator.generate(&ds).unwrap().unwrap();
-        let bytes = icon.get_element(Tag::PIXEL_DATA).unwrap().value().as_buffer().unwrap().data();
+        let bytes = icon
+            .get_element(Tag::PIXEL_DATA)
+            .unwrap()
+            .value()
+            .as_buffer()
+            .unwrap()
+            .data();
         assert_eq!(bytes[0], 128, "2048 of 4095 → ~128, not clipped");
     }
 
@@ -301,8 +357,17 @@ mod tests {
     fn explicit_frame_index_selects_the_requested_frame() {
         let ds = source(4, 4, 2, 8, |_, y| if y < 4 { 10 } else { 20 });
         let icon = BasicIconGenerator.generate_frame(&ds, 1).unwrap().unwrap();
-        let bytes = icon.get_element(Tag::PIXEL_DATA).unwrap().value().as_buffer().unwrap().data();
-        assert_eq!(bytes[0], 20, "frame index is zero-based and selects frame 1");
+        let bytes = icon
+            .get_element(Tag::PIXEL_DATA)
+            .unwrap()
+            .value()
+            .as_buffer()
+            .unwrap()
+            .data();
+        assert_eq!(
+            bytes[0], 20,
+            "frame index is zero-based and selects frame 1"
+        );
     }
 
     #[test]

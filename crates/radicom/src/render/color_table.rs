@@ -144,8 +144,16 @@ mod tests {
         let path = dir.join(format!("radicom_color_{}.lut", std::process::id()));
         let table = ColorTable::monochrome1();
         table.save(&path).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 768, "writes exactly 768 bytes");
-        assert_eq!(ColorTable::load(&path).unwrap(), table, "load round-trips the table");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            768,
+            "writes exactly 768 bytes"
+        );
+        assert_eq!(
+            ColorTable::load(&path).unwrap(),
+            table,
+            "load round-trips the table"
+        );
         std::fs::remove_file(&path).ok();
 
         // a short file is rejected

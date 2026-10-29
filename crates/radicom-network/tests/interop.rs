@@ -14,7 +14,9 @@ use radicom::model::tag::Tag;
 use radicom_network::association::sop_class;
 use radicom_network::client::DicomClient;
 use radicom_network::server::{DicomServer, ServerOptions};
-use radicom_network::services::{CEchoRequest, CEchoResponse, CStoreRequest, CStoreResponse, ServiceProvider};
+use radicom_network::services::{
+    CEchoRequest, CEchoResponse, CStoreRequest, CStoreResponse, ServiceProvider,
+};
 use radicom_network::store::StoreSink;
 use std::sync::{Arc, Mutex};
 
@@ -26,7 +28,10 @@ struct CaptureProvider {
 
 impl CaptureProvider {
     fn new(sops: Vec<String>) -> Self {
-        CaptureProvider { sops, files: Mutex::new(Vec::new()) }
+        CaptureProvider {
+            sops,
+            files: Mutex::new(Vec::new()),
+        }
     }
 }
 
@@ -45,13 +50,17 @@ impl ServiceProvider for CaptureProvider {
 }
 
 fn corpus_file(rel: &str) -> DicomFile {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests-data").join(rel);
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests-data")
+        .join(rel);
     DicomFile::open(&path).unwrap_or_else(|e| panic!("open {}: {e:?}", path.display()))
 }
 
 #[tokio::test]
 async fn self_interop_c_echo_over_tcp() {
-    let provider = Arc::new(CaptureProvider::new(vec![sop_class::VERIFICATION.to_string()]));
+    let provider = Arc::new(CaptureProvider::new(vec![
+        sop_class::VERIFICATION.to_string()
+    ]));
     let server = DicomServer::bind("127.0.0.1:0", provider.clone(), ServerOptions::default())
         .await
         .expect("bind");
@@ -59,7 +68,10 @@ async fn self_interop_c_echo_over_tcp() {
     let handle = tokio::spawn(async move { server.accept_one().await });
 
     let mut client = DicomClient::new("SCU", "SCP", addr.to_string());
-    let echo = client.send_c_echo(sop_class::VERIFICATION).await.expect("C-ECHO");
+    let echo = client
+        .send_c_echo(sop_class::VERIFICATION)
+        .await
+        .expect("C-ECHO");
     assert_eq!(echo.status, 0x0000, "C-ECHO accepted");
     client.release().await;
     handle.await.unwrap().unwrap();
@@ -75,11 +87,17 @@ async fn self_interop_c_store_real_file_round_trips() {
         .expect("SOP class UID")
         .trim()
         .to_string();
-    let provider = Arc::new(CaptureProvider::new(vec![sop_class::VERIFICATION.to_string(), sop]));
+    let provider = Arc::new(CaptureProvider::new(vec![
+        sop_class::VERIFICATION.to_string(),
+        sop,
+    ]));
     let server = DicomServer::bind(
         "127.0.0.1:0",
         provider.clone(),
-        ServerOptions { store_sink: StoreSink::Memory, ..Default::default() },
+        ServerOptions {
+            store_sink: StoreSink::Memory,
+            ..Default::default()
+        },
     )
     .await
     .expect("bind");
@@ -101,7 +119,10 @@ async fn self_interop_c_store_real_file_round_trips() {
     let mut received = stored[0].dataset.clone();
     strip_group_lengths(&mut original);
     strip_group_lengths(&mut received);
-    assert!(received == original, "wire round-trip preserves every element (group lengths normalised)");
+    assert!(
+        received == original,
+        "wire round-trip preserves every element (group lengths normalised)"
+    );
     assert_eq!(
         stored[0].dataset.transfer_syntax().uid(),
         file.dataset.transfer_syntax().uid(),
@@ -152,15 +173,26 @@ async fn external_peer_c_echo_and_optional_c_store() {
     let called = setting("RADICOM_CALLED", "ANY-SCP");
 
     let mut client = DicomClient::new(calling.clone(), called.clone(), peer.clone());
-    let echo = client.send_c_echo(sop_class::VERIFICATION).await.expect("C-ECHO failed");
-    assert_eq!(echo.status, 0x0000, "peer {peer} rejected C-ECHO: 0x{:04X}", echo.status);
+    let echo = client
+        .send_c_echo(sop_class::VERIFICATION)
+        .await
+        .expect("C-ECHO failed");
+    assert_eq!(
+        echo.status, 0x0000,
+        "peer {peer} rejected C-ECHO: 0x{:04X}",
+        echo.status
+    );
     client.release().await;
 
     if let Ok(path) = std::env::var("RADICOM_STORE_FILE") {
         let file = radicom::io::file::DicomFile::open(&path).expect("open store file");
         let mut client = DicomClient::new(calling, called, peer.clone());
         let resp = client.send_c_store(&file).await.expect("C-STORE failed");
-        assert_eq!(resp.status, 0x0000, "peer {peer} failed C-STORE: 0x{:04X}", resp.status);
+        assert_eq!(
+            resp.status, 0x0000,
+            "peer {peer} failed C-STORE: 0x{:04X}",
+            resp.status
+        );
         client.release().await;
     }
 }

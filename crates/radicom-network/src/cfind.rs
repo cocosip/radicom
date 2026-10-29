@@ -59,7 +59,11 @@ impl QueryRetrieveLevel {
     /// The retrieve SOP class for this level (§7.4, §7.5).
     ///
     /// A worklist is query-only, so it has no retrieve model.
-    pub fn retrieve_sop_class(self, root: QueryRoot, service: RetrieveService) -> Option<&'static str> {
+    pub fn retrieve_sop_class(
+        self,
+        root: QueryRoot,
+        service: RetrieveService,
+    ) -> Option<&'static str> {
         use crate::association::sop_class as sc;
         if self == QueryRetrieveLevel::Worklist {
             return None;
@@ -183,7 +187,8 @@ impl CFindRequest {
 
     /// Sets a matching key to `value` (creates the element if absent).
     pub fn with_key(mut self, group: u16, element: u16, vr: Vr, value: impl Into<String>) -> Self {
-        self.identifier.insert_str(Tag::new(group, element), vr, value);
+        self.identifier
+            .insert_str(Tag::new(group, element), vr, value);
         self
     }
 
@@ -285,7 +290,8 @@ impl CFindResponse {
 
     /// The command for this response; the Identifier travels as the dataset.
     pub fn to_command(&self) -> Command {
-        let mut command = Command::request(CommandField::CFindRsp, self.message_id_being_responded_to);
+        let mut command =
+            Command::request(CommandField::CFindRsp, self.message_id_being_responded_to);
         command.message_id_being_responded_to = Some(self.message_id_being_responded_to);
         command.status = Some(self.status);
         command.no_dataset = self.identifier.is_none();
@@ -319,9 +325,9 @@ impl CFindResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::ServiceProvider;
     use crate::association::sop_class;
-        use futures::stream::BoxStream;
+    use crate::services::ServiceProvider;
+    use futures::stream::BoxStream;
     use futures::StreamExt;
 
     #[test]
@@ -356,7 +362,11 @@ mod tests {
             assert_eq!(QueryRetrieveLevel::parse(level.as_str()), Some(level));
         }
         assert_eq!(QueryRetrieveLevel::parse("nonsense"), None);
-        assert_eq!(QueryRetrieveLevel::parse(" study "), Some(QueryRetrieveLevel::Study), "trimmed and case-insensitive");
+        assert_eq!(
+            QueryRetrieveLevel::parse(" study "),
+            Some(QueryRetrieveLevel::Study),
+            "trimmed and case-insensitive"
+        );
     }
 
     #[test]
@@ -366,9 +376,19 @@ mod tests {
         assert_eq!(request.sop_class_uid, sop_class::STUDY_ROOT_QR_FIND);
         assert_eq!(request.message_id, 7);
         // the standard study return keys are present and empty
-        assert!(request.identifier.contains(&Tag::STUDY_INSTANCE_UID), "Study Instance UID");
-        assert!(request.identifier.contains(&Tag::PATIENT_NAME), "Patient Name");
-        assert_eq!(request.identifier.get_str(Tag::PATIENT_NAME).unwrap(), "", "return keys start empty");
+        assert!(
+            request.identifier.contains(&Tag::STUDY_INSTANCE_UID),
+            "Study Instance UID"
+        );
+        assert!(
+            request.identifier.contains(&Tag::PATIENT_NAME),
+            "Patient Name"
+        );
+        assert_eq!(
+            request.identifier.get_str(Tag::PATIENT_NAME).unwrap(),
+            "",
+            "return keys start empty"
+        );
 
         let worklist = CFindRequest::worklist_query(1);
         assert_eq!(worklist.sop_class_uid, sop_class::MODALITY_WORKLIST_FIND);
@@ -380,8 +400,17 @@ mod tests {
         let request = CFindRequest::study_query(3)
             .with_key(0x0010, 0x0020, Vr::Lo, "PID-1")
             .with_key(0x0008, 0x0061, Vr::Cs, "CT");
-        assert_eq!(request.identifier.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
-        assert_eq!(request.identifier.get_str(Tag::MODALITIES_IN_STUDY).unwrap(), "CT");
+        assert_eq!(
+            request.identifier.get_str(Tag::PATIENT_ID).unwrap(),
+            "PID-1"
+        );
+        assert_eq!(
+            request
+                .identifier
+                .get_str(Tag::MODALITIES_IN_STUDY)
+                .unwrap(),
+            "CT"
+        );
     }
 
     #[test]
@@ -391,7 +420,10 @@ mod tests {
         assert_eq!(command.field, CommandField::CFindRq);
         assert_eq!(command.message_id, 11);
         assert!(!command.no_dataset, "the Identifier travels as a dataset");
-        assert_eq!(command.affected_sop_class_uid.as_deref(), Some(sop_class::STUDY_ROOT_QR_FIND));
+        assert_eq!(
+            command.affected_sop_class_uid.as_deref(),
+            Some(sop_class::STUDY_ROOT_QR_FIND)
+        );
     }
 
     #[test]
@@ -403,7 +435,10 @@ mod tests {
         assert!(response.is_pending());
         assert_eq!(response.state(), StatusState::Pending);
         assert!(response.identifier.is_some());
-        assert!(!response.to_command().no_dataset, "the item travels as a dataset");
+        assert!(
+            !response.to_command().no_dataset,
+            "the item travels as a dataset"
+        );
     }
 
     #[test]
@@ -457,12 +492,16 @@ mod tests {
             vec![sop_class::STUDY_ROOT_QR_FIND.to_string()]
         }
 
-        fn on_c_find<'a>(&'a self, request: &'a CFindRequest) -> BoxStream<'a, Result<CFindResponse>> {
+        fn on_c_find<'a>(
+            &'a self,
+            request: &'a CFindRequest,
+        ) -> BoxStream<'a, Result<CFindResponse>> {
             let items = self.items.clone();
             let total = items.len() as u16;
-            Box::pin(futures::stream::iter(items).map(move |item| {
-                Ok(CFindResponse::pending(request, item))
-            }))
+            Box::pin(
+                futures::stream::iter(items)
+                    .map(move |item| Ok(CFindResponse::pending(request, item))),
+            )
             .chain(futures::stream::once(async move {
                 Ok(CFindResponse::success(request, total))
             }))
@@ -474,7 +513,9 @@ mod tests {
     /// terminal response (§7.3). The engine loop driving it lives in `server`.
     #[tokio::test]
     async fn provider_stream_yields_items_then_one_terminal_response() {
-        let provider = FixedProvider { items: vec![Dataset::new(), Dataset::new()] };
+        let provider = FixedProvider {
+            items: vec![Dataset::new(), Dataset::new()],
+        };
         let request = CFindRequest::study_query(1);
 
         let mut stream = provider.on_c_find(&request);
@@ -482,6 +523,9 @@ mod tests {
         while let Some(response) = stream.next().await {
             statuses.push(response.unwrap().status);
         }
-        assert_eq!(statuses, vec![status::PENDING, status::PENDING, status::SUCCESS]);
+        assert_eq!(
+            statuses,
+            vec![status::PENDING, status::PENDING, status::SUCCESS]
+        );
     }
 }

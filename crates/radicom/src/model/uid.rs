@@ -99,7 +99,8 @@ impl AsRef<str> for Uid {
 
 // Runtime registry: interned known UIDs plus user registrations. The
 // generated table from radicom-dict is force-seeded on first use (UID-02).
-static REGISTRY: Lazy<RwLock<HashMap<Arc<str>, Arc<Uid>>>> = Lazy::new(|| RwLock::new(HashMap::new()));
+static REGISTRY: Lazy<RwLock<HashMap<Arc<str>, Arc<Uid>>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
 static SEED: Lazy<()> = Lazy::new(|| {
     let entries = radicom_dict::generated::uids::UIDS;
     let mut reg = REGISTRY.write().expect("registry lock");
@@ -121,7 +122,12 @@ static SEED: Lazy<()> = Lazy::new(|| {
         };
         // Runtime registrations are never overwritten by the seed.
         reg.entry(Arc::from(raw.uid)).or_insert_with(|| {
-            Arc::new(Uid { value: Arc::from(raw.uid), name: Some(raw.name), uid_type, retired: raw.retired })
+            Arc::new(Uid {
+                value: Arc::from(raw.uid),
+                name: Some(raw.name),
+                uid_type,
+                retired: raw.retired,
+            })
         });
     }
 });
@@ -145,7 +151,12 @@ impl Uid {
     /// Builds an unregistered UID instance. Prefer [`Uid::parse`] which
     /// returns interned known instances.
     pub fn new(value: impl Into<Arc<str>>) -> Self {
-        Uid { value: value.into(), name: None, uid_type: UidType::Unknown, retired: false }
+        Uid {
+            value: value.into(),
+            name: None,
+            uid_type: UidType::Unknown,
+            retired: false,
+        }
     }
 
     pub fn value(&self) -> &str {
@@ -168,14 +179,22 @@ impl Uid {
 
     /// Registers a runtime-known UID (extension point). Replaces an
     /// existing entry with the same value.
-    pub fn register(value: &'static str, name: &'static str, uid_type: UidType, retired: bool) -> Arc<Uid> {
+    pub fn register(
+        value: &'static str,
+        name: &'static str,
+        uid_type: UidType,
+        retired: bool,
+    ) -> Arc<Uid> {
         let uid = Arc::new(Uid {
             value: Arc::from(value),
             name: Some(name),
             uid_type,
             retired,
         });
-        REGISTRY.write().expect("registry lock").insert(Arc::from(value), uid.clone());
+        REGISTRY
+            .write()
+            .expect("registry lock")
+            .insert(Arc::from(value), uid.clone());
         // invalidate the sorted snapshot and publish a new generation
         ENUM_GEN.fetch_add(1, Ordering::AcqRel);
         *ENUM_CACHE.write().expect("enum cache lock") = None;
@@ -198,7 +217,11 @@ impl Uid {
     pub fn query(s: &str) -> Option<Arc<Uid>> {
         ensure_seeded();
         let trimmed = s.trim_matches(|c| c == ' ' || c == '\0');
-        REGISTRY.read().expect("registry lock").get(trimmed).cloned()
+        REGISTRY
+            .read()
+            .expect("registry lock")
+            .get(trimmed)
+            .cloned()
     }
 
     /// All registered UIDs sorted by value. The sorted snapshot is built once
@@ -213,7 +236,12 @@ impl Uid {
                 return (**list).clone();
             }
         }
-        let mut all: Vec<Arc<Uid>> = REGISTRY.read().expect("registry lock").values().cloned().collect();
+        let mut all: Vec<Arc<Uid>> = REGISTRY
+            .read()
+            .expect("registry lock")
+            .values()
+            .cloned()
+            .collect();
         all.sort();
         let list = Arc::new(all);
         // Only publish when no registration slipped in while we built the list;
@@ -294,7 +322,8 @@ impl Uid {
             return false;
         }
         // each component is digits with no leading zero, except the single "0"
-        s.split('.').all(|comp| !comp.is_empty() && (comp == "0" || comp.as_bytes()[0] != b'0'))
+        s.split('.')
+            .all(|comp| !comp.is_empty() && (comp == "0" || comp.as_bytes()[0] != b'0'))
     }
 
     pub fn is_valid_uid(&self) -> bool {
@@ -411,7 +440,10 @@ mod tests {
             false,
         );
         let parsed = Uid::parse("1.2.840.10008.1.2.1");
-        assert!(Arc::ptr_eq(&known, &parsed), "parse returns the interned instance");
+        assert!(
+            Arc::ptr_eq(&known, &parsed),
+            "parse returns the interned instance"
+        );
         assert_eq!(parsed.uid_type(), UidType::TransferSyntax);
         assert_eq!(parsed.name(), Some("Explicit VR Little Endian"));
 
@@ -441,23 +473,55 @@ mod tests {
         set.insert(uid.clone());
         assert!(set.contains(&Uid::new(uid.value())));
 
-        let volume = Uid::register("1.2.840.10008.9.1", "Volume Storage", UidType::SopClass, false);
+        let volume = Uid::register(
+            "1.2.840.10008.9.1",
+            "Volume Storage",
+            UidType::SopClass,
+            false,
+        );
         assert_eq!(volume.storage_category(), StorageCategory::Volume);
         assert!(volume.is_volume_storage());
-        let presentation = Uid::register("1.2.840.10008.9.2", "Presentation State Storage", UidType::SopClass, false);
-        assert_eq!(presentation.storage_category(), StorageCategory::PresentationState);
-        let waveform = Uid::register("1.2.840.10008.9.3", "Waveform Storage", UidType::SopClass, false);
+        let presentation = Uid::register(
+            "1.2.840.10008.9.2",
+            "Presentation State Storage",
+            UidType::SopClass,
+            false,
+        );
+        assert_eq!(
+            presentation.storage_category(),
+            StorageCategory::PresentationState
+        );
+        let waveform = Uid::register(
+            "1.2.840.10008.9.3",
+            "Waveform Storage",
+            UidType::SopClass,
+            false,
+        );
         assert_eq!(waveform.storage_category(), StorageCategory::Waveform);
-        let image = Uid::register("1.2.840.10008.9.4", "Image Storage", UidType::SopClass, false);
+        let image = Uid::register(
+            "1.2.840.10008.9.4",
+            "Image Storage",
+            UidType::SopClass,
+            false,
+        );
         assert!(image.is_image_storage());
     }
 
     #[test]
     fn equality_by_value_only() {
-        let a = Uid::register("1.2.840.10008.1.2", "Implicit VR LE", UidType::TransferSyntax, false);
+        let a = Uid::register(
+            "1.2.840.10008.1.2",
+            "Implicit VR LE",
+            UidType::TransferSyntax,
+            false,
+        );
         let b = Uid::parse("1.2.840.10008.1.2");
         assert_eq!(a, b, "registered vs parsed compare equal");
-        assert_eq!(*a, Uid::new("1.2.840.10008.1.2"), "registered vs fresh compare by value");
+        assert_eq!(
+            *a,
+            Uid::new("1.2.840.10008.1.2"),
+            "registered vs fresh compare by value"
+        );
     }
 
     #[test]
@@ -470,7 +534,12 @@ mod tests {
 
     #[test]
     fn enumerate_is_sorted_unique_and_sees_new_registrations() {
-        let marker = Uid::register("1.2.999.42", "Enumerate Marker", UidType::ServiceClass, false);
+        let marker = Uid::register(
+            "1.2.999.42",
+            "Enumerate Marker",
+            UidType::ServiceClass,
+            false,
+        );
         let first = Uid::enumerate();
         assert!(first.windows(2).all(|w| w[0] <= w[1]), "sorted by value");
         let mut keys: Vec<&str> = first.iter().map(|u| u.value()).collect();
@@ -499,11 +568,25 @@ mod tests {
         assert_eq!(image.storage_category(), StorageCategory::Image);
         assert!(image.is_image_storage());
 
-        let private_sop = Uid::register("1.3.46.670589.11.0.1", "Private SOP", UidType::SopClass, false);
+        let private_sop = Uid::register(
+            "1.3.46.670589.11.0.1",
+            "Private SOP",
+            UidType::SopClass,
+            false,
+        );
         assert_eq!(private_sop.storage_category(), StorageCategory::Private);
 
-        let ts = Uid::register("1.2.840.10008.1.2.2", "Explicit VR BE", UidType::TransferSyntax, false);
-        assert_eq!(ts.storage_category(), StorageCategory::None, "non-SOP classes do not classify");
+        let ts = Uid::register(
+            "1.2.840.10008.1.2.2",
+            "Explicit VR BE",
+            UidType::TransferSyntax,
+            false,
+        );
+        assert_eq!(
+            ts.storage_category(),
+            StorageCategory::None,
+            "non-SOP classes do not classify"
+        );
 
         let sr = Uid::register(
             "1.2.840.10008.5.1.4.1.1.88.11",
@@ -529,7 +612,11 @@ mod tests {
             UidType::SopClass,
             false,
         );
-        assert_eq!(pdf.storage_category(), StorageCategory::Document, "Encapsulated PDF is Document");
+        assert_eq!(
+            pdf.storage_category(),
+            StorageCategory::Document,
+            "Encapsulated PDF is Document"
+        );
 
         let raw = Uid::register(
             "1.2.840.10008.5.1.4.1.1.66",
@@ -545,27 +632,44 @@ mod tests {
             UidType::SopClass,
             false,
         );
-        assert_eq!(volume.storage_category(), StorageCategory::Other, "no Volume/Image keyword → Other");
+        assert_eq!(
+            volume.storage_category(),
+            StorageCategory::Other,
+            "no Volume/Image keyword → Other"
+        );
 
         // a non-standard root that is not a SOP class is not Private
-        let private_ts = Uid::register("1.3.46.670589.11.0.2", "Private TS", UidType::TransferSyntax, false);
+        let private_ts = Uid::register(
+            "1.3.46.670589.11.0.2",
+            "Private TS",
+            UidType::TransferSyntax,
+            false,
+        );
         assert_eq!(private_ts.storage_category(), StorageCategory::None);
     }
 
     #[test]
     fn ui_validity_rules() {
         assert!(Uid::is_valid("1.2.840.10008.1.2"));
-        assert!(Uid::is_valid("2.25.329800735698586629295641978511506172918"));
+        assert!(Uid::is_valid(
+            "2.25.329800735698586629295641978511506172918"
+        ));
         assert!(Uid::is_valid("1.2.3 "), "trailing spaces tolerated");
         assert!(!Uid::is_valid(""), "empty");
-        assert!(!Uid::is_valid(&format!("1.{}", "9".repeat(64))), ">64 chars");
+        assert!(
+            !Uid::is_valid(&format!("1.{}", "9".repeat(64))),
+            ">64 chars"
+        );
         assert!(!Uid::is_valid("1.2.a"), "non-digit component");
         assert!(!Uid::is_valid("01.2"), "leading zero");
         assert!(!Uid::is_valid("1.02"), "leading zero in component");
         assert!(!Uid::is_valid("1..2"), "empty component");
         // a single "0" component is valid (PS3.5: only multi-digit leading zeros
         // are forbidden) — real roots like 1.2.826.0.1 rely on this
-        assert!(Uid::is_valid("1.2.826.0.1.3680043.10.999"), "single 0 component allowed");
+        assert!(
+            Uid::is_valid("1.2.826.0.1.3680043.10.999"),
+            "single 0 component allowed"
+        );
         assert!(!Uid::is_valid(".1"), "empty first component");
     }
 
@@ -596,7 +700,10 @@ mod tests {
         // to it yields a valid UID rather than an error
         assert_eq!(Uid::append("0.1", 2).unwrap(), "0.1.2");
         // a genuine multi-digit leading zero is still rejected
-        assert!(Uid::append("01.2", 3).is_err(), "multi-digit leading zero is invalid");
+        assert!(
+            Uid::append("01.2", 3).is_err(),
+            "multi-digit leading zero is invalid"
+        );
     }
 
     #[test]
@@ -623,9 +730,16 @@ mod tests {
 
         let all = gen.regenerate_all();
         assert_eq!(all.len(), 2);
-        assert_eq!(all[0].value(), "1.2.826.0.1.3680043.10.1330.1", "sorted by source, 1-based");
+        assert_eq!(
+            all[0].value(),
+            "1.2.826.0.1.3680043.10.1330.1",
+            "sorted by source, 1-based"
+        );
         assert_eq!(all[1].value(), "1.2.826.0.1.3680043.10.1330.2");
-        assert!(Arc::ptr_eq(&gen.map(&a), &all[0]), "the mapping is replaced");
+        assert!(
+            Arc::ptr_eq(&gen.map(&a), &all[0]),
+            "the mapping is replaced"
+        );
         assert!(Arc::ptr_eq(&gen.map(&b), &all[1]));
         // running again is stable
         let again = gen.regenerate_all();
@@ -636,11 +750,20 @@ mod tests {
     #[test]
     fn meta_sop_class_maps_known_print_classes() {
         let gray = Uid::new("1.2.840.10008.5.1.1.4");
-        assert_eq!(UidGenerator::meta_sop_class(&gray).unwrap().value(), "1.2.840.10008.5.1.1.9");
+        assert_eq!(
+            UidGenerator::meta_sop_class(&gray).unwrap().value(),
+            "1.2.840.10008.5.1.1.9"
+        );
         let color = Uid::new("1.2.840.10008.5.1.1.4.1");
-        assert_eq!(UidGenerator::meta_sop_class(&color).unwrap().value(), "1.2.840.10008.5.1.1.18");
+        assert_eq!(
+            UidGenerator::meta_sop_class(&color).unwrap().value(),
+            "1.2.840.10008.5.1.1.18"
+        );
         let pull = Uid::new("1.2.840.10008.5.1.1.31");
-        assert_eq!(UidGenerator::meta_sop_class(&pull).unwrap().value(), "1.2.840.10008.5.1.1.32");
+        assert_eq!(
+            UidGenerator::meta_sop_class(&pull).unwrap().value(),
+            "1.2.840.10008.5.1.1.32"
+        );
         // a storage SOP class has no meta class
         assert!(UidGenerator::meta_sop_class(&Uid::new("1.2.840.10008.5.1.4.1.1.2")).is_none());
     }

@@ -14,11 +14,13 @@ fn tests_data() -> PathBuf {
 
 #[test]
 fn json_golden_is_current() {
-    let bytes = std::fs::read(tests_data().join("explicit-le/GH178.dcm"))
-        .expect("read GH178.dcm");
+    let bytes = std::fs::read(tests_data().join("explicit-le/GH178.dcm")).expect("read GH178.dcm");
     let file = DicomFile::from_bytes(&bytes, &ReadOptions::default()).expect("parse GH178.dcm");
     let produced = dataset_to_json(&file.dataset, &JsonOptions::default()).expect("encode json");
     let expected = std::fs::read_to_string(tests_data().join("goldens/GH178.json"))
         .expect("read golden GH178.json");
-    assert_eq!(produced, expected, "json golden is stale; run `cargo xtask regen-goldens`");
+    assert_eq!(
+        produced, expected,
+        "json golden is stale; run `cargo xtask regen-goldens`"
+    );
 }

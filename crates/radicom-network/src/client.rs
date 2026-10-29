@@ -17,7 +17,7 @@ use crate::engine::ConnectionState;
 use crate::error::{NetworkError, Result};
 use crate::pdu::PresentationContext;
 use crate::server::{Association, ClientOptions};
-use crate::services::{CEchoResponse, CStoreResponse, CStoreRequest};
+use crate::services::{CEchoResponse, CStoreRequest, CStoreResponse};
 use radicom::io::file::DicomFile;
 use std::sync::Arc;
 use std::time::Duration;
@@ -67,15 +67,25 @@ pub enum DicomClientCancellationMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientEvent {
     /// The association lifecycle changed state.
-    StateChanged { state: ConnectionState },
-    AssociationAccepted { attempt: u32 },
-    AssociationRejected { reason: u8 },
+    StateChanged {
+        state: ConnectionState,
+    },
+    AssociationAccepted {
+        attempt: u32,
+    },
+    AssociationRejected {
+        reason: u8,
+    },
     AssociationReleased,
     /// An association attempt timed out before the peer answered.
-    AssociationRequestTimedOut { attempts: u32 },
+    AssociationRequestTimedOut {
+        attempts: u32,
+    },
     /// A request exceeded its `request_timeout`; the batch moves to a new
     /// association.
-    RequestTimedOut { message_id: u16 },
+    RequestTimedOut {
+        message_id: u16,
+    },
 }
 
 /// The high-level client (§9.1).
@@ -100,7 +110,11 @@ pub struct DicomClient {
 
 impl DicomClient {
     /// A client for `addr` (host:port form understood by tokio).
-    pub fn new(calling_ae: impl Into<String>, called_ae: impl Into<String>, addr: impl Into<String>) -> Self {
+    pub fn new(
+        calling_ae: impl Into<String>,
+        called_ae: impl Into<String>,
+        addr: impl Into<String>,
+    ) -> Self {
         DicomClient {
             addr: addr.into(),
             calling_ae: calling_ae.into(),
@@ -121,7 +135,10 @@ impl DicomClient {
     }
 
     /// Registers the reverse C-STORE handler; without one C-GET fails fast.
-    pub fn with_reverse_store_handler(mut self, handler: crate::server::ReverseStoreHandler) -> Self {
+    pub fn with_reverse_store_handler(
+        mut self,
+        handler: crate::server::ReverseStoreHandler,
+    ) -> Self {
         self.reverse_store = Some(handler);
         self
     }
@@ -149,7 +166,9 @@ impl DicomClient {
 
     async fn finish_request<T>(&mut self, result: Result<T>) -> Result<T> {
         if let Err(NetworkError::RequestTimedOut { message_id }) = &result {
-            self.emit(ClientEvent::RequestTimedOut { message_id: *message_id });
+            self.emit(ClientEvent::RequestTimedOut {
+                message_id: *message_id,
+            });
             self.abort().await;
         }
         result
@@ -180,19 +199,47 @@ impl DicomClient {
     /// association is released and reopened with the contexts at hand (§2.6).
     /// Retries only when the peer does not answer at all; a rejection is
     /// permanent and is reported immediately.
-    async fn ensure_association(&mut self, contexts: Vec<PresentationContext>) -> Result<&mut Association> {
+    async fn ensure_association(
+        &mut self,
+        contexts: Vec<PresentationContext>,
+    ) -> Result<&mut Association> {
+        self.ensure_association_with_roles(contexts, Vec::new())
+            .await
+    }
+
+    /// [`Self::ensure_association`] plus the role selections to propose.
+    async fn ensure_association_with_roles(
+        &mut self,
+        contexts: Vec<PresentationContext>,
+        roles: Vec<crate::pdu::RoleSelection>,
+    ) -> Result<&mut Association> {
         self.retire_if_spent().await;
-        if self.association.as_ref().is_some_and(|open| !covers(open, &contexts)) {
+        if self
+            .association
+            .as_ref()
+            .is_some_and(|open| !covers(open, &contexts) || !covers_roles(open, &roles))
+        {
             self.close_association().await;
         }
         if self.association.is_none() {
-            self.open_association(contexts).await?;
+            self.open_association(contexts, roles).await?;
         }
         Ok(self.association.as_mut().expect("open_association sets it"))
     }
 
     /// Opens an association, retrying peers that do not answer at all.
-    async fn open_association(&mut self, contexts: Vec<PresentationContext>) -> Result<()> {
+    async fn open_association(
+        &mut self,
+        contexts: Vec<PresentationContext>,
+        roles: Vec<crate::pdu::RoleSelection>,
+    ) -> Result<()> {
+        let mut options = self.options.connection.clone();
+        // the caller's configured roles plus the ones this request needs
+        for role in roles {
+            if !options.role_selections.contains(&role) {
+                options.role_selections.push(role);
+            }
+        }
         let mut attempt = 0u32;
         loop {
             attempt += 1;
@@ -201,7 +248,7 @@ impl DicomClient {
                 &self.calling_ae,
                 &self.called_ae,
                 contexts.clone(),
-                self.options.connection.clone(),
+                options.clone(),
             )
             .await;
             match result {
@@ -209,7 +256,9 @@ impl DicomClient {
                     if let Some(handler) = self.reverse_store.clone() {
                         association.set_reverse_store_handler(handler);
                     }
-                    self.emit(ClientEvent::StateChanged { state: ConnectionState::Open });
+                    self.emit(ClientEvent::StateChanged {
+                        state: ConnectionState::Open,
+                    });
                     self.emit(ClientEvent::AssociationAccepted { attempt });
                     self.sent_on_association = 0;
                     self.association = Some(association);
@@ -231,7 +280,9 @@ impl DicomClient {
                     // only a peer that never answered is worth another attempt:
                     // a refusal, a TLS failure or a protocol error will not
                     // improve, and 0 retries means exactly that (§2.8)
-                    if !is_retryable(&other) || attempt >= self.options.max_consecutive_timeout_retries {
+                    if !is_retryable(&other)
+                        || attempt >= self.options.max_consecutive_timeout_retries
+                    {
                         return Err(other);
                     }
                 }
@@ -242,9 +293,13 @@ impl DicomClient {
     /// Releases the current association, tolerating a peer that already left.
     async fn close_association(&mut self) {
         if let Some(association) = self.association.take() {
-            self.emit(ClientEvent::StateChanged { state: ConnectionState::Closing });
+            self.emit(ClientEvent::StateChanged {
+                state: ConnectionState::Closing,
+            });
             let _ = association.release().await;
-            self.emit(ClientEvent::StateChanged { state: ConnectionState::Closed });
+            self.emit(ClientEvent::StateChanged {
+                state: ConnectionState::Closed,
+            });
             self.emit(ClientEvent::AssociationReleased);
         }
         self.sent_on_association = 0;
@@ -262,11 +317,18 @@ impl DicomClient {
         let context = PresentationContext::new(
             1,
             sop_class.clone(),
-            vec!["1.2.840.10008.1.2".to_string(), "1.2.840.10008.1.2.1".to_string()],
+            vec![
+                "1.2.840.10008.1.2".to_string(),
+                "1.2.840.10008.1.2.1".to_string(),
+            ],
         );
         let (context_id, response) = {
             let association = self.ensure_association(vec![context]).await?;
-            let context_id = association.contexts().pick(&sop_class, "").map(|c| c.id).ok();
+            let context_id = association
+                .contexts()
+                .pick(&sop_class, "")
+                .map(|c| c.id)
+                .ok();
             let response = association.send_c_echo(&sop_class).await;
             (context_id, response)
         };
@@ -293,7 +355,11 @@ impl DicomClient {
         );
         let (context_id, response) = {
             let association = self.ensure_association(vec![context]).await?;
-            let context_id = association.contexts().pick(&sop_class, &syntax).map(|c| c.id).ok();
+            let context_id = association
+                .contexts()
+                .pick(&sop_class, &syntax)
+                .map(|c| c.id)
+                .ok();
             let response = association.send_c_store(file).await;
             (context_id, response)
         };
@@ -310,11 +376,18 @@ impl DicomClient {
         let context = PresentationContext::new(
             1,
             request.sop_class_uid.clone(),
-            vec!["1.2.840.10008.1.2".to_string(), "1.2.840.10008.1.2.1".to_string()],
+            vec![
+                "1.2.840.10008.1.2".to_string(),
+                "1.2.840.10008.1.2.1".to_string(),
+            ],
         );
         let (context_id, result) = {
             let association = self.ensure_association(vec![context]).await?;
-            let context_id = association.contexts().pick(&request.sop_class_uid, "").map(|c| c.id).ok();
+            let context_id = association
+                .contexts()
+                .pick(&request.sop_class_uid, "")
+                .map(|c| c.id)
+                .ok();
             let result = association.send_c_find(request).await;
             (context_id, result)
         };
@@ -331,11 +404,18 @@ impl DicomClient {
         let context = PresentationContext::new(
             1,
             request.sop_class_uid.clone(),
-            vec!["1.2.840.10008.1.2".to_string(), "1.2.840.10008.1.2.1".to_string()],
+            vec![
+                "1.2.840.10008.1.2".to_string(),
+                "1.2.840.10008.1.2.1".to_string(),
+            ],
         );
         let (context_id, result) = {
             let association = self.ensure_association(vec![context]).await?;
-            let context_id = association.contexts().pick(&request.sop_class_uid, "").map(|c| c.id).ok();
+            let context_id = association
+                .contexts()
+                .pick(&request.sop_class_uid, "")
+                .map(|c| c.id)
+                .ok();
             let result = association.send_c_move(request).await;
             (context_id, result)
         };
@@ -364,20 +444,45 @@ impl DicomClient {
         let mut contexts = vec![PresentationContext::new(
             1,
             request.sop_class_uid.clone(),
-            vec!["1.2.840.10008.1.2".to_string(), "1.2.840.10008.1.2.1".to_string()],
+            vec![
+                "1.2.840.10008.1.2".to_string(),
+                "1.2.840.10008.1.2.1".to_string(),
+            ],
         )];
+        // The instances come back as reverse C-STORE requests, so this side
+        // must be granted the SCP role for every storage class it will
+        // receive: a peer that honours role selection refuses to send them
+        // otherwise (PS3.7 §7.4, review #16).
+        let mut roles: Vec<crate::pdu::RoleSelection> = storage_sop_classes
+            .iter()
+            .map(|sop_class| crate::pdu::RoleSelection {
+                sop_class: sop_class.clone(),
+                scu_role: false,
+                scp_role: true,
+            })
+            .collect();
+        roles.sort_by(|a, b| a.sop_class.cmp(&b.sop_class));
+        roles.dedup_by(|a, b| a.sop_class == b.sop_class);
+
         let mut next_id = 3u8;
         for sop_class in storage_sop_classes {
             contexts.push(PresentationContext::new(
                 next_id,
                 sop_class.clone(),
-                vec!["1.2.840.10008.1.2".to_string(), "1.2.840.10008.1.2.1".to_string()],
+                vec![
+                    "1.2.840.10008.1.2".to_string(),
+                    "1.2.840.10008.1.2.1".to_string(),
+                ],
             ));
             next_id = next_id.wrapping_add(2);
         }
         let (context_id, result) = {
-            let association = self.ensure_association(contexts).await?;
-            let context_id = association.contexts().pick(&request.sop_class_uid, "").map(|c| c.id).ok();
+            let association = self.ensure_association_with_roles(contexts, roles).await?;
+            let context_id = association
+                .contexts()
+                .pick(&request.sop_class_uid, "")
+                .map(|c| c.id)
+                .ok();
             let result = association.send_c_get(request).await;
             (context_id, result)
         };
@@ -420,9 +525,13 @@ impl DicomClient {
     /// Aborts the association (§9.1 cancellation mode).
     pub async fn abort(&mut self) {
         if let Some(association) = self.association.take() {
-            self.emit(ClientEvent::StateChanged { state: ConnectionState::Closing });
+            self.emit(ClientEvent::StateChanged {
+                state: ConnectionState::Closing,
+            });
             let _ = association.abort(0).await;
-            self.emit(ClientEvent::StateChanged { state: ConnectionState::Closed });
+            self.emit(ClientEvent::StateChanged {
+                state: ConnectionState::Closed,
+            });
         }
         self.sent_on_association = 0;
         self.last_request = None;
@@ -441,9 +550,25 @@ impl DicomClient {
 
 /// True when the open association accepted every abstract syntax in `wanted`.
 fn covers(association: &Association, wanted: &[PresentationContext]) -> bool {
-    wanted
-        .iter()
-        .all(|context| association.contexts().find_abstract(&context.abstract_syntax).is_some())
+    wanted.iter().all(|context| {
+        association
+            .contexts()
+            .find_abstract(&context.abstract_syntax)
+            .is_some()
+    })
+}
+
+/// True when the open association granted every role in `wanted`.
+///
+/// An association that negotiated no roles at all covers nothing here: the
+/// C-GET storage SCP role must be granted explicitly (PS3.7 §7.4).
+fn covers_roles(association: &Association, wanted: &[crate::pdu::RoleSelection]) -> bool {
+    wanted.iter().all(|role| {
+        association
+            .contexts()
+            .find_abstract(&role.sop_class)
+            .is_some_and(|context| context.roles.iter().any(|granted| granted == role))
+    })
 }
 
 /// True for the transport-level failures a retry can plausibly fix (§2.8).
@@ -455,7 +580,10 @@ fn is_retryable(error: &NetworkError) -> bool {
     match error {
         NetworkError::AssociationRequestTimedOut { .. } => true,
         NetworkError::Io(error) => {
-            matches!(error.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock)
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            )
         }
         _ => false,
     }
@@ -465,8 +593,8 @@ fn is_retryable(error: &NetworkError) -> bool {
 mod tests {
     use super::*;
     use crate::association::sop_class;
-    use crate::services::{CStoreRequest, ServiceProvider, VerificationProvider};
     use crate::server::{DicomServer, ServerOptions};
+    use crate::services::{CStoreRequest, ServiceProvider, VerificationProvider};
     use crate::store::StoreSink;
 
     #[test]
@@ -516,9 +644,13 @@ mod tests {
 
     #[tokio::test]
     async fn echo_through_the_high_level_client() {
-        let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), ServerOptions::default())
-            .await
-            .unwrap();
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(VerificationProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
         let addr = server.local_addr();
         let handle = tokio::spawn(async move { server.accept_one().await });
 
@@ -539,15 +671,21 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_releases_the_association_in_release_mode() {
-        let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), ServerOptions::default())
-            .await
-            .unwrap();
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(VerificationProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
         let addr = server.local_addr();
         let handle = tokio::spawn(async move { server.accept_one().await });
 
         let mut client = DicomClient::new("SCU", "SCP", addr.to_string());
         client.send_c_echo(sop_class::VERIFICATION).await.unwrap();
-        client.shutdown(DicomClientCancellationMode::ImmediatelyReleaseAssociation).await;
+        client
+            .shutdown(DicomClientCancellationMode::ImmediatelyReleaseAssociation)
+            .await;
         // a clean release is what lets the server's accept_one observe a
         // graceful close rather than a dropped connection
         handle.await.unwrap().unwrap();
@@ -555,13 +693,18 @@ mod tests {
 
     #[tokio::test]
     async fn events_report_the_association_lifecycle() {
-        let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), ServerOptions::default())
-            .await
-            .unwrap();
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(VerificationProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
         let addr = server.local_addr();
         let handle = tokio::spawn(async move { server.accept_one().await });
 
-        let seen: Arc<std::sync::Mutex<Vec<ClientEvent>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen: Arc<std::sync::Mutex<Vec<ClientEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = seen.clone();
         let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
             .with_event_handler(Arc::new(move |event| sink.lock().unwrap().push(event)));
@@ -572,10 +715,16 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                ClientEvent::StateChanged { state: ConnectionState::Open },
+                ClientEvent::StateChanged {
+                    state: ConnectionState::Open
+                },
                 ClientEvent::AssociationAccepted { attempt: 1 },
-                ClientEvent::StateChanged { state: ConnectionState::Closing },
-                ClientEvent::StateChanged { state: ConnectionState::Closed },
+                ClientEvent::StateChanged {
+                    state: ConnectionState::Closing
+                },
+                ClientEvent::StateChanged {
+                    state: ConnectionState::Closed
+                },
                 ClientEvent::AssociationReleased,
             ]
         );
@@ -598,7 +747,10 @@ mod tests {
         let server = DicomServer::bind(
             "127.0.0.1:0",
             Arc::new(StoreProvider),
-            ServerOptions { store_sink: StoreSink::Memory, ..Default::default() },
+            ServerOptions {
+                store_sink: StoreSink::Memory,
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -606,9 +758,19 @@ mod tests {
         let handle = tokio::spawn(async move { server.accept_one().await });
 
         let mut dataset = radicom::model::dataset::Dataset::new();
-        dataset.insert_str(radicom::model::tag::Tag::SOP_CLASS_UID, radicom::model::vr::Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
-        dataset.insert_str(radicom::model::tag::Tag::SOP_INSTANCE_UID, radicom::model::vr::Vr::Ui, "1.2.3");
-        dataset.set_transfer_syntax(radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        dataset.insert_str(
+            radicom::model::tag::Tag::SOP_CLASS_UID,
+            radicom::model::vr::Vr::Ui,
+            "1.2.840.10008.5.1.4.1.1.7",
+        );
+        dataset.insert_str(
+            radicom::model::tag::Tag::SOP_INSTANCE_UID,
+            radicom::model::vr::Vr::Ui,
+            "1.2.3",
+        );
+        dataset.set_transfer_syntax(
+            radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
         let file = DicomFile::from_dataset(dataset);
 
         let mut client = DicomClient::new("SCU", "SCP", addr.to_string());
@@ -649,23 +811,38 @@ mod tests {
                     radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
                 );
                 Box::pin(futures::stream::once(async move {
-                    Ok(crate::cget::CGetEvent::instance(DicomFile::from_dataset(dataset)))
+                    Ok(crate::cget::CGetEvent::instance(DicomFile::from_dataset(
+                        dataset,
+                    )))
                 }))
             }
         }
 
-        let server = DicomServer::bind("127.0.0.1:0", Arc::new(GetProvider), ServerOptions::default())
-            .await
-            .unwrap();
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(GetProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
         let addr = server.local_addr();
         let handle = tokio::spawn(async move { server.accept_one().await });
 
-        let received: Arc<std::sync::Mutex<Vec<DicomFile>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let mut client = DicomClient::new("SCU", "SCP", addr.to_string()).collect_reverse_stores(received.clone());
+        let received: Arc<std::sync::Mutex<Vec<DicomFile>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
+            .collect_reverse_stores(received.clone());
         let storage = vec!["1.2.840.10008.5.1.4.1.1.7".to_string()];
-        let responses = client.send_c_get(&CGetRequest::study("1.2.3", 1), &storage).await.unwrap();
+        let responses = client
+            .send_c_get(&CGetRequest::study("1.2.3", 1), &storage)
+            .await
+            .unwrap();
 
-        assert_eq!(received.lock().unwrap().len(), 1, "the instance arrived through the reverse handler");
+        assert_eq!(
+            received.lock().unwrap().len(),
+            1,
+            "the instance arrived through the reverse handler"
+        );
         assert_eq!(
             responses.last().unwrap().status,
             crate::dimse::status::SUCCESS,
@@ -692,14 +869,21 @@ mod tests {
                 }))
             }
         }
-        let server = DicomServer::bind("127.0.0.1:0", Arc::new(FindProvider), ServerOptions::default())
-            .await
-            .unwrap();
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(FindProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
         let addr = server.local_addr();
         let handle = tokio::spawn(async move { server.accept_one().await });
 
         let mut client = DicomClient::new("SCU", "SCP", addr.to_string());
-        let responses = client.send_c_find(&CFindRequest::study_query(1)).await.unwrap();
+        let responses = client
+            .send_c_find(&CFindRequest::study_query(1))
+            .await
+            .unwrap();
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0].status, crate::dimse::status::SUCCESS);
         client.release().await;
@@ -728,23 +912,40 @@ mod tests {
                 }))
             }
         }
-        let server = DicomServer::bind("127.0.0.1:0", Arc::new(FindProvider), ServerOptions::default())
-            .await
-            .unwrap();
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(FindProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
         let addr = server.local_addr();
         let handle = tokio::spawn(async move { server.accept_one().await });
 
         let mut client = DicomClient::new("SCU", "SCP", addr.to_string());
-        client.send_c_find(&CFindRequest::study_query(1)).await.unwrap();
+        client
+            .send_c_find(&CFindRequest::study_query(1))
+            .await
+            .unwrap();
 
-        assert!(client.cancel(1).await.unwrap(), "the request we just sent is cancellable");
+        assert!(
+            client.cancel(1).await.unwrap(),
+            "the request we just sent is cancellable"
+        );
         assert!(
             !client.cancel(999).await.unwrap(),
             "an id this client never sent is not reported as a sent cancel"
         );
 
-        let responses = client.send_c_find(&CFindRequest::study_query(2)).await.unwrap();
-        assert_eq!(responses.len(), 1, "the association stayed healthy after C-CANCEL");
+        let responses = client
+            .send_c_find(&CFindRequest::study_query(2))
+            .await
+            .unwrap();
+        assert_eq!(
+            responses.len(),
+            1,
+            "the association stayed healthy after C-CANCEL"
+        );
 
         client.release().await;
         handle.await.unwrap().unwrap();
@@ -753,19 +954,27 @@ mod tests {
     #[tokio::test]
     async fn cancel_without_an_association_is_a_no_op() {
         let mut client = DicomClient::new("SCU", "SCP", "127.0.0.1:1");
-        assert!(!client.cancel(1).await.unwrap(), "no association yet means nothing to cancel");
+        assert!(
+            !client.cancel(1).await.unwrap(),
+            "no association yet means nothing to cancel"
+        );
     }
 
     #[tokio::test]
     async fn a_rejection_is_not_retried() {
         // the SCP serves nothing, so the association is rejected
-        let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), ServerOptions::default())
-            .await
-            .unwrap();
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(VerificationProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
         let addr = server.local_addr();
         let handle = tokio::spawn(async move { server.accept_one().await });
 
-        let seen: Arc<std::sync::Mutex<Vec<ClientEvent>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen: Arc<std::sync::Mutex<Vec<ClientEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = seen.clone();
         let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
             .with_event_handler(Arc::new(move |event| sink.lock().unwrap().push(event)));
@@ -775,7 +984,10 @@ mod tests {
             Err(NetworkError::Reject { .. }) => {}
             other => panic!("expected a rejection, got {other:?}"),
         }
-        assert!(matches!(seen.lock().unwrap().first(), Some(ClientEvent::AssociationRejected { .. })));
+        assert!(matches!(
+            seen.lock().unwrap().first(),
+            Some(ClientEvent::AssociationRejected { .. })
+        ));
         handle.await.unwrap().unwrap();
     }
 
@@ -787,9 +999,15 @@ mod tests {
         #[async_trait::async_trait]
         impl ServiceProvider for EchoAndStore {
             fn supported_sop_classes(&self) -> Vec<String> {
-                vec![sop_class::VERIFICATION.to_string(), "1.2.840.10008.5.1.4.1.1.7".to_string()]
+                vec![
+                    sop_class::VERIFICATION.to_string(),
+                    "1.2.840.10008.5.1.4.1.1.7".to_string(),
+                ]
             }
-            async fn on_c_echo(&self, request: &crate::services::CEchoRequest) -> Result<CEchoResponse> {
+            async fn on_c_echo(
+                &self,
+                request: &crate::services::CEchoRequest,
+            ) -> Result<CEchoResponse> {
                 Ok(CEchoResponse::success(request))
             }
             async fn on_c_store(&self, request: &CStoreRequest) -> Result<CStoreResponse> {
@@ -799,7 +1017,10 @@ mod tests {
         let server = DicomServer::bind(
             "127.0.0.1:0",
             Arc::new(EchoAndStore),
-            ServerOptions { store_sink: StoreSink::Memory, ..Default::default() },
+            ServerOptions {
+                store_sink: StoreSink::Memory,
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -808,7 +1029,8 @@ mod tests {
             let _ = server.run().await;
         });
 
-        let seen: Arc<std::sync::Mutex<Vec<ClientEvent>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen: Arc<std::sync::Mutex<Vec<ClientEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = seen.clone();
         let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
             .with_event_handler(Arc::new(move |event| sink.lock().unwrap().push(event)));
@@ -822,7 +1044,10 @@ mod tests {
             .iter()
             .filter(|event| matches!(event, ClientEvent::AssociationAccepted { .. }))
             .count();
-        assert_eq!(accepted, 2, "the storage class needs an association of its own");
+        assert_eq!(
+            accepted, 2,
+            "the storage class needs an association of its own"
+        );
         assert!(
             events.contains(&ClientEvent::AssociationReleased),
             "the echo association is released before the second is opened"
@@ -837,8 +1062,14 @@ mod tests {
             radicom::model::vr::Vr::Ui,
             "1.2.840.10008.5.1.4.1.1.7",
         );
-        dataset.insert_str(radicom::model::tag::Tag::SOP_INSTANCE_UID, radicom::model::vr::Vr::Ui, "1.2.3");
-        dataset.set_transfer_syntax(radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        dataset.insert_str(
+            radicom::model::tag::Tag::SOP_INSTANCE_UID,
+            radicom::model::vr::Vr::Ui,
+            "1.2.3",
+        );
+        dataset.set_transfer_syntax(
+            radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
         DicomFile::from_dataset(dataset)
     }
 
@@ -851,7 +1082,9 @@ mod tests {
         let counter = attempts.clone();
         tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else { return };
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
                 counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 // hold the socket open: EOF would be a different failure
                 tokio::spawn(async move {
@@ -890,7 +1123,8 @@ mod tests {
     async fn a_silent_peer_is_retried_up_to_the_cap() {
         // the option counts attempts, not extra tries: 2 means two connections
         let (addr, attempts) = silent_peer().await;
-        let mut client = DicomClient::new("SCU", "SCP", addr.to_string()).with_options(impatient_options(2));
+        let mut client =
+            DicomClient::new("SCU", "SCP", addr.to_string()).with_options(impatient_options(2));
         match client.send_c_echo(sop_class::VERIFICATION).await {
             Err(NetworkError::AssociationRequestTimedOut { .. }) => {}
             other => panic!("expected a timeout, got {other:?}"),
@@ -902,7 +1136,8 @@ mod tests {
     async fn zero_retries_means_one_attempt() {
         // §2.8: max_consecutive_timeout_retries = 0 means "do not retry"
         let (addr, attempts) = silent_peer().await;
-        let mut client = DicomClient::new("SCU", "SCP", addr.to_string()).with_options(impatient_options(0));
+        let mut client =
+            DicomClient::new("SCU", "SCP", addr.to_string()).with_options(impatient_options(0));
         assert!(client.send_c_echo(sop_class::VERIFICATION).await.is_err());
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
@@ -910,14 +1145,21 @@ mod tests {
     #[tokio::test]
     async fn association_timeout_is_reported_to_event_handlers() {
         let (addr, _attempts) = silent_peer().await;
-        let seen: Arc<std::sync::Mutex<Vec<ClientEvent>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen: Arc<std::sync::Mutex<Vec<ClientEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = seen.clone();
         let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
             .with_options(impatient_options(2))
             .with_event_handler(Arc::new(move |event| sink.lock().unwrap().push(event)));
 
-        let error = client.send_c_echo(sop_class::VERIFICATION).await.unwrap_err();
-        assert!(matches!(error, NetworkError::AssociationRequestTimedOut { .. }));
+        let error = client
+            .send_c_echo(sop_class::VERIFICATION)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            NetworkError::AssociationRequestTimedOut { .. }
+        ));
         let events = seen.lock().unwrap();
         assert!(events.contains(&ClientEvent::AssociationRequestTimedOut { attempts: 1 }));
         assert!(events.contains(&ClientEvent::AssociationRequestTimedOut { attempts: 2 }));
@@ -926,7 +1168,8 @@ mod tests {
     #[tokio::test]
     async fn request_timeout_reports_event_and_returns_without_waiting_forever() {
         let (addr, peer) = silent_associated_peer().await;
-        let seen: Arc<std::sync::Mutex<Vec<ClientEvent>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen: Arc<std::sync::Mutex<Vec<ClientEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = seen.clone();
         let options = DicomClientOptions {
             max_consecutive_timeout_retries: 1,
@@ -941,9 +1184,18 @@ mod tests {
             .with_options(options)
             .with_event_handler(Arc::new(move |event| sink.lock().unwrap().push(event)));
 
-        let error = client.send_c_echo(sop_class::VERIFICATION).await.unwrap_err();
-        assert!(matches!(error, NetworkError::RequestTimedOut { message_id: 1 }));
-        assert!(seen.lock().unwrap().contains(&ClientEvent::RequestTimedOut { message_id: 1 }));
+        let error = client
+            .send_c_echo(sop_class::VERIFICATION)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            NetworkError::RequestTimedOut { message_id: 1 }
+        ));
+        assert!(seen
+            .lock()
+            .unwrap()
+            .contains(&ClientEvent::RequestTimedOut { message_id: 1 }));
         peer.abort();
     }
 
@@ -957,10 +1209,14 @@ mod tests {
         let counter = attempts.clone();
         tokio::spawn(async move {
             loop {
-                let Ok((mut stream, _)) = listener.accept().await else { return };
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
                 counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 // not a PDU at all: retrying would only repeat the same answer
-                let _ = stream.write_all(&[0xEE, 0x00, 0x00, 0x00, 0x00, 0x00]).await;
+                let _ = stream
+                    .write_all(&[0xEE, 0x00, 0x00, 0x00, 0x00, 0x00])
+                    .await;
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_secs(30)).await;
                     drop(stream);
@@ -968,13 +1224,21 @@ mod tests {
             }
         });
 
-        let mut client = DicomClient::new("SCU", "SCP", addr.to_string()).with_options(impatient_options(5));
-        let error = client.send_c_echo(sop_class::VERIFICATION).await.unwrap_err();
+        let mut client =
+            DicomClient::new("SCU", "SCP", addr.to_string()).with_options(impatient_options(5));
+        let error = client
+            .send_c_echo(sop_class::VERIFICATION)
+            .await
+            .unwrap_err();
         assert!(
             !matches!(error, NetworkError::AssociationRequestTimedOut { .. }),
             "the peer answered, so this is not a timeout: {error:?}"
         );
-        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1, "no retry");
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "no retry"
+        );
     }
 
     #[tokio::test]
@@ -1004,23 +1268,36 @@ mod tests {
         });
 
         let contexts = vec![
-            PresentationContext::new(1, "1.2.840.10008.5.1.4.1.1.7", vec!["1.2.840.10008.1.2".to_string()]),
+            PresentationContext::new(
+                1,
+                "1.2.840.10008.5.1.4.1.1.7",
+                vec!["1.2.840.10008.1.2".to_string()],
+            ),
             PresentationContext::new(
                 3,
                 "1.2.840.10008.5.1.4.1.2.1.1",
                 vec!["1.2.840.10008.1.2".to_string()],
             ),
         ];
-        let association = Association::open(addr, "SCU", "SCP", contexts, crate::server::ClientOptions::default())
-            .await
-            .unwrap();
+        let association = Association::open(
+            addr,
+            "SCU",
+            "SCP",
+            contexts,
+            crate::server::ClientOptions::default(),
+        )
+        .await
+        .unwrap();
         let mut client = DicomClient::new("SCU", "SCP", addr.to_string());
         client.association = Some(association);
         // the C-FIND (message ID 7) was sent on the second context
         client.last_request = Some((7, 3));
 
         assert!(client.cancel(7).await.unwrap());
-        assert!(!client.cancel(8).await.unwrap(), "an ID this client never sent");
+        assert!(
+            !client.cancel(8).await.unwrap(),
+            "an ID this client never sent"
+        );
         peer.await.unwrap();
     }
 }

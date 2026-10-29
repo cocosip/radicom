@@ -22,27 +22,63 @@ fn corpus_dir() -> PathBuf {
 const CORPUS: &[(&str, &str)] = &[
     ("explicit-le/GH220.dcm", "syntax matrix / explicit LE"),
     ("explicit-le/GH487.dcm", "syntax matrix / explicit LE"),
-    ("explicit-le/1403-OB.dcm", "syntax matrix / explicit LE (OB)"),
+    (
+        "explicit-le/1403-OB.dcm",
+        "syntax matrix / explicit LE (OB)",
+    ),
     ("explicit-le/GH178.dcm", "syntax matrix / explicit LE"),
-    ("explicit-le/GH626.dcm", "syntax matrix / private SQ with a bad VR byte"),
-    ("explicit-le/GH179B.dcm", "syntax matrix / truncated file (partial read)"),
-    ("big-endian/GH177_D_CLUNIE_CT1_IVRLE_BigEndian_undefined_length.dcm", "syntax matrix / BE CP-246"),
+    (
+        "explicit-le/GH626.dcm",
+        "syntax matrix / private SQ with a bad VR byte",
+    ),
+    (
+        "explicit-le/GH179B.dcm",
+        "syntax matrix / truncated file (partial read)",
+    ),
+    (
+        "big-endian/GH177_D_CLUNIE_CT1_IVRLE_BigEndian_undefined_length.dcm",
+        "syntax matrix / BE CP-246",
+    ),
     ("implicit-le/GH1958.dcm", "syntax matrix / implicit LE"),
-    ("deflated/Issue1097_deflated_sq.dcm", "syntax matrix / deflated (raw RFC1951)"),
-    ("deflated/GH227.dcm", "syntax matrix / deflated (raw RFC1951)"),
+    (
+        "deflated/Issue1097_deflated_sq.dcm",
+        "syntax matrix / deflated (raw RFC1951)",
+    ),
+    (
+        "deflated/GH227.dcm",
+        "syntax matrix / deflated (raw RFC1951)",
+    ),
     ("charset/chrGB2312.dcm", "charsets / GB2312"),
-    ("charset/chrJapMulti.dcm", "charsets / ISO 2022 Japanese multi-byte"),
-    ("charset/chrSQEncoding.dcm", "charsets / SQ with specific charset"),
+    (
+        "charset/chrJapMulti.dcm",
+        "charsets / ISO 2022 Japanese multi-byte",
+    ),
+    (
+        "charset/chrSQEncoding.dcm",
+        "charsets / SQ with specific charset",
+    ),
     ("charset/chrRuss.dcm", "charsets / ISO_IR 144 Cyrillic"),
     ("charset/chrArab.dcm", "charsets / ISO_IR 127 Arabic"),
     ("charset/chrGreek.dcm", "charsets / ISO_IR 126 Greek"),
     ("charset/chrHbrw.dcm", "charsets / ISO_IR 138 Hebrew"),
-    ("charset/chrI2.dcm", "charsets / ISO 2022 IR 149 mixed 8-bit"),
-    ("charset/chrKoreanMulti.dcm", "charsets / ISO 2022 IR 149 Korean"),
+    (
+        "charset/chrI2.dcm",
+        "charsets / ISO 2022 IR 149 mixed 8-bit",
+    ),
+    (
+        "charset/chrKoreanMulti.dcm",
+        "charsets / ISO 2022 IR 149 Korean",
+    ),
     ("sr/test_SR.dcm", "structures / SR document tree"),
     ("media/DICOMDIR", "media / DICOMDIR"),
-    ("encapsulated/GH538-jpeg1.dcm", "encapsulated / JPEG baseline"),
-    ("encapsulated/D_CLUNIE_CT1_RLE_FRAGS.dcm", "encapsulated / RLE with a trailing element"),
+    (
+        "encapsulated/GH538-jpeg1.dcm",
+        "encapsulated / JPEG baseline",
+    ),
+    (
+        "encapsulated/D_CLUNIE_CT1_RLE_FRAGS.dcm",
+        "encapsulated / RLE with a trailing element",
+    ),
 ];
 
 #[test]
@@ -53,7 +89,11 @@ fn every_corpus_file_parses() {
             .unwrap_or_else(|e| panic!("[{category}] read {}: {e}", path.display()));
         let file = DicomFile::from_bytes(&bytes, &ReadOptions::default())
             .unwrap_or_else(|e| panic!("[{category}] parse {}: {e}", path.display()));
-        assert!(!file.dataset.is_empty(), "[{category}] {} parsed an empty dataset", rel);
+        assert!(
+            !file.dataset.is_empty(),
+            "[{category}] {} parsed an empty dataset",
+            rel
+        );
     }
 }
 
@@ -70,7 +110,10 @@ fn every_corpus_file_write_is_stable() {
         let first = file.to_bytes(&WriteOptions::default()).unwrap();
         let again = DicomFile::from_bytes(&first, &ReadOptions::default()).unwrap();
         let second = again.to_bytes(&WriteOptions::default()).unwrap();
-        assert_eq!(first, second, "[{category}] {rel} must re-serialise to identical bytes");
+        assert_eq!(
+            first, second,
+            "[{category}] {rel} must re-serialise to identical bytes"
+        );
     }
 }
 
@@ -131,10 +174,19 @@ fn charset_corpus_decodes_to_real_characters() {
     for (rel, expected) in cases {
         let bytes = std::fs::read(corpus_dir().join(rel)).unwrap();
         let file = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
-        let name = file.dataset.try_get_str(Tag::PATIENT_NAME).unwrap_or_default();
-        assert!(!name.contains('\u{FFFD}'), "{rel}: PatientName has replacement chars: {name:?}");
+        let name = file
+            .dataset
+            .try_get_str(Tag::PATIENT_NAME)
+            .unwrap_or_default();
+        assert!(
+            !name.contains('\u{FFFD}'),
+            "{rel}: PatientName has replacement chars: {name:?}"
+        );
         for want in *expected {
-            assert!(name.contains(want), "{rel}: PatientName {name:?} should contain {want:?}");
+            assert!(
+                name.contains(want),
+                "{rel}: PatientName {name:?} should contain {want:?}"
+            );
         }
     }
 }
@@ -144,7 +196,8 @@ fn charset_corpus_decodes_to_real_characters() {
 #[test]
 fn a_truncated_file_keeps_its_readable_prefix() {
     let bytes = std::fs::read(corpus_dir().join("explicit-le/GH179B.dcm")).unwrap();
-    let file = DicomFile::from_bytes(&bytes, &ReadOptions::default()).expect("partial read succeeds");
+    let file =
+        DicomFile::from_bytes(&bytes, &ReadOptions::default()).expect("partial read succeeds");
     assert!(file.is_partial, "truncated input must be flagged partial");
     assert!(!file.dataset.is_empty(), "the readable prefix is retained");
 }
@@ -162,7 +215,11 @@ fn a_real_sr_document_walks_its_content_tree() {
     let bytes = std::fs::read(corpus_dir().join("sr/test_SR.dcm")).unwrap();
     let sr = StructuredReport::from_bytes(&bytes).unwrap();
     let roots = sr.root_items();
-    assert_eq!(roots.len(), 5, "the reference SR has five top-level content items");
+    assert_eq!(
+        roots.len(),
+        5,
+        "the reference SR has five top-level content items"
+    );
     assert_eq!(count(&roots), 28, "the whole content tree has 28 nodes");
 
     // The tree mixes CONTAINER / TEXT / COMPOSITE / IMAGE / UIDREF nodes.
@@ -179,7 +236,10 @@ fn a_real_sr_document_walks_its_content_tree() {
     }
     walk(&roots, &mut seen);
     for expected in [ValueType::Container, ValueType::Text, ValueType::Image] {
-        assert!(seen.contains(&expected), "the tree should contain a {expected:?} node");
+        assert!(
+            seen.contains(&expected),
+            "the tree should contain a {expected:?} node"
+        );
     }
 
     // One container node carries children (a nested report structure).

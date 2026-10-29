@@ -28,9 +28,24 @@ use std::sync::Arc;
 /// [`ParseObserver::on_begin_fragment`] instead of arriving as a fragment,
 /// so observers never special-case fragment index 0.
 pub trait ParseObserver {
-    fn on_element(&mut self, ctx: &ParseContext, tag: &Tag, vr: Vr, buffer: SharedBuffer) -> Result<(), Error>;
-    fn on_begin_sequence(&mut self, ctx: &ParseContext, tag: &Tag, defined_length: Option<u32>) -> Result<(), Error>;
-    fn on_begin_sequence_item(&mut self, ctx: &ParseContext, defined_length: Option<u32>) -> Result<(), Error>;
+    fn on_element(
+        &mut self,
+        ctx: &ParseContext,
+        tag: &Tag,
+        vr: Vr,
+        buffer: SharedBuffer,
+    ) -> Result<(), Error>;
+    fn on_begin_sequence(
+        &mut self,
+        ctx: &ParseContext,
+        tag: &Tag,
+        defined_length: Option<u32>,
+    ) -> Result<(), Error>;
+    fn on_begin_sequence_item(
+        &mut self,
+        ctx: &ParseContext,
+        defined_length: Option<u32>,
+    ) -> Result<(), Error>;
     fn on_end_sequence_item(&mut self, ctx: &ParseContext) -> Result<(), Error>;
     fn on_end_sequence(&mut self, ctx: &ParseContext) -> Result<(), Error>;
     fn on_begin_fragment(
@@ -110,7 +125,8 @@ impl Default for DicomReader {
 /// A flat 256-slot table per group avoids hashing a `(u16, u8)` key for every
 /// private element, and the creator is stored as a shared `Arc` so resolving a
 /// private tag clones a pointer instead of allocating a fresh creator.
-type PrivateCreators = HashMap<u16, Box<[Option<Arc<crate::model::private_creator::PrivateCreator>>; 256]>>;
+type PrivateCreators =
+    HashMap<u16, Box<[Option<Arc<crate::model::private_creator::PrivateCreator>>; 256]>>;
 
 /// What ends one nesting level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,9 +183,18 @@ enum Step {
         defined: Option<u32>,
     },
     /// T5: an item tag at dataset level with no preceding SQ header.
-    Orphan { raw: (u16, u16), pos: u64, defined: Option<u32> },
+    Orphan {
+        raw: (u16, u16),
+        pos: u64,
+        defined: Option<u32>,
+    },
     /// A fragment sequence to scan into the observer.
-    Fragments { raw: (u16, u16), tag: Tag, vr: Vr, pos: u64 },
+    Fragments {
+        raw: (u16, u16),
+        tag: Tag,
+        vr: Vr,
+        pos: u64,
+    },
 }
 
 struct Parser<'a, R: Read + Seek> {
@@ -188,7 +213,10 @@ struct Parser<'a, R: Read + Seek> {
 
 impl<'a, R: Read + Seek> Parser<'a, R> {
     fn ctx(&self, pos: u64) -> ParseContext {
-        ParseContext { position: pos, depth: self.depth }
+        ParseContext {
+            position: pos,
+            depth: self.depth,
+        }
     }
 
     fn position(&mut self) -> Result<u64, Error> {
@@ -203,7 +231,10 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
 
     fn read_tag(&mut self, at: u64) -> Result<(u16, u16), Error> {
         let group = self.source.read_u16().map_err(|e| io_err_need(e, at, 2))?;
-        let element = self.source.read_u16().map_err(|e| io_err_need(e, at + 2, 2))?;
+        let element = self
+            .source
+            .read_u16()
+            .map_err(|e| io_err_need(e, at + 2, 2))?;
         Ok((group, element))
     }
 
@@ -255,12 +286,18 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                 return Ok(self.explicit_vr);
             }
             let g = self.source.read_u16().map_err(|e| io_err_need(e, pos, 2))?;
-            let e = self.source.read_u16().map_err(|e| io_err_need(e, pos + 2, 2))?;
+            let e = self
+                .source
+                .read_u16()
+                .map_err(|e| io_err_need(e, pos + 2, 2))?;
             if (g, e) != (0xFFFE, 0xE000) {
                 self.source.goto(pos).map_err(|e| io_err(e, pos))?;
                 return Ok(self.explicit_vr);
             }
-            let len = self.source.read_u32().map_err(|e| io_err_need(e, pos + 4, 4))?;
+            let len = self
+                .source
+                .read_u32()
+                .map_err(|e| io_err_need(e, pos + 4, 4))?;
             if len > 0 {
                 break;
             }
@@ -288,7 +325,9 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
             return Ok(false);
         }
         let mut tag = [0u8; 4];
-        self.source.read_exact(&mut tag).map_err(|e| io_err_need(e, pos, 4))?;
+        self.source
+            .read_exact(&mut tag)
+            .map_err(|e| io_err_need(e, pos, 4))?;
         self.source.goto(pos).map_err(|e| io_err(e, pos))?;
         // item/delimiter tags follow the transfer syntax byte order
         let item = (tag[0] == 0xFF && tag[1] == 0xFE && tag[2] == 0xE0 && tag[3] == 0x00)
@@ -313,14 +352,20 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                     self.source.skip(length).map_err(|e| io_err(e, at))?;
                     return Ok(EmptyBuffer::shared());
                 }
-                LargeValuePolicy::OnDemand => match self.source.window_at_current(length).map_err(|e| io_err(e, at))? {
+                LargeValuePolicy::OnDemand => match self
+                    .source
+                    .window_at_current(length)
+                    .map_err(|e| io_err(e, at))?
+                {
                     Some(window) => {
                         self.source.skip(length).map_err(|e| io_err(e, at))?;
                         window
                     }
                     None => self.source.read_buffer(length).map_err(|e| io_err(e, at))?,
                 },
-                LargeValuePolicy::Materialize => self.source.read_buffer(length).map_err(|e| io_err(e, at))?,
+                LargeValuePolicy::Materialize => {
+                    self.source.read_buffer(length).map_err(|e| io_err(e, at))?
+                }
             }
         } else {
             self.source.read_buffer(length).map_err(|e| io_err(e, at))?
@@ -341,7 +386,11 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         let tag = crate::model::tag_index::lookup_or_create(group, element);
         if tag.is_private() && tag.private_creator().is_none() && element > 0x00FF {
             let block = (element >> 8) as u8;
-            if let Some(creator) = self.private_creators.get(&group).and_then(|slots| slots[block as usize].as_ref()) {
+            if let Some(creator) = self
+                .private_creators
+                .get(&group)
+                .and_then(|slots| slots[block as usize].as_ref())
+            {
                 return Tag::private(group, element, Arc::clone(creator));
             }
         }
@@ -354,7 +403,9 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         if self.explicit_vr {
             let pos = self.position()?;
             let mut code = [0u8; 2];
-            self.source.read_exact(&mut code).map_err(|e| io_err_need(e, at, 2))?;
+            self.source
+                .read_exact(&mut code)
+                .map_err(|e| io_err_need(e, at, 2))?;
             match Vr::try_parse(&code) {
                 Some(vr) => return Ok((vr, true)),
                 None => {
@@ -388,7 +439,10 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
     fn enter(&mut self) -> Result<(), Error> {
         self.depth += 1;
         if self.depth > self.options.max_depth {
-            return Err(Error::Reader(ReaderError::TooDeep { limit: self.options.max_depth, position: 0 }));
+            return Err(Error::Reader(ReaderError::TooDeep {
+                limit: self.options.max_depth,
+                position: 0,
+            }));
         }
         Ok(())
     }
@@ -396,7 +450,11 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
     /// Switches parser and source byte order together.
     fn set_byte_order(&mut self, big_endian: bool) {
         self.big_endian = big_endian;
-        self.source.endian = if big_endian { Endian::Big } else { Endian::Little };
+        self.source.endian = if big_endian {
+            Endian::Big
+        } else {
+            Endian::Little
+        };
     }
 
     /// Parses one element (or delimiter) header and, for leaves, its value.
@@ -421,7 +479,10 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         let (group, element) = self.read_tag(tag_pos)?;
 
         if group == 0xFFFE {
-            let length = self.source.read_u32().map_err(|e| io_err_need(e, tag_pos + 4, 4))?;
+            let length = self
+                .source
+                .read_u32()
+                .map_err(|e| io_err_need(e, tag_pos + 4, 4))?;
             let defined = (length != 0xFFFF_FFFF).then_some(length);
             return Ok(match element {
                 0xE00D => match mode {
@@ -435,9 +496,17 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                     let raw = (group, element);
                     let value_start = self.position()?;
                     if mode == Mode::Top {
-                        Step::Orphan { raw, pos: value_start, defined }
+                        Step::Orphan {
+                            raw,
+                            pos: value_start,
+                            defined,
+                        }
                     } else {
-                        Step::Item { raw, pos: value_start, defined }
+                        Step::Item {
+                            raw,
+                            pos: value_start,
+                            defined,
+                        }
                     }
                 }
                 _ => {
@@ -503,7 +572,14 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
 
         if vr == Vr::Sq {
             let cp246 = raw_vr == Vr::Un && !tag.is_private();
-            return Ok(Step::Sequence { raw, tag, pos: value_start, defined, private_probe, cp246 });
+            return Ok(Step::Sequence {
+                raw,
+                tag,
+                pos: value_start,
+                defined,
+                private_probe,
+                cp246,
+            });
         }
 
         let Some(length) = defined else {
@@ -525,9 +601,20 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                     });
                 }
                 let buffer = self.skip_undefined_value_to_delimiter()?;
-                return Ok(Step::Element { raw, tag, vr: Vr::Un, pos: tag_pos, buffer });
+                return Ok(Step::Element {
+                    raw,
+                    tag,
+                    vr: Vr::Un,
+                    pos: tag_pos,
+                    buffer,
+                });
             }
-            return Ok(Step::Fragments { raw, tag, vr, pos: value_start });
+            return Ok(Step::Fragments {
+                raw,
+                tag,
+                vr,
+                pos: value_start,
+            });
         };
 
         // A truncated *value* is a real error (its declared length is
@@ -544,13 +631,22 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         // RD-05: private creator tracking
         if tag.is_private() && tag.is_private_creator_slot() && vr == Vr::Lo {
             let creator = Arc::new(crate::model::private_creator::PrivateCreator::new(
-                String::from_utf8_lossy(&buffer.data()).trim_end_matches([' ', '\0']).to_string(),
+                String::from_utf8_lossy(&buffer.data())
+                    .trim_end_matches([' ', '\0'])
+                    .to_string(),
             ));
             self.private_creators
                 .entry(group)
-                .or_insert_with(|| Box::new(std::array::from_fn(|_| None)))[(element & 0xFF) as usize] = Some(creator);
+                .or_insert_with(|| Box::new(std::array::from_fn(|_| None)))
+                [(element & 0xFF) as usize] = Some(creator);
         }
-        Ok(Step::Element { raw, tag, vr, pos: tag_pos, buffer })
+        Ok(Step::Element {
+            raw,
+            tag,
+            vr,
+            pos: tag_pos,
+            buffer,
+        })
     }
 
     /// Best-effort recovery for an undefined-length private value that is not a
@@ -593,7 +689,10 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
             let (g, e) = self.read_tag(pos)?;
             match (g, e) {
                 (0xFFFE, 0xE000) => {
-                    let length = self.source.read_u32().map_err(|e| io_err_need(e, pos + 4, 4))?;
+                    let length = self
+                        .source
+                        .read_u32()
+                        .map_err(|e| io_err_need(e, pos + 4, 4))?;
                     if length == 0xFFFF_FFFF {
                         return Err(Error::Reader(ReaderError::Invalid {
                             message: "fragment with undefined length".into(),
@@ -608,7 +707,9 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                     let read_vr = if first { Vr::Ob } else { vr };
                     let buffer = match self.read_value_buffer(read_vr, length as u64, pos) {
                         Ok(buffer) => buffer,
-                        Err(Error::Reader(ReaderError::Eof { .. })) if self.options.partial_on_eof => {
+                        Err(Error::Reader(ReaderError::Eof { .. }))
+                            if self.options.partial_on_eof =>
+                        {
                             self.suspended = true;
                             return Ok(());
                         }
@@ -625,20 +726,28 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                         if length % 2 == 1 {
                             tracing::warn!(length, "odd-length pixel data fragment padded to even");
                         }
-                        observer.on_fragment(&self.ctx(pos), EvenLengthBuffer::wrap_if_needed(buffer))?;
+                        observer.on_fragment(
+                            &self.ctx(pos),
+                            EvenLengthBuffer::wrap_if_needed(buffer),
+                        )?;
                     }
                 }
                 (0xFFFE, 0xE0DD) => {
                     // the delimiter is tag(4) + length(4); consuming only the
                     // tag leaves the length in the stream and desynchronizes
                     // every following element
-                    let _ = self.source.read_u32().map_err(|e| io_err_need(e, pos + 4, 4))?;
+                    let _ = self
+                        .source
+                        .read_u32()
+                        .map_err(|e| io_err_need(e, pos + 4, 4))?;
                     debug_assert_eq!(self.position()?, pos + 8);
                     break;
                 }
                 _ => {
                     return Err(Error::Reader(ReaderError::Invalid {
-                        message: format!("unexpected tag in DICOM fragment sequence {g:04X},{e:04X}"),
+                        message: format!(
+                            "unexpected tag in DICOM fragment sequence {g:04X},{e:04X}"
+                        ),
                         position: pos,
                     }))
                 }
@@ -718,7 +827,13 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                     self.stopped = true;
                     return Ok(LevelEnd::Eof);
                 }
-                Step::Element { raw, tag, vr, pos, buffer } => {
+                Step::Element {
+                    raw,
+                    tag,
+                    vr,
+                    pos,
+                    buffer,
+                } => {
                     observer.on_element(&self.ctx(pos), &tag, vr, buffer)?;
                     previous = Some(raw);
                 }
@@ -726,11 +841,19 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                     self.parse_fragment_sequence(observer, &tag, vr, pos)?;
                     previous = Some(raw);
                 }
-                Step::Sequence { raw, tag, pos, defined, private_probe, cp246 } => {
+                Step::Sequence {
+                    raw,
+                    tag,
+                    pos,
+                    defined,
+                    private_probe,
+                    cp246,
+                } => {
                     observer.on_begin_sequence(&self.ctx(pos), &tag, defined)?;
                     let (saved_explicit, saved_be) = (self.explicit_vr, self.big_endian);
                     if private_probe {
-                        self.explicit_vr = self.probe_inner_explicit(defined.unwrap_or(u32::MAX))?;
+                        self.explicit_vr =
+                            self.probe_inner_explicit(defined.unwrap_or(u32::MAX))?;
                         if self.explicit_vr {
                             self.set_byte_order(false);
                         }
@@ -776,7 +899,9 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                         (LevelEnd::Eof, _) | (_, Some(_)) => end,
                         // further sibling items and the sequence delimiter
                         // belong to this anonymous sequence
-                        (_, None) => self.parse_level(observer, None, Mode::SequenceDelimiter, pos)?,
+                        (_, None) => {
+                            self.parse_level(observer, None, Mode::SequenceDelimiter, pos)?
+                        }
                     };
                     self.depth -= 1;
                     observer.on_end_sequence(&self.here()?)?;
@@ -808,7 +933,6 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         Ok(end)
     }
 }
-
 
 /// Basic offset table entries follow the transfer syntax byte order, four bytes
 /// each. PS3.5 requires the item length to be a multiple of 4; a malformed
@@ -846,7 +970,10 @@ fn decode_offset_table(buffer: &SharedBuffer, big_endian: bool) -> Vec<u32> {
 pub fn inflate(bytes: &[u8]) -> Result<Vec<u8>, Error> {
     use std::io::Read as _;
     let mut out = Vec::new();
-    if flate2::read::ZlibDecoder::new(bytes).read_to_end(&mut out).is_ok() {
+    if flate2::read::ZlibDecoder::new(bytes)
+        .read_to_end(&mut out)
+        .is_ok()
+    {
         return Ok(out);
     }
     out.clear();
@@ -863,7 +990,9 @@ pub fn inflate(bytes: &[u8]) -> Result<Vec<u8>, Error> {
 /// the same typed error on a truncated stream.
 pub fn inflate_stream<R: Read + Seek>(source: &mut R, start: u64) -> Result<Vec<u8>, Error> {
     use std::io::Read as _;
-    source.seek(std::io::SeekFrom::Start(start)).map_err(|e| Error::Reader(ReaderError::Other(format!("deflate seek: {e}"))))?;
+    source
+        .seek(std::io::SeekFrom::Start(start))
+        .map_err(|e| Error::Reader(ReaderError::Other(format!("deflate seek: {e}"))))?;
     let mut out = Vec::new();
     {
         let mut decoder = flate2::read::ZlibDecoder::new(&mut *source);
@@ -872,7 +1001,9 @@ pub fn inflate_stream<R: Read + Seek>(source: &mut R, start: u64) -> Result<Vec<
         }
     }
     out.clear();
-    source.seek(std::io::SeekFrom::Start(start)).map_err(|e| Error::Reader(ReaderError::Other(format!("deflate seek: {e}"))))?;
+    source
+        .seek(std::io::SeekFrom::Start(start))
+        .map_err(|e| Error::Reader(ReaderError::Other(format!("deflate seek: {e}"))))?;
     flate2::read::DeflateDecoder::new(&mut *source)
         .read_to_end(&mut out)
         .map_err(|e| Error::Reader(ReaderError::Other(format!("deflate: {e}"))))?;
@@ -886,7 +1017,8 @@ mod tests {
 
     fn raw_deflate(plain: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
-        let mut encoder = flate2::write::DeflateEncoder::new(&mut out, flate2::Compression::default());
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(&mut out, flate2::Compression::default());
         encoder.write_all(plain).unwrap();
         encoder.finish().unwrap();
         out
@@ -907,7 +1039,11 @@ mod tests {
             let mut source = Cursor::new([b"PRE".as_slice(), body.as_slice()].concat());
             let streamed = inflate_stream(&mut source, 3).unwrap();
             assert_eq!(streamed, plain);
-            assert_eq!(streamed, inflate(&body).unwrap(), "streaming == slice decoder");
+            assert_eq!(
+                streamed,
+                inflate(&body).unwrap(),
+                "streaming == slice decoder"
+            );
         }
     }
 
@@ -918,7 +1054,10 @@ mod tests {
         let mut source = Cursor::new(truncated.to_vec());
         match inflate_stream(&mut source, 0) {
             Err(Error::Reader(ReaderError::Other(message))) => {
-                assert!(message.contains("deflate"), "typed deflate error, got {message}");
+                assert!(
+                    message.contains("deflate"),
+                    "typed deflate error, got {message}"
+                );
             }
             other => panic!("expected ReaderError::Other(deflate), got {other:?}"),
         }

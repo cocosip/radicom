@@ -28,16 +28,28 @@ pub struct Tag {
 
 impl Tag {
     /// The unknown tag `(FFFF,FFFF)`.
-    pub const UNKNOWN: Tag = Tag { group: 0xFFFF, element: 0xFFFF, private_creator: None };
+    pub const UNKNOWN: Tag = Tag {
+        group: 0xFFFF,
+        element: 0xFFFF,
+        private_creator: None,
+    };
 
     pub const fn new(group: u16, element: u16) -> Self {
-        Tag { group, element, private_creator: None }
+        Tag {
+            group,
+            element,
+            private_creator: None,
+        }
     }
 
     /// Constructs a private tag bound to `creator`.
     pub fn private(group: u16, element: u16, creator: Arc<PrivateCreator>) -> Self {
         debug_assert!(group & 1 == 1, "private tags require an odd group");
-        Tag { group, element, private_creator: Some(creator) }
+        Tag {
+            group,
+            element,
+            private_creator: Some(creator),
+        }
     }
 
     pub const fn group(&self) -> u16 {
@@ -139,7 +151,11 @@ impl Tag {
         let element = parse_hex_u16(e).map_err(|_| bad_tag(s))?;
         match creator.filter(|c| !c.is_empty()) {
             None => Ok(Tag::new(group, element)),
-            Some(c) => Ok(Tag::private(group, element, Arc::new(PrivateCreator::new(c)))),
+            Some(c) => Ok(Tag::private(
+                group,
+                element,
+                Arc::new(PrivateCreator::new(c)),
+            )),
         }
     }
 }
@@ -153,7 +169,9 @@ fn parse_hex_u16(s: &str) -> Result<u16, ()> {
 }
 
 fn bad_tag(input: &str) -> Error {
-    Error::Data(DataError::Other { message: format!("invalid tag \"{input}\"") })
+    Error::Data(DataError::Other {
+        message: format!("invalid tag \"{input}\""),
+    })
 }
 
 impl PartialEq for Tag {
@@ -340,13 +358,25 @@ mod tests {
         assert_eq!(public.to_string_with("X"), "(7fe0,0010)");
         assert_eq!(public.to_string_with("g"), "7fe0,0010");
         assert_eq!(public.to_string_with("J"), "7FE00010");
-        assert_eq!(public.to_string_with("anything"), "(7fe0,0010)", "G is the fallback");
+        assert_eq!(
+            public.to_string_with("anything"),
+            "(7fe0,0010)",
+            "G is the fallback"
+        );
 
         let private = Tag::private(0x0029, 0x1001, creator("Vendor X"));
         assert_eq!(private.to_string_with("G"), "(0029,1001:Vendor X)");
-        assert_eq!(private.to_string_with("X"), "(0029,xx01:Vendor X)", "X hides the block number");
+        assert_eq!(
+            private.to_string_with("X"),
+            "(0029,xx01:Vendor X)",
+            "X hides the block number"
+        );
         assert_eq!(private.to_string_with("g"), "0029,1001:Vendor X");
-        assert_eq!(private.to_string_with("J"), "00291001", "J never shows the creator");
+        assert_eq!(
+            private.to_string_with("J"),
+            "00291001",
+            "J never shows the creator"
+        );
     }
 
     #[test]
@@ -354,10 +384,16 @@ mod tests {
         assert!(Tag::parse("").is_err());
         assert!(Tag::parse("(0028,0010").is_ok(), "missing ')' tolerated");
         assert!(Tag::parse("(28,10)").is_ok(), "short hex tolerated");
-        assert!(Tag::parse("(0028:0010)").is_err(), "missing ',' is an error");
+        assert!(
+            Tag::parse("(0028:0010)").is_err(),
+            "missing ',' is an error"
+        );
         assert!(Tag::parse("(GGGG,EEEE)").is_err(), "non-hex is an error");
         assert!(Tag::parse("7FE0001").is_err(), "7 digits is an error");
-        assert!(Tag::parse("(0028,10000)").is_err(), ">4 hex digits is an error");
+        assert!(
+            Tag::parse("(0028,10000)").is_err(),
+            ">4 hex digits is an error"
+        );
     }
 
     #[test]

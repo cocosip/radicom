@@ -9,12 +9,13 @@ use std::path::PathBuf;
 
 use radicom::model::dataset::Dataset;
 use radicom_network::message::encode_command;
+use radicom_network::nservice::NServiceRequest;
 use radicom_network::pdu::encode;
 use radicom_network::server::command_bytes;
 use radicom_network::{
-    Associate, CFindRequest, CFindResponse, Command, CommandField, PData, Pdu, Pdv, PresentationContext,
+    Associate, CFindRequest, CFindResponse, Command, CommandField, PData, Pdu, Pdv,
+    PresentationContext,
 };
-use radicom_network::nservice::NServiceRequest;
 
 fn goldens_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests-data/goldens")
@@ -35,17 +36,22 @@ fn hex_lines(bytes: &[u8]) -> String {
 }
 
 fn normalized(text: &str) -> String {
-    text.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_uppercase()
+    text.chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_uppercase()
 }
 
 // Fixtures — keep in sync with `regen_goldens` in xtask/src/main.rs.
 fn fixture_associate_rq() -> Vec<u8> {
     let mut associate = Associate::new("RADICOM_SCP", "RADICOM_SCU");
-    associate.presentation_contexts.push(PresentationContext::new(
-        1,
-        "1.2.840.10008.1.1",
-        vec!["1.2.840.10008.1.2.1".to_string()],
-    ));
+    associate
+        .presentation_contexts
+        .push(PresentationContext::new(
+            1,
+            "1.2.840.10008.1.1",
+            vec!["1.2.840.10008.1.2.1".to_string()],
+        ));
     encode(&Pdu::AssociateRq(associate)).expect("encode")
 }
 
@@ -53,7 +59,12 @@ fn fixture_pdata_cecho() -> Vec<u8> {
     let mut command = Command::request(CommandField::CEchoRq, 1);
     command.affected_sop_class_uid = Some("1.2.840.10008.1.1".to_string());
     let command_bytes = encode_command(&command.to_dataset()).expect("encode command");
-    let pdv = Pdv { context_id: 1, is_command: true, is_last: true, data: command_bytes.into() };
+    let pdv = Pdv {
+        context_id: 1,
+        is_command: true,
+        is_last: true,
+        data: command_bytes.into(),
+    };
     encode(&Pdu::PData(PData { pdvs: vec![pdv] })).expect("encode")
 }
 
@@ -62,11 +73,13 @@ fn fixture_pdata_cecho() -> Vec<u8> {
 /// Version Name (0x55), not an empty user item (§2.19, §4.10).
 fn fixture_associate_rq_user_info() -> Vec<u8> {
     let mut associate = Associate::new("RADICOM_SCP", "RADICOM_SCU");
-    associate.presentation_contexts.push(PresentationContext::new(
-        1,
-        "1.2.840.10008.1.1",
-        vec!["1.2.840.10008.1.2.1".to_string()],
-    ));
+    associate
+        .presentation_contexts
+        .push(PresentationContext::new(
+            1,
+            "1.2.840.10008.1.1",
+            vec!["1.2.840.10008.1.2.1".to_string()],
+        ));
     associate.user_information = radicom_network::association::build_user_information(
         16384,
         "1.2.826.0.1.3680043.10.1330.2",
@@ -122,8 +135,14 @@ fn pdu_goldens_are_current() {
 #[test]
 fn service_command_goldens_are_current() {
     check("cmd_n_get_rq.hex", fixture_command_n_get_rq());
-    check("cmd_cget_reverse_store_rq.hex", fixture_command_cget_reverse_store_rq());
-    check("cmd_cfind_pending_rsp.hex", fixture_command_cfind_pending_rsp());
+    check(
+        "cmd_cget_reverse_store_rq.hex",
+        fixture_command_cget_reverse_store_rq(),
+    );
+    check(
+        "cmd_cfind_pending_rsp.hex",
+        fixture_command_cfind_pending_rsp(),
+    );
 }
 
 #[test]
@@ -138,6 +157,12 @@ fn real_association_request_carries_implementation_identity() {
         request.user_information.implementation_class_uid.as_deref(),
         Some("1.2.826.0.1.3680043.10.1330.2")
     );
-    assert_eq!(request.user_information.implementation_version_name.as_deref(), Some("RADICOM_0_1"));
+    assert_eq!(
+        request
+            .user_information
+            .implementation_version_name
+            .as_deref(),
+        Some("RADICOM_0_1")
+    );
     check("associate_rq_user_info.hex", bytes);
 }

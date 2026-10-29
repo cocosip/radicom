@@ -34,14 +34,19 @@ fn image_dataset(frames: u32) -> Dataset {
     ds.insert_str(Tag::PIXEL_SPACING, Vr::Ds, "0.5\\0.5");
     ds.insert_str(Tag::WINDOW_CENTER, Vr::Ds, "2048"); // WindowCenter
     ds.insert_str(Tag::WINDOW_WIDTH, Vr::Ds, "4096"); // WindowWidth
-    // some metadata to give the parser/encoder real work
+                                                      // some metadata to give the parser/encoder real work
     for (i, (group, element, vr, value)) in [
         (0x0008u16, 0x0060u16, Vr::Cs, "CT".to_string()),
         (0x0008, 0x0020, Vr::Da, "20260101".to_string()),
         (0x0008, 0x103E, Vr::Lo, "benchmark series".to_string()),
         (0x0010, 0x0010, Vr::Pn, "Doe^John".to_string()),
         (0x0010, 0x0020, Vr::Lo, "PATIENT-0001".to_string()),
-        (0x0020, 0x4000, Vr::Lt, "a fairly long comment used for benchmarking".to_string()),
+        (
+            0x0020,
+            0x4000,
+            Vr::Lt,
+            "a fairly long comment used for benchmarking".to_string(),
+        ),
     ]
     .iter()
     .enumerate()
@@ -90,7 +95,10 @@ fn main() {
     let dataset = image_dataset(1);
     let file = DicomFile::from_dataset(dataset.clone());
     let encoded = file.to_bytes(&WriteOptions::default()).expect("serialize");
-    println!("fixture: 512x512x1 16-bit image, {} bytes encoded\n", encoded.len());
+    println!(
+        "fixture: 512x512x1 16-bit image, {} bytes encoded\n",
+        encoded.len()
+    );
 
     // parse_dataset
     let iters = 2_000;
@@ -144,7 +152,8 @@ fn main() {
     });
     report("open_800_elements", ns, iters);
     let ns = time_ops(iters, || {
-        let parsed = DicomFile::from_bytes(black_box(&many_bytes), &ReadOptions::default()).unwrap();
+        let parsed =
+            DicomFile::from_bytes(black_box(&many_bytes), &ReadOptions::default()).unwrap();
         black_box(parsed);
     });
     report("from_bytes_800", ns, iters);

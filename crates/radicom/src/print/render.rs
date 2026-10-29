@@ -25,7 +25,9 @@ pub struct RenderScale {
 impl Default for RenderScale {
     fn default() -> Self {
         // a print-friendly ~150 dpi (≈5.9 px/mm)
-        RenderScale { pixels_per_mm: 150.0 / 25.4 }
+        RenderScale {
+            pixels_per_mm: 150.0 / 25.4,
+        }
     }
 }
 
@@ -58,9 +60,11 @@ impl FilmBox {
         scale: RenderScale,
         empty_density: EmptyDensity,
     ) -> Result<RawImage, Error> {
-        let film = self
-            .film_size()
-            .ok_or_else(|| Error::Data(DataError::Other { message: "no FilmSizeID to render".into() }))?;
+        let film = self.film_size().ok_or_else(|| {
+            Error::Data(DataError::Other {
+                message: "no FilmSizeID to render".into(),
+            })
+        })?;
 
         let canvas_w = ((film.width_mm * scale.pixels_per_mm).round() as u32).max(1);
         let canvas_h = ((film.height_mm * scale.pixels_per_mm).round() as u32).max(1);
@@ -148,7 +152,11 @@ impl Canvas {
         for chunk in bytes.as_chunks_mut::<4>().0 {
             *chunk = pixel;
         }
-        Canvas { width, height, bytes }
+        Canvas {
+            width,
+            height,
+            bytes,
+        }
     }
 
     fn set(&mut self, x: i64, y: i64, color: Color32) {
@@ -209,7 +217,8 @@ impl Canvas {
 
         // Resample the BGRA patch directly into one full-image buffer, then copy
         // its rows into the canvas — no RGB round trip and no per-pixel set (§3.7).
-        let rescaled = if magnification.is_some_and(|value| value.eq_ignore_ascii_case("REPLICATE")) {
+        let rescaled = if magnification.is_some_and(|value| value.eq_ignore_ascii_case("REPLICATE"))
+        {
             nearest_bgra32(
                 patch.as_bytes(),
                 patch.width() as usize,
@@ -246,7 +255,8 @@ impl Canvas {
         for dy in y0..y1 {
             let src_start = ((dy * dst_w + x0) * 4) as usize;
             let dst_start = (((off_y + dy) * self.width as i64 + (off_x + x0)) * 4) as usize;
-            self.bytes[dst_start..dst_start + run].copy_from_slice(&src[src_start..src_start + run]);
+            self.bytes[dst_start..dst_start + run]
+                .copy_from_slice(&src[src_start..src_start + run]);
         }
     }
 
@@ -256,7 +266,13 @@ impl Canvas {
 }
 
 /// Nearest-neighbour BGRA resampling used by the DICOM `REPLICATE` mode.
-fn nearest_bgra32(input: &[u8], input_width: usize, input_height: usize, output_width: usize, output_height: usize) -> Vec<u8> {
+fn nearest_bgra32(
+    input: &[u8],
+    input_width: usize,
+    input_height: usize,
+    output_width: usize,
+    output_height: usize,
+) -> Vec<u8> {
     let mut output = vec![0u8; output_width * output_height * 4];
     let x_ratio = if output_width <= 1 {
         0.0
@@ -315,7 +331,9 @@ mod tests {
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![fill; 16])),
             ),
         ));
-        ds.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        ds.set_transfer_syntax(
+            crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
         ds
     }
 
@@ -335,12 +353,15 @@ mod tests {
         if !polarity.is_empty() {
             boxed.insert_str(polarity_tag, Vr::Cs, polarity);
         }
-        boxed.insert_sequence(Tag::BASIC_GRAYSCALE_IMAGE_SEQUENCE).push(grayscale_image(fill));
+        boxed
+            .insert_sequence(Tag::BASIC_GRAYSCALE_IMAGE_SEQUENCE)
+            .push(grayscale_image(fill));
 
         let mut film = Dataset::new();
         film.insert_str(image_display_format, Vr::Cs, "STANDARD\\1,1");
         film.insert_str(film_size_id, Vr::Cs, "A4");
-        film.insert_sequence(referenced_image_box_sequence).push(boxed);
+        film.insert_sequence(referenced_image_box_sequence)
+            .push(boxed);
         FilmBox::from_dataset(film)
     }
 
@@ -352,25 +373,49 @@ mod tests {
     #[test]
     fn rendering_produces_a_canvas_of_the_film_size() {
         let film = film_with_one_box("", 128);
-        let image = film.render_to_image(10.0, RenderScale { pixels_per_mm: 1.0 }, EmptyDensity::Black).unwrap();
+        let image = film
+            .render_to_image(
+                10.0,
+                RenderScale { pixels_per_mm: 1.0 },
+                EmptyDensity::Black,
+            )
+            .unwrap();
         assert_eq!(image.width(), 210); // A4 width mm at 1 px/mm
         assert_eq!(image.height(), 297);
         // the 4x4 grey-128 patch is scaled into the central cell: the canvas
         // centre must carry the source grey, not the black background.
-        assert_eq!(grey_at(&image, 105, 148), 128, "the cell content is actually blitted");
+        assert_eq!(
+            grey_at(&image, 105, 148),
+            128,
+            "the cell content is actually blitted"
+        );
     }
 
     #[test]
     fn the_background_uses_the_empty_density() {
         let film = film_with_one_box("", 128);
-        let white = film.render_to_image(10.0, RenderScale { pixels_per_mm: 1.0 }, EmptyDensity::White).unwrap();
+        let white = film
+            .render_to_image(
+                10.0,
+                RenderScale { pixels_per_mm: 1.0 },
+                EmptyDensity::White,
+            )
+            .unwrap();
         // every corner is the white background
         for (x, y) in [(0, 0), (209, 0), (0, 296), (209, 296)] {
-            assert_eq!(grey_at(&white, x, y), 255, "corner ({x},{y}) is white background");
+            assert_eq!(
+                grey_at(&white, x, y),
+                255,
+                "corner ({x},{y}) is white background"
+            );
         }
         // and the drawn cell differs from the background, so the test cannot
         // pass with background-only output.
-        assert_eq!(grey_at(&white, 105, 148), 128, "the cell is drawn over the background");
+        assert_eq!(
+            grey_at(&white, 105, 148),
+            128,
+            "the cell is drawn over the background"
+        );
     }
 
     #[test]
@@ -378,13 +423,35 @@ mod tests {
         let mut film = film_with_one_box("", 128);
         film.set_trim(true);
         // 2 px/mm → a 2 mm trim border is 4 px wide (fo-dicom BORDER 100*2/25.4).
-        let image = film.render_to_image(10.0, RenderScale { pixels_per_mm: 2.0 }, EmptyDensity::White).unwrap();
+        let image = film
+            .render_to_image(
+                10.0,
+                RenderScale { pixels_per_mm: 2.0 },
+                EmptyDensity::White,
+            )
+            .unwrap();
         for i in 0..4 {
-            assert_eq!(grey_at(&image, 100, i), 0, "top border is 4 px thick (row {i})");
-            assert_eq!(grey_at(&image, i, 100), 0, "left border is 4 px thick (column {i})");
+            assert_eq!(
+                grey_at(&image, 100, i),
+                0,
+                "top border is 4 px thick (row {i})"
+            );
+            assert_eq!(
+                grey_at(&image, i, 100),
+                0,
+                "left border is 4 px thick (column {i})"
+            );
         }
-        assert_eq!(grey_at(&image, 100, 4), 255, "past the 4 px border is background (not a 1 px hairline)");
-        assert_eq!(grey_at(&image, 140, 148), 128, "the cell is drawn inside the border");
+        assert_eq!(
+            grey_at(&image, 100, 4),
+            255,
+            "past the 4 px border is background (not a 1 px hairline)"
+        );
+        assert_eq!(
+            grey_at(&image, 140, 148),
+            128,
+            "the cell is drawn inside the border"
+        );
     }
 
     /// Builds a FilmBox with two boxes in reverse list order (position 2 then 1),
@@ -397,7 +464,9 @@ mod tests {
         let build = |position: u16, fill: u8| {
             let mut boxed = Dataset::new();
             boxed.insert_value(image_box_position.clone(), position);
-            boxed.insert_sequence(Tag::BASIC_GRAYSCALE_IMAGE_SEQUENCE).push(grayscale_image(fill));
+            boxed
+                .insert_sequence(Tag::BASIC_GRAYSCALE_IMAGE_SEQUENCE)
+                .push(grayscale_image(fill));
             boxed
         };
         let mut film = Dataset::new();
@@ -413,35 +482,69 @@ mod tests {
     fn image_box_position_selects_the_cell() {
         let film = film_with_two_boxes_reversed();
         let cells = film.layout(10.0);
-        let image = film.render_to_image(10.0, RenderScale { pixels_per_mm: 2.0 }, EmptyDensity::Black).unwrap();
+        let image = film
+            .render_to_image(
+                10.0,
+                RenderScale { pixels_per_mm: 2.0 },
+                EmptyDensity::Black,
+            )
+            .unwrap();
         let centre = |cell: &LayoutCell| {
             let cx = ((cell.x + cell.width / 2.0) * 2.0) as u32;
             let cy = ((cell.y + cell.height / 2.0) * 2.0) as u32;
             grey_at(&image, cx, cy)
         };
-        assert_eq!(centre(&cells[0]), 255, "position 1 (white) lands in the first cell, despite list order");
-        assert_eq!(centre(&cells[1]), 0, "position 2 (black) lands in the second cell");
+        assert_eq!(
+            centre(&cells[0]),
+            255,
+            "position 1 (white) lands in the first cell, despite list order"
+        );
+        assert_eq!(
+            centre(&cells[1]),
+            0,
+            "position 2 (black) lands in the second cell"
+        );
     }
 
     #[test]
     fn polarity_reverse_darkens_a_white_cell() {
         // white source, REVERSE polarity → the drawn cell is dark
         let film = film_with_one_box("REVERSE", 255);
-        let image = film.render_to_image(10.0, RenderScale { pixels_per_mm: 2.0 }, EmptyDensity::Black).unwrap();
+        let image = film
+            .render_to_image(
+                10.0,
+                RenderScale { pixels_per_mm: 2.0 },
+                EmptyDensity::Black,
+            )
+            .unwrap();
         let cx = image.width() / 2;
         let cy = image.height() / 2;
         let i = ((cy * image.width() + cx) * 4) as usize;
-        assert!(image.as_bytes()[i] < 60, "REVERSE inverts a white cell to dark, got {}", image.as_bytes()[i]);
+        assert!(
+            image.as_bytes()[i] < 60,
+            "REVERSE inverts a white cell to dark, got {}",
+            image.as_bytes()[i]
+        );
     }
 
     #[test]
     fn a_normal_cell_keeps_its_brightness() {
         let film = film_with_one_box("", 255);
-        let image = film.render_to_image(10.0, RenderScale { pixels_per_mm: 2.0 }, EmptyDensity::Black).unwrap();
+        let image = film
+            .render_to_image(
+                10.0,
+                RenderScale { pixels_per_mm: 2.0 },
+                EmptyDensity::Black,
+            )
+            .unwrap();
         let cx = image.width() / 2;
         let cy = image.height() / 2;
         let i = ((cy * image.width() + cx) * 4) as usize;
-        assert!(image.as_bytes()[i] > 200, "a white NORMAL cell stays bright, got {}", image.as_bytes()[i]);
+        assert!(
+            image.as_bytes()[i] > 200,
+            "a white NORMAL cell stays bright, got {}",
+            image.as_bytes()[i]
+        );
     }
 
     fn centre_grey(image: &RawImage) -> u8 {
@@ -455,24 +558,37 @@ mod tests {
         let mut identity = film_with_one_box("", 64);
         identity.set_presentation_lut_shape(PresentationLutShape::Identity);
         let lit = identity
-            .render_to_image(10.0, RenderScale { pixels_per_mm: 2.0 }, EmptyDensity::Black)
+            .render_to_image(
+                10.0,
+                RenderScale { pixels_per_mm: 2.0 },
+                EmptyDensity::Black,
+            )
             .unwrap();
 
         let mut inverse = film_with_one_box("", 64);
         inverse.set_presentation_lut_shape(PresentationLutShape::Inverse);
         let inverted = inverse
-            .render_to_image(10.0, RenderScale { pixels_per_mm: 2.0 }, EmptyDensity::Black)
+            .render_to_image(
+                10.0,
+                RenderScale { pixels_per_mm: 2.0 },
+                EmptyDensity::Black,
+            )
             .unwrap();
 
         let (a, b) = (centre_grey(&lit), centre_grey(&inverted));
-        assert!(b > a + 100, "INVERSE ({b}) must be much brighter than IDENTITY ({a}) for a dark cell");
+        assert!(
+            b > a + 100,
+            "INVERSE ({b}) must be much brighter than IDENTITY ({a}) for a dark cell"
+        );
     }
 
     #[test]
     fn rendering_without_a_film_size_errors() {
         let mut film = FilmBox::new();
         film.set_image_display_format("STANDARD\\1,1").unwrap();
-        assert!(film.render_to_image(10.0, RenderScale::default(), EmptyDensity::Black).is_err());
+        assert!(film
+            .render_to_image(10.0, RenderScale::default(), EmptyDensity::Black)
+            .is_err());
     }
 
     #[test]
@@ -488,7 +604,12 @@ mod tests {
             ],
         );
         // a cell placed partly off the top-left of the canvas to exercise clipping
-        let cell = LayoutCell { x: -0.5, y: -0.5, width: 5.0, height: 4.0 };
+        let cell = LayoutCell {
+            x: -0.5,
+            y: -0.5,
+            width: 5.0,
+            height: 4.0,
+        };
         let (cw, ch, ppm) = (30u32, 25u32, 3.0f64);
         let bg = crate::pixel::Color32::new(5, 6, 7);
         let mut actual = Canvas::filled(cw, ch, bg);
@@ -510,17 +631,30 @@ mod tests {
         let fit = (cell_w as f64 / patch.width() as f64).min(cell_h as f64 / patch.height() as f64);
         let dst_w = ((patch.width() as f64 * fit).round() as i64).max(1);
         let dst_h = ((patch.height() as f64 * fit).round() as i64).max(1);
-        let rescaled = crate::render::bilinear_color24(&rgb, patch.width() as usize, patch.height() as usize, dst_w as usize, dst_h as usize);
+        let rescaled = crate::render::bilinear_color24(
+            &rgb,
+            patch.width() as usize,
+            patch.height() as usize,
+            dst_w as usize,
+            dst_h as usize,
+        );
         let off_x = cell_x + (cell_w - dst_w) / 2;
         let off_y = cell_y + (cell_h - dst_h) / 2;
         for dy in 0..dst_h {
             for dx in 0..dst_w {
                 let si = ((dy * dst_w + dx) * 3) as usize;
-                expected.set(off_x + dx, off_y + dy, crate::pixel::Color32::new(rescaled[si], rescaled[si + 1], rescaled[si + 2]));
+                expected.set(
+                    off_x + dx,
+                    off_y + dy,
+                    crate::pixel::Color32::new(rescaled[si], rescaled[si + 1], rescaled[si + 2]),
+                );
             }
         }
 
-        assert_eq!(actual.bytes, expected.bytes, "direct BGRA blit matches the RGB round trip byte for byte");
+        assert_eq!(
+            actual.bytes, expected.bytes,
+            "direct BGRA blit matches the RGB round trip byte for byte"
+        );
     }
 
     #[test]
@@ -533,7 +667,12 @@ mod tests {
                 255, 255, 255, 255, // white
             ],
         );
-        let cell = LayoutCell { x: 0.0, y: 0.0, width: 4.0, height: 2.0 };
+        let cell = LayoutCell {
+            x: 0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 2.0,
+        };
         let mut canvas = Canvas::filled(4, 2, crate::pixel::Color32::new(0, 0, 0));
         canvas.blit_scaled(&cell, &patch, 1.0, Some("REPLICATE"), None);
 
@@ -554,7 +693,12 @@ mod tests {
                 255, 255, 255, 255, // white
             ],
         );
-        let cell = LayoutCell { x: 0.0, y: 0.0, width: 8.0, height: 4.0 };
+        let cell = LayoutCell {
+            x: 0.0,
+            y: 0.0,
+            width: 8.0,
+            height: 4.0,
+        };
         let mut canvas = Canvas::filled(8, 4, crate::pixel::Color32::new(7, 7, 7));
         canvas.blit_scaled(&cell, &patch, 1.0, None, Some(2.0));
 
@@ -567,7 +711,13 @@ mod tests {
             .iter()
             .filter(|pixel| pixel[0] == 255)
             .count();
-        assert_eq!(lit_pixels, 1, "requested width must shrink the rendered patch");
-        assert_eq!(&canvas.bytes[(8 + 4) * 4..(8 + 5) * 4], &[255, 255, 255, 255]);
+        assert_eq!(
+            lit_pixels, 1,
+            "requested width must shrink the rendered patch"
+        );
+        assert_eq!(
+            &canvas.bytes[(8 + 4) * 4..(8 + 5) * 4],
+            &[255, 255, 255, 255]
+        );
     }
 }

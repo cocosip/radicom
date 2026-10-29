@@ -64,25 +64,34 @@ pub struct TlsOptions {
 
 impl TlsOptions {
     /// Server material from a PEM certificate chain and private key.
-    pub fn server(cert_file: impl Into<std::path::PathBuf>, key_file: impl Into<std::path::PathBuf>) -> Self {
-        TlsOptions { cert_file: Some(cert_file.into()), key_file: Some(key_file.into()), ..Default::default() }
+    pub fn server(
+        cert_file: impl Into<std::path::PathBuf>,
+        key_file: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        TlsOptions {
+            cert_file: Some(cert_file.into()),
+            key_file: Some(key_file.into()),
+            ..Default::default()
+        }
     }
 
     /// Client material trusting the given CA bundle, or anything when `None`.
     pub fn client(ca_file: Option<impl Into<std::path::PathBuf>>) -> Self {
-        TlsOptions { cert_file: ca_file.map(Into::into), accept_any: false, ..Default::default() }
+        TlsOptions {
+            cert_file: ca_file.map(Into::into),
+            accept_any: false,
+            ..Default::default()
+        }
     }
 
     /// Builds the server configuration (§2.4).
     pub fn server_config(&self) -> Result<Arc<ServerConfig>> {
-        let cert_path = self
-            .cert_file
-            .as_ref()
-            .ok_or(NetworkError::protocol("TLS server needs a certificate file"))?;
-        let key_path = self
-            .key_file
-            .as_ref()
-            .ok_or(NetworkError::protocol("TLS server needs a private key file"))?;
+        let cert_path = self.cert_file.as_ref().ok_or(NetworkError::protocol(
+            "TLS server needs a certificate file",
+        ))?;
+        let key_path = self.key_file.as_ref().ok_or(NetworkError::protocol(
+            "TLS server needs a private key file",
+        ))?;
 
         let chain = load_certs(cert_path)?;
         let key = load_key(key_path)?;
@@ -92,12 +101,18 @@ impl TlsOptions {
             Some(ca) => {
                 let mut roots = RootCertStore::empty();
                 for cert in load_certs(ca)? {
-                    roots.add(cert).map_err(|e| NetworkError::protocol_tls(e.to_string()))?;
+                    roots
+                        .add(cert)
+                        .map_err(|e| NetworkError::protocol_tls(e.to_string()))?;
                 }
                 let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
                     .build()
-                    .map_err(|e| NetworkError::protocol_tls(format!("bad client CA bundle: {e}")))?;
-                builder.with_client_cert_verifier(verifier).with_single_cert(chain, key)
+                    .map_err(|e| {
+                        NetworkError::protocol_tls(format!("bad client CA bundle: {e}"))
+                    })?;
+                builder
+                    .with_client_cert_verifier(verifier)
+                    .with_single_cert(chain, key)
             }
             None => builder.with_no_client_auth().with_single_cert(chain, key),
         }
@@ -110,14 +125,18 @@ impl TlsOptions {
         let mut roots = RootCertStore::empty();
         if let Some(ca) = &self.cert_file {
             for cert in load_certs(ca)? {
-                roots.add(cert).map_err(|e| NetworkError::protocol_tls(e.to_string()))?;
+                roots
+                    .add(cert)
+                    .map_err(|e| NetworkError::protocol_tls(e.to_string()))?;
             }
         }
 
         let builder = ClientConfig::builder_with_protocol_versions(self.min_version.versions());
         let builder = if self.accept_any {
             // testing only: accept any server certificate
-            builder.dangerous().with_custom_certificate_verifier(Arc::new(NoVerification))
+            builder
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(NoVerification))
         } else {
             builder.with_root_certificates(roots)
         };
@@ -155,7 +174,10 @@ impl TlsOptions {
     }
 
     /// Performs the server handshake over an accepted TCP stream (§2.4).
-    pub async fn accept(&self, stream: tokio::net::TcpStream) -> Result<tokio_rustls::server::TlsStream<tokio::net::TcpStream>> {
+    pub async fn accept(
+        &self,
+        stream: tokio::net::TcpStream,
+    ) -> Result<tokio_rustls::server::TlsStream<tokio::net::TcpStream>> {
         let config = self.server_config()?;
         let acceptor = tokio_rustls::TlsAcceptor::from(config);
         acceptor.accept(stream).await.map_err(tls_err)
@@ -182,10 +204,14 @@ fn tls_err(e: std::io::Error) -> NetworkError {
 /// Loads a PEM certificate chain.
 fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
     let data = std::fs::read(path).map_err(NetworkError::Io)?;
-    let parsed: std::result::Result<Vec<_>, _> = certs(&mut BufReader::new(data.as_slice())).collect();
-    let chain = parsed.map_err(|e| NetworkError::protocol_tls(format!("bad certificate PEM: {e}")))?;
+    let parsed: std::result::Result<Vec<_>, _> =
+        certs(&mut BufReader::new(data.as_slice())).collect();
+    let chain =
+        parsed.map_err(|e| NetworkError::protocol_tls(format!("bad certificate PEM: {e}")))?;
     if chain.is_empty() {
-        return Err(NetworkError::protocol_tls("certificate file holds no certificate"));
+        return Err(NetworkError::protocol_tls(
+            "certificate file holds no certificate",
+        ));
     }
     Ok(chain)
 }
@@ -193,13 +219,21 @@ fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
 /// Loads a PEM private key (PKCS#8 or PKCS#1).
 fn load_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
     let data = std::fs::read(path).map_err(NetworkError::Io)?;
-    if let Ok(Some(key)) = pkcs8_private_keys(&mut BufReader::new(data.as_slice())).next().transpose() {
+    if let Ok(Some(key)) = pkcs8_private_keys(&mut BufReader::new(data.as_slice()))
+        .next()
+        .transpose()
+    {
         return Ok(PrivateKeyDer::Pkcs8(key));
     }
-    if let Ok(Some(key)) = rsa_private_keys(&mut BufReader::new(data.as_slice())).next().transpose() {
+    if let Ok(Some(key)) = rsa_private_keys(&mut BufReader::new(data.as_slice()))
+        .next()
+        .transpose()
+    {
         return Ok(PrivateKeyDer::Pkcs1(key));
     }
-    Err(NetworkError::protocol_tls("private key file holds no usable key"))
+    Err(NetworkError::protocol_tls(
+        "private key file holds no usable key",
+    ))
 }
 
 /// Test-only verifier that accepts any certificate (§2.4).
@@ -214,7 +248,10 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for NoVerification
         _server_name: &tokio_rustls::rustls::pki_types::ServerName<'_>,
         _ocsp_response: &[u8],
         _now: tokio_rustls::rustls::pki_types::UnixTime,
-    ) -> std::result::Result<tokio_rustls::rustls::client::danger::ServerCertVerified, tokio_rustls::rustls::Error> {
+    ) -> std::result::Result<
+        tokio_rustls::rustls::client::danger::ServerCertVerified,
+        tokio_rustls::rustls::Error,
+    > {
         Ok(tokio_rustls::rustls::client::danger::ServerCertVerified::assertion())
     }
 
@@ -223,7 +260,10 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for NoVerification
         _message: &[u8],
         _cert: &CertificateDer<'_>,
         _dss: &tokio_rustls::rustls::DigitallySignedStruct,
-    ) -> std::result::Result<tokio_rustls::rustls::client::danger::HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+    ) -> std::result::Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
         Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
     }
 
@@ -232,7 +272,10 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for NoVerification
         _message: &[u8],
         _cert: &CertificateDer<'_>,
         _dss: &tokio_rustls::rustls::DigitallySignedStruct,
-    ) -> std::result::Result<tokio_rustls::rustls::client::danger::HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+    ) -> std::result::Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
         Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
     }
 
@@ -249,11 +292,20 @@ mod tests {
 
     #[test]
     fn server_config_requires_both_files() {
-        let options = TlsOptions { cert_file: Some("cert.pem".into()), ..Default::default() };
+        let options = TlsOptions {
+            cert_file: Some("cert.pem".into()),
+            ..Default::default()
+        };
         assert!(options.server_config().is_err(), "a key is mandatory");
 
-        let options = TlsOptions { key_file: Some("key.pem".into()), ..Default::default() };
-        assert!(options.server_config().is_err(), "a certificate is mandatory");
+        let options = TlsOptions {
+            key_file: Some("key.pem".into()),
+            ..Default::default()
+        };
+        assert!(
+            options.server_config().is_err(),
+            "a certificate is mandatory"
+        );
     }
 
     #[test]
@@ -268,12 +320,18 @@ mod tests {
     #[test]
     fn client_config_without_a_ca_builds_an_empty_root_store() {
         let options = TlsOptions::default();
-        assert!(options.client_config().is_ok(), "an empty root store is valid");
+        assert!(
+            options.client_config().is_ok(),
+            "an empty root store is valid"
+        );
     }
 
     #[test]
     fn client_config_accepts_any_when_asked() {
-        let options = TlsOptions { accept_any: true, ..Default::default() };
+        let options = TlsOptions {
+            accept_any: true,
+            ..Default::default()
+        };
         assert!(options.client_config().is_ok());
     }
     /// Writes a self-signed certificate and key, returning their paths.
@@ -300,22 +358,38 @@ mod tests {
             tls: Some(TlsOptions::server(cert.clone(), key)),
             ..Default::default()
         };
-        let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), server_options)
-            .await
-            .unwrap();
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(VerificationProvider),
+            server_options,
+        )
+        .await
+        .unwrap();
         let addr = server.local_addr();
         let handle = tokio::spawn(async move { server.accept_one().await });
 
         // trust the self-signed certificate through the CA bundle
         let client_options = ClientOptions {
-            tls: Some(TlsOptions { cert_file: Some(cert), server_name: Some("localhost".into()), ..Default::default() }),
+            tls: Some(TlsOptions {
+                cert_file: Some(cert),
+                server_name: Some("localhost".into()),
+                ..Default::default()
+            }),
             ..Default::default()
         };
-        let contexts =
-            vec![PresentationContext::new(1, sop_class::VERIFICATION, vec!["1.2.840.10008.1.2".to_string()])];
-        let mut association = Association::open(addr, "SCU", "SCP", contexts, client_options).await.unwrap();
+        let contexts = vec![PresentationContext::new(
+            1,
+            sop_class::VERIFICATION,
+            vec!["1.2.840.10008.1.2".to_string()],
+        )];
+        let mut association = Association::open(addr, "SCU", "SCP", contexts, client_options)
+            .await
+            .unwrap();
 
-        let response = association.send_c_echo(sop_class::VERIFICATION).await.unwrap();
+        let response = association
+            .send_c_echo(sop_class::VERIFICATION)
+            .await
+            .unwrap();
         assert_eq!(response.status, crate::dimse::status::SUCCESS);
         association.release().await.unwrap();
         handle.await.unwrap().unwrap();
@@ -329,20 +403,101 @@ mod tests {
         use crate::services::VerificationProvider;
 
         let (cert, key) = self_signed("untrusted");
-        let server_options = ServerOptions { tls: Some(TlsOptions::server(cert, key)), ..Default::default() };
-        let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), server_options)
-            .await
-            .unwrap();
+        let server_options = ServerOptions {
+            tls: Some(TlsOptions::server(cert, key)),
+            ..Default::default()
+        };
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(VerificationProvider),
+            server_options,
+        )
+        .await
+        .unwrap();
         let addr = server.local_addr();
         let handle = tokio::spawn(async move { server.accept_one().await });
 
         // no CA bundle and no accept_any: verification must fail
-        let client_options = ClientOptions { tls: Some(TlsOptions::default()), ..Default::default() };
-        let contexts =
-            vec![PresentationContext::new(1, sop_class::VERIFICATION, vec!["1.2.840.10008.1.2".to_string()])];
+        let client_options = ClientOptions {
+            tls: Some(TlsOptions::default()),
+            ..Default::default()
+        };
+        let contexts = vec![PresentationContext::new(
+            1,
+            sop_class::VERIFICATION,
+            vec!["1.2.840.10008.1.2".to_string()],
+        )];
         let result = Association::open(addr, "SCU", "SCP", contexts, client_options).await;
         assert!(result.is_err(), "an untrusted certificate is rejected");
         let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn a_silent_peer_times_out_the_server_handshake() {
+        // review #14: a peer that connects and never sends a ClientHello must not
+        // hold the connection (and its client slot) forever.
+        use crate::error::NetworkError;
+        use crate::server::{DicomServer, ServerOptions};
+        use crate::services::VerificationProvider;
+        use std::time::Duration;
+
+        let (cert, key) = self_signed("silent");
+        let server_options = ServerOptions {
+            tls: Some(TlsOptions::server(cert, key)),
+            tls_handshake_timeout: Duration::from_millis(50),
+            ..Default::default()
+        };
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(VerificationProvider),
+            server_options,
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        // connect over TCP, send nothing, keep the socket open
+        let _silent = tokio::net::TcpStream::connect(addr).await.unwrap();
+        match handle.await.unwrap() {
+            Err(NetworkError::TlsHandshakeTimedOut { .. }) => {}
+            other => panic!("expected a handshake timeout, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_silent_server_times_out_the_client_handshake() {
+        // review #14, client side: a listener that never speaks TLS must not hang
+        // `Association::open`.
+        use crate::server::{Association, ClientOptions};
+        use std::time::Duration;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move {
+            // accept and hold the socket without a handshake
+            let stream = listener.accept().await.unwrap().0;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            drop(stream);
+        });
+
+        let options = ClientOptions {
+            tls: Some(TlsOptions {
+                accept_any: true,
+                ..Default::default()
+            }),
+            tls_handshake_timeout: Duration::from_millis(50),
+            ..Default::default()
+        };
+        let result = Association::open(addr, "SCU", "SCP", Vec::new(), options).await;
+        assert!(
+            matches!(
+                result,
+                Err(crate::error::NetworkError::TlsHandshakeTimedOut { .. })
+            ),
+            "the client handshake has its own deadline"
+        );
+        accept.abort();
     }
 
     #[tokio::test]
@@ -353,19 +508,39 @@ mod tests {
         use crate::services::VerificationProvider;
 
         let (cert, key) = self_signed("any");
-        let server_options = ServerOptions { tls: Some(TlsOptions::server(cert, key)), ..Default::default() };
-        let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), server_options)
-            .await
-            .unwrap();
+        let server_options = ServerOptions {
+            tls: Some(TlsOptions::server(cert, key)),
+            ..Default::default()
+        };
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(VerificationProvider),
+            server_options,
+        )
+        .await
+        .unwrap();
         let addr = server.local_addr();
         let handle = tokio::spawn(async move { server.accept_one().await });
 
-        let client_options =
-            ClientOptions { tls: Some(TlsOptions { accept_any: true, ..Default::default() }), ..Default::default() };
-        let contexts =
-            vec![PresentationContext::new(1, sop_class::VERIFICATION, vec!["1.2.840.10008.1.2".to_string()])];
-        let mut association = Association::open(addr, "SCU", "SCP", contexts, client_options).await.unwrap();
-        let response = association.send_c_echo(sop_class::VERIFICATION).await.unwrap();
+        let client_options = ClientOptions {
+            tls: Some(TlsOptions {
+                accept_any: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let contexts = vec![PresentationContext::new(
+            1,
+            sop_class::VERIFICATION,
+            vec!["1.2.840.10008.1.2".to_string()],
+        )];
+        let mut association = Association::open(addr, "SCU", "SCP", contexts, client_options)
+            .await
+            .unwrap();
+        let response = association
+            .send_c_echo(sop_class::VERIFICATION)
+            .await
+            .unwrap();
         assert_eq!(response.status, crate::dimse::status::SUCCESS);
         association.release().await.unwrap();
         handle.await.unwrap().unwrap();
@@ -375,7 +550,10 @@ mod tests {
         // §2.14: defaulting to "localhost" verified the wrong name; an unset
         // name means "verify the peer address we actually connected to"
         assert_eq!(TlsOptions::default().server_name(), None);
-        let named = TlsOptions { server_name: Some("pacs.example".into()), ..Default::default() };
+        let named = TlsOptions {
+            server_name: Some("pacs.example".into()),
+            ..Default::default()
+        };
         assert_eq!(named.server_name(), Some("pacs.example"));
     }
 
@@ -387,9 +565,14 @@ mod tests {
     #[test]
     fn a_client_certificate_needs_its_key() {
         let (cert, _key) = self_signed("client-half");
-        let options = TlsOptions { client_cert_file: Some(cert), ..Default::default() };
+        let options = TlsOptions {
+            client_cert_file: Some(cert),
+            ..Default::default()
+        };
         match options.client_config() {
-            Err(NetworkError::Tls(message)) => assert!(message.contains("private key"), "got {message}"),
+            Err(NetworkError::Tls(message)) => {
+                assert!(message.contains("private key"), "got {message}")
+            }
             other => panic!("expected a TLS error, got {other:?}"),
         }
     }
@@ -397,14 +580,20 @@ mod tests {
     /// Spins a TLS server and returns `(addr, join handle)`.
     async fn tls_server(
         options: TlsOptions,
-    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<crate::error::Result<()>>) {
+    ) -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<crate::error::Result<()>>,
+    ) {
         use crate::server::{DicomServer, ServerOptions};
         use crate::services::VerificationProvider;
 
         let server = DicomServer::bind(
             "127.0.0.1:0",
             Arc::new(VerificationProvider),
-            ServerOptions { tls: Some(options), ..Default::default() },
+            ServerOptions {
+                tls: Some(options),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -453,7 +642,10 @@ mod tests {
         let (cert, key) = self_signed("bare-ip");
         let (addr, handle) = tls_server(TlsOptions::server(cert.clone(), key)).await;
         let client_options = ClientOptions {
-            tls: Some(TlsOptions { cert_file: Some(cert), ..Default::default() }),
+            tls: Some(TlsOptions {
+                cert_file: Some(cert),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let result = Association::open(addr, "SCU", "SCP", echo_contexts(), client_options).await;
@@ -511,7 +703,10 @@ mod tests {
             }),
             ..Default::default()
         };
-        let mut association = Association::open(addr, "SCU", "SCP", echo_contexts(), client_options).await.unwrap();
+        let mut association =
+            Association::open(addr, "SCU", "SCP", echo_contexts(), client_options)
+                .await
+                .unwrap();
         let response = association
             .send_c_echo(crate::association::sop_class::VERIFICATION)
             .await
@@ -536,7 +731,11 @@ mod tests {
         client.write_all(&legacy_client_hello()).await.unwrap();
 
         let mut reply = [0u8; 5];
-        let read = tokio::time::timeout(std::time::Duration::from_secs(5), client.read_exact(&mut reply)).await;
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.read_exact(&mut reply),
+        )
+        .await;
         // 0x15 = alert: the handshake was refused. An immediate close (or no
         // answer at all) is a refusal too, so only a real reply is inspected.
         if let Ok(Ok(_)) = read {
@@ -570,7 +769,10 @@ mod tests {
             }),
             ..Default::default()
         };
-        let mut association = Association::open(addr, "SCU", "SCP", echo_contexts(), client_options).await.unwrap();
+        let mut association =
+            Association::open(addr, "SCU", "SCP", echo_contexts(), client_options)
+                .await
+                .unwrap();
         let response = association
             .send_c_echo(crate::association::sop_class::VERIFICATION)
             .await

@@ -28,7 +28,10 @@ use radicom_network::cmove::CMoveRequest;
 use std::sync::{Arc, Mutex};
 
 fn arg(args: &[String], name: &str) -> Option<String> {
-    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
 
 fn client(calling: &str, called: &str, peer: &str) -> DicomClient {
@@ -96,7 +99,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2) optional C-STORE (own association).
     if let Some(path) = store {
         let file = DicomFile::open(&path)?;
-        let sop = file.dataset.try_get_str(Tag::SOP_CLASS_UID).unwrap_or_default();
+        let sop = file
+            .dataset
+            .try_get_str(Tag::SOP_CLASS_UID)
+            .unwrap_or_default();
         println!("C-STORE {path} (SOP {sop})");
         let mut store_client = client(&calling, &called, &peer);
         let resp = store_client.send_c_store(&file).await?;
@@ -137,7 +143,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             request = request.with_key(group, element, vr, value);
         }
         let storage: Vec<String> = arg(&args, "--storage")
-            .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+            .map(|s| {
+                s.split(',')
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect()
+            })
             .unwrap_or_else(default_storage);
         let received = Arc::new(Mutex::new(Vec::new()));
         let mut get_client = DicomClient::new(calling.clone(), called.clone(), peer.clone())
@@ -148,8 +159,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let received = received.lock().unwrap();
             println!("C-GET level={level_text} received={}", received.len());
             for file in received.iter().take(10) {
-                let sop = file.dataset.try_get_str(Tag::SOP_CLASS_UID).unwrap_or_default();
-                let instance = file.dataset.try_get_str(Tag::SOP_INSTANCE_UID).unwrap_or_default();
+                let sop = file
+                    .dataset
+                    .try_get_str(Tag::SOP_CLASS_UID)
+                    .unwrap_or_default();
+                let instance = file
+                    .dataset
+                    .try_get_str(Tag::SOP_INSTANCE_UID)
+                    .unwrap_or_default();
                 println!("  - SOP={sop} instance={instance}");
             }
         }

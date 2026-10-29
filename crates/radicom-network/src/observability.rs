@@ -52,7 +52,8 @@ pub struct MetricsSnapshot {
 impl MetricsSnapshot {
     /// Connections currently open (opened − closed, saturating).
     pub fn active_connections(&self) -> u64 {
-        self.connections_opened.saturating_sub(self.connections_closed)
+        self.connections_opened
+            .saturating_sub(self.connections_closed)
     }
 }
 
@@ -228,7 +229,9 @@ impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for CountingStream<
 
 impl<S: std::fmt::Debug> std::fmt::Debug for CountingStream<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CountingStream").field("inner", &self.inner).finish()
+        f.debug_struct("CountingStream")
+            .field("inner", &self.inner)
+            .finish()
     }
 }
 
@@ -353,7 +356,8 @@ mod tests {
                 tracing::span::Id::from_u64(1)
             }
             fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-            fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+            fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {
+            }
             fn event(&self, _event: &tracing::Event<'_>) {
                 self.0.fetch_add(1, Ordering::Relaxed);
             }

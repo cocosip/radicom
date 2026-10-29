@@ -33,24 +33,40 @@ pub struct MetaSopClasses;
 const TABLE: &[(&str, &[&str])] = &[
     (
         uids::BASIC_GRAYSCALE_PRINT_MANAGEMENT_META,
-        &[uids::BASIC_FILM_SESSION, uids::BASIC_FILM_BOX, uids::BASIC_GRAYSCALE_IMAGE_BOX, uids::PRINTER],
+        &[
+            uids::BASIC_FILM_SESSION,
+            uids::BASIC_FILM_BOX,
+            uids::BASIC_GRAYSCALE_IMAGE_BOX,
+            uids::PRINTER,
+        ],
     ),
     (
         uids::BASIC_COLOR_PRINT_MANAGEMENT_META,
-        &[uids::BASIC_FILM_SESSION, uids::BASIC_FILM_BOX, uids::BASIC_COLOR_IMAGE_BOX, uids::PRINTER],
+        &[
+            uids::BASIC_FILM_SESSION,
+            uids::BASIC_FILM_BOX,
+            uids::BASIC_COLOR_IMAGE_BOX,
+            uids::PRINTER,
+        ],
     ),
 ];
 
 impl MetaSopClasses {
     /// Every meta-class → sub-classes entry, as fo-dicom's `Instances` table.
     pub fn instances() -> Vec<(&'static str, Vec<&'static str>)> {
-        TABLE.iter().map(|(meta, subs)| (*meta, subs.to_vec())).collect()
+        TABLE
+            .iter()
+            .map(|(meta, subs)| (*meta, subs.to_vec()))
+            .collect()
     }
 
     /// The sub SOP classes aggregated by a meta SOP class, or `None` when
     /// `meta` is not a known meta class.
     pub fn sub_sop_classes(meta: &str) -> Option<Vec<&'static str>> {
-        TABLE.iter().find(|(key, _)| *key == meta).map(|(_, subs)| subs.to_vec())
+        TABLE
+            .iter()
+            .find(|(key, _)| *key == meta)
+            .map(|(_, subs)| subs.to_vec())
     }
 
     /// Reverse lookup: every meta SOP class whose sub-class list contains
@@ -229,7 +245,8 @@ mod tests {
 
     #[test]
     fn grayscale_meta_maps_to_its_sub_classes() {
-        let subs = MetaSopClasses::sub_sop_classes(uids::BASIC_GRAYSCALE_PRINT_MANAGEMENT_META).unwrap();
+        let subs =
+            MetaSopClasses::sub_sop_classes(uids::BASIC_GRAYSCALE_PRINT_MANAGEMENT_META).unwrap();
         assert_eq!(
             subs,
             vec![
@@ -243,7 +260,8 @@ mod tests {
 
     #[test]
     fn color_meta_maps_to_its_sub_classes() {
-        let subs = MetaSopClasses::sub_sop_classes(uids::BASIC_COLOR_PRINT_MANAGEMENT_META).unwrap();
+        let subs =
+            MetaSopClasses::sub_sop_classes(uids::BASIC_COLOR_PRINT_MANAGEMENT_META).unwrap();
         assert!(subs.contains(&uids::BASIC_COLOR_IMAGE_BOX));
         assert!(!subs.contains(&uids::BASIC_GRAYSCALE_IMAGE_BOX));
     }
@@ -257,10 +275,17 @@ mod tests {
     fn reverse_lookup_finds_the_meta_class_for_a_sub_class() {
         // the Image Box is shared: it belongs to the grayscale meta class
         let metas = MetaSopClasses::meta_sop_classes_for(uids::BASIC_GRAYSCALE_IMAGE_BOX);
-        assert_eq!(metas, vec![uids::BASIC_GRAYSCALE_PRINT_MANAGEMENT_META.to_string()]);
+        assert_eq!(
+            metas,
+            vec![uids::BASIC_GRAYSCALE_PRINT_MANAGEMENT_META.to_string()]
+        );
         // the film session is shared by both meta classes
         let metas = MetaSopClasses::meta_sop_classes_for(uids::BASIC_FILM_SESSION);
-        assert_eq!(metas.len(), 2, "the film session belongs to both meta classes");
+        assert_eq!(
+            metas.len(),
+            2,
+            "the film session belongs to both meta classes"
+        );
     }
 
     #[test]
@@ -272,16 +297,28 @@ mod tests {
 
     #[test]
     fn network_identifier_appends_the_mac_as_decimal() {
-        let uid = network_identifier_from_mac("1.2.826.0.1.3680043.10.999", &[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        let uid = network_identifier_from_mac(
+            "1.2.826.0.1.3680043.10.999",
+            &[0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        );
         // 0x001122334455 = 73588229205
         assert_eq!(uid, "1.2.826.0.1.3680043.10.999.73588229205");
-        assert!(radicom::model::uid::Uid::is_valid(&uid), "the derived UID is valid");
+        assert!(
+            radicom::model::uid::Uid::is_valid(&uid),
+            "the derived UID is valid"
+        );
     }
 
     #[test]
     fn mac_parsing_accepts_colon_and_dash() {
-        assert_eq!(parse_mac("aa:bb:cc:dd:ee:ff"), Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]));
-        assert_eq!(parse_mac("00-11-22-33-44-55"), Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]));
+        assert_eq!(
+            parse_mac("aa:bb:cc:dd:ee:ff"),
+            Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
+        );
+        assert_eq!(
+            parse_mac("00-11-22-33-44-55"),
+            Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55])
+        );
         assert_eq!(parse_mac("not-a-mac"), None);
         assert_eq!(parse_mac("00:11:22"), None, "wrong number of octets");
     }
@@ -294,6 +331,9 @@ mod tests {
         let uid = try_get_network_identifier("1.2.826.0.1.3680043.10.999")
             .expect("a host MAC is readable on Windows");
         assert!(uid.starts_with("1.2.826.0.1.3680043.10.999."), "uid: {uid}");
-        assert!(radicom::model::uid::Uid::is_valid(&uid), "derived UID valid: {uid}");
+        assert!(
+            radicom::model::uid::Uid::is_valid(&uid),
+            "derived UID valid: {uid}"
+        );
     }
 }

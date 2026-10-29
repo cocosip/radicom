@@ -37,7 +37,11 @@ impl Dataset {
     }
 
     pub fn with_transfer_syntax(ts: Arc<TransferSyntax>) -> Self {
-        Dataset { items: BTreeMap::new(), transfer_syntax: ts, validate: true }
+        Dataset {
+            items: BTreeMap::new(),
+            transfer_syntax: ts,
+            validate: true,
+        }
     }
 
     pub fn transfer_syntax(&self) -> Arc<TransferSyntax> {
@@ -182,7 +186,9 @@ impl Dataset {
             Some(DicomItem::Element(e)) => Ok(e.count()),
             Some(DicomItem::Sequence(s)) => Ok(s.len()),
             Some(DicomItem::Fragments(f)) => Ok(f.fragments().len()),
-            None => Err(Error::Data(DataError::TagNotFound { tag: TagRef(tag.group(), tag.element()) })),
+            None => Err(Error::Data(DataError::TagNotFound {
+                tag: TagRef(tag.group(), tag.element()),
+            })),
         }
     }
 
@@ -196,7 +202,9 @@ impl Dataset {
                 expected: "SQ",
                 found: "element",
             })),
-            None => Err(Error::Data(DataError::TagNotFound { tag: TagRef(tag.group(), tag.element()) })),
+            None => Err(Error::Data(DataError::TagNotFound {
+                tag: TagRef(tag.group(), tag.element()),
+            })),
         }
     }
 
@@ -281,7 +289,12 @@ impl Dataset {
 
     /// Typed insert that forces `vr`, bypassing dictionary resolution
     /// (fo-dicom `AddOrUpdate(VR, tag, values)`).
-    pub fn insert_value_with_vr<V: IntoElement>(&mut self, tag: Tag, vr: Vr, value: V) -> &mut Self {
+    pub fn insert_value_with_vr<V: IntoElement>(
+        &mut self,
+        tag: Tag,
+        vr: Vr,
+        value: V,
+    ) -> &mut Self {
         self.insert_or_update(value.into_element(tag, vr))
     }
 
@@ -618,12 +631,25 @@ mod tests {
         ds.insert_empty(Tag::new(0x6002, 0x3000), Vr::Ow);
         ds.insert_empty(Tag::new(0x6002, 0x0010), Vr::Us);
 
-        let group: Vec<_> = ds.enumerate_group(0x0010).map(|i| i.tag().clone()).collect();
-        assert_eq!(group, vec![PATIENT_NAME, PATIENT_ID], "group length (0000) excluded");
+        let group: Vec<_> = ds
+            .enumerate_group(0x0010)
+            .map(|i| i.tag().clone())
+            .collect();
+        assert_eq!(
+            group,
+            vec![PATIENT_NAME, PATIENT_ID],
+            "group length (0000) excluded"
+        );
 
         let overlay = MaskedTag::parse("(60xx,3000)").unwrap();
-        let masked: Vec<_> = ds.enumerate_masked(&overlay).map(|i| i.tag().clone()).collect();
-        assert_eq!(masked, vec![Tag::new(0x6000, 0x3000), Tag::new(0x6002, 0x3000)]);
+        let masked: Vec<_> = ds
+            .enumerate_masked(&overlay)
+            .map(|i| i.tag().clone())
+            .collect();
+        assert_eq!(
+            masked,
+            vec![Tag::new(0x6000, 0x3000), Tag::new(0x6002, 0x3000)]
+        );
 
         assert_eq!(ds.enumerate_group(0x7FE0).count(), 0);
     }
@@ -653,7 +679,8 @@ mod tests {
         let mut off = Dataset::new();
         off.set_validation(false);
         off.insert_str(Tag::ACCESSION_NUMBER, Vr::Ae, "SEVENTEEN_CHARS_X");
-        off.validate().expect("validation disabled ignores bad values");
+        off.validate()
+            .expect("validation disabled ignores bad values");
     }
 
     #[test]
@@ -669,7 +696,10 @@ mod tests {
     fn insert_dispatch_matrix() {
         let mut ds = Dataset::new();
         ds.insert_value(PATIENT_NAME, "Doe^John");
-        ds.insert_value(Tag::STUDY_INSTANCE_UID, crate::model::uid::Uid::new("1.2.3"));
+        ds.insert_value(
+            Tag::STUDY_INSTANCE_UID,
+            crate::model::uid::Uid::new("1.2.3"),
+        );
         ds.insert_value(ROWS, 512_i32);
         ds.insert_value(Tag::SLICE_THICKNESS, 2.5_f64); // slice thickness DS
         ds.insert_value(Tag::PIXEL_DATA, vec![1u8, 2, 3]);
@@ -679,7 +709,11 @@ mod tests {
         let uid_el = ds.get_element(Tag::STUDY_INSTANCE_UID).unwrap();
         assert_eq!(uid_el.vr(), Vr::Ui);
         let rows_el = ds.get_element(ROWS).unwrap();
-        assert_eq!(rows_el.vr(), Vr::Us, "dictionary VR for (0028,0010) must win over the IS value hint");
+        assert_eq!(
+            rows_el.vr(),
+            Vr::Us,
+            "dictionary VR for (0028,0010) must win over the IS value hint"
+        );
         let thick = ds.get_element(Tag::SLICE_THICKNESS).unwrap();
         assert_eq!(thick.vr(), Vr::Ds);
         let th: f64 = ds.get(Tag::SLICE_THICKNESS).unwrap();
@@ -703,13 +737,20 @@ mod tests {
     #[test]
     fn dictionary_vr_beats_the_numeric_value_hint() {
         let mut ds = Dataset::new();
+        // a saveable file needs the instance's own SOP class (review #8)
+        ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.2");
+        ds.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5.6.7");
         ds.insert_value(ROWS, 512u16);
         ds.insert_value(COLUMNS, 256u16);
         ds.insert_value(Tag::NUMBER_OF_FRAMES, 3u16);
         ds.insert_value(Tag::RESCALE_INTERCEPT, 1.5f64);
 
         assert_eq!(ds.get_element(ROWS).unwrap().vr(), Vr::Us, "ROWS is US");
-        assert_eq!(ds.get_element(COLUMNS).unwrap().vr(), Vr::Us, "COLUMNS is US");
+        assert_eq!(
+            ds.get_element(COLUMNS).unwrap().vr(),
+            Vr::Us,
+            "COLUMNS is US"
+        );
         assert_eq!(
             ds.get_element(Tag::NUMBER_OF_FRAMES).unwrap().vr(),
             Vr::Is,
@@ -728,7 +769,9 @@ mod tests {
 
         // And the wire bytes carry US, not IS.
         let file = crate::io::file::DicomFile::from_dataset(ds);
-        let bytes = file.to_bytes(&crate::io::writer::WriteOptions::default()).unwrap();
+        let bytes = file
+            .to_bytes(&crate::io::writer::WriteOptions::default())
+            .unwrap();
         let pos = bytes
             .windows(4)
             .position(|w| w == [0x28, 0x00, 0x10, 0x00])
@@ -768,18 +811,24 @@ mod tests {
     #[test]
     fn numeric_hint_covers_every_numeric_vr() {
         let mut ds = Dataset::new();
-        ds.insert_value(Tag::ROWS, 7u16);                        // US
-        ds.insert_value(Tag::NUMBER_OF_FRAMES, 3u16);            // IS
+        ds.insert_value(Tag::ROWS, 7u16); // US
+        ds.insert_value(Tag::NUMBER_OF_FRAMES, 3u16); // IS
         ds.insert_value(Tag::SMALLEST_IMAGE_PIXEL_VALUE, -5i32); // SS-capable dictionary VR
-        ds.insert_value(Tag::RESCALE_INTERCEPT, -1.25f64);       // DS
+        ds.insert_value(Tag::RESCALE_INTERCEPT, -1.25f64); // DS
 
         assert_eq!(ds.get_element(ROWS).unwrap().vr(), Vr::Us);
         assert_eq!(ds.get_element(Tag::NUMBER_OF_FRAMES).unwrap().vr(), Vr::Is);
         assert_eq!(ds.get_element(Tag::RESCALE_INTERCEPT).unwrap().vr(), Vr::Ds);
 
         // The SS case keeps its sign through the IS hint.
-        let smallest = ds.get_element(Tag::SMALLEST_IMAGE_PIXEL_VALUE).unwrap().vr();
-        assert!(matches!(smallest, Vr::Ss | Vr::Us | Vr::Is), "got {smallest:?}");
+        let smallest = ds
+            .get_element(Tag::SMALLEST_IMAGE_PIXEL_VALUE)
+            .unwrap()
+            .vr();
+        assert!(
+            matches!(smallest, Vr::Ss | Vr::Us | Vr::Is),
+            "got {smallest:?}"
+        );
         assert_eq!(ds.get::<i32>(Tag::SMALLEST_IMAGE_PIXEL_VALUE).unwrap(), -5);
     }
 
@@ -817,7 +866,10 @@ mod tests {
     fn insert_add_vs_update() {
         let mut ds = Dataset::new();
         ds.insert_str(PATIENT_ID, Vr::Lo, "A");
-        assert!(ds.insert_new(PATIENT_ID, "B").is_err(), "Add duplicates error");
+        assert!(
+            ds.insert_new(PATIENT_ID, "B").is_err(),
+            "Add duplicates error"
+        );
         ds.insert_str(PATIENT_ID, Vr::Lo, "B");
         assert_eq!(ds.get_str(PATIENT_ID).unwrap(), "B", "update replaces");
         assert_eq!(ds.value_count(PATIENT_ID).unwrap(), 1);
@@ -837,24 +889,37 @@ mod tests {
         assert_eq!(seq.len(), 2);
         assert_eq!(ds.value_count(Tag::REFERENCED_IMAGE_SEQUENCE).unwrap(), 2);
         assert_eq!(
-            seq.items()[0].get_str(Tag::REFERENCED_SOP_CLASS_UID).unwrap(),
+            seq.items()[0]
+                .get_str(Tag::REFERENCED_SOP_CLASS_UID)
+                .unwrap(),
             "1.2.3",
             "nested dataset reads"
         );
-        assert!(ds.get::<String>(Tag::REFERENCED_IMAGE_SEQUENCE).is_err(), "SQ is not an element");
+        assert!(
+            ds.get::<String>(Tag::REFERENCED_IMAGE_SEQUENCE).is_err(),
+            "SQ is not an element"
+        );
         // cascade: setting the outer syntax reaches nested items
         ds.set_transfer_syntax(syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone());
-        let nested_ts = ds.get_sequence(Tag::REFERENCED_IMAGE_SEQUENCE).unwrap().items()[0].transfer_syntax();
+        let nested_ts = ds
+            .get_sequence(Tag::REFERENCED_IMAGE_SEQUENCE)
+            .unwrap()
+            .items()[0]
+            .transfer_syntax();
         assert_eq!(nested_ts.uid(), "1.2.840.10008.1.2");
     }
 
     #[test]
     fn private_tag_resolution_and_creation() {
         let mut ds = Dataset::new();
-        let creator = Arc::new(crate::model::private_creator::PrivateCreator::new("ACME 1.2"));
+        let creator = Arc::new(crate::model::private_creator::PrivateCreator::new(
+            "ACME 1.2",
+        ));
         let dict_style = Tag::private(0x0029, 0x0001, creator.clone());
 
-        let resolved = ds.get_private_tag(dict_style.clone(), true).expect("block allocated");
+        let resolved = ds
+            .get_private_tag(dict_style.clone(), true)
+            .expect("block allocated");
         assert_eq!(resolved.group(), 0x0029);
         assert_eq!(resolved.element() & 0xFF, 0x01);
         assert_eq!(resolved.element() >> 8, 0x10, "first free block");
@@ -869,29 +934,45 @@ mod tests {
         // store a value at the block tag and read it back through the
         // dictionary-style tag
         ds.insert_str(resolved.clone(), Vr::Lo, "widget");
-        assert_eq!(ds.get_str(dict_style).unwrap(), "widget", "block-relative reads");
+        assert_eq!(
+            ds.get_str(dict_style).unwrap(),
+            "widget",
+            "block-relative reads"
+        );
 
         // non-private and block tags pass through unchanged
-        assert_eq!(ds.get_private_tag(Tag::PATIENT_NAME, false), Some(Tag::PATIENT_NAME));
+        assert_eq!(
+            ds.get_private_tag(Tag::PATIENT_NAME, false),
+            Some(Tag::PATIENT_NAME)
+        );
     }
 
     #[test]
     fn insert_or_update_resolves_and_retags_new_private_creator() {
         let mut ds = Dataset::new();
-        let creator = Arc::new(crate::model::private_creator::PrivateCreator::new("ACME 1.2"));
+        let creator = Arc::new(crate::model::private_creator::PrivateCreator::new(
+            "ACME 1.2",
+        ));
         let dict_style = Tag::private(0x0029, 0x0001, creator.clone());
 
         ds.insert_or_update(DicomElement::new_str(dict_style.clone(), Vr::Lo, "widget"));
 
-        let resolved = ds.get_private_tag(dict_style.clone(), false).expect("creator block allocated");
+        let resolved = ds
+            .get_private_tag(dict_style.clone(), false)
+            .expect("creator block allocated");
         assert_eq!(resolved.element(), 0x1001);
         assert_eq!(ds.get_str(dict_style).unwrap(), "widget");
         assert!(ds.items().any(|item| item.tag() == &resolved));
         assert!(ds.items().all(|item| item.tag().element() != 0x0001));
 
         let sequence_tag = Tag::private(0x0029, 0x0002, creator.clone());
-        ds.insert_or_update(DicomItem::Sequence(DicomSequence::new(sequence_tag.clone())));
-        assert_eq!(ds.get_sequence(sequence_tag).unwrap().tag().element(), 0x1002);
+        ds.insert_or_update(DicomItem::Sequence(DicomSequence::new(
+            sequence_tag.clone(),
+        )));
+        assert_eq!(
+            ds.get_sequence(sequence_tag).unwrap().tag().element(),
+            0x1002
+        );
 
         let fragments_tag = Tag::private(0x0029, 0x0003, creator);
         ds.insert_or_update(DicomItem::Fragments(DicomFragmentSequence::new(
@@ -904,7 +985,13 @@ mod tests {
     #[test]
     fn private_group_exhaustion() {
         let mut ds = Dataset::new();
-        let mk = |name: &str| Tag::private(0x002B, 0x0001, Arc::new(crate::model::private_creator::PrivateCreator::new(name)));
+        let mk = |name: &str| {
+            Tag::private(
+                0x002B,
+                0x0001,
+                Arc::new(crate::model::private_creator::PrivateCreator::new(name)),
+            )
+        };
         // fill all 240 blocks (0x10..=0xFF)
         for i in 0..240u32 {
             let tag = mk(&format!("C{i}"));
@@ -919,17 +1006,26 @@ mod tests {
     fn try_insert_or_update_errors_when_the_private_group_is_full() {
         let mut ds = Dataset::new();
         for i in 0..240u32 {
-            let creator = Arc::new(crate::model::private_creator::PrivateCreator::new(format!("C{i}")));
-            assert!(ds.get_private_tag(Tag::private(0x002B, 0x0001, creator), true).is_some());
+            let creator = Arc::new(crate::model::private_creator::PrivateCreator::new(format!(
+                "C{i}"
+            )));
+            assert!(ds
+                .get_private_tag(Tag::private(0x002B, 0x0001, creator), true)
+                .is_some());
         }
         let tag = Tag::private(
             0x002B,
             0x0001,
-            Arc::new(crate::model::private_creator::PrivateCreator::new("overflow")),
+            Arc::new(crate::model::private_creator::PrivateCreator::new(
+                "overflow",
+            )),
         );
         let item = DicomItem::Element(DicomElement::new_str(tag, Vr::Lo, "x"));
         assert_eq!(ds.len(), 240, "creator slots only");
-        assert!(ds.try_insert_or_update(item).is_err(), "a full group surfaces an error, not a silent drop");
+        assert!(
+            ds.try_insert_or_update(item).is_err(),
+            "a full group surfaces an error, not a silent drop"
+        );
     }
 
     #[test]
@@ -979,10 +1075,16 @@ mod tests {
         ds.copy_to_masked(&mut masked, &MaskedTag::parse("(0010,xxxx)").unwrap());
         assert!(masked.item(&PATIENT_ID).is_some());
         assert!(masked.item(&PATIENT_NAME).is_some());
-        assert!(masked.item(&Tag::new(0x0008, 0x0060)).is_none(), "other groups are skipped");
+        assert!(
+            masked.item(&Tag::new(0x0008, 0x0060)).is_none(),
+            "other groups are skipped"
+        );
 
         let mut named = Dataset::new();
-        ds.copy_tags(&mut named, &[Tag::new(0x0008, 0x0060), Tag::new(0x9999, 0x9999)]);
+        ds.copy_tags(
+            &mut named,
+            &[Tag::new(0x0008, 0x0060), Tag::new(0x9999, 0x9999)],
+        );
         assert_eq!(named.len(), 1, "missing tags are skipped");
         assert_eq!(named.get_str(Tag::new(0x0008, 0x0060)).unwrap(), "CT");
     }
@@ -1081,7 +1183,11 @@ impl PartialEq for Dataset {
     /// are not part of content.
     fn eq(&self, other: &Self) -> bool {
         self.items.len() == other.items.len()
-            && self.items.iter().zip(other.items.iter()).all(|((ta, ia), (tb, ib))| ta == tb && ia == ib)
+            && self
+                .items
+                .iter()
+                .zip(other.items.iter())
+                .all(|((ta, ia), (tb, ib))| ta == tb && ia == ib)
     }
 }
 
@@ -1098,7 +1204,10 @@ impl Dataset {
     pub fn content_equals(&self, other: &Self) -> bool {
         self.items.len() == other.items.len()
             && self.items.iter().all(|(tag, item)| {
-                other.items.get(tag).is_some_and(|other_item| items_content_equal(item, other_item))
+                other
+                    .items
+                    .get(tag)
+                    .is_some_and(|other_item| items_content_equal(item, other_item))
             })
     }
 }
@@ -1117,7 +1226,10 @@ fn items_content_equal(a: &DicomItem, b: &DicomItem) -> bool {
         (DicomItem::Sequence(x), DicomItem::Sequence(y)) => {
             x.tag() == y.tag()
                 && x.items().len() == y.items().len()
-                && x.items().iter().zip(y.items()).all(|(d1, d2)| d1.content_equals(d2))
+                && x.items()
+                    .iter()
+                    .zip(y.items())
+                    .all(|(d1, d2)| d1.content_equals(d2))
         }
         (DicomItem::Fragments(x), DicomItem::Fragments(y)) => x == y,
         _ => false,
@@ -1163,7 +1275,10 @@ impl Dataset {
         if let Some(per_frame) = self.try_get_sequence(PER_FRAME_FUNCTIONAL_GROUPS) {
             let item = per_frame.items().get(frame as usize).ok_or_else(|| {
                 Error::Data(DataError::IndexOutOfRange {
-                    tag: TagRef(PER_FRAME_FUNCTIONAL_GROUPS.group(), PER_FRAME_FUNCTIONAL_GROUPS.element()),
+                    tag: TagRef(
+                        PER_FRAME_FUNCTIONAL_GROUPS.group(),
+                        PER_FRAME_FUNCTIONAL_GROUPS.element(),
+                    ),
                     index: frame as usize,
                     count: per_frame.len(),
                 })
@@ -1181,7 +1296,8 @@ impl Dataset {
         time_tag: impl AsRef<Tag>,
     ) -> Result<chrono::NaiveDateTime, Error> {
         let date: chrono::NaiveDate = self.get(date_tag)?;
-        let time: chrono::NaiveTime = self.get_or(time_tag.as_ref().clone(), chrono::NaiveTime::MIN);
+        let time: chrono::NaiveTime =
+            self.get_or(time_tag.as_ref().clone(), chrono::NaiveTime::MIN);
         Ok(chrono::NaiveDateTime::new(date, time))
     }
 
@@ -1224,12 +1340,11 @@ impl Dataset {
         };
         use chrono::TimeZone;
         // the naive value is local time AT the offset (DICOM DT semantics)
-        offset
-            .from_local_datetime(&naive)
-            .single()
-            .ok_or_else(|| Error::Data(DataError::Other {
+        offset.from_local_datetime(&naive).single().ok_or_else(|| {
+            Error::Data(DataError::Other {
                 message: "date-time does not exist in the given offset".into(),
-            }))
+            })
+        })
     }
 }
 
@@ -1263,8 +1378,16 @@ mod derived_tests {
     fn functional_groups_flatten() {
         let ds = enhanced_dataset();
         let f0 = ds.functional_groups(0).unwrap();
-        assert_eq!(f0.get_str(Tag::SLICE_THICKNESS).unwrap(), "2.5", "shared contributes");
-        assert_eq!(f0.get_str(Tag::SLICE_LOCATION).unwrap(), "-5.0", "frame 0 location");
+        assert_eq!(
+            f0.get_str(Tag::SLICE_THICKNESS).unwrap(),
+            "2.5",
+            "shared contributes"
+        );
+        assert_eq!(
+            f0.get_str(Tag::SLICE_LOCATION).unwrap(),
+            "-5.0",
+            "frame 0 location"
+        );
         let f1 = ds.functional_groups(1).unwrap();
         assert_eq!(f1.get_str(Tag::SLICE_LOCATION).unwrap(), "-2.5");
 
@@ -1314,16 +1437,42 @@ mod derived_tests {
         };
 
         let mut a = Dataset::new();
-        a.insert(DicomElement::new_bytes(Tag::PIXEL_DATA, Vr::Ob, unresolved("http://a/1"))).unwrap();
+        a.insert(DicomElement::new_bytes(
+            Tag::PIXEL_DATA,
+            Vr::Ob,
+            unresolved("http://a/1"),
+        ))
+        .unwrap();
         let mut b = Dataset::new();
-        b.insert(DicomElement::new_bytes(Tag::PIXEL_DATA, Vr::Ob, unresolved("http://b/2"))).unwrap();
-        assert!(a.content_equals(&b), "unresolved bulk data is compared by tag only");
+        b.insert(DicomElement::new_bytes(
+            Tag::PIXEL_DATA,
+            Vr::Ob,
+            unresolved("http://b/2"),
+        ))
+        .unwrap();
+        assert!(
+            a.content_equals(&b),
+            "unresolved bulk data is compared by tag only"
+        );
 
         let mut c = Dataset::new();
-        c.insert(DicomElement::new_bytes(Tag::PIXEL_DATA, Vr::Ob, resolved(vec![1, 2, 3]))).unwrap();
+        c.insert(DicomElement::new_bytes(
+            Tag::PIXEL_DATA,
+            Vr::Ob,
+            resolved(vec![1, 2, 3]),
+        ))
+        .unwrap();
         let mut d = Dataset::new();
-        d.insert(DicomElement::new_bytes(Tag::PIXEL_DATA, Vr::Ob, resolved(vec![1, 2, 4]))).unwrap();
-        assert!(!c.content_equals(&d), "materialized bulk data still compares bytes");
+        d.insert(DicomElement::new_bytes(
+            Tag::PIXEL_DATA,
+            Vr::Ob,
+            resolved(vec![1, 2, 4]),
+        ))
+        .unwrap();
+        assert!(
+            !c.content_equals(&d),
+            "materialized bulk data still compares bytes"
+        );
 
         // tag set must match exactly
         let mut e = Dataset::new();

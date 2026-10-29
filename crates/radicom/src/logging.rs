@@ -79,9 +79,15 @@ mod tests {
     fn to_dump_string_with_options_respects_truncation() {
         let mut ds = Dataset::new();
         ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Averyveryverylongvalue");
-        let options = DumpOptions { max_value_chars: 4, ..Default::default() };
+        let options = DumpOptions {
+            max_value_chars: 4,
+            ..Default::default()
+        };
         let text = ds.to_dump_string_with(&options);
-        assert!(!text.contains("Averyveryverylongvalue"), "value must be elided: {text}");
+        assert!(
+            !text.contains("Averyveryverylongvalue"),
+            "value must be elided: {text}"
+        );
     }
 
     #[test]

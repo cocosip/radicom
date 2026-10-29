@@ -24,7 +24,11 @@ pub struct TcpOptions {
 
 impl Default for TcpOptions {
     fn default() -> Self {
-        TcpOptions { nodelay: true, send_buffer_size: None, receive_buffer_size: None }
+        TcpOptions {
+            nodelay: true,
+            send_buffer_size: None,
+            receive_buffer_size: None,
+        }
     }
 }
 
@@ -40,21 +44,90 @@ pub async fn read_pdu<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Pdu
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(NetworkError::Io(e)),
     }
-    reader.read_exact(&mut header[1..]).await.map_err(NetworkError::Io)?;
+    reader
+        .read_exact(&mut header[1..])
+        .await
+        .map_err(NetworkError::Io)?;
 
     let length = u32::from_be_bytes([header[2], header[3], header[4], header[5]]);
     if length > MAX_PDU_SIZE {
-        return Err(NetworkError::protocol("PDU length exceeds the 262144-byte receive limit"));
+        return Err(NetworkError::protocol(
+            "PDU length exceeds the 262144-byte receive limit",
+        ));
     }
     // One allocation sized from the validated length field, then read the body
     // straight into it: no intermediate zero-initialised copy (§3.1). The
     // MAX_PDU_SIZE check above keeps a peer from requesting a huge allocation.
     let mut frame = vec![0u8; HEADER_LEN + length as usize];
     frame[..HEADER_LEN].copy_from_slice(&header);
-    reader.read_exact(&mut frame[HEADER_LEN..]).await.map_err(NetworkError::Io)?;
+    reader
+        .read_exact(&mut frame[HEADER_LEN..])
+        .await
+        .map_err(NetworkError::Io)?;
 
     // Hand the frame over as `Bytes` so PDVs share it instead of copying (§3.4).
     pdu::decode_bytes(bytes::Bytes::from(frame)).map(Some)
+}
+
+/// Cancel-safe PDU framer.
+///
+/// [`read_pdu`] keeps its progress in the future, so a `select!` that drops the
+/// future after it consumed part of a frame loses those bytes and the next call
+/// resynchronises in the middle of a PDU. This keeps the received bytes in the
+/// struct instead: dropping the future only loses an *attempt*, never data.
+#[derive(Debug, Default)]
+pub struct PduReader {
+    buf: bytes::BytesMut,
+}
+
+impl PduReader {
+    pub fn new() -> Self {
+        PduReader {
+            buf: bytes::BytesMut::new(),
+        }
+    }
+
+    /// Reads one PDU, buffering across cancellation (§3.1, review #13).
+    pub async fn read_pdu<R: AsyncRead + Unpin>(&mut self, reader: &mut R) -> Result<Option<Pdu>> {
+        loop {
+            if let Some(pdu) = self.take_frame()? {
+                return Ok(Some(pdu));
+            }
+            let mut chunk = [0u8; 8192];
+            // `AsyncReadExt::read` is cancel safe: a dropped future consumes
+            // nothing, so the partial frame in `buf` stays valid.
+            let n = reader.read(&mut chunk).await.map_err(NetworkError::Io)?;
+            if n == 0 {
+                if self.buf.is_empty() {
+                    return Ok(None);
+                }
+                return Err(NetworkError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "early eof inside a PDU frame",
+                )));
+            }
+            self.buf.extend_from_slice(&chunk[..n]);
+        }
+    }
+
+    /// Extracts one complete frame from the buffer, if there is one.
+    fn take_frame(&mut self) -> Result<Option<Pdu>> {
+        if self.buf.len() < HEADER_LEN {
+            return Ok(None);
+        }
+        let length = u32::from_be_bytes([self.buf[2], self.buf[3], self.buf[4], self.buf[5]]);
+        if length > MAX_PDU_SIZE {
+            return Err(NetworkError::protocol(
+                "PDU length exceeds the 262144-byte receive limit",
+            ));
+        }
+        let total = HEADER_LEN + length as usize;
+        if self.buf.len() < total {
+            return Ok(None);
+        }
+        let frame = self.buf.split_to(total);
+        pdu::decode_bytes(frame.freeze()).map(Some)
+    }
 }
 
 /// Writes one PDU frame to an async stream.
@@ -112,8 +185,7 @@ async fn write_pdata_direct<W: AsyncWrite + Unpin>(
         let mut header = [0u8; 6];
         header[0..4].copy_from_slice(&((pdv.data.len() + pad + 2) as u32).to_be_bytes());
         header[4] = pdv.context_id;
-        header[5] = (if pdv.is_command { 0x01 } else { 0 })
-            | (if pdv.is_last { 0x02 } else { 0 });
+        header[5] = (if pdv.is_command { 0x01 } else { 0 }) | (if pdv.is_last { 0x02 } else { 0 });
         headers.push(header);
     }
 
@@ -139,7 +211,10 @@ async fn write_all_vectored<W: AsyncWrite + Unpin>(
     let mut remaining: &mut [std::io::IoSlice<'_>] = slices;
     while !remaining.is_empty() {
         let take = remaining.len().min(1024);
-        let written = writer.write_vectored(&remaining[..take]).await.map_err(NetworkError::Io)?;
+        let written = writer
+            .write_vectored(&remaining[..take])
+            .await
+            .map_err(NetworkError::Io)?;
         if written == 0 {
             return Err(NetworkError::Io(std::io::ErrorKind::WriteZero.into()));
         }
@@ -154,7 +229,9 @@ async fn write_all_vectored<W: AsyncWrite + Unpin>(
 /// it — so a refused request is not fatal. It is at least *attempted*: the
 /// fields would otherwise be a promise the transport never keeps (§2.12).
 pub fn apply_options(stream: &tokio::net::TcpStream, options: &TcpOptions) -> Result<()> {
-    stream.set_nodelay(options.nodelay).map_err(NetworkError::Io)?;
+    stream
+        .set_nodelay(options.nodelay)
+        .map_err(NetworkError::Io)?;
     // tokio exposes no SO_SNDBUF/SO_RCVBUF setter, so go through socket2 on the
     // same file descriptor/socket handle
     let socket = socket2::SockRef::from(stream);
@@ -194,6 +271,56 @@ mod tests {
     use tokio::io::duplex;
 
     #[tokio::test]
+    async fn a_cancelled_read_keeps_the_partial_frame() {
+        // review #13: the bytes of a half-read PDU must survive the dropped
+        // read future, or the next read starts mid-header.
+        let (mut sender, mut reader) = duplex(64);
+        let wire = pdu::encode(&Pdu::ReleaseRq).unwrap();
+        sender.write_all(&wire[..2]).await.unwrap();
+        let mut framer = PduReader::new();
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            framer.read_pdu(&mut reader),
+        )
+        .await;
+        assert!(
+            cancelled.is_err(),
+            "the read is still waiting for the rest of the frame"
+        );
+
+        sender.write_all(&wire[2..]).await.unwrap();
+        drop(sender);
+        assert_eq!(
+            framer.read_pdu(&mut reader).await.unwrap(),
+            Some(Pdu::ReleaseRq),
+            "the frame is assembled across the cancelled read"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_buffered_pdus_are_returned_in_order() {
+        let (mut sender, mut reader) = duplex(4096);
+        write_pdu(&mut sender, &Pdu::ReleaseRq).await.unwrap();
+        write_pdu(&mut sender, &Pdu::ReleaseRp).await.unwrap();
+        drop(sender);
+        // one read pulls both frames in; they must come out in order
+        let mut framer = PduReader::new();
+        assert_eq!(
+            framer.read_pdu(&mut reader).await.unwrap(),
+            Some(Pdu::ReleaseRq)
+        );
+        assert_eq!(
+            framer.read_pdu(&mut reader).await.unwrap(),
+            Some(Pdu::ReleaseRp)
+        );
+        assert_eq!(
+            framer.read_pdu(&mut reader).await.unwrap(),
+            None,
+            "clean eof after the last frame"
+        );
+    }
+
+    #[tokio::test]
     async fn writes_and_reads_a_release_pdu() {
         let (mut client, mut server) = duplex(1024);
         write_pdu(&mut client, &Pdu::ReleaseRq).await.unwrap();
@@ -205,7 +332,12 @@ mod tests {
     async fn writes_and_reads_a_pdata_pdu() {
         let (mut client, mut server) = duplex(4096);
         let pdata = Pdu::PData(PData {
-            pdvs: vec![Pdv { context_id: 1, is_command: true, is_last: true, data: vec![1, 2, 3, 4].into() }],
+            pdvs: vec![Pdv {
+                context_id: 1,
+                is_command: true,
+                is_last: true,
+                data: vec![1, 2, 3, 4].into(),
+            }],
         });
         write_pdu(&mut client, &pdata).await.unwrap();
         assert_eq!(read_pdu(&mut server).await.unwrap().unwrap(), pdata);
@@ -215,12 +347,24 @@ mod tests {
     async fn write_pdus_batches_several_frames_into_one_write() {
         let (mut client, mut server) = duplex(4096);
         let first = Pdu::PData(PData {
-            pdvs: vec![Pdv { context_id: 1, is_command: true, is_last: false, data: vec![1, 2, 3, 4].into() }],
+            pdvs: vec![Pdv {
+                context_id: 1,
+                is_command: true,
+                is_last: false,
+                data: vec![1, 2, 3, 4].into(),
+            }],
         });
         let second = Pdu::PData(PData {
-            pdvs: vec![Pdv { context_id: 1, is_command: false, is_last: true, data: vec![5, 6].into() }],
+            pdvs: vec![Pdv {
+                context_id: 1,
+                is_command: false,
+                is_last: true,
+                data: vec![5, 6].into(),
+            }],
         });
-        write_pdus(&mut client, &[first.clone(), second.clone()]).await.unwrap();
+        write_pdus(&mut client, &[first.clone(), second.clone()])
+            .await
+            .unwrap();
         assert_eq!(read_pdu(&mut server).await.unwrap().unwrap(), first);
         assert_eq!(read_pdu(&mut server).await.unwrap().unwrap(), second);
     }
@@ -229,8 +373,18 @@ mod tests {
     async fn write_pdus_matches_the_encoded_bytes_with_odd_padding() {
         let pdata = Pdu::PData(PData {
             pdvs: vec![
-                Pdv { context_id: 1, is_command: true, is_last: false, data: vec![1, 2, 3].into() },
-                Pdv { context_id: 2, is_command: false, is_last: true, data: vec![4, 5, 6, 7].into() },
+                Pdv {
+                    context_id: 1,
+                    is_command: true,
+                    is_last: false,
+                    data: vec![1, 2, 3].into(),
+                },
+                Pdv {
+                    context_id: 2,
+                    is_command: false,
+                    is_last: true,
+                    data: vec![4, 5, 6, 7].into(),
+                },
             ],
         });
         let pdus = vec![pdata, Pdu::ReleaseRq];
@@ -243,13 +397,19 @@ mod tests {
         write_pdus(&mut client, &pdus).await.unwrap();
         let mut got = vec![0u8; expected.len()];
         server.read_exact(&mut got).await.unwrap();
-        assert_eq!(got, expected, "vectored P-DATA is byte-identical to encode_into");
+        assert_eq!(
+            got, expected,
+            "vectored P-DATA is byte-identical to encode_into"
+        );
     }
 
     #[tokio::test]
     async fn writes_and_reads_an_abort() {
         let (mut client, mut server) = duplex(1024);
-        let abort = Pdu::Abort(Abort { source: AbortSource::Provider, reason: 0 });
+        let abort = Pdu::Abort(Abort {
+            source: AbortSource::Provider,
+            reason: 0,
+        });
         write_pdu(&mut client, &abort).await.unwrap();
         assert_eq!(read_pdu(&mut server).await.unwrap().unwrap(), abort);
     }
@@ -258,14 +418,20 @@ mod tests {
     async fn clean_eof_reports_none() {
         let (client, mut server) = duplex(64);
         drop(client);
-        assert!(read_pdu(&mut server).await.unwrap().is_none(), "peer close is not an error");
+        assert!(
+            read_pdu(&mut server).await.unwrap().is_none(),
+            "peer close is not an error"
+        );
     }
 
     #[tokio::test]
     async fn truncated_pdu_is_an_io_error() {
         let (mut client, mut server) = duplex(64);
         // header claims 100 body bytes but the peer closes early
-        client.write_all(&[0x05, 0x00, 0x00, 0x00, 0x00, 100]).await.unwrap();
+        client
+            .write_all(&[0x05, 0x00, 0x00, 0x00, 0x00, 100])
+            .await
+            .unwrap();
         drop(client);
         match read_pdu(&mut server).await {
             Err(NetworkError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof),
@@ -287,7 +453,10 @@ mod tests {
         frame.resize(HEADER_LEN + MAX_PDU_SIZE as usize, 0x00);
         client.write_all(&frame).await.unwrap();
 
-        match read_pdu(&mut server).await.expect("a PDU at the advertised maximum is accepted") {
+        match read_pdu(&mut server)
+            .await
+            .expect("a PDU at the advertised maximum is accepted")
+        {
             Some(Pdu::PData(pdata)) => {
                 assert_eq!(pdata.pdvs.len(), 1);
                 assert_eq!(pdata.pdvs[0].data.len(), (pdv_len - 2) as usize);
@@ -301,9 +470,14 @@ mod tests {
         // 0x00040001 is above the largest value this side ever advertises, so
         // rejecting it is not a false claim about our own capacity.
         let (mut client, mut server) = duplex(64);
-        client.write_all(&[0x05, 0x00, 0x00, 0x04, 0x00, 0x01]).await.unwrap();
+        client
+            .write_all(&[0x05, 0x00, 0x00, 0x04, 0x00, 0x01])
+            .await
+            .unwrap();
         match read_pdu(&mut server).await {
-            Err(NetworkError::Protocol(message)) => assert!(message.contains("262144"), "got {message}"),
+            Err(NetworkError::Protocol(message)) => {
+                assert!(message.contains("262144"), "got {message}")
+            }
             other => panic!("expected Protocol error, got {other:?}"),
         }
     }
@@ -313,8 +487,14 @@ mod tests {
         let (mut client, mut server) = duplex(4096);
         write_pdu(&mut client, &Pdu::ReleaseRq).await.unwrap();
         write_pdu(&mut client, &Pdu::ReleaseRp).await.unwrap();
-        assert_eq!(read_pdu(&mut server).await.unwrap().unwrap(), Pdu::ReleaseRq);
-        assert_eq!(read_pdu(&mut server).await.unwrap().unwrap(), Pdu::ReleaseRp);
+        assert_eq!(
+            read_pdu(&mut server).await.unwrap().unwrap(),
+            Pdu::ReleaseRq
+        );
+        assert_eq!(
+            read_pdu(&mut server).await.unwrap().unwrap(),
+            Pdu::ReleaseRp
+        );
     }
 
     #[tokio::test]
@@ -322,9 +502,14 @@ mod tests {
         // §3.5: a peer-declared 4 GiB body must be rejected by the MAX_PDU_SIZE
         // gate before any buffer is sized from it, not allocated then filled.
         let (mut client, mut server) = duplex(64);
-        client.write_all(&[0x04, 0x00, 0xFF, 0xFF, 0xFF, 0xFF]).await.unwrap();
+        client
+            .write_all(&[0x04, 0x00, 0xFF, 0xFF, 0xFF, 0xFF])
+            .await
+            .unwrap();
         match read_pdu(&mut server).await {
-            Err(NetworkError::Protocol(message)) => assert!(message.contains("262144"), "got {message}"),
+            Err(NetworkError::Protocol(message)) => {
+                assert!(message.contains("262144"), "got {message}")
+            }
             other => panic!("expected a Protocol error, got {other:?}"),
         }
     }

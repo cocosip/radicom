@@ -8,8 +8,13 @@ use crate::error::Error;
 use crate::io::file::DicomFile;
 use crate::io::writer::WriteOptions;
 use crate::model::dataset::Dataset;
+use crate::model::tag::Tag;
+use crate::model::vr::Vr;
 use crate::sr::content_item::{tags, ContentItem, ValueType};
 use std::path::Path;
+
+/// Basic Text SR Storage, the SOP class a `StructuredReport` document is.
+pub const BASIC_TEXT_SR_STORAGE: &str = "1.2.840.10008.5.1.4.1.1.88.11";
 
 /// A structured report document (§4.3).
 #[derive(Debug, Clone)]
@@ -24,13 +29,31 @@ impl StructuredReport {
     }
 
     /// Wraps a dataset in a minimal SR file (§4.3).
-    pub fn from_dataset(dataset: Dataset) -> Self {
-        StructuredReport { file: DicomFile::from_dataset(dataset) }
+    ///
+    /// The document's own identity is filled in when the dataset does not carry
+    /// it: a Basic Text SR instance must name its SOP class, and the file meta
+    /// group is built from it (review #8).
+    pub fn from_dataset(mut dataset: Dataset) -> Self {
+        if !dataset.contains(&Tag::SOP_CLASS_UID) {
+            dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, BASIC_TEXT_SR_STORAGE);
+        }
+        if !dataset.contains(&Tag::SOP_INSTANCE_UID) {
+            dataset.insert_str(
+                Tag::SOP_INSTANCE_UID,
+                Vr::Ui,
+                crate::model::uid::Uid::generate_value(),
+            );
+        }
+        StructuredReport {
+            file: DicomFile::from_dataset(dataset),
+        }
     }
 
     /// Opens an SR from a file (§4.3).
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
-        Ok(StructuredReport { file: DicomFile::open(path)? })
+        Ok(StructuredReport {
+            file: DicomFile::open(path)?,
+        })
     }
 
     /// Opens an SR from any seekable reader (fo-dicom's `Stream` overload).
@@ -42,7 +65,9 @@ impl StructuredReport {
 
     /// Reads an SR from bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        Ok(StructuredReport { file: DicomFile::from_bytes(bytes, &crate::io::file::ReadOptions::default())? })
+        Ok(StructuredReport {
+            file: DicomFile::from_bytes(bytes, &crate::io::file::ReadOptions::default())?,
+        })
     }
 
     /// The underlying file.
@@ -64,7 +89,11 @@ impl StructuredReport {
             .dataset
             .try_get_sequence(tags::CONTENT_SEQUENCE)
             .map(|sequence| {
-                sequence.items().iter().map(|item| ContentItem::from_dataset(item.clone())).collect()
+                sequence
+                    .items()
+                    .iter()
+                    .map(|item| ContentItem::from_dataset(item.clone()))
+                    .collect()
             })
             .unwrap_or_default()
     }
@@ -89,7 +118,10 @@ impl StructuredReport {
         let roots = self.root_items();
         if roots.len() != 1 {
             return Err(Error::Data(crate::error::DataError::Other {
-                message: format!("an SR must have exactly one root item, found {}", roots.len()),
+                message: format!(
+                    "an SR must have exactly one root item, found {}",
+                    roots.len()
+                ),
             }));
         }
         if roots[0].value_type() != Some(ValueType::Container) {
@@ -167,7 +199,10 @@ mod tests {
         assert_eq!(roots.len(), 1);
         let children = roots[0].children();
         assert_eq!(children.len(), 1);
-        assert_eq!(children[0].text_value().as_deref(), Some("Mass in the left lung"));
+        assert_eq!(
+            children[0].text_value().as_deref(),
+            Some("Mass in the left lung")
+        );
     }
 
     #[test]
@@ -191,7 +226,11 @@ mod tests {
     #[test]
     fn save_writes_a_file_that_opens_back() {
         let mut root = container();
-        root.add_child(ContentItem::text(CodeItem::new("121071", "DCM"), Relationship::Contains, "ok"));
+        root.add_child(ContentItem::text(
+            CodeItem::new("121071", "DCM"),
+            Relationship::Contains,
+            "ok",
+        ));
         let mut report = StructuredReport::from_dataset(Dataset::new());
         report.set_root_items(vec![root]);
 
@@ -206,7 +245,11 @@ mod tests {
     #[test]
     fn a_report_round_trips_through_a_writer_and_reader() {
         let mut root = container();
-        root.add_child(ContentItem::text(CodeItem::new("121071", "DCM"), Relationship::Contains, "stream"));
+        root.add_child(ContentItem::text(
+            CodeItem::new("121071", "DCM"),
+            Relationship::Contains,
+            "stream",
+        ));
         let mut report = StructuredReport::from_dataset(Dataset::new());
         report.set_root_items(vec![root]);
 
@@ -215,6 +258,11 @@ mod tests {
         let mut cursor = std::io::Cursor::new(bytes);
         let reopened = StructuredReport::open_reader(&mut cursor).unwrap();
         reopened.validate().unwrap();
-        assert_eq!(reopened.root_items()[0].children()[0].text_value().as_deref(), Some("stream"));
+        assert_eq!(
+            reopened.root_items()[0].children()[0]
+                .text_value()
+                .as_deref(),
+            Some("stream")
+        );
     }
 }

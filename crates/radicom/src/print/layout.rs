@@ -16,7 +16,10 @@ pub struct FilmSize {
 
 impl FilmSize {
     pub fn new(width_mm: f64, height_mm: f64) -> Self {
-        FilmSize { width_mm, height_mm }
+        FilmSize {
+            width_mm,
+            height_mm,
+        }
     }
 
     /// Parses a DICOM film size string (§5).
@@ -44,7 +47,10 @@ impl FilmSize {
             return Some(FilmSize::new(w, h));
         }
         // `NNCMXNNCM` form, e.g. `24CMX30CM`
-        if let Some((w, h)) = text.strip_suffix("CM").and_then(|rest| rest.split_once('X')) {
+        if let Some((w, h)) = text
+            .strip_suffix("CM")
+            .and_then(|rest| rest.split_once('X'))
+        {
             let w = w.strip_suffix("CM").unwrap_or(w);
             let w = w.parse::<f64>().ok()?;
             let h = h.parse::<f64>().ok()?;
@@ -118,7 +124,10 @@ impl ImageDisplayFormat {
                 let index = parse_count(rest, text)?;
                 Ok(ImageDisplayFormat::Custom(index))
             }
-            other => Err(format_error(text, &format!("unknown display format \"{other}\""))),
+            other => Err(format_error(
+                text,
+                &format!("unknown display format \"{other}\""),
+            )),
         }
     }
 
@@ -157,7 +166,12 @@ impl ImageDisplayFormat {
                 col_major(counts, usable_w, usable_h, left, top)
             }
             ImageDisplayFormat::Slide | ImageDisplayFormat::SuperSlide => {
-                vec![LayoutCell { x: left, y: top, width: usable_w, height: usable_h }]
+                vec![LayoutCell {
+                    x: left,
+                    y: top,
+                    width: usable_w,
+                    height: usable_h,
+                }]
             }
             ImageDisplayFormat::Custom(_) => Vec::new(),
         }
@@ -181,7 +195,12 @@ fn grid(per_row: &[u32], usable_w: f64, usable_h: f64, left: f64, top: f64) -> V
         let col_w = usable_w / column_count as f64;
         let y = top + r as f64 * row_h;
         for c in 0..column_count {
-            cells.push(LayoutCell { x: left + c as f64 * col_w, y, width: col_w, height: row_h });
+            cells.push(LayoutCell {
+                x: left + c as f64 * col_w,
+                y,
+                width: col_w,
+                height: row_h,
+            });
         }
     }
     cells
@@ -202,7 +221,12 @@ fn col_major(counts: &[u32], usable_w: f64, usable_h: f64, left: f64, top: f64) 
         let row_h = usable_h / *rows_in_col as f64;
         let x = left + c as f64 * col_w;
         for r in 0..*rows_in_col {
-            cells.push(LayoutCell { x, y: top + r as f64 * row_h, width: col_w, height: row_h });
+            cells.push(LayoutCell {
+                x,
+                y: top + r as f64 * row_h,
+                width: col_w,
+                height: row_h,
+            });
         }
     }
     cells
@@ -210,7 +234,10 @@ fn col_major(counts: &[u32], usable_w: f64, usable_h: f64, left: f64, top: f64) 
 
 /// Parses a single positive count, rejecting zero and garbage.
 fn parse_count(text: &str, whole: &str) -> Result<u32, Error> {
-    let count = text.trim().parse::<u32>().map_err(|_| format_error(whole, "expected a number"))?;
+    let count = text
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| format_error(whole, "expected a number"))?;
     if count == 0 {
         return Err(format_error(whole, "counts must be positive"));
     }
@@ -219,7 +246,10 @@ fn parse_count(text: &str, whole: &str) -> Result<u32, Error> {
 
 /// Parses a comma-separated list of positive counts.
 fn parse_counts(rest: &str, whole: &str) -> Result<Vec<u32>, Error> {
-    let counts: Result<Vec<u32>, Error> = rest.split(',').map(|part| parse_count(part, whole)).collect();
+    let counts: Result<Vec<u32>, Error> = rest
+        .split(',')
+        .map(|part| parse_count(part, whole))
+        .collect();
     let counts = counts?;
     if counts.is_empty() {
         return Err(format_error(whole, "no counts given"));
@@ -228,7 +258,9 @@ fn parse_counts(rest: &str, whole: &str) -> Result<Vec<u32>, Error> {
 }
 
 fn format_error(text: &str, reason: &str) -> Error {
-    Error::Data(DataError::Other { message: format!("bad ImageDisplayFormat \"{text}\": {reason}") })
+    Error::Data(DataError::Other {
+        message: format!("bad ImageDisplayFormat \"{text}\": {reason}"),
+    })
 }
 
 #[cfg(test)]
@@ -238,7 +270,13 @@ mod tests {
     #[test]
     fn standard_parses_to_columns_and_rows() {
         let format = ImageDisplayFormat::parse("STANDARD\\2,3").unwrap();
-        assert_eq!(format, ImageDisplayFormat::Standard { columns: 2, rows: 3 });
+        assert_eq!(
+            format,
+            ImageDisplayFormat::Standard {
+                columns: 2,
+                rows: 3
+            }
+        );
         assert_eq!(format.cell_count(), 6);
     }
 
@@ -258,17 +296,35 @@ mod tests {
 
     #[test]
     fn slide_superslide_and_custom_parse() {
-        assert_eq!(ImageDisplayFormat::parse("SLIDE").unwrap(), ImageDisplayFormat::Slide);
-        assert_eq!(ImageDisplayFormat::parse("SUPERSLIDE").unwrap(), ImageDisplayFormat::SuperSlide);
-        assert_eq!(ImageDisplayFormat::parse("CUSTOM\\3").unwrap(), ImageDisplayFormat::Custom(3));
+        assert_eq!(
+            ImageDisplayFormat::parse("SLIDE").unwrap(),
+            ImageDisplayFormat::Slide
+        );
+        assert_eq!(
+            ImageDisplayFormat::parse("SUPERSLIDE").unwrap(),
+            ImageDisplayFormat::SuperSlide
+        );
+        assert_eq!(
+            ImageDisplayFormat::parse("CUSTOM\\3").unwrap(),
+            ImageDisplayFormat::Custom(3)
+        );
     }
 
     #[test]
     fn an_unknown_format_is_rejected() {
         assert!(ImageDisplayFormat::parse("BOGUS\\1,2").is_err());
-        assert!(ImageDisplayFormat::parse("STANDARD").is_err(), "STANDARD needs C,R");
-        assert!(ImageDisplayFormat::parse("ROW\\").is_err(), "ROW needs counts");
-        assert!(ImageDisplayFormat::parse("STANDARD\\0,2").is_err(), "zero counts are invalid");
+        assert!(
+            ImageDisplayFormat::parse("STANDARD").is_err(),
+            "STANDARD needs C,R"
+        );
+        assert!(
+            ImageDisplayFormat::parse("ROW\\").is_err(),
+            "ROW needs counts"
+        );
+        assert!(
+            ImageDisplayFormat::parse("STANDARD\\0,2").is_err(),
+            "zero counts are invalid"
+        );
     }
 
     #[test]
@@ -300,7 +356,10 @@ mod tests {
         assert_eq!(top.len(), 2);
         let bottom: Vec<_> = cells.iter().filter(|c| c.y == 100.0).collect();
         assert_eq!(bottom.len(), 1);
-        assert!((bottom[0].width - 180.0).abs() < 1e-9, "the single cell spans the full width");
+        assert!(
+            (bottom[0].width - 180.0).abs() < 1e-9,
+            "the single cell spans the full width"
+        );
     }
 
     #[test]
@@ -312,7 +371,10 @@ mod tests {
         // left column (x=10) has 1 cell, right column (x=100) has 2
         let left: Vec<_> = cells.iter().filter(|c| c.x == 10.0).collect();
         assert_eq!(left.len(), 1);
-        let right: Vec<_> = cells.iter().filter(|c| (c.x - 100.0).abs() < 1e-9).collect();
+        let right: Vec<_> = cells
+            .iter()
+            .filter(|c| (c.x - 100.0).abs() < 1e-9)
+            .collect();
         assert_eq!(right.len(), 2);
     }
 
@@ -320,15 +382,33 @@ mod tests {
     fn slide_layout_is_one_cell() {
         let cells = ImageDisplayFormat::Slide.layout(FilmSize::new(200.0, 300.0), 5.0);
         assert_eq!(cells.len(), 1);
-        assert_eq!(cells[0], LayoutCell { x: 5.0, y: 5.0, width: 190.0, height: 290.0 });
+        assert_eq!(
+            cells[0],
+            LayoutCell {
+                x: 5.0,
+                y: 5.0,
+                width: 190.0,
+                height: 290.0
+            }
+        );
     }
 
     #[test]
     fn film_size_parses_named_and_metric_forms() {
         assert_eq!(FilmSize::parse("A4"), Some(FilmSize::new(210.0, 297.0)));
-        assert_eq!(FilmSize::parse("a4"), Some(FilmSize::new(210.0, 297.0)), "case-insensitive");
-        assert_eq!(FilmSize::parse("8INX10IN"), Some(FilmSize::new(203.0, 254.0)));
-        assert_eq!(FilmSize::parse("24CMX30CM"), Some(FilmSize::new(240.0, 300.0)));
+        assert_eq!(
+            FilmSize::parse("a4"),
+            Some(FilmSize::new(210.0, 297.0)),
+            "case-insensitive"
+        );
+        assert_eq!(
+            FilmSize::parse("8INX10IN"),
+            Some(FilmSize::new(203.0, 254.0))
+        );
+        assert_eq!(
+            FilmSize::parse("24CMX30CM"),
+            Some(FilmSize::new(240.0, 300.0))
+        );
         assert_eq!(FilmSize::parse("bogus"), None);
     }
 

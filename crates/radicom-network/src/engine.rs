@@ -72,7 +72,10 @@ pub struct PendingTable {
 impl PendingTable {
     pub fn new() -> Self {
         // message IDs start at 1; 0 is not a valid ID
-        PendingTable { entries: HashMap::new(), next_message_id: 1 }
+        PendingTable {
+            entries: HashMap::new(),
+            next_message_id: 1,
+        }
     }
 
     /// Allocates the next message ID, skipping IDs still in flight (D3).
@@ -80,7 +83,11 @@ impl PendingTable {
         // at most 65535 requests can be outstanding
         for _ in 0..u16::MAX {
             let id = self.next_message_id;
-            self.next_message_id = if self.next_message_id == u16::MAX { 1 } else { self.next_message_id + 1 };
+            self.next_message_id = if self.next_message_id == u16::MAX {
+                1
+            } else {
+                self.next_message_id + 1
+            };
             if !self.entries.contains_key(&id) {
                 return Ok(id);
             }
@@ -142,7 +149,12 @@ impl PendingTable {
     /// True when the peer's response completes the request (§5.2).
     ///
     /// `Pending` keeps the entry; anything else removes it.
-    pub fn apply_response(&mut self, message_id: u16, status: StatusState, now: Instant) -> Option<PendingRequest> {
+    pub fn apply_response(
+        &mut self,
+        message_id: u16,
+        status: StatusState,
+        now: Instant,
+    ) -> Option<PendingRequest> {
         let entry = self.entries.get_mut(&message_id)?;
         entry.last_activity = now;
         if status.is_pending() {
@@ -215,7 +227,11 @@ pub struct ConnectionLifecycle {
 
 impl Default for ConnectionLifecycle {
     fn default() -> Self {
-        ConnectionLifecycle { state: ConnectionState::Open, queued_pdus: 0, pending_requests: 0 }
+        ConnectionLifecycle {
+            state: ConnectionState::Open,
+            queued_pdus: 0,
+            pending_requests: 0,
+        }
     }
 }
 
@@ -236,7 +252,9 @@ impl ConnectionLifecycle {
             return Err(NetworkError::protocol("connection is already closing"));
         }
         if self.queued_pdus > 0 || self.pending_requests > 0 {
-            return Err(NetworkError::protocol("cannot close while queues are non-empty"));
+            return Err(NetworkError::protocol(
+                "cannot close while queues are non-empty",
+            ));
         }
         self.state = ConnectionState::Closing;
         Ok(())
@@ -269,7 +287,10 @@ pub struct PduQueue {
 
 impl PduQueue {
     pub fn new(capacity: usize) -> Self {
-        PduQueue { capacity: capacity.max(1), depth: 0 }
+        PduQueue {
+            capacity: capacity.max(1),
+            depth: 0,
+        }
     }
 
     pub fn capacity(&self) -> usize {
@@ -309,7 +330,10 @@ mod tests {
     use crate::dimse::{CommandField, StatusState};
 
     fn request(message_id: u16) -> PendingRequest {
-        PendingRequest::new(Command::request(CommandField::CFindRq, message_id), Instant::now())
+        PendingRequest::new(
+            Command::request(CommandField::CFindRq, message_id),
+            Instant::now(),
+        )
     }
 
     #[test]
@@ -320,14 +344,25 @@ mod tests {
         in_flight.message_id = 2;
         table.insert(in_flight);
         // 2 is taken, so the allocator must return 3
-        assert_eq!(table.allocate_message_id().unwrap(), 3, "in-flight IDs are skipped");
+        assert_eq!(
+            table.allocate_message_id().unwrap(),
+            3,
+            "in-flight IDs are skipped"
+        );
     }
 
     #[test]
     fn message_ids_wrap_around() {
-        let mut table = PendingTable { entries: HashMap::new(), next_message_id: u16::MAX };
+        let mut table = PendingTable {
+            entries: HashMap::new(),
+            next_message_id: u16::MAX,
+        };
         assert_eq!(table.allocate_message_id().unwrap(), u16::MAX);
-        assert_eq!(table.allocate_message_id().unwrap(), 1, "wraps to 1, never 0");
+        assert_eq!(
+            table.allocate_message_id().unwrap(),
+            1,
+            "wraps to 1, never 0"
+        );
     }
 
     #[test]
@@ -351,21 +386,28 @@ mod tests {
         assert!(table.is_empty());
 
         table.insert(request(9));
-        assert!(table.apply_response(9, StatusState::Failure, Instant::now()).is_some());
+        assert!(table
+            .apply_response(9, StatusState::Failure, Instant::now())
+            .is_some());
         assert!(table.is_empty(), "Failure also completes");
     }
 
     #[test]
     fn responses_for_unknown_ids_are_ignored() {
         let mut table = PendingTable::new();
-        assert!(table.apply_response(404, StatusState::Success, Instant::now()).is_none());
+        assert!(table
+            .apply_response(404, StatusState::Success, Instant::now())
+            .is_none());
     }
 
     #[test]
     fn touch_updates_the_activity_time() {
         let mut table = PendingTable::new();
         let start = Instant::now();
-        table.insert(PendingRequest::new(Command::request(CommandField::CFindRq, 1), start));
+        table.insert(PendingRequest::new(
+            Command::request(CommandField::CFindRq, 1),
+            start,
+        ));
         let later = start + Duration::from_secs(10);
         table.touch(1, later);
         assert_eq!(table.get(1).unwrap().last_activity, later);
@@ -375,8 +417,14 @@ mod tests {
     fn watchdog_reports_expired_requests() {
         let mut table = PendingTable::new();
         let start = Instant::now();
-        table.insert(PendingRequest::new(Command::request(CommandField::CFindRq, 1), start));
-        table.insert(PendingRequest::new(Command::request(CommandField::CFindRq, 2), start + Duration::from_secs(30)));
+        table.insert(PendingRequest::new(
+            Command::request(CommandField::CFindRq, 1),
+            start,
+        ));
+        table.insert(PendingRequest::new(
+            Command::request(CommandField::CFindRq, 2),
+            start + Duration::from_secs(30),
+        ));
 
         let timeout = Duration::from_secs(20);
         // only the older request has expired
@@ -391,9 +439,14 @@ mod tests {
     fn abandoned_requests_do_not_time_out() {
         let mut table = PendingTable::new();
         let start = Instant::now();
-        table.insert(PendingRequest::new(Command::request(CommandField::CFindRq, 1), start));
+        table.insert(PendingRequest::new(
+            Command::request(CommandField::CFindRq, 1),
+            start,
+        ));
         table.get_mut(1).unwrap().abandoned = true;
-        assert!(table.timed_out(start + Duration::from_secs(60), Duration::from_secs(5)).is_empty());
+        assert!(table
+            .timed_out(start + Duration::from_secs(60), Duration::from_secs(5))
+            .is_empty());
     }
 
     #[test]
@@ -401,7 +454,11 @@ mod tests {
         let mut table = PendingTable::new();
         table.insert(request(5));
         table.insert(request(2));
-        assert_eq!(table.message_ids(), vec![2, 5], "sorted for deterministic failure order");
+        assert_eq!(
+            table.message_ids(),
+            vec![2, 5],
+            "sorted for deterministic failure order"
+        );
     }
 
     #[test]
@@ -415,17 +472,26 @@ mod tests {
 
         breaker.reset();
         assert!(!breaker.is_tripped());
-        assert!(!breaker.is_blocked(11), "a new association clears the blocks");
+        assert!(
+            !breaker.is_blocked(11),
+            "a new association clears the blocks"
+        );
     }
 
     #[test]
     fn graceful_close_refuses_while_work_is_outstanding() {
         let mut lifecycle = ConnectionLifecycle::default();
         lifecycle.set_load(1, 0);
-        assert!(lifecycle.try_close().is_err(), "queued PDUs block a graceful close");
+        assert!(
+            lifecycle.try_close().is_err(),
+            "queued PDUs block a graceful close"
+        );
 
         lifecycle.set_load(0, 2);
-        assert!(lifecycle.try_close().is_err(), "pending requests block a graceful close");
+        assert!(
+            lifecycle.try_close().is_err(),
+            "pending requests block a graceful close"
+        );
 
         lifecycle.set_load(0, 0);
         lifecycle.try_close().unwrap();

@@ -114,9 +114,15 @@ impl StorageAppInfo {
 
     pub fn from_app_info(info: &AppInfo) -> Self {
         StorageAppInfo {
-            level_of_support: info.byte_field(field::STORAGE_LEVEL_OF_SUPPORT).unwrap_or(0),
-            digital_signature: info.byte_field(field::STORAGE_DIGITAL_SIGNATURE).unwrap_or(0),
-            element_coercion: info.byte_field(field::STORAGE_ELEMENT_COERCION).unwrap_or(0),
+            level_of_support: info
+                .byte_field(field::STORAGE_LEVEL_OF_SUPPORT)
+                .unwrap_or(0),
+            digital_signature: info
+                .byte_field(field::STORAGE_DIGITAL_SIGNATURE)
+                .unwrap_or(0),
+            element_coercion: info
+                .byte_field(field::STORAGE_ELEMENT_COERCION)
+                .unwrap_or(0),
         }
     }
 
@@ -156,7 +162,10 @@ impl FindAppInfo {
             .with_field(field::FIND_DATETIME_MATCHING, self.datetime_matching)
             .with_field(field::FIND_FUZZY_MATCHING, self.fuzzy_matching)
             .with_field(field::FIND_TIMEZONE_ADJUSTMENT, self.timezone_adjustment)
-            .with_field(field::FIND_ENHANCED_MULTIFRAME, self.enhanced_multiframe_conversion)
+            .with_field(
+                field::FIND_ENHANCED_MULTIFRAME,
+                self.enhanced_multiframe_conversion,
+            )
     }
 
     pub fn from_app_info(info: &AppInfo) -> Self {
@@ -164,8 +173,12 @@ impl FindAppInfo {
             relational_queries: info.byte_field(field::FIND_RELATIONAL_QUERIES).unwrap_or(0),
             datetime_matching: info.byte_field(field::FIND_DATETIME_MATCHING).unwrap_or(0),
             fuzzy_matching: info.byte_field(field::FIND_FUZZY_MATCHING).unwrap_or(0),
-            timezone_adjustment: info.byte_field(field::FIND_TIMEZONE_ADJUSTMENT).unwrap_or(0),
-            enhanced_multiframe_conversion: info.byte_field(field::FIND_ENHANCED_MULTIFRAME).unwrap_or(0),
+            timezone_adjustment: info
+                .byte_field(field::FIND_TIMEZONE_ADJUSTMENT)
+                .unwrap_or(0),
+            enhanced_multiframe_conversion: info
+                .byte_field(field::FIND_ENHANCED_MULTIFRAME)
+                .unwrap_or(0),
         }
     }
 }
@@ -181,13 +194,18 @@ impl RetrieveAppInfo {
     pub fn to_app_info(self) -> AppInfo {
         AppInfo::new()
             .with_field(field::RETRIEVE_RELATIONAL, self.relational_retrieval)
-            .with_field(field::RETRIEVE_ENHANCED_MULTIFRAME, self.enhanced_multiframe_conversion)
+            .with_field(
+                field::RETRIEVE_ENHANCED_MULTIFRAME,
+                self.enhanced_multiframe_conversion,
+            )
     }
 
     pub fn from_app_info(info: &AppInfo) -> Self {
         RetrieveAppInfo {
             relational_retrieval: info.byte_field(field::RETRIEVE_RELATIONAL).unwrap_or(0),
-            enhanced_multiframe_conversion: info.byte_field(field::RETRIEVE_ENHANCED_MULTIFRAME).unwrap_or(0),
+            enhanced_multiframe_conversion: info
+                .byte_field(field::RETRIEVE_ENHANCED_MULTIFRAME)
+                .unwrap_or(0),
         }
     }
 }
@@ -221,12 +239,13 @@ impl ExtendedNegotiationPolicy {
         requested
             .iter()
             .map(|ext| {
-                let info = AppInfo { fields: ext.requested.clone() };
+                let info = AppInfo {
+                    fields: ext.requested.clone(),
+                };
                 let accepted = match self {
                     ExtendedNegotiationPolicy::DeclineAll => AppInfo::answer(&info, |_, _| None),
-                    ExtendedNegotiationPolicy::Custom(f) => {
-                        f(&ext.sop_class, &info).unwrap_or_else(|| AppInfo::answer(&info, |_, _| None))
-                    }
+                    ExtendedNegotiationPolicy::Custom(f) => f(&ext.sop_class, &info)
+                        .unwrap_or_else(|| AppInfo::answer(&info, |_, _| None)),
                 };
                 ExtendedNegotiation {
                     sop_class: ext.sop_class.clone(),
@@ -252,7 +271,9 @@ pub fn apply_answer(user_information: &mut UserInformation, policy: &ExtendedNeg
 /// Validates a common extended negotiation item (§4.3).
 pub fn validate_common_extended(common: &CommonExtended) -> Result<()> {
     if common.service_class_uid.is_empty() {
-        return Err(NetworkError::protocol("common extended negotiation has no service class UID"));
+        return Err(NetworkError::protocol(
+            "common extended negotiation has no service class UID",
+        ));
     }
     if common.related_general_sop_classes.is_empty() {
         return Err(NetworkError::protocol(
@@ -283,8 +304,15 @@ mod tests {
 
     #[test]
     fn fields_are_flat_and_gaps_are_zero_filled() {
-        let info = AppInfo::new().with_field(3, 1).with_field(1, 2).with_field(3, 9);
-        assert_eq!(info.fields, vec![2, 0, 9], "index n-1 is field n; gaps are 0; last value wins");
+        let info = AppInfo::new()
+            .with_field(3, 1)
+            .with_field(1, 2)
+            .with_field(3, 9);
+        assert_eq!(
+            info.fields,
+            vec![2, 0, 9],
+            "index n-1 is field n; gaps are 0; last value wins"
+        );
         assert_eq!(info.byte_field(1), Some(2));
         assert_eq!(info.byte_field(2), Some(0), "a gap reads as not-supported");
         assert_eq!(info.byte_field(4), None);
@@ -293,7 +321,11 @@ mod tests {
 
     #[test]
     fn storage_typed_round_trip() {
-        let typed = StorageAppInfo { level_of_support: 1, digital_signature: 1, element_coercion: 0 };
+        let typed = StorageAppInfo {
+            level_of_support: 1,
+            digital_signature: 1,
+            element_coercion: 0,
+        };
         let info = typed.to_app_info();
         assert_eq!(StorageAppInfo::from_app_info(&info), typed);
         assert!(typed.peer_supports(StorageOption::DigitalSignature));
@@ -303,11 +335,21 @@ mod tests {
 
     #[test]
     fn find_and_retrieve_typed_round_trip() {
-        let find = FindAppInfo { relational_queries: 1, datetime_matching: 1, ..Default::default() };
+        let find = FindAppInfo {
+            relational_queries: 1,
+            datetime_matching: 1,
+            ..Default::default()
+        };
         assert_eq!(FindAppInfo::from_app_info(&find.to_app_info()), find);
 
-        let retrieve = RetrieveAppInfo { relational_retrieval: 1, enhanced_multiframe_conversion: 0 };
-        assert_eq!(RetrieveAppInfo::from_app_info(&retrieve.to_app_info()), retrieve);
+        let retrieve = RetrieveAppInfo {
+            relational_retrieval: 1,
+            enhanced_multiframe_conversion: 0,
+        };
+        assert_eq!(
+            RetrieveAppInfo::from_app_info(&retrieve.to_app_info()),
+            retrieve
+        );
     }
 
     #[test]
@@ -315,7 +357,10 @@ mod tests {
         let info = AppInfo::new().with_field(1, 1);
         let storage = StorageAppInfo::from_app_info(&info);
         assert_eq!(storage.level_of_support, 1);
-        assert_eq!(storage.digital_signature, 0, "an absent field is not support");
+        assert_eq!(
+            storage.digital_signature, 0,
+            "an absent field is not support"
+        );
         assert!(!storage.peer_supports(StorageOption::DigitalSignature));
     }
 
@@ -336,8 +381,15 @@ mod tests {
         let answered = ExtendedNegotiationPolicy::decline_all().answer(&requested);
         assert_eq!(answered.len(), 1);
         assert_eq!(answered[0].sop_class, "1.2.840.10008.5.1.4.1.1.7");
-        assert!(answered[0].requested.is_empty(), "an AC item carries only the accepted side");
-        assert_eq!(answered[0].accepted, vec![0, 0, 0], "every requested field is answered with 0");
+        assert!(
+            answered[0].requested.is_empty(),
+            "an AC item carries only the accepted side"
+        );
+        assert_eq!(
+            answered[0].accepted,
+            vec![0, 0, 0],
+            "every requested field is answered with 0"
+        );
     }
 
     #[test]
@@ -345,9 +397,17 @@ mod tests {
         // the AC mirrors the RQ: no requested item, no answered item
         let answered = ExtendedNegotiationPolicy::decline_all().answer(&[]);
         assert!(answered.is_empty());
-        let empty = ExtendedNegotiation { sop_class: "1.2.3".into(), requested: Vec::new(), accepted: Vec::new() };
+        let empty = ExtendedNegotiation {
+            sop_class: "1.2.3".into(),
+            requested: Vec::new(),
+            accepted: Vec::new(),
+        };
         let answered = ExtendedNegotiationPolicy::decline_all().answer(&[empty]);
-        assert_eq!(answered.len(), 1, "the item itself is structurally mirrored");
+        assert_eq!(
+            answered.len(),
+            1,
+            "the item itself is structurally mirrored"
+        );
         assert!(answered[0].accepted.is_empty());
     }
 
@@ -357,11 +417,15 @@ mod tests {
             if sop_class != "1.2.840.10008.5.1.4.1.1.7" {
                 return None;
             }
-            Some(AppInfo::answer(requested, |field, _| (field == 1).then_some(1)))
+            Some(AppInfo::answer(requested, |field, _| {
+                (field == 1).then_some(1)
+            }))
         }
         let policy = ExtendedNegotiationPolicy::new(grant_level);
         let answered = policy.answer(&[storage_ext("1.2.840.10008.5.1.4.1.1.7", 1, 1)]);
-        let info = AppInfo { fields: answered[0].accepted.clone() };
+        let info = AppInfo {
+            fields: answered[0].accepted.clone(),
+        };
         assert!(info.is_supported(1), "level granted");
         assert_eq!(info.field(2), Some(&[0u8][..]), "signature refused");
 
@@ -381,23 +445,47 @@ mod tests {
             service_class_uid: "1.2.840.10008.4.2".into(),
             related_general_sop_classes: vec!["1.2.840.10008.5.1.4.1.1.7".into()],
         });
-        user.role_selections.push(RoleSelection { sop_class: "1.2.3".into(), scu_role: true, scp_role: false });
+        user.role_selections.push(RoleSelection {
+            sop_class: "1.2.3".into(),
+            scu_role: true,
+            scp_role: false,
+        });
         apply_answer(&mut user, &ExtendedNegotiationPolicy::decline_all());
-        assert_eq!(user.extended_negotiations.len(), 1, "the SOP class item survives");
-        assert_eq!(user.extended_negotiations[0].accepted, vec![0, 0, 0], "answered with 'not supported'");
-        assert!(user.common_extended.is_some(), "unrelated user information is left alone");
+        assert_eq!(
+            user.extended_negotiations.len(),
+            1,
+            "the SOP class item survives"
+        );
+        assert_eq!(
+            user.extended_negotiations[0].accepted,
+            vec![0, 0, 0],
+            "answered with 'not supported'"
+        );
+        assert!(
+            user.common_extended.is_some(),
+            "unrelated user information is left alone"
+        );
         assert_eq!(user.role_selections.len(), 1);
     }
 
     #[test]
     fn common_extended_needs_a_service_class_and_a_related_class() {
-        let empty_service = CommonExtended { service_class_uid: String::new(), related_general_sop_classes: vec!["1".into()] };
+        let empty_service = CommonExtended {
+            service_class_uid: String::new(),
+            related_general_sop_classes: vec!["1".into()],
+        };
         assert!(validate_common_extended(&empty_service).is_err());
 
-        let no_related = CommonExtended { service_class_uid: "1.2.3".into(), related_general_sop_classes: Vec::new() };
+        let no_related = CommonExtended {
+            service_class_uid: "1.2.3".into(),
+            related_general_sop_classes: Vec::new(),
+        };
         assert!(validate_common_extended(&no_related).is_err());
 
-        let ok = CommonExtended { service_class_uid: "1.2.3".into(), related_general_sop_classes: vec!["1.2.4".into()] };
+        let ok = CommonExtended {
+            service_class_uid: "1.2.3".into(),
+            related_general_sop_classes: vec!["1.2.4".into()],
+        };
         assert!(validate_common_extended(&ok).is_ok());
     }
 
@@ -405,7 +493,11 @@ mod tests {
     fn role_selections_survive_the_answer() {
         // applying an answer must not disturb unrelated user items
         let mut user = UserInformation::new(16384);
-        user.role_selections.push(RoleSelection { sop_class: "1.2.3".into(), scu_role: true, scp_role: true });
+        user.role_selections.push(RoleSelection {
+            sop_class: "1.2.3".into(),
+            scu_role: true,
+            scp_role: true,
+        });
         user.user_identity = Some(UserIdentity {
             identity_type: 1,
             primary: b"user".to_vec(),

@@ -29,7 +29,12 @@ pub struct CodeItem {
 
 impl CodeItem {
     pub fn new(value: impl Into<String>, scheme: impl Into<String>) -> Self {
-        CodeItem { value: value.into(), scheme: scheme.into(), meaning: None, scheme_version: None }
+        CodeItem {
+            value: value.into(),
+            scheme: scheme.into(),
+            meaning: None,
+            scheme_version: None,
+        }
     }
 
     /// Builds a URN code item with its display meaning and no scheme metadata.
@@ -78,13 +83,23 @@ impl CodeItem {
             .into_iter()
             .find_map(|tag| dataset.try_get_str(&tag));
         let Some(value) = value else {
-            return Err(Error::Data(DataError::Other { message: "no coded entry found".into() }));
+            return Err(Error::Data(DataError::Other {
+                message: "no coded entry found".into(),
+            }));
         };
         Ok(CodeItem {
             value: value.trim().to_string(),
-            scheme: dataset.try_get_str(&Tag::CODING_SCHEME_DESIGNATOR).unwrap_or_default().trim().to_string(),
-            meaning: dataset.try_get_str(&Tag::CODE_MEANING).map(|m| m.trim().to_string()),
-            scheme_version: dataset.try_get_str(&Tag::CODING_SCHEME_VERSION).map(|v| v.trim().to_string()),
+            scheme: dataset
+                .try_get_str(&Tag::CODING_SCHEME_DESIGNATOR)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+            meaning: dataset
+                .try_get_str(&Tag::CODE_MEANING)
+                .map(|m| m.trim().to_string()),
+            scheme_version: dataset
+                .try_get_str(&Tag::CODING_SCHEME_VERSION)
+                .map(|v| v.trim().to_string()),
         })
     }
 
@@ -147,14 +162,20 @@ mod tests {
 
         assert_eq!(ds.try_get_str(CODE_VALUE).as_deref(), Some("T-A0100"));
         assert_eq!(vr_of(&ds, CODE_VALUE), Some(Vr::Sh));
-        assert_eq!(ds.try_get_str(CODING_SCHEME_DESIGNATOR).as_deref(), Some("SRT"));
+        assert_eq!(
+            ds.try_get_str(CODING_SCHEME_DESIGNATOR).as_deref(),
+            Some("SRT")
+        );
         assert_eq!(vr_of(&ds, CODING_SCHEME_DESIGNATOR), Some(Vr::Sh));
         assert_eq!(ds.try_get_str(CODE_MEANING).as_deref(), Some("Chest"));
         assert_eq!(vr_of(&ds, CODE_MEANING), Some(Vr::Lo));
         assert_eq!(ds.try_get_str(CODING_SCHEME_VERSION).as_deref(), Some("1"));
         assert_eq!(vr_of(&ds, CODING_SCHEME_VERSION), Some(Vr::Sh));
 
-        assert!(ds.try_get_str(LONG_CODE_VALUE).is_none(), "a short value stays in CodeValue");
+        assert!(
+            ds.try_get_str(LONG_CODE_VALUE).is_none(),
+            "a short value stays in CodeValue"
+        );
         assert!(ds.try_get_str(URN_CODE_VALUE).is_none());
         // (0008,0106) is ContextGroupVersion (DT), never a scheme version
         assert!(ds.try_get_str(CONTEXT_GROUP_VERSION).is_none());
@@ -165,9 +186,15 @@ mod tests {
         let mut ds = Dataset::new();
         // 17 bytes: one over the SH limit
         CodeItem::new("12345678901234567", "99DIN").write_into(&mut ds);
-        assert_eq!(ds.try_get_str(LONG_CODE_VALUE).as_deref(), Some("12345678901234567"));
+        assert_eq!(
+            ds.try_get_str(LONG_CODE_VALUE).as_deref(),
+            Some("12345678901234567")
+        );
         assert_eq!(vr_of(&ds, LONG_CODE_VALUE), Some(Vr::Uc));
-        assert!(ds.try_get_str(CODE_VALUE).is_none(), "SH cannot hold 17 bytes");
+        assert!(
+            ds.try_get_str(CODE_VALUE).is_none(),
+            "SH cannot hold 17 bytes"
+        );
         assert!(ds.try_get_str(URN_CODE_VALUE).is_none());
     }
 
@@ -175,7 +202,10 @@ mod tests {
     fn a_urn_writes_urn_code_value() {
         let mut ds = Dataset::new();
         CodeItem::new("urn:oid:1.2.3", "DCM").write_into(&mut ds);
-        assert_eq!(ds.try_get_str(URN_CODE_VALUE).as_deref(), Some("urn:oid:1.2.3"));
+        assert_eq!(
+            ds.try_get_str(URN_CODE_VALUE).as_deref(),
+            Some("urn:oid:1.2.3")
+        );
         assert_eq!(vr_of(&ds, URN_CODE_VALUE), Some(Vr::Ur));
         assert!(ds.try_get_str(CODE_VALUE).is_none());
         assert!(ds.try_get_str(LONG_CODE_VALUE).is_none());
@@ -185,13 +215,18 @@ mod tests {
     fn a_16_byte_value_still_fits_code_value() {
         let mut ds = Dataset::new();
         CodeItem::new("1234567890123456", "99DIN").write_into(&mut ds);
-        assert_eq!(ds.try_get_str(CODE_VALUE).as_deref(), Some("1234567890123456"));
+        assert_eq!(
+            ds.try_get_str(CODE_VALUE).as_deref(),
+            Some("1234567890123456")
+        );
         assert!(ds.try_get_str(LONG_CODE_VALUE).is_none());
     }
 
     #[test]
     fn a_code_round_trips_through_a_dataset() {
-        let original = CodeItem::new("T-A0100", "SRT").with_meaning("Chest").with_version("1");
+        let original = CodeItem::new("T-A0100", "SRT")
+            .with_meaning("Chest")
+            .with_version("1");
         let mut ds = Dataset::new();
         original.write_into(&mut ds);
         let parsed = CodeItem::read_from(&ds).unwrap();
@@ -200,7 +235,10 @@ mod tests {
 
     #[test]
     fn long_and_urn_values_round_trip() {
-        for code in [CodeItem::new("12345678901234567", "99DIN"), CodeItem::new("urn:oid:1.2.3", "DCM")] {
+        for code in [
+            CodeItem::new("12345678901234567", "99DIN"),
+            CodeItem::new("urn:oid:1.2.3", "DCM"),
+        ] {
             let mut ds = Dataset::new();
             code.write_into(&mut ds);
             assert_eq!(CodeItem::read_from(&ds).unwrap(), code);
@@ -217,8 +255,14 @@ mod tests {
 
         let mut ds = Dataset::new();
         code.write_into(&mut ds);
-        assert_eq!(ds.try_get_str(URN_CODE_VALUE).as_deref(), Some("urn:oid:1.2.3"));
-        assert_eq!(ds.try_get_str(CODE_MEANING).as_deref(), Some("Example meaning"));
+        assert_eq!(
+            ds.try_get_str(URN_CODE_VALUE).as_deref(),
+            Some("urn:oid:1.2.3")
+        );
+        assert_eq!(
+            ds.try_get_str(CODE_MEANING).as_deref(),
+            Some("Example meaning")
+        );
         assert!(ds.try_get_str(CODING_SCHEME_DESIGNATOR).is_none());
         assert!(ds.try_get_str(CODING_SCHEME_VERSION).is_none());
     }
@@ -228,9 +272,19 @@ mod tests {
         // deliberately stricter than fo-dicom's value+scheme+version comparison
         let finding = CodeItem::new("121071", "DCM").with_meaning("Finding");
         let observation = CodeItem::new("121071", "DCM").with_meaning("Observation");
-        assert_ne!(finding, observation, "the meaning text participates in equality");
-        assert_eq!(finding, CodeItem::new("121071", "DCM").with_meaning("Finding"));
-        assert_ne!(finding, CodeItem::new("121071", "DCM"), "no meaning differs from a meaning");
+        assert_ne!(
+            finding, observation,
+            "the meaning text participates in equality"
+        );
+        assert_eq!(
+            finding,
+            CodeItem::new("121071", "DCM").with_meaning("Finding")
+        );
+        assert_ne!(
+            finding,
+            CodeItem::new("121071", "DCM"),
+            "no meaning differs from a meaning"
+        );
     }
 
     #[test]
@@ -243,7 +297,9 @@ mod tests {
     fn a_code_wraps_into_a_sequence_item() {
         let code = CodeItem::new("T-A0100", "SRT");
         let holder = code.to_sequence(Tag::CONCEPT_NAME_CODE_SEQUENCE);
-        let sequence = holder.try_get_sequence(Tag::CONCEPT_NAME_CODE_SEQUENCE).unwrap();
+        let sequence = holder
+            .try_get_sequence(Tag::CONCEPT_NAME_CODE_SEQUENCE)
+            .unwrap();
         assert_eq!(sequence.items().len(), 1);
         assert_eq!(CodeItem::read_from(&sequence.items()[0]).unwrap(), code);
     }

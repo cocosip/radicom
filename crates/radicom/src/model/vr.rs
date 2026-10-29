@@ -96,7 +96,8 @@ impl Vr {
     pub const fn is_string(self) -> bool {
         matches!(
             self,
-            Vr::Ae | Vr::As
+            Vr::Ae
+                | Vr::As
                 | Vr::Cs
                 | Vr::Da
                 | Vr::Ds
@@ -117,15 +118,29 @@ impl Vr {
 
     /// Affected by Specific Character Set (spec §2.2 "charset-sensitive").
     pub const fn is_character_encoded(self) -> bool {
-        matches!(self, Vr::Lo | Vr::Lt | Vr::Pn | Vr::Sh | Vr::St | Vr::Uc | Vr::Ur | Vr::Ut)
+        matches!(
+            self,
+            Vr::Lo | Vr::Lt | Vr::Pn | Vr::Sh | Vr::St | Vr::Uc | Vr::Ur | Vr::Ut
+        )
     }
 
     /// 16-bit (short-form) length field; false = 32-bit (long-form).
     pub const fn is_16bit_length(self) -> bool {
         !matches!(
             self,
-            Vr::Ob | Vr::Od | Vr::Of | Vr::Ol | Vr::Ov | Vr::Ow | Vr::Sq | Vr::Uc | Vr::Un
-                | Vr::Ur | Vr::Ut | Vr::Uv | Vr::Sv
+            Vr::Ob
+                | Vr::Od
+                | Vr::Of
+                | Vr::Ol
+                | Vr::Ov
+                | Vr::Ow
+                | Vr::Sq
+                | Vr::Uc
+                | Vr::Un
+                | Vr::Ur
+                | Vr::Ut
+                | Vr::Uv
+                | Vr::Sv
         )
     }
 
@@ -353,7 +368,21 @@ mod tests {
 
     #[test]
     fn multi_value_classification() {
-        let multi = [Vr::Ae, Vr::As, Vr::Cs, Vr::Da, Vr::Ds, Vr::Dt, Vr::Is, Vr::Lo, Vr::Pn, Vr::Sh, Vr::Tm, Vr::Ui, Vr::Uc];
+        let multi = [
+            Vr::Ae,
+            Vr::As,
+            Vr::Cs,
+            Vr::Da,
+            Vr::Ds,
+            Vr::Dt,
+            Vr::Is,
+            Vr::Lo,
+            Vr::Pn,
+            Vr::Sh,
+            Vr::Tm,
+            Vr::Ui,
+            Vr::Uc,
+        ];
         for vr in multi {
             assert!(vr.is_multi_value(), "{}", vr);
         }
@@ -368,10 +397,40 @@ mod tests {
     #[test]
     fn parse_all_codes_round_trip() {
         for vr in [
-            Vr::Ae, Vr::As, Vr::At, Vr::Cs, Vr::Da, Vr::Ds, Vr::Dt, Vr::Fd, Vr::Fl, Vr::Is,
-            Vr::Lo, Vr::Lt, Vr::Ob, Vr::Od, Vr::Of, Vr::Ol, Vr::Ov, Vr::Ow, Vr::Pn, Vr::Sh,
-            Vr::Sl, Vr::Sq, Vr::Ss, Vr::St, Vr::Sv, Vr::Tm, Vr::Uc, Vr::Ui, Vr::Ul, Vr::Un,
-            Vr::Ur, Vr::Us, Vr::Ut, Vr::Uv,
+            Vr::Ae,
+            Vr::As,
+            Vr::At,
+            Vr::Cs,
+            Vr::Da,
+            Vr::Ds,
+            Vr::Dt,
+            Vr::Fd,
+            Vr::Fl,
+            Vr::Is,
+            Vr::Lo,
+            Vr::Lt,
+            Vr::Ob,
+            Vr::Od,
+            Vr::Of,
+            Vr::Ol,
+            Vr::Ov,
+            Vr::Ow,
+            Vr::Pn,
+            Vr::Sh,
+            Vr::Sl,
+            Vr::Sq,
+            Vr::Ss,
+            Vr::St,
+            Vr::Sv,
+            Vr::Tm,
+            Vr::Uc,
+            Vr::Ui,
+            Vr::Ul,
+            Vr::Un,
+            Vr::Ur,
+            Vr::Us,
+            Vr::Ut,
+            Vr::Uv,
         ] {
             let code = vr.code();
             assert_eq!(Vr::parse_str(code).unwrap(), vr, "{}", code);
@@ -383,12 +442,21 @@ mod tests {
     #[test]
     fn parse_rejects_unknown_and_internal() {
         assert!(Vr::try_parse(b"ZZ").is_none());
-        assert!(Vr::try_parse(b"OX").is_none(), "OX handled by reader logic, not parse");
+        assert!(
+            Vr::try_parse(b"OX").is_none(),
+            "OX handled by reader logic, not parse"
+        );
         assert!(Vr::try_parse(b"AO").is_none());
         assert!(Vr::parse_str("PNX").is_err());
         assert!(Vr::parse_str("").is_err());
-        assert!(Vr::parse(b"NO").is_err(), "internal VR NONE is not parseable");
-        assert_eq!(Vr::parse(b"??").unwrap_err().to_string(), "unknown VR code 3F 3F");
+        assert!(
+            Vr::parse(b"NO").is_err(),
+            "internal VR NONE is not parseable"
+        );
+        assert_eq!(
+            Vr::parse(b"??").unwrap_err().to_string(),
+            "unknown VR code 3F 3F"
+        );
     }
 
     #[test]

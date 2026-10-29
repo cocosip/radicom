@@ -15,14 +15,22 @@ pub struct Vm {
 }
 
 impl Vm {
-    pub const ONE: Vm = Vm { min: 1, max: Some(1), multiplicity: 1 };
+    pub const ONE: Vm = Vm {
+        min: 1,
+        max: Some(1),
+        multiplicity: 1,
+    };
 
     /// Parses a dictionary VM string (VM-01), mirroring fo-dicom:
     /// tokenized on `-`, spaces and the `or` keyword (so `"1-n or 1"`
     /// resolves to its first alternative); `"n"` marks unbounded, a trailing
     /// `n` marks the multiplicity step.
     pub fn parse(s: &str) -> Result<Vm, Error> {
-        let invalid = || Error::Data(DataError::Other { message: format!("invalid VM \"{s}\"") });
+        let invalid = || {
+            Error::Data(DataError::Other {
+                message: format!("invalid VM \"{s}\""),
+            })
+        };
         let parts: Vec<&str> = s
             .trim()
             .split(['-', ' ', '\t'])
@@ -33,17 +41,29 @@ impl Vm {
             [] => Err(invalid()),
             [single] => {
                 let n: u32 = single.parse().map_err(|_| invalid())?;
-                Ok(Vm { min: n, max: Some(n), multiplicity: n })
+                Ok(Vm {
+                    min: n,
+                    max: Some(n),
+                    multiplicity: n,
+                })
             }
             // extra alternatives after the second token are ignored
             [min_s, max_s, ..] => {
                 let min: u32 = min_s.parse().map_err(|_| invalid())?;
                 if let Some(head) = max_s.strip_suffix('n').or_else(|| max_s.strip_suffix('N')) {
                     let multiplicity = head.parse::<u32>().unwrap_or(1);
-                    Ok(Vm { min, max: None, multiplicity: multiplicity.max(1) })
+                    Ok(Vm {
+                        min,
+                        max: None,
+                        multiplicity: multiplicity.max(1),
+                    })
                 } else {
                     let max: u32 = max_s.parse().map_err(|_| invalid())?;
-                    Ok(Vm { min, max: Some(max), multiplicity: 1 })
+                    Ok(Vm {
+                        min,
+                        max: Some(max),
+                        multiplicity: 1,
+                    })
                 }
             }
         }
@@ -78,16 +98,80 @@ mod tests {
     #[test]
     fn parse_and_display_round_trip() {
         let cases = [
-            ("1", Vm { min: 1, max: Some(1), multiplicity: 1 }, "1"),
-            ("2", Vm { min: 2, max: Some(2), multiplicity: 2 }, "2"),
-            ("1-n", Vm { min: 1, max: None, multiplicity: 1 }, "1-n"),
-            ("2-n", Vm { min: 2, max: None, multiplicity: 1 }, "2-n"),
-            ("1-3", Vm { min: 1, max: Some(3), multiplicity: 1 }, "1-3"),
+            (
+                "1",
+                Vm {
+                    min: 1,
+                    max: Some(1),
+                    multiplicity: 1,
+                },
+                "1",
+            ),
+            (
+                "2",
+                Vm {
+                    min: 2,
+                    max: Some(2),
+                    multiplicity: 2,
+                },
+                "2",
+            ),
+            (
+                "1-n",
+                Vm {
+                    min: 1,
+                    max: None,
+                    multiplicity: 1,
+                },
+                "1-n",
+            ),
+            (
+                "2-n",
+                Vm {
+                    min: 2,
+                    max: None,
+                    multiplicity: 1,
+                },
+                "2-n",
+            ),
+            (
+                "1-3",
+                Vm {
+                    min: 1,
+                    max: Some(3),
+                    multiplicity: 1,
+                },
+                "1-3",
+            ),
             // fo-dicom semantics: trailing n = unbounded max + step
-            ("2-2n", Vm { min: 2, max: None, multiplicity: 2 }, "2-2n"),
-            ("3-n", Vm { min: 3, max: None, multiplicity: 1 }, "3-n"),
+            (
+                "2-2n",
+                Vm {
+                    min: 2,
+                    max: None,
+                    multiplicity: 2,
+                },
+                "2-2n",
+            ),
+            (
+                "3-n",
+                Vm {
+                    min: 3,
+                    max: None,
+                    multiplicity: 1,
+                },
+                "3-n",
+            ),
             // fo-dicom alternative spelling: first alternative wins
-            ("1-n or 1", Vm { min: 1, max: None, multiplicity: 1 }, "1-n"),
+            (
+                "1-n or 1",
+                Vm {
+                    min: 1,
+                    max: None,
+                    multiplicity: 1,
+                },
+                "1-n",
+            ),
         ];
         for (text, expected, display) in cases {
             let vm = Vm::parse(text).unwrap();
@@ -98,7 +182,14 @@ mod tests {
         assert!(Vm::parse("").is_err());
         assert!(Vm::parse("-n").is_err());
         // fo-dicom tolerates a trailing dash (empty segments are dropped):
-        assert_eq!(Vm::parse("1-").unwrap(), Vm { min: 1, max: Some(1), multiplicity: 1 });
+        assert_eq!(
+            Vm::parse("1-").unwrap(),
+            Vm {
+                min: 1,
+                max: Some(1),
+                multiplicity: 1
+            }
+        );
     }
 
     #[test]

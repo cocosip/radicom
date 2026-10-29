@@ -78,7 +78,9 @@ impl HostedServerConfig {
             return Err(NetworkError::protocol("AE title must be 1..=16 characters"));
         }
         if ae.starts_with(' ') || ae.ends_with(' ') {
-            return Err(NetworkError::protocol("AE title must not have leading/trailing spaces"));
+            return Err(NetworkError::protocol(
+                "AE title must not have leading/trailing spaces",
+            ));
         }
         if !ae.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
             return Err(NetworkError::protocol("AE title must be printable ASCII"));
@@ -120,7 +122,12 @@ impl<P: ServiceProvider + 'static> HostedDicomServer<P> {
         HostedDicomServer {
             config,
             provider: Arc::new(provider),
-            state: Mutex::new(State { addr: None, task: None, shutdown: None, connected_clients: None }),
+            state: Mutex::new(State {
+                addr: None,
+                task: None,
+                shutdown: None,
+                connected_clients: None,
+            }),
             listening: AtomicBool::new(false),
             last_error: Arc::new(Mutex::new(None)),
         }
@@ -246,7 +253,10 @@ mod tests {
 
     #[tokio::test]
     async fn starts_listens_and_stops() {
-        let config = HostedServerConfig { port: 0, ..Default::default() };
+        let config = HostedServerConfig {
+            port: 0,
+            ..Default::default()
+        };
         let server = HostedDicomServer::new(config, EchoOnly);
         assert!(!server.health().listening);
 
@@ -312,7 +322,11 @@ mod tests {
 
         server.stop().await.unwrap();
         assert!(!server.health().listening);
-        assert_eq!(server.connected_clients(), 1, "stop must not abort an active connection");
+        assert_eq!(
+            server.connected_clients(),
+            1,
+            "stop must not abort an active connection"
+        );
 
         drop(client);
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -326,7 +340,10 @@ mod tests {
 
     #[tokio::test]
     async fn stop_interrupts_a_connection_waiting_for_a_client_slot() {
-        let config = HostedServerConfig { max_clients: 1, ..Default::default() };
+        let config = HostedServerConfig {
+            max_clients: 1,
+            ..Default::default()
+        };
         let server = HostedDicomServer::new(config, EchoOnly);
         server.start().await.unwrap();
         let bound = server.local_addr().unwrap();
@@ -370,9 +387,15 @@ mod tests {
 
     #[tokio::test]
     async fn an_invalid_ae_title_is_rejected() {
-        let config = HostedServerConfig { ae_title: "WAY_TOO_LONG_AE_TITLE_X".into(), ..Default::default() };
+        let config = HostedServerConfig {
+            ae_title: "WAY_TOO_LONG_AE_TITLE_X".into(),
+            ..Default::default()
+        };
         let server = HostedDicomServer::new(config, EchoOnly);
-        assert!(server.start().await.is_err(), "over-long AE title is rejected");
+        assert!(
+            server.start().await.is_err(),
+            "over-long AE title is rejected"
+        );
         assert!(!server.health().listening);
     }
 
@@ -386,12 +409,19 @@ mod tests {
             addr,
             "SCU",
             "OTHER-SCP",
-            vec![PresentationContext::new(1, sop_class::VERIFICATION, vec!["1.2.840.10008.1.2".into()])],
+            vec![PresentationContext::new(
+                1,
+                sop_class::VERIFICATION,
+                vec!["1.2.840.10008.1.2".into()],
+            )],
             ClientOptions::default(),
         )
         .await;
 
-        assert!(matches!(result, Err(NetworkError::Reject { .. })), "unexpected association result: {result:?}");
+        assert!(
+            matches!(result, Err(NetworkError::Reject { .. })),
+            "unexpected association result: {result:?}"
+        );
         server.stop().await.unwrap();
     }
 
@@ -399,21 +429,36 @@ mod tests {
     async fn stop_then_start_serves_again() {
         // §4.7: stop must clear the listening/addr pair, and a later start must
         // bind and accept connections again (there was no restart test).
-        let server = HostedDicomServer::new(HostedServerConfig { port: 0, ..Default::default() }, EchoOnly);
+        let server = HostedDicomServer::new(
+            HostedServerConfig {
+                port: 0,
+                ..Default::default()
+            },
+            EchoOnly,
+        );
         server.start().await.unwrap();
         let first = server.local_addr().expect("bound");
         let dial = SocketAddr::from(([127, 0, 0, 1], first.port()));
-        assert!(tokio::net::TcpStream::connect(dial).await.is_ok(), "the first listener is up");
+        assert!(
+            tokio::net::TcpStream::connect(dial).await.is_ok(),
+            "the first listener is up"
+        );
 
         server.stop().await.unwrap();
         assert!(!server.health().listening);
-        assert!(server.local_addr().is_none(), "stop clears the bound address");
+        assert!(
+            server.local_addr().is_none(),
+            "stop clears the bound address"
+        );
 
         server.start().await.unwrap();
         assert!(server.health().listening);
         let second = server.local_addr().expect("bound again after stop");
         let dial = SocketAddr::from(([127, 0, 0, 1], second.port()));
-        assert!(tokio::net::TcpStream::connect(dial).await.is_ok(), "the restarted listener accepts connections");
+        assert!(
+            tokio::net::TcpStream::connect(dial).await.is_ok(),
+            "the restarted listener accepts connections"
+        );
         server.stop().await.unwrap();
     }
 

@@ -3,10 +3,12 @@
 use crate::error::{DataError, Error};
 use crate::model::private_creator::PrivateCreator;
 use crate::model::tag::Tag;
-use crate::model::vr::Vr;
 use crate::model::vm::Vm;
+use crate::model::vr::Vr;
 use once_cell::sync::Lazy;
-use radicom_dict::generated::dict::{DICTIONARY, MASKED_DICTIONARY, PRIVATE_DICTIONARY, RawDictEntry};
+use radicom_dict::generated::dict::{
+    RawDictEntry, DICTIONARY, MASKED_DICTIONARY, PRIVATE_DICTIONARY,
+};
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::{Arc, Mutex, RwLock};
@@ -32,10 +34,40 @@ impl DictionaryEntry {
     pub fn unknown(tag: Tag) -> Arc<DictionaryEntry> {
         static ALL_VRS: Lazy<Box<[Vr]>> = Lazy::new(|| {
             Box::from([
-                Vr::Ae, Vr::As, Vr::At, Vr::Cs, Vr::Da, Vr::Ds, Vr::Dt, Vr::Fd, Vr::Fl, Vr::Is,
-                Vr::Lo, Vr::Lt, Vr::Ob, Vr::Od, Vr::Of, Vr::Ol, Vr::Ov, Vr::Ow, Vr::Pn, Vr::Sh,
-                Vr::Sl, Vr::Sq, Vr::Ss, Vr::St, Vr::Sv, Vr::Tm, Vr::Uc, Vr::Ui, Vr::Ul, Vr::Un,
-                Vr::Ur, Vr::Us, Vr::Ut, Vr::Uv,
+                Vr::Ae,
+                Vr::As,
+                Vr::At,
+                Vr::Cs,
+                Vr::Da,
+                Vr::Ds,
+                Vr::Dt,
+                Vr::Fd,
+                Vr::Fl,
+                Vr::Is,
+                Vr::Lo,
+                Vr::Lt,
+                Vr::Ob,
+                Vr::Od,
+                Vr::Of,
+                Vr::Ol,
+                Vr::Ov,
+                Vr::Ow,
+                Vr::Pn,
+                Vr::Sh,
+                Vr::Sl,
+                Vr::Sq,
+                Vr::Ss,
+                Vr::St,
+                Vr::Sv,
+                Vr::Tm,
+                Vr::Uc,
+                Vr::Ui,
+                Vr::Ul,
+                Vr::Un,
+                Vr::Ur,
+                Vr::Us,
+                Vr::Ut,
+                Vr::Uv,
             ])
         });
         Arc::new(DictionaryEntry {
@@ -45,7 +77,11 @@ impl DictionaryEntry {
             name: "Unknown",
             keyword: "Unknown",
             vrs: ALL_VRS.clone(),
-            vm: Vm { min: 1, max: None, multiplicity: 1 },
+            vm: Vm {
+                min: 1,
+                max: None,
+                multiplicity: 1,
+            },
             retired: false,
         })
     }
@@ -62,7 +98,10 @@ fn parse_vr_list(s: &str) -> Result<Box<[Vr]>, Error> {
         .map(Vec::into_boxed_slice)
 }
 
-fn build_entry(raw: &RawDictEntry, creator: Option<Arc<PrivateCreator>>) -> Result<DictionaryEntry, Error> {
+fn build_entry(
+    raw: &RawDictEntry,
+    creator: Option<Arc<PrivateCreator>>,
+) -> Result<DictionaryEntry, Error> {
     let mask = if raw.group_mask != 0xFFFF || raw.element_mask != 0xFFFF {
         Some((raw.group_mask, raw.element_mask))
     } else {
@@ -113,7 +152,10 @@ impl MaskedIndex {
     fn find(&self, tag: &Tag) -> Option<Arc<DictionaryEntry>> {
         let mut best: Option<usize> = None;
         for &(gm, em) in &self.shapes {
-            if let Some(&idx) = self.buckets.get(&(gm, em, tag.group() & gm, tag.element() & em)) {
+            if let Some(&idx) = self
+                .buckets
+                .get(&(gm, em, tag.group() & gm, tag.element() & em))
+            {
                 best = Some(best.map_or(idx, |b| b.min(idx)));
             }
         }
@@ -171,8 +213,11 @@ impl Dictionary {
         };
         for raw in DICTIONARY {
             let entry = Arc::new(build_entry(raw, None)?);
-            dict.exact.insert((raw.group as u32) << 16 | raw.element as u32, entry);
-            dict.keywords.entry(raw.keyword).or_insert_with(|| (raw.group as u32) << 16 | raw.element as u32);
+            dict.exact
+                .insert((raw.group as u32) << 16 | raw.element as u32, entry);
+            dict.keywords
+                .entry(raw.keyword)
+                .or_insert_with(|| (raw.group as u32) << 16 | raw.element as u32);
         }
         for raw in MASKED_DICTIONARY {
             let entry = Arc::new(build_entry(raw, None)?);
@@ -184,11 +229,14 @@ impl Dictionary {
             let mut subs = dict.private.write().expect("private lock");
             let sub = subs.entry(raw.creator.to_string()).or_default();
             if entry.mask.is_none() {
-                sub.exact.insert((raw.group as u32) << 16 | raw.element as u32, entry);
+                sub.exact
+                    .insert((raw.group as u32) << 16 | raw.element as u32, entry);
             } else {
                 sub.masked.push(entry);
             }
-            dict.keyword_creator.entry(raw.keyword).or_insert(raw.creator);
+            dict.keyword_creator
+                .entry(raw.keyword)
+                .or_insert(raw.creator);
         }
         Ok(dict)
     }
@@ -278,9 +326,8 @@ pub struct RuntimeEntry {
 // -- default dictionary (one-shot replacement, DICT-03) -------------------
 
 static DEFAULT: std::sync::OnceLock<Arc<Dictionary>> = std::sync::OnceLock::new();
-static GENERATED: Lazy<Arc<Dictionary>> = Lazy::new(|| {
-    Arc::new(Dictionary::with_generated().expect("generated dictionary builds"))
-});
+static GENERATED: Lazy<Arc<Dictionary>> =
+    Lazy::new(|| Arc::new(Dictionary::with_generated().expect("generated dictionary builds")));
 
 /// The active default dictionary, borrowed from a process-lifetime static.
 ///
@@ -304,9 +351,11 @@ pub fn default_dictionary() -> Arc<Dictionary> {
 /// Replaces the default dictionary; only the first call wins (subsequent
 /// calls error, mirroring fo-dicom's one-shot guard).
 pub fn set_default_dictionary(dict: Arc<Dictionary>) -> Result<(), Error> {
-    DEFAULT.set(dict).map_err(|_| Error::Data(DataError::Other {
-        message: "default dictionary already replaced".into(),
-    }))
+    DEFAULT.set(dict).map_err(|_| {
+        Error::Data(DataError::Other {
+            message: "default dictionary already replaced".into(),
+        })
+    })
 }
 
 // -- runtime XML loading (DICT-03) ----------------------------------------
@@ -366,8 +415,16 @@ fn load_xml_stream(reader: impl Read) -> Result<Vec<RuntimeEntry>, Error> {
                     creator = None;
                     for attr in e.attributes().flatten() {
                         if attr.key.as_ref() == b"creator" {
-                            let name = attr.decode_and_unescape_value(reader.decoder()).map_err(Error::from)?.into_owned();
-                            creator = Some(interner.entry(name.clone()).or_insert_with(|| Arc::new(PrivateCreator::new(name))).clone());
+                            let name = attr
+                                .decode_and_unescape_value(reader.decoder())
+                                .map_err(Error::from)?
+                                .into_owned();
+                            creator = Some(
+                                interner
+                                    .entry(name.clone())
+                                    .or_insert_with(|| Arc::new(PrivateCreator::new(name)))
+                                    .clone(),
+                            );
                         }
                     }
                 }
@@ -379,12 +436,21 @@ fn load_xml_stream(reader: impl Read) -> Result<Vec<RuntimeEntry>, Error> {
                     let mut vm = String::new();
                     let mut retired = false;
                     for attr in e.attributes().flatten() {
-                        let val = attr.decode_and_unescape_value(reader.decoder()).map_err(Error::from)?.into_owned();
+                        let val = attr
+                            .decode_and_unescape_value(reader.decoder())
+                            .map_err(Error::from)?
+                            .into_owned();
                         match attr.key.as_ref() {
                             b"group" => group = Some(parse_hex_mask(&val)),
                             b"element" => element = Some(parse_hex_mask(&val)),
                             b"keyword" => keyword = val,
-                            b"vr" => vr = val.split('/').map(|s| s.trim()).collect::<Vec<_>>().join("\\"),
+                            b"vr" => {
+                                vr = val
+                                    .split('/')
+                                    .map(|s| s.trim())
+                                    .collect::<Vec<_>>()
+                                    .join("\\")
+                            }
                             b"vm" => vm = val,
                             b"retired" => retired = val == "true",
                             _ => {}
@@ -469,7 +535,9 @@ fn parse_hex_mask(hex: &str) -> (u16, u16) {
 
 impl From<quick_xml::Error> for Error {
     fn from(e: quick_xml::Error) -> Self {
-        Error::Data(DataError::Other { message: format!("dictionary XML: {e}") })
+        Error::Data(DataError::Other {
+            message: format!("dictionary XML: {e}"),
+        })
     }
 }
 
@@ -546,11 +614,17 @@ mod tests {
     #[test]
     fn default_dictionary_one_shot_replacement() {
         // active default resolves generated entries
-        assert_eq!(default_dictionary().entry(&Tag::PIXEL_DATA).keyword, "PixelData");
+        assert_eq!(
+            default_dictionary().entry(&Tag::PIXEL_DATA).keyword,
+            "PixelData"
+        );
 
         let custom = Dictionary::with_generated().unwrap();
         set_default_dictionary(Arc::new(custom)).unwrap();
-        assert_eq!(default_dictionary().entry(&Tag::PIXEL_DATA).keyword, "PixelData");
+        assert_eq!(
+            default_dictionary().entry(&Tag::PIXEL_DATA).keyword,
+            "PixelData"
+        );
 
         // second replacement errors (one-shot guard)
         let again = Dictionary::with_generated().unwrap();
@@ -576,7 +650,11 @@ mod tests {
 </dictionaries>"#;
         let rows = load_xml(private_xml.as_bytes()).unwrap();
         assert_eq!(rows.len(), 1);
-        let creator = rows[0].entry.creator.as_ref().expect("private creator attached");
+        let creator = rows[0]
+            .entry
+            .creator
+            .as_ref()
+            .expect("private creator attached");
         assert_eq!(creator.as_str(), "ACME 1.2");
 
         // merge and resolve through a private tag
@@ -601,7 +679,10 @@ mod tests {
         let dict = Dictionary::with_generated().unwrap();
         let a = dict.entry(&Tag::new(0x0029, 0x0010));
         let b = dict.entry(&Tag::new(0x0031, 0x0010));
-        assert!(Arc::ptr_eq(&a, &b), "placeholder is a shared static, not a per-call Arc");
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "placeholder is a shared static, not a per-call Arc"
+        );
         assert_eq!(a.keyword, "PrivateCreator");
         assert_eq!(&*a.vrs, &[Vr::Lo]);
         assert_eq!(a.vm, Vm::ONE);
@@ -632,7 +713,10 @@ mod tests {
 
         let mut idx2 = MaskedIndex::default();
         idx2.push(mk(0x1005, 0xFFFF, 0x00FF, "Block"));
-        assert_eq!(idx2.find(&Tag::new(0x0029, 0x1205)).unwrap().keyword, "Block");
+        assert_eq!(
+            idx2.find(&Tag::new(0x0029, 0x1205)).unwrap().keyword,
+            "Block"
+        );
     }
 
     #[test]
@@ -653,12 +737,26 @@ mod tests {
             })
         };
         let mut exact = HashMap::new();
-        exact.insert(pub_exact_tag.to_u32(), mk(pub_exact_tag.clone(), None, "PublicExact"));
+        exact.insert(
+            pub_exact_tag.to_u32(),
+            mk(pub_exact_tag.clone(), None, "PublicExact"),
+        );
         let mut masked = MaskedIndex::default();
-        masked.push(mk(pub_masked_tag.clone(), Some((0xFF00, 0xFFFF)), "PublicMasked"));
+        masked.push(mk(
+            pub_masked_tag.clone(),
+            Some((0xFF00, 0xFFFF)),
+            "PublicMasked",
+        ));
         let mut sub = PrivateSubDict::default();
-        sub.exact.insert(0x0029_1001, mk(Tag::new(0x0029, 0x1001), None, "PrivateExact"));
-        sub.masked.push(mk(Tag::new(0x0029, 0x1000), Some((0xFFFF, 0x00FF)), "PrivateMasked"));
+        sub.exact.insert(
+            0x0029_1001,
+            mk(Tag::new(0x0029, 0x1001), None, "PrivateExact"),
+        );
+        sub.masked.push(mk(
+            Tag::new(0x0029, 0x1000),
+            Some((0xFFFF, 0x00FF)),
+            "PrivateMasked",
+        ));
         let mut private = HashMap::new();
         private.insert("ACME".to_string(), sub);
         let dict = Dictionary {
@@ -673,9 +771,16 @@ mod tests {
         let p = |element: u16| Tag::private(0x0029, element, creator.clone());
         assert_eq!(dict.entry(&p(0x1001)).keyword, "PrivateExact");
         assert_eq!(dict.entry(&p(0x1000)).keyword, "PrivateMasked");
-        assert_eq!(dict.entry(&p(0x0010)).keyword, "PrivateCreator", "creator slot placeholder");
+        assert_eq!(
+            dict.entry(&p(0x0010)).keyword,
+            "PrivateCreator",
+            "creator slot placeholder"
+        );
         assert_eq!(dict.entry(&pub_exact_tag).keyword, "PublicExact");
-        assert_eq!(dict.entry(&Tag::new(0x6014, 0x0010)).keyword, "PublicMasked");
+        assert_eq!(
+            dict.entry(&Tag::new(0x6014, 0x0010)).keyword,
+            "PublicMasked"
+        );
         assert_eq!(dict.entry(&Tag::new(0x0043, 0x9999)).keyword, "Unknown");
     }
 }

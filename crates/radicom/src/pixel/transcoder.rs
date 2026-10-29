@@ -116,17 +116,25 @@ impl Transcoder {
     }
 
     /// Convenience: transcode and clone a file (TR-03).
-    pub fn transcode_file(&self, file: &crate::io::file::DicomFile) -> Result<crate::io::file::DicomFile, Error> {
+    pub fn transcode_file(
+        &self,
+        file: &crate::io::file::DicomFile,
+    ) -> Result<crate::io::file::DicomFile, Error> {
         let dataset = self.transcode_dataset(&file.dataset)?;
         let mut out = file.clone();
         out.dataset = dataset;
         // the meta group's transfer syntax is refreshed on save
-        out.file_meta.insert_str(Tag::TRANSFER_SYNTAX_UID, Vr::Ui, self.to.uid());
+        out.file_meta
+            .insert_str(Tag::TRANSFER_SYNTAX_UID, Vr::Ui, self.to.uid());
         Ok(out)
     }
 
     /// Decodes one frame without mutating the source (TR-02, §5.6).
-    pub fn decode_frame(&self, ds: &Dataset, frame: u32) -> Result<crate::model::buffer::SharedBuffer, Error> {
+    pub fn decode_frame(
+        &self,
+        ds: &Dataset,
+        frame: u32,
+    ) -> Result<crate::model::buffer::SharedBuffer, Error> {
         if !self.from.is_encapsulated() {
             return PixelDataRef::from_dataset(ds)?.get_frame(frame);
         }
@@ -135,7 +143,9 @@ impl Transcoder {
 
         // decode into a scratch dataset holding just this frame
         let mut target = ds.clone();
-        target.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        target.set_transfer_syntax(
+            crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
         target.remove(PIXEL_DATA);
         target.remove(Tag::NUMBER_OF_FRAMES);
         {
@@ -179,7 +189,9 @@ impl Transcoder {
         let codec = codec_registry().get_codec(&self.from)?;
         let frames = self.read_frames(ds)?;
         let mut source = ds.clone();
-        source.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        source.set_transfer_syntax(
+            crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
         source.remove(PIXEL_DATA);
         {
             let mut pd = PixelData::from_dataset(&mut source)?;
@@ -215,7 +227,9 @@ impl Transcoder {
     fn decode_to_uncompressed(&self, ds: &Dataset) -> Result<Dataset, Error> {
         let frames = self.decode_frames(ds)?;
         let mut out = ds.clone();
-        out.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        out.set_transfer_syntax(
+            crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
         out.remove(PIXEL_DATA);
         out.remove(Tag::NUMBER_OF_FRAMES);
         {
@@ -284,7 +298,9 @@ fn split_multi(value: &str) -> Vec<String> {
 /// Ensures the output syntax has a codec, failing fast otherwise (§3).
 pub fn require_codec(syntax: &TransferSyntax) -> Result<(), Error> {
     if syntax.is_encapsulated() && !codec_registry().has_codec(syntax) {
-        return Err(Error::Codec(CodecError::NotRegistered(syntax.uid().to_string())));
+        return Err(Error::Codec(CodecError::NotRegistered(
+            syntax.uid().to_string(),
+        )));
     }
     Ok(())
 }
@@ -307,7 +323,8 @@ impl crate::io::file::DicomFile {
         syntax: Arc<TransferSyntax>,
         out_params: Option<CodecParams>,
     ) -> Result<crate::io::file::DicomFile, Error> {
-        Transcoder::new(self.dataset.transfer_syntax(), syntax, None, out_params).transcode_file(self)
+        Transcoder::new(self.dataset.transfer_syntax(), syntax, None, out_params)
+            .transcode_file(self)
     }
 }
 
@@ -332,7 +349,12 @@ mod tests {
         fn transfer_syntax(&self) -> &'static TransferSyntax {
             self.syntax
         }
-        fn encode(&self, src: &PixelDataRef<'_>, dst: &mut PixelData<'_>, _p: &CodecParams) -> Result<(), Error> {
+        fn encode(
+            &self,
+            src: &PixelDataRef<'_>,
+            dst: &mut PixelData<'_>,
+            _p: &CodecParams,
+        ) -> Result<(), Error> {
             for i in 0..src.number_of_frames() {
                 let frame = src.get_frame(i)?;
                 let bytes: Vec<u8> = frame.data().iter().map(|b| b ^ 0xFF).collect();
@@ -340,7 +362,12 @@ mod tests {
             }
             Ok(())
         }
-        fn decode(&self, src: &PixelDataRef<'_>, dst: &mut PixelData<'_>, _p: &CodecParams) -> Result<(), Error> {
+        fn decode(
+            &self,
+            src: &PixelDataRef<'_>,
+            dst: &mut PixelData<'_>,
+            _p: &CodecParams,
+        ) -> Result<(), Error> {
             self.encode(src, dst, &CodecParams::None)
         }
     }
@@ -354,12 +381,20 @@ mod tests {
             self.syntaxes.iter().any(|s| s.uid() == syntax.uid())
         }
         fn can_transcode(&self, from: &TransferSyntax, to: &TransferSyntax) -> bool {
-            (!from.is_encapsulated() || self.has_codec(from)) && (!to.is_encapsulated() || self.has_codec(to))
+            (!from.is_encapsulated() || self.has_codec(from))
+                && (!to.is_encapsulated() || self.has_codec(to))
         }
         fn get_codec(&self, syntax: &TransferSyntax) -> Result<Arc<dyn Codec>, Error> {
-            match self.syntaxes.iter().copied().find(|s| s.uid() == syntax.uid()) {
+            match self
+                .syntaxes
+                .iter()
+                .copied()
+                .find(|s| s.uid() == syntax.uid())
+            {
                 Some(entry) => Ok(Arc::new(MockCodec { syntax: entry })),
-                None => Err(Error::Codec(CodecError::NotRegistered(syntax.uid().to_string()))),
+                None => Err(Error::Codec(CodecError::NotRegistered(
+                    syntax.uid().to_string(),
+                ))),
             }
         }
     }
@@ -404,7 +439,9 @@ mod tests {
             None,
         );
         match tr.transcode_dataset(&with_pixels(8, 2, 2, &[&[1, 2, 3, 4]])) {
-            Err(Error::Codec(CodecError::NotRegistered(uid))) => assert_eq!(uid, "1.2.840.10008.1.2.4.90"),
+            Err(Error::Codec(CodecError::NotRegistered(uid))) => {
+                assert_eq!(uid, "1.2.840.10008.1.2.4.90")
+            }
             Err(other) => panic!("expected NotRegistered, got {other}"),
             Ok(_) => panic!("expected NotRegistered, got success"),
         }
@@ -435,14 +472,20 @@ mod tests {
             None,
         );
         let out = tr.transcode_dataset(&ds).unwrap();
-        assert_eq!(frames_of(&out), vec![vec![1, 2, 3, 4], vec![5, 6, 7, 8]], "frames copied verbatim");
+        assert_eq!(
+            frames_of(&out),
+            vec![vec![1, 2, 3, 4], vec![5, 6, 7, 8]],
+            "frames copied verbatim"
+        );
         assert_eq!(out.transfer_syntax().uid(), "1.2.840.10008.1.2");
     }
 
     #[test]
     fn uncompressed_to_compressed_encodes() {
         let _guard = crate::pixel::codec::lock_registry();
-        set_codec_registry(Arc::new(MockRegistry { syntaxes: vec![&syntaxes::JPEG_2000_LOSSLESS] }));
+        set_codec_registry(Arc::new(MockRegistry {
+            syntaxes: vec![&syntaxes::JPEG_2000_LOSSLESS],
+        }));
         let ds = with_pixels(8, 2, 2, &[&[1, 2, 3, 4]]);
         let tr = Transcoder::new(
             syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
@@ -465,7 +508,9 @@ mod tests {
     #[test]
     fn compressed_to_uncompressed_decodes() {
         let _guard = crate::pixel::codec::lock_registry();
-        set_codec_registry(Arc::new(MockRegistry { syntaxes: vec![&syntaxes::JPEG_2000_LOSSLESS] }));
+        set_codec_registry(Arc::new(MockRegistry {
+            syntaxes: vec![&syntaxes::JPEG_2000_LOSSLESS],
+        }));
         let mut ds = dataset(8, 2, 2);
         ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
         ds.insert_fragments(PIXEL_DATA, Vr::Ob)
@@ -477,7 +522,11 @@ mod tests {
             None,
         );
         let out = tr.transcode_dataset(&ds).unwrap();
-        assert_eq!(frames_of(&out), vec![vec![1, 2, 3, 4]], "decode restores the payload");
+        assert_eq!(
+            frames_of(&out),
+            vec![vec![1, 2, 3, 4]],
+            "decode restores the payload"
+        );
         assert_eq!(out.transfer_syntax().uid(), "1.2.840.10008.1.2.1");
         crate::pixel::codec::reset_codec_registry();
     }
@@ -513,7 +562,9 @@ mod tests {
     #[test]
     fn source_dataset_is_never_mutated() {
         let _guard = crate::pixel::codec::lock_registry();
-        set_codec_registry(Arc::new(MockRegistry { syntaxes: vec![&syntaxes::JPEG_2000_LOSSLESS] }));
+        set_codec_registry(Arc::new(MockRegistry {
+            syntaxes: vec![&syntaxes::JPEG_2000_LOSSLESS],
+        }));
         let ds = with_pixels(8, 2, 2, &[&[1, 2, 3, 4]]);
         let before = ds.clone();
         let tr = Transcoder::new(
@@ -530,7 +581,9 @@ mod tests {
     #[test]
     fn decode_frame_isolates_one_frame() {
         let _guard = crate::pixel::codec::lock_registry();
-        set_codec_registry(Arc::new(MockRegistry { syntaxes: vec![&syntaxes::JPEG_2000_LOSSLESS] }));
+        set_codec_registry(Arc::new(MockRegistry {
+            syntaxes: vec![&syntaxes::JPEG_2000_LOSSLESS],
+        }));
         let mut ds = dataset(8, 2, 2);
         ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
         ds.insert_str(Tag::NUMBER_OF_FRAMES, Vr::Is, "2");
@@ -557,12 +610,21 @@ mod tests {
         let mut ds = dataset(8, 2, 2);
         Transcoder::mark_lossy(&mut ds, "ISO_10918_1", 1000, 200);
         assert_eq!(ds.get_str(LOSSY_IMAGE_COMPRESSION).unwrap(), "01");
-        assert_eq!(ds.get_str(LOSSY_IMAGE_COMPRESSION_METHOD).unwrap(), "ISO_10918_1");
+        assert_eq!(
+            ds.get_str(LOSSY_IMAGE_COMPRESSION_METHOD).unwrap(),
+            "ISO_10918_1"
+        );
         assert_eq!(ds.get_str(LOSSY_IMAGE_COMPRESSION_RATIO).unwrap(), "5.000");
 
         Transcoder::mark_lossy(&mut ds, "ISO_15444_1", 1000, 400);
-        assert_eq!(ds.get_str(LOSSY_IMAGE_COMPRESSION_METHOD).unwrap(), "ISO_10918_1\\ISO_15444_1");
-        assert_eq!(ds.get_str(LOSSY_IMAGE_COMPRESSION_RATIO).unwrap(), "5.000\\2.500");
+        assert_eq!(
+            ds.get_str(LOSSY_IMAGE_COMPRESSION_METHOD).unwrap(),
+            "ISO_10918_1\\ISO_15444_1"
+        );
+        assert_eq!(
+            ds.get_str(LOSSY_IMAGE_COMPRESSION_RATIO).unwrap(),
+            "5.000\\2.500"
+        );
     }
 
     #[test]
@@ -572,7 +634,11 @@ mod tests {
         assert_eq!(ds.get_str(LOSSY_IMAGE_COMPRESSION_RATIO).unwrap(), "0.333");
         let mut ds = dataset(8, 2, 2);
         Transcoder::mark_lossy(&mut ds, "X", 100, 0);
-        assert_eq!(ds.get_str(LOSSY_IMAGE_COMPRESSION_RATIO).unwrap(), "0.000", "no division by zero");
+        assert_eq!(
+            ds.get_str(LOSSY_IMAGE_COMPRESSION_RATIO).unwrap(),
+            "0.000",
+            "no division by zero"
+        );
     }
 
     #[test]
@@ -580,7 +646,9 @@ mod tests {
         // §4.4: verify the flag on the transcoded dataset, not just that a
         // helper exists. JPEG Baseline is ISO_10918_1 lossy.
         let _guard = crate::pixel::codec::lock_registry();
-        set_codec_registry(Arc::new(MockRegistry { syntaxes: vec![&syntaxes::JPEG_PROCESS_1] }));
+        set_codec_registry(Arc::new(MockRegistry {
+            syntaxes: vec![&syntaxes::JPEG_PROCESS_1],
+        }));
         let ds = with_pixels(8, 2, 2, &[&[1, 2, 3, 4]]);
         let tr = Transcoder::new(
             syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
@@ -589,18 +657,30 @@ mod tests {
             None,
         );
         let out = tr.transcode_dataset(&ds).unwrap();
-        assert_eq!(out.get_str(LOSSY_IMAGE_COMPRESSION).unwrap(), "01", "output flagged lossy");
-        assert_eq!(out.get_str(LOSSY_IMAGE_COMPRESSION_METHOD).unwrap(), "ISO_10918_1");
+        assert_eq!(
+            out.get_str(LOSSY_IMAGE_COMPRESSION).unwrap(),
+            "01",
+            "output flagged lossy"
+        );
+        assert_eq!(
+            out.get_str(LOSSY_IMAGE_COMPRESSION_METHOD).unwrap(),
+            "ISO_10918_1"
+        );
         // 4 source bytes → 4 encoded bytes (the mock XOR keeps length): ratio 1.000
         assert_eq!(out.get_str(LOSSY_IMAGE_COMPRESSION_RATIO).unwrap(), "1.000");
-        assert!(ds.get_str(LOSSY_IMAGE_COMPRESSION).is_err(), "the source is not mutated");
+        assert!(
+            ds.get_str(LOSSY_IMAGE_COMPRESSION).is_err(),
+            "the source is not mutated"
+        );
         crate::pixel::codec::reset_codec_registry();
     }
 
     #[test]
     fn transcode_extracts_embedded_overlays() {
         let _guard = crate::pixel::codec::lock_registry();
-        set_codec_registry(Arc::new(MockRegistry { syntaxes: vec![&syntaxes::JPEG_2000_LOSSLESS] }));
+        set_codec_registry(Arc::new(MockRegistry {
+            syntaxes: vec![&syntaxes::JPEG_2000_LOSSLESS],
+        }));
         let mut ds = dataset(8, 8, 1);
         ds.insert_value(crate::pixel::BITS_STORED, 7u16);
         ds.insert_value(Tag::new(0x6000, 0x0010), 1u16);
@@ -609,11 +689,13 @@ mod tests {
         ds.insert_value(Tag::new(0x6000, 0x0100), 1u16);
         ds.insert_value(Tag::new(0x6000, 0x0102), 7u16);
         ds.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
-        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
-            PIXEL_DATA,
-            Vr::Ob,
-            Arc::new(MemoryBuffer::from(vec![0x80u8, 0, 0, 0, 0, 0, 0, 0])),
-        )));
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                PIXEL_DATA,
+                Vr::Ob,
+                Arc::new(MemoryBuffer::from(vec![0x80u8, 0, 0, 0, 0, 0, 0, 0])),
+            ),
+        ));
         let tr = Transcoder::new(
             syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
             syntaxes::JPEG_2000_LOSSLESS.clone(),
@@ -621,8 +703,15 @@ mod tests {
             None,
         );
         let out = tr.transcode_dataset(&ds).unwrap();
-        assert!(out.contains(&Tag::new(0x6000, 0x3000)), "overlay extracted into a standalone element");
-        assert_eq!(out.get_or(Tag::new(0x6000, 0x0102), 99u16), 0, "bit position normalized");
+        assert!(
+            out.contains(&Tag::new(0x6000, 0x3000)),
+            "overlay extracted into a standalone element"
+        );
+        assert_eq!(
+            out.get_or(Tag::new(0x6000, 0x0102), 99u16),
+            0,
+            "bit position normalized"
+        );
         crate::pixel::codec::reset_codec_registry();
     }
 
@@ -630,16 +719,23 @@ mod tests {
     fn require_codec_reports_missing_registrations() {
         let _guard = crate::pixel::codec::lock_registry();
         crate::pixel::codec::reset_codec_registry();
-        assert!(require_codec(&syntaxes::EXPLICIT_VR_LITTLE_ENDIAN).is_ok(), "uncompressed needs no codec");
+        assert!(
+            require_codec(&syntaxes::EXPLICIT_VR_LITTLE_ENDIAN).is_ok(),
+            "uncompressed needs no codec"
+        );
         assert!(require_codec(&syntaxes::JPEG_2000_LOSSLESS).is_err());
     }
 
     #[test]
     fn transcode_file_updates_the_meta_group() {
         let _guard = crate::pixel::codec::lock_registry();
-        set_codec_registry(Arc::new(MockRegistry { syntaxes: vec![&syntaxes::JPEG_2000_LOSSLESS] }));
-        let mut file = crate::io::file::DicomFile::from_dataset(with_pixels(8, 2, 2, &[&[1, 2, 3, 4]]));
-        file.file_meta.insert_str(Tag::TRANSFER_SYNTAX_UID, Vr::Ui, "1.2.840.10008.1.2.1");
+        set_codec_registry(Arc::new(MockRegistry {
+            syntaxes: vec![&syntaxes::JPEG_2000_LOSSLESS],
+        }));
+        let mut file =
+            crate::io::file::DicomFile::from_dataset(with_pixels(8, 2, 2, &[&[1, 2, 3, 4]]));
+        file.file_meta
+            .insert_str(Tag::TRANSFER_SYNTAX_UID, Vr::Ui, "1.2.840.10008.1.2.1");
         let tr = Transcoder::new(
             syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
             syntaxes::JPEG_2000_LOSSLESS.clone(),
@@ -647,7 +743,10 @@ mod tests {
             None,
         );
         let out = tr.transcode_file(&file).unwrap();
-        assert_eq!(out.dataset.transfer_syntax().uid(), "1.2.840.10008.1.2.4.90");
+        assert_eq!(
+            out.dataset.transfer_syntax().uid(),
+            "1.2.840.10008.1.2.4.90"
+        );
         assert_eq!(
             out.file_meta.get_str(Tag::TRANSFER_SYNTAX_UID).unwrap(),
             "1.2.840.10008.1.2.4.90",
@@ -659,18 +758,35 @@ mod tests {
     #[test]
     fn dataset_clone_with_syntax_transcodes_without_touching_the_source() {
         let ds = with_pixels(8, 2, 2, &[&[1, 2, 3, 4]]);
-        let out = ds.clone_with_syntax(syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone(), None).unwrap();
+        let out = ds
+            .clone_with_syntax(syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone(), None)
+            .unwrap();
         assert_eq!(out.transfer_syntax().uid(), "1.2.840.10008.1.2");
-        assert_eq!(frames_of(&out), vec![vec![1, 2, 3, 4]], "frames are copied through");
-        assert_eq!(ds.transfer_syntax().uid(), "1.2.840.10008.1.2.1", "the source syntax is untouched");
+        assert_eq!(
+            frames_of(&out),
+            vec![vec![1, 2, 3, 4]],
+            "frames are copied through"
+        );
+        assert_eq!(
+            ds.transfer_syntax().uid(),
+            "1.2.840.10008.1.2.1",
+            "the source syntax is untouched"
+        );
     }
 
     #[test]
     fn file_clone_with_syntax_updates_the_meta_group() {
-        let mut file = crate::io::file::DicomFile::from_dataset(with_pixels(8, 2, 2, &[&[1, 2, 3, 4]]));
-        file.file_meta.insert_str(Tag::TRANSFER_SYNTAX_UID, Vr::Ui, "1.2.840.10008.1.2.1");
-        let out = file.clone_with_syntax(syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone(), None).unwrap();
+        let mut file =
+            crate::io::file::DicomFile::from_dataset(with_pixels(8, 2, 2, &[&[1, 2, 3, 4]]));
+        file.file_meta
+            .insert_str(Tag::TRANSFER_SYNTAX_UID, Vr::Ui, "1.2.840.10008.1.2.1");
+        let out = file
+            .clone_with_syntax(syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone(), None)
+            .unwrap();
         assert_eq!(out.dataset.transfer_syntax().uid(), "1.2.840.10008.1.2");
-        assert_eq!(out.file_meta.get_str(Tag::TRANSFER_SYNTAX_UID).unwrap(), "1.2.840.10008.1.2");
+        assert_eq!(
+            out.file_meta.get_str(Tag::TRANSFER_SYNTAX_UID).unwrap(),
+            "1.2.840.10008.1.2"
+        );
     }
 }

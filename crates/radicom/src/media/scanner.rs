@@ -44,7 +44,12 @@ pub struct ScanOptions {
 impl Default for ScanOptions {
     fn default() -> Self {
         // fo-dicom's scanner default: recurse fully, skip errors, no filter
-        ScanOptions { max_depth: None, error_policy: ScanErrorPolicy::Skip, glob: None, check_for_valid_header: false }
+        ScanOptions {
+            max_depth: None,
+            error_policy: ScanErrorPolicy::Skip,
+            glob: None,
+            check_for_valid_header: false,
+        }
     }
 }
 
@@ -144,9 +149,20 @@ where
         None => None,
     };
     let mut summary = ScanSummary::default();
-    walk(root.as_ref(), 0, options, matcher.as_ref(), control, &mut summary, visitor, &mut on_match)?;
+    walk(
+        root.as_ref(),
+        0,
+        options,
+        matcher.as_ref(),
+        control,
+        &mut summary,
+        visitor,
+        &mut on_match,
+    )?;
     summary.stopped = control.is_stopped();
-    visitor.on_event(ScanEvent::Complete { summary: summary.clone() });
+    visitor.on_event(ScanEvent::Complete {
+        summary: summary.clone(),
+    });
     Ok(summary)
 }
 
@@ -197,7 +213,16 @@ where
         if file_type.is_dir() {
             let can_descend = options.max_depth.is_none_or(|max| depth < max);
             if can_descend {
-                walk(&path, depth + 1, options, matcher, control, summary, visitor, on_match)?;
+                walk(
+                    &path,
+                    depth + 1,
+                    options,
+                    matcher,
+                    control,
+                    summary,
+                    visitor,
+                    on_match,
+                )?;
             }
             continue;
         }
@@ -219,10 +244,16 @@ where
             continue;
         }
         let index = summary.files_matched;
-        visitor.on_event(ScanEvent::File { path: path.clone(), index });
+        visitor.on_event(ScanEvent::File {
+            path: path.clone(),
+            index,
+        });
         on_match(&path)?;
         summary.files_matched += 1;
-        visitor.on_event(ScanEvent::Progress { scanned: summary.files_seen, matched: summary.files_matched });
+        visitor.on_event(ScanEvent::Progress {
+            scanned: summary.files_seen,
+            matched: summary.files_matched,
+        });
     }
     Ok(())
 }
@@ -253,7 +284,10 @@ pub struct DicomDirectoryBuilder {
 
 impl DicomDirectoryBuilder {
     pub fn new(file_set_id: impl Into<String>) -> Self {
-        DicomDirectoryBuilder { file_set_id: file_set_id.into(), files: Vec::new() }
+        DicomDirectoryBuilder {
+            file_set_id: file_set_id.into(),
+            files: Vec::new(),
+        }
     }
 
     /// A collector callback suitable as the scanner's `on_match`.
@@ -265,10 +299,7 @@ impl DicomDirectoryBuilder {
     }
 
     /// Builds the directory; `file_id` maps a scanned path to its record path.
-    pub fn build<E>(
-        self,
-        mut file_id: impl FnMut(&Path) -> PathBuf,
-    ) -> Result<DicomDirectory, E>
+    pub fn build<E>(self, mut file_id: impl FnMut(&Path) -> PathBuf) -> Result<DicomDirectory, E>
     where
         E: From<Error>,
     {
@@ -321,9 +352,13 @@ pub struct Glob {
 impl Glob {
     pub fn new(pattern: &str) -> Result<Glob, Error> {
         if pattern.is_empty() {
-            return Err(Error::File(crate::error::FileError::Other("empty glob pattern".into())));
+            return Err(Error::File(crate::error::FileError::Other(
+                "empty glob pattern".into(),
+            )));
         }
-        Ok(Glob { pattern: pattern.to_string() })
+        Ok(Glob {
+            pattern: pattern.to_string(),
+        })
     }
 
     /// True when `name` (a file name, not a full path) matches the pattern.
@@ -418,7 +453,10 @@ mod tests {
         touch(&dir.join("b.txt"));
         touch(&dir.join("c.dcm"));
 
-        let options = ScanOptions { glob: Some("*.dcm".into()), ..Default::default() };
+        let options = ScanOptions {
+            glob: Some("*.dcm".into()),
+            ..Default::default()
+        };
         let mut seen = Vec::new();
         let summary = scan_directory(&dir, &options, &mut |_| {}, |path| {
             seen.push(path.to_path_buf());
@@ -442,7 +480,10 @@ mod tests {
         fs::write(&good, bytes).unwrap();
         touch(&bad);
 
-        let options = ScanOptions { check_for_valid_header: true, ..Default::default() };
+        let options = ScanOptions {
+            check_for_valid_header: true,
+            ..Default::default()
+        };
         let mut seen = Vec::new();
         let summary = scan_directory(&dir, &options, &mut |_| {}, |path| {
             seen.push(path.to_path_buf());
@@ -464,7 +505,10 @@ mod tests {
         touch(&dir.join("sub/deeper/deepest.dcm"));
 
         // max_depth 0 = root only
-        let options = ScanOptions { max_depth: Some(0), ..Default::default() };
+        let options = ScanOptions {
+            max_depth: Some(0),
+            ..Default::default()
+        };
         let mut count = 0;
         scan_directory(&dir, &options, &mut |_| {}, |_| {
             count += 1;
@@ -493,14 +537,19 @@ mod tests {
 
         let mut files = 0usize;
         let mut progress_seen = false;
-        scan_directory(&dir, &ScanOptions::default(), &mut |event| match event {
-            ScanEvent::File { index, .. } => {
-                assert_eq!(index, files, "indices are sequential");
-                files += 1;
-            }
-            ScanEvent::Progress { matched, .. } if matched > 0 => progress_seen = true,
-            _ => {}
-        }, |_| Ok::<(), Error>(()))
+        scan_directory(
+            &dir,
+            &ScanOptions::default(),
+            &mut |event| match event {
+                ScanEvent::File { index, .. } => {
+                    assert_eq!(index, files, "indices are sequential");
+                    files += 1;
+                }
+                ScanEvent::Progress { matched, .. } if matched > 0 => progress_seen = true,
+                _ => {}
+            },
+            |_| Ok::<(), Error>(()),
+        )
         .unwrap();
         assert_eq!(files, 2);
         assert!(progress_seen, "progress events fire after each match");
@@ -513,11 +562,16 @@ mod tests {
         touch(&dir.join("a.dcm"));
 
         let mut complete = None;
-        let summary = scan_directory(&dir, &ScanOptions::default(), &mut |event| {
-            if let ScanEvent::Complete { summary } = event {
-                complete = Some(summary);
-            }
-        }, |_| Ok::<(), Error>(()))
+        let summary = scan_directory(
+            &dir,
+            &ScanOptions::default(),
+            &mut |event| {
+                if let ScanEvent::Complete { summary } = event {
+                    complete = Some(summary);
+                }
+            },
+            |_| Ok::<(), Error>(()),
+        )
         .unwrap();
 
         assert_eq!(complete, Some(summary));
@@ -547,13 +601,19 @@ mod tests {
         .unwrap();
 
         assert!(summary.stopped);
-        assert_eq!(seen, 1, "stopping from the first callback prevents later files");
+        assert_eq!(
+            seen, 1,
+            "stopping from the first callback prevents later files"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn a_missing_root_with_skip_policy_counts_an_error() {
-        let options = ScanOptions { error_policy: ScanErrorPolicy::Skip, ..Default::default() };
+        let options = ScanOptions {
+            error_policy: ScanErrorPolicy::Skip,
+            ..Default::default()
+        };
         let summary = scan_directory(
             std::env::temp_dir().join("radicom-scan-does-not-exist-xyz"),
             &options,
@@ -566,7 +626,10 @@ mod tests {
 
     #[test]
     fn a_missing_root_with_stop_policy_errors() {
-        let options = ScanOptions { error_policy: ScanErrorPolicy::Stop, ..Default::default() };
+        let options = ScanOptions {
+            error_policy: ScanErrorPolicy::Stop,
+            ..Default::default()
+        };
         let result = scan_directory(
             std::env::temp_dir().join("radicom-scan-does-not-exist-xyz"),
             &options,
@@ -582,23 +645,46 @@ mod tests {
         let dir = temp_dir("build");
         for (i, uid) in ["1.2.3.4.5", "1.2.3.4.6"].iter().enumerate() {
             let mut dataset = crate::model::dataset::Dataset::new();
-            dataset.insert_str(crate::media::tags::PATIENT_ID, crate::model::vr::Vr::Lo, "P1");
-            dataset.insert_str(crate::media::tags::STUDY_INSTANCE_UID, crate::model::vr::Vr::Ui, "1.2.3");
-            dataset.insert_str(crate::media::tags::SERIES_INSTANCE_UID, crate::model::vr::Vr::Ui, "1.2.3.4");
+            dataset.insert_str(
+                crate::media::tags::PATIENT_ID,
+                crate::model::vr::Vr::Lo,
+                "P1",
+            );
+            dataset.insert_str(
+                crate::media::tags::STUDY_INSTANCE_UID,
+                crate::model::vr::Vr::Ui,
+                "1.2.3",
+            );
+            dataset.insert_str(
+                crate::media::tags::SERIES_INSTANCE_UID,
+                crate::model::vr::Vr::Ui,
+                "1.2.3.4",
+            );
             dataset.insert_str(
                 crate::media::tags::SOP_CLASS_UID,
                 crate::model::vr::Vr::Ui,
                 "1.2.840.10008.5.1.4.1.1.2",
             );
-            dataset.insert_str(crate::media::tags::SOP_INSTANCE_UID, crate::model::vr::Vr::Ui, *uid);
-            dataset.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
-            DicomFile::from_dataset(dataset).save(dir.join(format!("img{i}.dcm"))).unwrap();
+            dataset.insert_str(
+                crate::media::tags::SOP_INSTANCE_UID,
+                crate::model::vr::Vr::Ui,
+                *uid,
+            );
+            dataset.set_transfer_syntax(
+                crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+            );
+            DicomFile::from_dataset(dataset)
+                .save(dir.join(format!("img{i}.dcm")))
+                .unwrap();
         }
 
         let mut builder = DicomDirectoryBuilder::new("MYFS");
         {
             let mut collector = builder.collector();
-            let options = ScanOptions { glob: Some("*.dcm".into()), ..Default::default() };
+            let options = ScanOptions {
+                glob: Some("*.dcm".into()),
+                ..Default::default()
+            };
             scan_directory(&dir, &options, &mut |_| {}, &mut collector).unwrap();
         }
         let directory = builder

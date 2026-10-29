@@ -101,7 +101,10 @@ impl std::fmt::Display for PersonName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut parts: Vec<String> = Vec::new();
         for g in &self.groups {
-            let Some(text) = g else { parts.push(String::new()); continue };
+            let Some(text) = g else {
+                parts.push(String::new());
+                continue;
+            };
             let mut comps: Vec<&str> = text.split('^').collect();
             while comps.last().is_some_and(|c| c.is_empty()) {
                 comps.pop();
@@ -145,14 +148,18 @@ pub fn format_ds(v: f64) -> String {
 /// truncation (`"3.0"` → 3).
 pub fn parse_is(s: &str) -> Result<i32, crate::error::Error> {
     let t = s.trim();
-    let invalid = || crate::error::Error::Data(crate::error::DataError::Other {
-        message: format!("invalid IS value \"{s}\""),
-    });
+    let invalid = || {
+        crate::error::Error::Data(crate::error::DataError::Other {
+            message: format!("invalid IS value \"{s}\""),
+        })
+    };
     if let Ok(v) = t.parse::<i32>() {
         return Ok(v);
     }
     // lenient: an all-digit decimal fraction truncates ("3.0" -> 3)
-    let Some((head, tail)) = t.split_once('.') else { return Err(invalid()) };
+    let Some((head, tail)) = t.split_once('.') else {
+        return Err(invalid());
+    };
     if tail.is_empty() || !tail.bytes().all(|b| b.is_ascii_digit()) {
         return Err(invalid());
     }
@@ -208,7 +215,10 @@ mod tests {
     fn pn_content_equality() {
         let a = PersonName::parse("Doe^John");
         let b = PersonName::parse("Doe^JOHN^");
-        assert!(PersonName::have_same_content(&a, &b), "case-insensitive, trailing empties ignored");
+        assert!(
+            PersonName::have_same_content(&a, &b),
+            "case-insensitive, trailing empties ignored"
+        );
         let c = PersonName::parse("Doe^Jane");
         assert!(!PersonName::have_same_content(&a, &c));
     }

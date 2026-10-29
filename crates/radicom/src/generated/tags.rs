@@ -4,6 +4,7 @@
 
 use crate::model::tag::Tag;
 
+#[rustfmt::skip]
 impl Tag {
     /// Command Group Length (UL)
     pub const COMMAND_GROUP_LENGTH: Tag = Tag::new(0x0000, 0x0000);

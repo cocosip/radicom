@@ -39,7 +39,8 @@ pub mod tag {
     pub const NUMBER_OF_COMPLETED_SUBOPERATIONS: Tag = Tag::NUMBER_OF_COMPLETED_SUBOPERATIONS;
     pub const NUMBER_OF_FAILED_SUBOPERATIONS: Tag = Tag::NUMBER_OF_FAILED_SUBOPERATIONS;
     pub const NUMBER_OF_WARNING_SUBOPERATIONS: Tag = Tag::NUMBER_OF_WARNING_SUBOPERATIONS;
-    pub const MOVE_ORIGINATOR_APPLICATION_ENTITY_TITLE: Tag = Tag::MOVE_ORIGINATOR_APPLICATION_ENTITY_TITLE;
+    pub const MOVE_ORIGINATOR_APPLICATION_ENTITY_TITLE: Tag =
+        Tag::MOVE_ORIGINATOR_APPLICATION_ENTITY_TITLE;
     pub const MOVE_ORIGINATOR_MESSAGE_ID: Tag = Tag::MOVE_ORIGINATOR_MESSAGE_ID;
 }
 
@@ -335,10 +336,17 @@ impl Command {
         let mut with_len = ds.clone();
         insert_ul(&mut with_len, tag::COMMAND_GROUP_LENGTH, 0);
         let total = radicom::io::writer::DicomWriter::default()
-            .dataset_length(&with_len, &radicom::model::transfer_syntax::syntaxes::IMPLICIT_VR_LITTLE_ENDIAN)
+            .dataset_length(
+                &with_len,
+                &radicom::model::transfer_syntax::syntaxes::IMPLICIT_VR_LITTLE_ENDIAN,
+            )
             .unwrap_or(0);
         // the group length element itself is 12 bytes (tag + length + value)
-        insert_ul(&mut ds, tag::COMMAND_GROUP_LENGTH, (total.saturating_sub(12)) as u32);
+        insert_ul(
+            &mut ds,
+            tag::COMMAND_GROUP_LENGTH,
+            (total.saturating_sub(12)) as u32,
+        );
         ds
     }
 
@@ -347,29 +355,37 @@ impl Command {
         let code: u16 = ds
             .get(tag::COMMAND_FIELD)
             .map_err(|_| NetworkError::protocol("command set has no CommandField"))?;
-        let field = CommandField::from_code(code)
-            .ok_or(NetworkError::protocol("unknown command field"))?;
+        let field =
+            CommandField::from_code(code).ok_or(NetworkError::protocol("unknown command field"))?;
 
         let data_set_type: u16 = ds.get_or(tag::COMMAND_DATA_SET_TYPE, NO_DATA_SET);
         let attribute_identifier_list = if ds.contains(&tag::ATTRIBUTE_IDENTIFIER_LIST) {
             let element = ds
                 .get_element(tag::ATTRIBUTE_IDENTIFIER_LIST)
-                .map_err(|_| NetworkError::protocol("Attribute Identifier List is not an element"))?;
+                .map_err(|_| {
+                    NetworkError::protocol("Attribute Identifier List is not an element")
+                })?;
             let Some(buffer) = element.value().as_buffer() else {
-                return Err(NetworkError::protocol("Attribute Identifier List is not binary"));
+                return Err(NetworkError::protocol(
+                    "Attribute Identifier List is not binary",
+                ));
             };
             let bytes = buffer.data();
             if bytes.len() % 4 != 0 {
-                return Err(NetworkError::protocol("Attribute Identifier List has an invalid length"));
+                return Err(NetworkError::protocol(
+                    "Attribute Identifier List has an invalid length",
+                ));
             }
             let tags = bytes
                 .as_chunks::<4>()
                 .0
                 .iter()
-                .map(|chunk| Tag::new(
-                    u16::from_le_bytes([chunk[0], chunk[1]]),
-                    u16::from_le_bytes([chunk[2], chunk[3]]),
-                ))
+                .map(|chunk| {
+                    Tag::new(
+                        u16::from_le_bytes([chunk[0], chunk[1]]),
+                        u16::from_le_bytes([chunk[2], chunk[3]]),
+                    )
+                })
                 .collect();
             Some(tags)
         } else {
@@ -378,17 +394,29 @@ impl Command {
 
         Ok(Command {
             field,
-            affected_sop_class_uid: ds.try_get_str(tag::AFFECTED_SOP_CLASS_UID).map(|s| s.trim().to_string()),
-            requested_sop_class_uid: ds.try_get_str(tag::REQUESTED_SOP_CLASS_UID).map(|s| s.trim().to_string()),
+            affected_sop_class_uid: ds
+                .try_get_str(tag::AFFECTED_SOP_CLASS_UID)
+                .map(|s| s.trim().to_string()),
+            requested_sop_class_uid: ds
+                .try_get_str(tag::REQUESTED_SOP_CLASS_UID)
+                .map(|s| s.trim().to_string()),
             message_id: ds.get_or(tag::MESSAGE_ID, 0u16),
             message_id_being_responded_to: ds.get(tag::MESSAGE_ID_BEING_RESPONDED_TO).ok(),
             status: ds.get(tag::STATUS).ok(),
-            error_comment: ds.try_get_str(tag::ERROR_COMMENT).map(|s| s.trim_end().to_string()),
+            error_comment: ds
+                .try_get_str(tag::ERROR_COMMENT)
+                .map(|s| s.trim_end().to_string()),
             priority: Priority::from_code(ds.get_or(tag::PRIORITY, 0u16)),
             no_dataset: data_set_type == NO_DATA_SET,
-            move_destination: ds.try_get_str(tag::MOVE_DESTINATION).map(|s| s.trim().to_string()),
-            affected_sop_instance_uid: ds.try_get_str(tag::AFFECTED_SOP_INSTANCE_UID).map(|s| s.trim().to_string()),
-            requested_sop_instance_uid: ds.try_get_str(tag::REQUESTED_SOP_INSTANCE_UID).map(|s| s.trim().to_string()),
+            move_destination: ds
+                .try_get_str(tag::MOVE_DESTINATION)
+                .map(|s| s.trim().to_string()),
+            affected_sop_instance_uid: ds
+                .try_get_str(tag::AFFECTED_SOP_INSTANCE_UID)
+                .map(|s| s.trim().to_string()),
+            requested_sop_instance_uid: ds
+                .try_get_str(tag::REQUESTED_SOP_INSTANCE_UID)
+                .map(|s| s.trim().to_string()),
             attribute_identifier_list,
             event_type_id: ds.get(tag::EVENT_TYPE_ID).ok(),
             action_type_id: ds.get(tag::ACTION_TYPE_ID).ok(),
@@ -497,11 +525,19 @@ pub struct Status {
 
 impl Status {
     pub fn new(code: u16) -> Self {
-        Status { code, state: classify(code), comment: None }
+        Status {
+            code,
+            state: classify(code),
+            comment: None,
+        }
     }
 
     pub fn with_comment(code: u16, comment: impl Into<String>) -> Self {
-        Status { code, state: classify(code), comment: Some(comment.into()) }
+        Status {
+            code,
+            state: classify(code),
+            comment: Some(comment.into()),
+        }
     }
 
     pub fn is_success(&self) -> bool {
@@ -602,7 +638,10 @@ pub fn register_status_description(
     service_class: StatusServiceClass,
     description: &'static str,
 ) {
-    STATUS_DESCRIPTIONS.write().unwrap().insert((code, service_class), description);
+    STATUS_DESCRIPTIONS
+        .write()
+        .unwrap()
+        .insert((code, service_class), description);
 }
 
 /// Returns a status description with service-class-specific wording where the
@@ -610,8 +649,15 @@ pub fn register_status_description(
 ///
 /// A description registered through [`register_status_description`] wins over
 /// the built-in table.
-pub fn status_description_for_service_class(code: u16, service_class: StatusServiceClass) -> &'static str {
-    if let Some(description) = STATUS_DESCRIPTIONS.read().unwrap().get(&(code, service_class)) {
+pub fn status_description_for_service_class(
+    code: u16,
+    service_class: StatusServiceClass,
+) -> &'static str {
+    if let Some(description) = STATUS_DESCRIPTIONS
+        .read()
+        .unwrap()
+        .get(&(code, service_class))
+    {
         return description;
     }
     match (code, service_class) {
@@ -738,7 +784,11 @@ mod tests {
             CommandField::NDeleteRq,
             CommandField::NDeleteRsp,
         ] {
-            assert_eq!(CommandField::from_code(field.code()), Some(field), "{field:?}");
+            assert_eq!(
+                CommandField::from_code(field.code()),
+                Some(field),
+                "{field:?}"
+            );
         }
         assert_eq!(CommandField::from_code(0x0099), None);
     }
@@ -761,16 +811,27 @@ mod tests {
         assert_eq!(Priority::from_code(0), Priority::Medium);
         assert_eq!(Priority::from_code(1), Priority::High);
         assert_eq!(Priority::from_code(2), Priority::Low);
-        assert_eq!(Priority::from_code(7), Priority::Medium, "an unknown value reads as the default");
+        assert_eq!(
+            Priority::from_code(7),
+            Priority::Medium,
+            "an unknown value reads as the default"
+        );
         assert_eq!(Priority::default(), Priority::Medium);
-        assert!(Priority::Medium < Priority::High && Priority::High < Priority::Low, "Ord follows the codes");
+        assert!(
+            Priority::Medium < Priority::High && Priority::High < Priority::Low,
+            "Ord follows the codes"
+        );
     }
 
     #[test]
     fn priority_lands_in_0000_0700_with_the_standard_value() {
         use crate::test_wire::{command_bytes, element_value};
 
-        for (priority, code) in [(Priority::Medium, 0u16), (Priority::High, 1), (Priority::Low, 2)] {
+        for (priority, code) in [
+            (Priority::Medium, 0u16),
+            (Priority::High, 1),
+            (Priority::Low, 2),
+        ] {
             let mut command = Command::request(CommandField::CFindRq, 1);
             command.priority = priority;
             let bytes = command_bytes(&command);
@@ -784,7 +845,10 @@ mod tests {
         // an absent (0000,0700) reads as MEDIUM
         let mut ds = Dataset::new();
         ds.insert_value(tag::COMMAND_FIELD, CommandField::CFindRq.code());
-        assert_eq!(Command::from_dataset(&ds).unwrap().priority, Priority::Medium);
+        assert_eq!(
+            Command::from_dataset(&ds).unwrap().priority,
+            Priority::Medium
+        );
     }
 
     #[test]
@@ -795,19 +859,37 @@ mod tests {
         // responses name the request in (0000,0120).
         let request = Command::request(CommandField::CEchoRq, 7);
         let bytes = command_bytes(&request);
-        assert_eq!(element_value(&bytes, 0x0000, 0x0110), Some(7u16.to_le_bytes().to_vec()), "a request keeps it");
+        assert_eq!(
+            element_value(&bytes, 0x0000, 0x0110),
+            Some(7u16.to_le_bytes().to_vec()),
+            "a request keeps it"
+        );
 
         let response = Command::response(&request, status::SUCCESS).expect("C-ECHO has a response");
         let bytes = command_bytes(&response);
-        assert_eq!(element_value(&bytes, 0x0000, 0x0110), None, "a response must not carry Message ID");
-        assert_eq!(element_value(&bytes, 0x0000, 0x0120), Some(7u16.to_le_bytes().to_vec()));
+        assert_eq!(
+            element_value(&bytes, 0x0000, 0x0110),
+            None,
+            "a response must not carry Message ID"
+        );
+        assert_eq!(
+            element_value(&bytes, 0x0000, 0x0120),
+            Some(7u16.to_le_bytes().to_vec())
+        );
 
         // C-CANCEL identifies the cancelled request in (0000,0120) only
         let mut cancel = Command::request(CommandField::CCancelRq, 7);
         cancel.message_id_being_responded_to = Some(7);
         let bytes = command_bytes(&cancel);
-        assert_eq!(element_value(&bytes, 0x0000, 0x0110), None, "C-CANCEL has no Message ID");
-        assert_eq!(element_value(&bytes, 0x0000, 0x0120), Some(7u16.to_le_bytes().to_vec()));
+        assert_eq!(
+            element_value(&bytes, 0x0000, 0x0110),
+            None,
+            "C-CANCEL has no Message ID"
+        );
+        assert_eq!(
+            element_value(&bytes, 0x0000, 0x0120),
+            Some(7u16.to_le_bytes().to_vec())
+        );
     }
 
     #[test]
@@ -818,8 +900,14 @@ mod tests {
         let back = Command::from_dataset(&ds).unwrap();
         assert_eq!(back.field, CommandField::CEchoRq);
         assert_eq!(back.message_id, 42);
-        assert_eq!(back.affected_sop_class_uid.as_deref(), Some("1.2.840.10008.1.1"));
-        assert!(!back.no_dataset, "C-ECHO request has no dataset, but the flag is set by the sender");
+        assert_eq!(
+            back.affected_sop_class_uid.as_deref(),
+            Some("1.2.840.10008.1.1")
+        );
+        assert!(
+            !back.no_dataset,
+            "C-ECHO request has no dataset, but the flag is set by the sender"
+        );
     }
 
     #[test]
@@ -829,9 +917,16 @@ mod tests {
         let ds = request.to_dataset();
         let declared: u32 = ds.get(tag::COMMAND_GROUP_LENGTH).unwrap();
         let total = radicom::io::writer::DicomWriter::default()
-            .dataset_length(&ds, &radicom::model::transfer_syntax::syntaxes::IMPLICIT_VR_LITTLE_ENDIAN)
+            .dataset_length(
+                &ds,
+                &radicom::model::transfer_syntax::syntaxes::IMPLICIT_VR_LITTLE_ENDIAN,
+            )
             .unwrap();
-        assert_eq!(declared as u64, total - 12, "(0000,0000) covers everything after itself");
+        assert_eq!(
+            declared as u64,
+            total - 12,
+            "(0000,0000) covers everything after itself"
+        );
     }
 
     #[test]
@@ -866,7 +961,11 @@ mod tests {
             CommandField::CCancelRq,
         ] {
             let request = Command::request(field, 1);
-            assert_eq!(Command::response(&request, status::SUCCESS), None, "{field:?}");
+            assert_eq!(
+                Command::response(&request, status::SUCCESS),
+                None,
+                "{field:?}"
+            );
         }
     }
 
@@ -885,9 +984,14 @@ mod tests {
             CommandField::NCreateRq,
             CommandField::NDeleteRq,
         ] {
-            let response = response_field(field).unwrap_or_else(|| panic!("{field:?} has a response"));
+            let response =
+                response_field(field).unwrap_or_else(|| panic!("{field:?} has a response"));
             assert!(!response.is_request(), "{response:?} must be a response");
-            assert_eq!(response.code() & 0x7FFF, field.code(), "{field:?} pairs with {response:?}");
+            assert_eq!(
+                response.code() & 0x7FFF,
+                field.code(),
+                "{field:?} pairs with {response:?}"
+            );
         }
         assert_eq!(response_field(CommandField::CEchoRsp), None);
         assert_eq!(response_field(CommandField::CCancelRq), None);
@@ -898,13 +1002,19 @@ mod tests {
         let mut request = Command::request(CommandField::CStoreRq, 1);
         request.no_dataset = true;
         let ds = request.to_dataset();
-        assert_eq!(ds.get::<u16>(tag::COMMAND_DATA_SET_TYPE).unwrap(), NO_DATA_SET);
+        assert_eq!(
+            ds.get::<u16>(tag::COMMAND_DATA_SET_TYPE).unwrap(),
+            NO_DATA_SET
+        );
         assert!(Command::from_dataset(&ds).unwrap().no_dataset);
 
         let mut request = Command::request(CommandField::CStoreRq, 1);
         request.no_dataset = false;
         let ds = request.to_dataset();
-        assert_ne!(ds.get::<u16>(tag::COMMAND_DATA_SET_TYPE).unwrap(), NO_DATA_SET);
+        assert_ne!(
+            ds.get::<u16>(tag::COMMAND_DATA_SET_TYPE).unwrap(),
+            NO_DATA_SET
+        );
         assert!(!Command::from_dataset(&ds).unwrap().no_dataset);
     }
 
@@ -927,13 +1037,26 @@ mod tests {
         assert_eq!(classify(status::SUCCESS), StatusState::Success);
         assert_eq!(classify(status::PENDING), StatusState::Pending);
         assert_eq!(classify(status::CANCEL), StatusState::Cancel);
-        assert_eq!(classify(status::SUBOPERATIONS_COMPLETED_WITH_WARNINGS), StatusState::Warning);
+        assert_eq!(
+            classify(status::SUBOPERATIONS_COMPLETED_WITH_WARNINGS),
+            StatusState::Warning
+        );
         assert_eq!(classify(status::PROCESSING_FAILURE), StatusState::Failure);
 
         // DIMSE-N codes are failures, not the pending family
-        assert_eq!(classify(status::INVALID_ATTRIBUTE_VALUE), StatusState::Failure);
-        assert_eq!(classify(status::ATTRIBUTE_VALUE_OUT_OF_RANGE), StatusState::Warning);
-        assert_eq!(classify(0x0100), StatusState::Failure, "only FF00/FF01 are pending");
+        assert_eq!(
+            classify(status::INVALID_ATTRIBUTE_VALUE),
+            StatusState::Failure
+        );
+        assert_eq!(
+            classify(status::ATTRIBUTE_VALUE_OUT_OF_RANGE),
+            StatusState::Warning
+        );
+        assert_eq!(
+            classify(0x0100),
+            StatusState::Failure,
+            "only FF00/FF01 are pending"
+        );
     }
 
     #[test]
@@ -946,9 +1069,19 @@ mod tests {
         assert_eq!(Status::new(0xB000).pattern(), "Bxxx");
 
         assert_eq!(status_description(0xA7FF), "Out of resources");
-        assert_eq!(status_description(0xA701), "Unable to calculate number of matches", "exact wins");
-        assert_eq!(status_description(0xA9FF), "Identifier or data set does not match SOP class");
-        assert_eq!(status_description(status::MISSING_ATTRIBUTE), "Missing attribute");
+        assert_eq!(
+            status_description(0xA701),
+            "Unable to calculate number of matches",
+            "exact wins"
+        );
+        assert_eq!(
+            status_description(0xA9FF),
+            "Identifier or data set does not match SOP class"
+        );
+        assert_eq!(
+            status_description(status::MISSING_ATTRIBUTE),
+            "Missing attribute"
+        );
     }
 
     #[test]
@@ -1050,21 +1183,33 @@ mod tests {
     #[test]
     fn a_custom_status_description_can_be_registered() {
         // a private/new code the built-in table does not know
-        assert_eq!(status_description_for_service_class(0xEE01, StatusServiceClass::QueryRetrieve), "Unknown status");
-        register_status_description(0xEE01, StatusServiceClass::QueryRetrieve, "Custom query status");
+        assert_eq!(
+            status_description_for_service_class(0xEE01, StatusServiceClass::QueryRetrieve),
+            "Unknown status"
+        );
+        register_status_description(
+            0xEE01,
+            StatusServiceClass::QueryRetrieve,
+            "Custom query status",
+        );
         assert_eq!(
             status_description_for_service_class(0xEE01, StatusServiceClass::QueryRetrieve),
             "Custom query status"
         );
         // only the registered service class is overridden
-        assert_eq!(status_description_for_service_class(0xEE01, StatusServiceClass::Storage), "Unknown status");
+        assert_eq!(
+            status_description_for_service_class(0xEE01, StatusServiceClass::Storage),
+            "Unknown status"
+        );
     }
 
     #[test]
     fn missing_command_field_is_an_error() {
         let ds = Dataset::new();
         match Command::from_dataset(&ds) {
-            Err(NetworkError::Protocol(message)) => assert!(message.contains("CommandField"), "got {message}"),
+            Err(NetworkError::Protocol(message)) => {
+                assert!(message.contains("CommandField"), "got {message}")
+            }
             other => panic!("expected Protocol error, got {other:?}"),
         }
     }
@@ -1073,7 +1218,10 @@ mod tests {
     fn unknown_command_field_is_an_error() {
         let mut ds = Dataset::new();
         ds.insert_value(tag::COMMAND_FIELD, 0x0099u16);
-        assert!(matches!(Command::from_dataset(&ds), Err(NetworkError::Protocol(_))));
+        assert!(matches!(
+            Command::from_dataset(&ds),
+            Err(NetworkError::Protocol(_))
+        ));
     }
 
     #[test]
@@ -1108,7 +1256,10 @@ mod tests {
         request.action_type_id = Some(1);
 
         let back = Command::from_dataset(&request.to_dataset()).unwrap();
-        assert_eq!(back.requested_sop_class_uid.as_deref(), Some("1.2.840.10008.5.1.4.1.1.88.1"));
+        assert_eq!(
+            back.requested_sop_class_uid.as_deref(),
+            Some("1.2.840.10008.5.1.4.1.1.88.1")
+        );
         assert_eq!(back.requested_sop_instance_uid.as_deref(), Some("1.2.3"));
         assert_eq!(back.event_type_id, Some(2));
         assert_eq!(back.action_type_id, Some(1));

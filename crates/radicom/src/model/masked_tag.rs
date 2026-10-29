@@ -20,7 +20,10 @@ impl MaskedTag {
 
     /// Exact tag shape: `(GGGG,EEEE)` with full mask.
     pub const fn exact(tag: u32) -> Self {
-        MaskedTag { card: tag, mask: 0xFFFF_FFFF }
+        MaskedTag {
+            card: tag,
+            mask: 0xFFFF_FFFF,
+        }
     }
 
     pub const fn card(&self) -> u32 {
@@ -47,7 +50,9 @@ impl MaskedTag {
         let body = s.strip_prefix('(').unwrap_or(s);
         let body = body.strip_suffix(')').unwrap_or(body);
         let invalid = || {
-            Error::Data(DataError::Other { message: format!("invalid masked tag \"{s}\"") })
+            Error::Data(DataError::Other {
+                message: format!("invalid masked tag \"{s}\""),
+            })
         };
         let hex = if let Some((g, e)) = body.split_once(',') {
             let g = g.trim();
@@ -61,7 +66,11 @@ impl MaskedTag {
         } else {
             return Err(invalid());
         };
-        if hex.len() != 8 || !hex.chars().all(|c| c == 'x' || c == 'X' || c.is_ascii_hexdigit()) {
+        if hex.len() != 8
+            || !hex
+                .chars()
+                .all(|c| c == 'x' || c == 'X' || c.is_ascii_hexdigit())
+        {
             return Err(invalid());
         }
         let mut card = 0u32;
@@ -129,7 +138,10 @@ mod tests {
 
         assert_eq!(MaskedTag::parse("60XX,3000").unwrap(), m);
         assert_eq!(MaskedTag::parse("60xx3000").unwrap(), m);
-        assert_eq!(MaskedTag::parse("(0028,0010)").unwrap(), MaskedTag::exact(0x0028_0010));
+        assert_eq!(
+            MaskedTag::parse("(0028,0010)").unwrap(),
+            MaskedTag::exact(0x0028_0010)
+        );
     }
 
     #[test]
@@ -138,7 +150,10 @@ mod tests {
         assert!(overlay_data.matches(0x6002, 0x3000));
         assert!(overlay_data.matches(0x60FE, 0x3000));
         assert!(!overlay_data.matches(0x6002, 0x4000));
-        assert!(!overlay_data.matches(0x6102, 0x3000), "6102 & FF00 = 6100 ≠ 6000");
+        assert!(
+            !overlay_data.matches(0x6102, 0x3000),
+            "6102 & FF00 = 6100 ≠ 6000"
+        );
         assert!(overlay_data.matches_u32(0x6014_3000));
 
         // all-wildcard and fully-fixed shapes

@@ -7,6 +7,7 @@
 //! dataset and file anonymized by that instance; a file's media-storage SOP
 //! instance UID is kept in sync with the dataset's SOP instance UID (§6.2).
 
+use crate::anonymizer::profile::{Action, AnonOption, SecurityProfile};
 use crate::error::Error;
 use crate::io::file::DicomFile;
 use crate::model::dataset::Dataset;
@@ -15,7 +16,6 @@ use crate::model::item::DicomItem;
 use crate::model::tag::Tag;
 use crate::model::uid::Uid;
 use crate::model::vr::Vr;
-use crate::anonymizer::profile::{Action, AnonOption, SecurityProfile};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -91,7 +91,8 @@ impl Anonymizer {
         // dataset SOP instance UID so the two never disagree
         if file.file_meta.contains(&MEDIA_STORAGE_SOP_INSTANCE_UID) {
             if let Some(sop_instance) = file.dataset.try_get_str(SOP_INSTANCE_UID) {
-                file.file_meta.insert_str(MEDIA_STORAGE_SOP_INSTANCE_UID, Vr::Ui, sop_instance);
+                file.file_meta
+                    .insert_str(MEDIA_STORAGE_SOP_INSTANCE_UID, Vr::Ui, sop_instance);
             }
         }
         Ok(())
@@ -117,7 +118,11 @@ impl Anonymizer {
     /// Only the tags are collected up front — the items themselves stay in the
     /// dataset, so a 32 MB pixel buffer or a whole SR subtree is never cloned
     /// just to be walked (§3.4).
-    fn walk(&self, dataset: &mut Dataset, replaced: &mut HashMap<String, String>) -> Result<(), Error> {
+    fn walk(
+        &self,
+        dataset: &mut Dataset,
+        replaced: &mut HashMap<String, String>,
+    ) -> Result<(), Error> {
         let mut to_remove: Vec<Tag> = Vec::new();
         let tags: Vec<Tag> = dataset.items().map(|item| item.tag().clone()).collect();
 
@@ -134,7 +139,9 @@ impl Anonymizer {
                     Some(Action::Remove) => to_remove.push(tag),
                     Some(Action::Keep) => {}
                     _ => {
-                        let Some(DicomItem::Sequence(mut sequence)) = dataset.remove(&tag) else { continue };
+                        let Some(DicomItem::Sequence(mut sequence)) = dataset.remove(&tag) else {
+                            continue;
+                        };
                         for child in sequence.items_mut() {
                             self.walk(child, replaced)?;
                         }
@@ -150,7 +157,9 @@ impl Anonymizer {
                 continue;
             }
             // fragments carry no VR and no value the actions know how to blank
-            let Some(DicomItem::Element(element)) = dataset.item(&tag) else { continue };
+            let Some(DicomItem::Element(element)) = dataset.item(&tag) else {
+                continue;
+            };
             let vr = element.vr();
 
             match action {
@@ -194,12 +203,20 @@ impl Anonymizer {
     }
 
     /// Rewrites a UID element to a consistent replacement (§6.2).
-    fn replace_uid(&self, dataset: &mut Dataset, tag: &Tag, replaced: &mut HashMap<String, String>) {
+    fn replace_uid(
+        &self,
+        dataset: &mut Dataset,
+        tag: &Tag,
+        replaced: &mut HashMap<String, String>,
+    ) {
         let old = dataset.try_get_str(tag).unwrap_or_default();
         if old.trim().is_empty() {
             return; // no need to replace empty UIDs
         }
-        let new_uid = replaced.entry(old).or_insert_with(Uid::generate_value).clone();
+        let new_uid = replaced
+            .entry(old)
+            .or_insert_with(Uid::generate_value)
+            .clone();
         dataset.insert_str(tag.clone(), Vr::Ui, new_uid);
     }
 
@@ -256,11 +273,16 @@ impl Anonymizer {
 
 /// Binary VRs (`Other*`/UN) that blank to an empty buffer rather than a dummy.
 fn is_other(vr: Vr) -> bool {
-    matches!(vr, Vr::Ob | Vr::Od | Vr::Of | Vr::Ol | Vr::Ov | Vr::Ow | Vr::Un)
+    matches!(
+        vr,
+        Vr::Ob | Vr::Od | Vr::Of | Vr::Ol | Vr::Ov | Vr::Ow | Vr::Un
+    )
 }
 
 /// Locks the UID map; a poisoned mutex still holds a consistent map.
-fn lock(map: &Mutex<HashMap<String, String>>) -> std::sync::MutexGuard<'_, HashMap<String, String>> {
+fn lock(
+    map: &Mutex<HashMap<String, String>>,
+) -> std::sync::MutexGuard<'_, HashMap<String, String>> {
     map.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
@@ -297,7 +319,10 @@ mod tests {
         let sop = ds.try_get_str(Tag::SOP_INSTANCE_UID).unwrap();
         let study = ds.try_get_str(Tag::STUDY_INSTANCE_UID).unwrap();
         assert_ne!(sop, "1.2.3.4", "the SOP instance UID must be replaced");
-        assert_eq!(sop, study, "the same source UID maps to the same replacement");
+        assert_eq!(
+            sop, study,
+            "the same source UID maps to the same replacement"
+        );
         assert!(!sop.is_empty());
     }
 
@@ -313,7 +338,10 @@ mod tests {
         let mut ds = dataset();
         Anonymizer::basic().anonymize_in_place(&mut ds).unwrap();
         let accession = ds.try_get_str(Tag::ACCESSION_NUMBER);
-        assert!(accession.map(|v| v.is_empty()).unwrap_or(true), "AccessionNumber is blanked");
+        assert!(
+            accession.map(|v| v.is_empty()).unwrap_or(true),
+            "AccessionNumber is blanked"
+        );
     }
 
     #[test]
@@ -323,7 +351,10 @@ mod tests {
             .with_patient("Alias^Name", "PAT-42")
             .anonymize_in_place(&mut ds)
             .unwrap();
-        assert_eq!(ds.try_get_str(Tag::PATIENT_NAME).as_deref(), Some("Alias^Name"));
+        assert_eq!(
+            ds.try_get_str(Tag::PATIENT_NAME).as_deref(),
+            Some("Alias^Name")
+        );
         assert_eq!(ds.try_get_str(Tag::PATIENT_ID).as_deref(), Some("PAT-42"));
     }
 
@@ -337,9 +368,17 @@ mod tests {
         let mut ds = Dataset::new();
         ds.insert_str(Tag::SPACING_BETWEEN_SLICES, Vr::Ds, "12.5");
         anon.anonymize_in_place(&mut ds).unwrap();
-        let v = ds.try_get_str(Tag::SPACING_BETWEEN_SLICES).unwrap_or_default();
-        assert_ne!(v, "ANONYMOUS", "a DS dummy must be numeric, not the word ANONYMOUS");
-        assert!(v.trim().parse::<f64>().is_ok(), "DS dummy must parse as a number, got {v:?}");
+        let v = ds
+            .try_get_str(Tag::SPACING_BETWEEN_SLICES)
+            .unwrap_or_default();
+        assert_ne!(
+            v, "ANONYMOUS",
+            "a DS dummy must be numeric, not the word ANONYMOUS"
+        );
+        assert!(
+            v.trim().parse::<f64>().is_ok(),
+            "DS dummy must parse as a number, got {v:?}"
+        );
     }
 
     #[test]
@@ -349,11 +388,13 @@ mod tests {
         let mut ds = Dataset::new();
         let mut child = Dataset::new();
         child.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Nested^Name");
-        ds.insert_sequence(Tag::REFERENCED_STUDY_SEQUENCE).push(child);
+        ds.insert_sequence(Tag::REFERENCED_STUDY_SEQUENCE)
+            .push(child);
 
         Anonymizer::basic().anonymize_in_place(&mut ds).unwrap();
         assert!(
-            ds.try_get_sequence(Tag::REFERENCED_STUDY_SEQUENCE).is_none(),
+            ds.try_get_sequence(Tag::REFERENCED_STUDY_SEQUENCE)
+                .is_none(),
             "ReferencedStudySequence is X under the basic profile and must be removed"
         );
     }
@@ -369,12 +410,15 @@ mod tests {
         let mut ds = Dataset::new();
         let mut child = Dataset::new();
         child.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Nested^Name");
-        ds.insert_sequence(Tag::REFERENCED_STUDY_SEQUENCE).push(child);
+        ds.insert_sequence(Tag::REFERENCED_STUDY_SEQUENCE)
+            .push(child);
 
         anon.anonymize_in_place(&mut ds).unwrap();
         let sequence = ds.try_get_sequence(Tag::REFERENCED_STUDY_SEQUENCE).unwrap();
         assert_eq!(
-            sequence.items()[0].try_get_str(Tag::PATIENT_NAME).as_deref(),
+            sequence.items()[0]
+                .try_get_str(Tag::PATIENT_NAME)
+                .as_deref(),
             Some(""),
             "the nested PatientName is blanked"
         );
@@ -384,8 +428,14 @@ mod tests {
     fn the_clone_variant_leaves_the_original_untouched() {
         let ds = dataset();
         let anonymized = Anonymizer::basic().anonymize(&ds).unwrap();
-        assert_eq!(ds.try_get_str(Tag::PATIENT_NAME).as_deref(), Some("Doe^John"));
-        assert_eq!(anonymized.try_get_str(Tag::PATIENT_NAME).as_deref(), Some(""));
+        assert_eq!(
+            ds.try_get_str(Tag::PATIENT_NAME).as_deref(),
+            Some("Doe^John")
+        );
+        assert_eq!(
+            anonymized.try_get_str(Tag::PATIENT_NAME).as_deref(),
+            Some("")
+        );
     }
 
     #[test]
@@ -397,8 +447,15 @@ mod tests {
         ds.insert_str(Tag::SERIES_DATE, Vr::Da, "20260102"); // SeriesDate: X/D
         Anonymizer::basic().anonymize_in_place(&mut ds).unwrap();
 
-        assert_eq!(ds.try_get_str(Tag::STUDY_DATE).as_deref(), Some(""), "StudyDate blanked");
-        assert!(ds.try_get_str(Tag::SERIES_DATE).is_none(), "SeriesDate removed");
+        assert_eq!(
+            ds.try_get_str(Tag::STUDY_DATE).as_deref(),
+            Some(""),
+            "StudyDate blanked"
+        );
+        assert!(
+            ds.try_get_str(Tag::SERIES_DATE).is_none(),
+            "SeriesDate removed"
+        );
     }
 
     #[test]
@@ -410,7 +467,10 @@ mod tests {
         Anonymizer::basic().anonymize_in_place(&mut ds).unwrap();
         let a = ds.try_get_str(Tag::SOP_INSTANCE_UID).unwrap();
         let b = ds.try_get_str(Tag::REFERENCED_SOP_INSTANCE_UID).unwrap();
-        assert_eq!(a, b, "the same UID must map consistently even across different tags");
+        assert_eq!(
+            a, b,
+            "the same UID must map consistently even across different tags"
+        );
         assert_ne!(a, "1.2.3.4");
     }
 
@@ -425,11 +485,13 @@ mod tests {
         let mut ds = Dataset::new();
         let mut child = Dataset::new();
         child.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Nested^Name");
-        ds.insert_sequence(Tag::REFERENCED_STUDY_SEQUENCE).push(child);
+        ds.insert_sequence(Tag::REFERENCED_STUDY_SEQUENCE)
+            .push(child);
 
         anon.anonymize_in_place(&mut ds).unwrap();
         assert!(
-            ds.try_get_sequence(Tag::REFERENCED_STUDY_SEQUENCE).is_none(),
+            ds.try_get_sequence(Tag::REFERENCED_STUDY_SEQUENCE)
+                .is_none(),
             "an SQ marked X must be removed entirely"
         );
     }
@@ -444,10 +506,13 @@ mod tests {
         let mut ds = Dataset::new();
         let mut child = Dataset::new();
         child.insert_str(Tag::PATIENT_ID, Vr::Lo, "PII"); // PatientID: Z under basic
-        ds.insert_sequence(Tag::REFERENCED_STUDY_SEQUENCE).push(child);
+        ds.insert_sequence(Tag::REFERENCED_STUDY_SEQUENCE)
+            .push(child);
 
         anon.anonymize_in_place(&mut ds).unwrap();
-        let seq = ds.try_get_sequence(Tag::REFERENCED_STUDY_SEQUENCE).expect("sequence is kept");
+        let seq = ds
+            .try_get_sequence(Tag::REFERENCED_STUDY_SEQUENCE)
+            .expect("sequence is kept");
         assert_eq!(
             seq.items()[0].try_get_str(Tag::PATIENT_ID).as_deref(),
             Some(""),
@@ -458,11 +523,20 @@ mod tests {
     #[test]
     fn anonymizing_a_file_syncs_the_media_storage_uid() {
         let mut file = DicomFile::from_dataset(dataset());
-        file.file_meta.insert_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4");
-        Anonymizer::basic().anonymize_file_in_place(&mut file).unwrap();
+        file.file_meta
+            .insert_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4");
+        Anonymizer::basic()
+            .anonymize_file_in_place(&mut file)
+            .unwrap();
         let sop = file.dataset.try_get_str(Tag::SOP_INSTANCE_UID).unwrap();
-        let meta = file.file_meta.try_get_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID).unwrap();
-        assert_eq!(meta, sop, "file meta must track the anonymized instance UID");
+        let meta = file
+            .file_meta
+            .try_get_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID)
+            .unwrap();
+        assert_eq!(
+            meta, sop,
+            "file meta must track the anonymized instance UID"
+        );
     }
 
     #[test]
@@ -481,7 +555,11 @@ mod tests {
         let b = second.try_get_str(Tag::STUDY_INSTANCE_UID).unwrap();
         assert_ne!(a, "1.2.3.4", "the UID is replaced");
         assert_eq!(a, b, "one source UID keeps one replacement across calls");
-        assert_eq!(anon.replaced_uids().get("1.2.3.4"), Some(&a), "the map is readable");
+        assert_eq!(
+            anon.replaced_uids().get("1.2.3.4"),
+            Some(&a),
+            "the map is readable"
+        );
 
         // a second anonymizer starts with an empty map
         let other = Anonymizer::basic();

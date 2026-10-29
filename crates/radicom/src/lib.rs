@@ -12,8 +12,8 @@
 //! Image codec implementations live in the separate `radicom-codecs` project;
 //! this crate only defines the [`pixel::codec`] interfaces and registry.
 
-pub mod encoding;
 pub mod dump;
+pub mod encoding;
 pub mod error;
 pub mod generated;
 pub mod io;
@@ -32,16 +32,16 @@ pub mod anonymizer;
 
 pub use error::{DataError, Error, FileError, ReaderError, ValidationFailure};
 pub use logging::LogLevel;
+pub use model::dataset::{Dataset, DatasetWalker};
+pub use model::dicom_datetime::DtPoint;
 pub use model::dictionary::{
     default_dictionary, load_xml, set_default_dictionary, Dictionary, DictionaryEntry, RuntimeEntry,
 };
-pub use model::dataset::{Dataset, DatasetWalker};
-pub use model::dicom_datetime::DtPoint;
 pub use model::element::DicomElement;
-pub use model::item::{DicomFragmentSequence, DicomItem, DicomSequence};
 pub use model::endian::Endian;
-pub use model::person_name::PersonName;
+pub use model::item::{DicomFragmentSequence, DicomItem, DicomSequence};
 pub use model::masked_tag::MaskedTag;
+pub use model::person_name::PersonName;
 pub use model::tag::Tag;
 pub use model::transfer_syntax::{self as transfer_syntax_registry, TransferSyntax};
 pub use model::uid::{StorageCategory, Uid, UidGenerator, UidType};

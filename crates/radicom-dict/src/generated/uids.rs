@@ -16,6 +16,7 @@ pub struct RawUid {
     pub retired: bool,
 }
 
+#[rustfmt::skip]
 pub static UIDS: &[RawUid] = &[
         RawUid { uid: "1.2.840.10008.1.1", keyword: "Verification", name: "Verification SOP Class", type_code: 1, retired: false },
         RawUid { uid: "1.2.840.10008.1.2", keyword: "ImplicitVRLittleEndian", name: "Implicit VR Little Endian: Default Transfer Syntax for DICOM", type_code: 0, retired: false },
@@ -1949,6 +1950,7 @@ pub static UIDS: &[RawUid] = &[
 
 /// Well-known UID string constants (SCREAMING_SNAKE of the source
 /// keyword; `_N` suffixes disambiguate keyword collisions).
+#[rustfmt::skip]
 pub mod consts {
     pub const VERIFICATION: &str = "1.2.840.10008.1.1";
     pub const IMPLICIT_VR_LITTLE_ENDIAN: &str = "1.2.840.10008.1.2";

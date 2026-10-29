@@ -27,7 +27,11 @@ impl Endian {
         if size <= 1 {
             return;
         }
-        debug_assert_eq!(buf.len() % size, 0, "buffer length must be a multiple of the unit size");
+        debug_assert_eq!(
+            buf.len() % size,
+            0,
+            "buffer length must be a multiple of the unit size"
+        );
         for chunk in buf.chunks_exact_mut(size) {
             chunk.reverse();
         }

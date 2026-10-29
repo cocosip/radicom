@@ -4,8 +4,8 @@
 //! parsing runs with validation off (read-tolerant policy).
 
 use crate::error::{Error, TagRef, ValidationFailure};
-use crate::model::element::DicomElement;
 use crate::model::dicom_datetime::{parse_dt, parse_tm};
+use crate::model::element::DicomElement;
 use crate::model::vr::Vr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -50,7 +50,11 @@ fn fail(vr: Vr, content: &str, reason: impl Into<String>) -> String {
     // include the VR and a bounded prefix of the value: "not a valid DA value"
     // alone does not tell a caller which element or what was in it
     let shown: String = content.chars().take(32).collect();
-    let ellipsis = if content.chars().count() > 32 { "…" } else { "" };
+    let ellipsis = if content.chars().count() > 32 {
+        "…"
+    } else {
+        ""
+    };
     format!("{vr:?} \"{shown}{ellipsis}\": {}", reason.into())
 }
 
@@ -173,8 +177,7 @@ pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
         }
         Vr::As => {
             let b = content.as_bytes();
-            if b.len() == 3
-                && b.iter().all(|c| c.is_ascii_digit())
+            if b.len() == 3 && b.iter().all(|c| c.is_ascii_digit())
                 || (b.len() == 4
                     && b[..3].iter().all(|c| c.is_ascii_digit())
                     && matches!(b[3], b'D' | b'W' | b'M' | b'Y'))
@@ -188,7 +191,10 @@ pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
             if content.len() > 16 {
                 return Err(fail(vr, content, "length exceeds 16"));
             }
-            if !content.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_' || c == ' ') {
+            if !content
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_' || c == ' ')
+            {
                 return Err(fail(vr, content, "characters outside [A-Z0-9_ ]"));
             }
             Ok(())
@@ -302,7 +308,10 @@ pub fn validate_vm(element: &DicomElement) -> Result<(), String> {
     if tag.is_private() {
         return Ok(());
     }
-    if matches!(element.vr(), Vr::Ob | Vr::Od | Vr::Of | Vr::Ol | Vr::Ov | Vr::Ow | Vr::Uc | Vr::Un) {
+    if matches!(
+        element.vr(),
+        Vr::Ob | Vr::Od | Vr::Of | Vr::Ol | Vr::Ov | Vr::Ow | Vr::Uc | Vr::Un
+    ) {
         return Ok(());
     }
     let entry = crate::model::dictionary::dictionary().entry(tag);
@@ -353,8 +362,14 @@ mod tests {
     #[test]
     fn ae_rules() {
         assert!(validate_single(Vr::Ae, "SCPMED").is_ok());
-        assert!(validate_single(Vr::Ae, "EXACTLY16CHARS").is_ok(), "exactly 16");
-        assert!(validate_single(Vr::Ae, "SEVENTEEN_CHARS_X").is_err(), "17 chars");
+        assert!(
+            validate_single(Vr::Ae, "EXACTLY16CHARS").is_ok(),
+            "exactly 16"
+        );
+        assert!(
+            validate_single(Vr::Ae, "SEVENTEEN_CHARS_X").is_err(),
+            "17 chars"
+        );
         assert!(validate_single(Vr::Ae, "   ").is_err(), "all blank");
         assert!(validate_single(Vr::Ae, "A\\B").is_err(), "backslash");
         assert!(validate_single(Vr::Ae, "A\nB").is_err(), "control char");
@@ -376,22 +391,43 @@ mod tests {
     fn date_time_rules_delegate_to_parsers() {
         assert!(validate_single(Vr::Da, "20240305").is_ok());
         assert!(validate_single(Vr::Da, "20241301").is_err());
-        assert!(validate_single(Vr::Da, "20240101-20241231").is_ok(), "ranges valid");
+        assert!(
+            validate_single(Vr::Da, "20240101-20241231").is_ok(),
+            "ranges valid"
+        );
         assert!(validate_single(Vr::Tm, "103015").is_ok());
         assert!(validate_single(Vr::Tm, "240000").is_err());
         assert!(validate_single(Vr::Dt, "20240305103015+0530").is_ok());
-        assert!(validate_single(Vr::Dt, "20240305103015-1500").is_err(), "offset hour 15");
+        assert!(
+            validate_single(Vr::Dt, "20240305103015-1500").is_err(),
+            "offset hour 15"
+        );
         // PS3.3 §6.2: negative offsets cap at 12h, positive at 14h.
-        assert!(validate_single(Vr::Dt, "20240305103015-1300").is_err(), "negative offset hour 13");
-        assert!(validate_single(Vr::Dt, "20240305103015-1200").is_ok(), "negative offset hour 12");
-        assert!(validate_single(Vr::Dt, "20240305103015+1400").is_ok(), "positive offset hour 14");
+        assert!(
+            validate_single(Vr::Dt, "20240305103015-1300").is_err(),
+            "negative offset hour 13"
+        );
+        assert!(
+            validate_single(Vr::Dt, "20240305103015-1200").is_ok(),
+            "negative offset hour 12"
+        );
+        assert!(
+            validate_single(Vr::Dt, "20240305103015+1400").is_ok(),
+            "positive offset hour 14"
+        );
     }
 
     #[test]
     fn ds_is_rules() {
         assert!(validate_single(Vr::Ds, "-1.5E2").is_ok());
-        assert!(validate_single(Vr::Ds, "1234567890123456").is_ok(), "16 chars");
-        assert!(validate_single(Vr::Ds, "12345678901234567").is_err(), "17 chars");
+        assert!(
+            validate_single(Vr::Ds, "1234567890123456").is_ok(),
+            "16 chars"
+        );
+        assert!(
+            validate_single(Vr::Ds, "12345678901234567").is_err(),
+            "17 chars"
+        );
         assert!(validate_single(Vr::Ds, "abc").is_err());
         assert!(validate_single(Vr::Is, "+42").is_ok());
         assert!(validate_single(Vr::Is, "4 2").is_err());
@@ -400,18 +436,39 @@ mod tests {
     #[test]
     fn da_requires_full_yyyymmdd() {
         assert!(validate_single(Vr::Da, "20240305").is_ok());
-        assert!(validate_single(Vr::Da, "20240305-20241231").is_ok(), "range");
-        assert!(validate_single(Vr::Da, "2024").is_err(), "partial date is not conformant");
-        assert!(validate_single(Vr::Da, "202403").is_err(), "partial date is not conformant");
-        assert!(validate_single(Vr::Da, "2024.03.05").is_err(), "dots are not conformant");
-        assert!(validate_single(Vr::Da, "2024/03/05").is_err(), "slashes are not conformant");
+        assert!(
+            validate_single(Vr::Da, "20240305-20241231").is_ok(),
+            "range"
+        );
+        assert!(
+            validate_single(Vr::Da, "2024").is_err(),
+            "partial date is not conformant"
+        );
+        assert!(
+            validate_single(Vr::Da, "202403").is_err(),
+            "partial date is not conformant"
+        );
+        assert!(
+            validate_single(Vr::Da, "2024.03.05").is_err(),
+            "dots are not conformant"
+        );
+        assert!(
+            validate_single(Vr::Da, "2024/03/05").is_err(),
+            "slashes are not conformant"
+        );
     }
 
     #[test]
     fn is_rejects_a_fraction_and_overflow() {
         assert!(validate_single(Vr::Is, "-42").is_ok());
-        assert!(validate_single(Vr::Is, "3.0").is_err(), "an IS has no fraction");
-        assert!(validate_single(Vr::Is, "999999999999").is_err(), "over 32-bit");
+        assert!(
+            validate_single(Vr::Is, "3.0").is_err(),
+            "an IS has no fraction"
+        );
+        assert!(
+            validate_single(Vr::Is, "999999999999").is_err(),
+            "over 32-bit"
+        );
     }
 
     #[test]
@@ -449,7 +506,10 @@ mod tests {
         assert!(validate_single(Vr::Pn, "Doe^John^Quincy^Jr^MD").is_ok());
         assert!(validate_single(Vr::Pn, "A=B=C").is_ok());
         assert!(validate_single(Vr::Pn, "A=B=C=D").is_err(), "four groups");
-        assert!(validate_single(Vr::Pn, "a^b^c^d^e^f").is_err(), "six components");
+        assert!(
+            validate_single(Vr::Pn, "a^b^c^d^e^f").is_err(),
+            "six components"
+        );
         let long = format!("{}^x", "N".repeat(65));
         assert!(validate_single(Vr::Pn, &long).is_err(), "group over 64");
     }
@@ -459,7 +519,10 @@ mod tests {
         assert!(validate_single(Vr::Ui, "1.2.840.10008.1.2").is_ok());
         assert!(validate_single(Vr::Ui, "01.2").is_err(), "leading zero");
         assert!(validate_single(Vr::Ui, "1..2").is_err(), "empty component");
-        assert!(validate_single(Vr::Ui, &"1".repeat(65)).is_err(), "too long");
+        assert!(
+            validate_single(Vr::Ui, &"1".repeat(65)).is_err(),
+            "too long"
+        );
     }
 
     #[test]
@@ -478,12 +541,20 @@ mod tests {
         assert!(validate_vm(&many).is_err(), "LO VM 1 rejects two values");
 
         // private tag exempt
-        let priv_tag = Tag::private(0x0029, 0x1001, std::sync::Arc::new(crate::model::private_creator::PrivateCreator::new("X")));
+        let priv_tag = Tag::private(
+            0x0029,
+            0x1001,
+            std::sync::Arc::new(crate::model::private_creator::PrivateCreator::new("X")),
+        );
         let priv_el = DicomElement::new_str(priv_tag, Vr::Lo, "a\\b");
         assert!(validate_vm(&priv_el).is_ok(), "private tags exempt");
 
         // Other family exempt
-        let ob = DicomElement::new_bytes(Tag::PIXEL_DATA, Vr::Ob, std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![1, 2, 3])));
+        let ob = DicomElement::new_bytes(
+            Tag::PIXEL_DATA,
+            Vr::Ob,
+            std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![1, 2, 3])),
+        );
         assert!(validate_vm(&ob).is_ok());
 
         // empty exempt

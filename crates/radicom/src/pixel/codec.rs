@@ -186,11 +186,21 @@ pub trait Codec: Send + Sync {
     /// via `src.get_frame(i)`, write every frame via `dst.add_frame(...)`,
     /// touch no dataset element outside the `PixelData` setters, and map all
     /// failures to [`Error::Codec`] without panicking.
-    fn encode(&self, src: &PixelDataRef<'_>, dst: &mut PixelData<'_>, params: &CodecParams) -> Result<(), Error>;
+    fn encode(
+        &self,
+        src: &PixelDataRef<'_>,
+        dst: &mut PixelData<'_>,
+        params: &CodecParams,
+    ) -> Result<(), Error>;
 
     /// Decodes `src` frames into `dst`, with the same obligations as
     /// [`Codec::encode`].
-    fn decode(&self, src: &PixelDataRef<'_>, dst: &mut PixelData<'_>, params: &CodecParams) -> Result<(), Error>;
+    fn decode(
+        &self,
+        src: &PixelDataRef<'_>,
+        dst: &mut PixelData<'_>,
+        params: &CodecParams,
+    ) -> Result<(), Error>;
 }
 
 // -- registry (CODEC-03, §3) ---------------------------------------------
@@ -221,7 +231,9 @@ impl CodecRegistry for EmptyCodecRegistry {
     }
 
     fn get_codec(&self, syntax: &TransferSyntax) -> Result<Arc<dyn Codec>, Error> {
-        Err(Error::Codec(CodecError::NotRegistered(syntax.uid().to_string())))
+        Err(Error::Codec(CodecError::NotRegistered(
+            syntax.uid().to_string(),
+        )))
     }
 }
 
@@ -258,7 +270,9 @@ pub fn reset_codec_registry() {
 // -- JPEG bit-depth scanning (CODEC-05) ----------------------------------
 
 /// Marker bytes of interest when scanning a JPEG bitstream.
-const SOF_MARKERS: [u8; 12] = [0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE];
+const SOF_MARKERS: [u8; 12] = [
+    0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE,
+];
 
 /// Bit depth declared by a JPEG SOF marker (CODEC-05).
 ///
@@ -297,10 +311,10 @@ pub fn jpeg_bit_depth(data: &[u8]) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::transfer_syntax::syntaxes;
-    use crate::model::vr::Vr;
     use crate::model::dataset::Dataset;
     use crate::model::tag::Tag;
+    use crate::model::transfer_syntax::syntaxes;
+    use crate::model::vr::Vr;
     use crate::pixel::{BITS_ALLOCATED, COLUMNS, PHOTOMETRIC_INTERPRETATION, ROWS};
 
     /// A trivial codec used to prove the boundary contract.
@@ -315,7 +329,12 @@ mod tests {
         fn transfer_syntax(&self) -> &'static TransferSyntax {
             self.syntax
         }
-        fn encode(&self, src: &PixelDataRef<'_>, dst: &mut PixelData<'_>, _p: &CodecParams) -> Result<(), Error> {
+        fn encode(
+            &self,
+            src: &PixelDataRef<'_>,
+            dst: &mut PixelData<'_>,
+            _p: &CodecParams,
+        ) -> Result<(), Error> {
             for i in 0..src.number_of_frames() {
                 let frame = src.get_frame(i)?;
                 // mock "compression": XOR every byte so tests can tell the
@@ -328,7 +347,12 @@ mod tests {
             }
             Ok(())
         }
-        fn decode(&self, src: &PixelDataRef<'_>, dst: &mut PixelData<'_>, _p: &CodecParams) -> Result<(), Error> {
+        fn decode(
+            &self,
+            src: &PixelDataRef<'_>,
+            dst: &mut PixelData<'_>,
+            _p: &CodecParams,
+        ) -> Result<(), Error> {
             self.encode(src, dst, &CodecParams::None)
         }
     }
@@ -342,13 +366,18 @@ mod tests {
             syntax.uid() == self.syntax.uid()
         }
         fn can_transcode(&self, from: &TransferSyntax, to: &TransferSyntax) -> bool {
-            (!from.is_encapsulated() || self.has_codec(from)) && (!to.is_encapsulated() || self.has_codec(to))
+            (!from.is_encapsulated() || self.has_codec(from))
+                && (!to.is_encapsulated() || self.has_codec(to))
         }
         fn get_codec(&self, syntax: &TransferSyntax) -> Result<Arc<dyn Codec>, Error> {
             if self.has_codec(syntax) {
-                Ok(Arc::new(MockCodec { syntax: self.syntax }))
+                Ok(Arc::new(MockCodec {
+                    syntax: self.syntax,
+                }))
             } else {
-                Err(Error::Codec(CodecError::NotRegistered(syntax.uid().to_string())))
+                Err(Error::Codec(CodecError::NotRegistered(
+                    syntax.uid().to_string(),
+                )))
             }
         }
     }
@@ -371,8 +400,15 @@ mod tests {
         assert_eq!(J2kParams::default().rate, 20);
         assert!(J2kParams::default().allow_mct);
         assert_eq!(HtJ2kParams::default().decompositions, 5);
-        assert_eq!(HtJ2kParams::default().progression_order, ProgressionOrder::Lrcp);
-        assert_eq!(JpegLsParams::default().near_lossless, 0, "lossless by default");
+        assert_eq!(
+            HtJ2kParams::default().progression_order,
+            ProgressionOrder::Lrcp
+        );
+        assert_eq!(
+            JpegLsParams::default().near_lossless,
+            0,
+            "lossless by default"
+        );
         assert_eq!(CodecParams::default(), CodecParams::None);
     }
 
@@ -398,11 +434,22 @@ mod tests {
         let registry = codec_registry();
         let evle = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
         let j2k = syntaxes::JPEG_2000_LOSSLESS.clone();
-        assert!(registry.can_transcode(&evle, &evle), "uncompressed both sides");
-        assert!(!registry.can_transcode(&evle, &j2k), "no codec for the target");
-        assert!(!registry.can_transcode(&j2k, &evle), "no codec for the source");
+        assert!(
+            registry.can_transcode(&evle, &evle),
+            "uncompressed both sides"
+        );
+        assert!(
+            !registry.can_transcode(&evle, &j2k),
+            "no codec for the target"
+        );
+        assert!(
+            !registry.can_transcode(&j2k, &evle),
+            "no codec for the source"
+        );
 
-        set_codec_registry(Arc::new(MockRegistry { syntax: &syntaxes::JPEG_2000_LOSSLESS }));
+        set_codec_registry(Arc::new(MockRegistry {
+            syntax: &syntaxes::JPEG_2000_LOSSLESS,
+        }));
         let registry = codec_registry();
         assert!(registry.has_codec(&j2k));
         assert!(registry.can_transcode(&evle, &j2k));
@@ -414,8 +461,12 @@ mod tests {
     #[test]
     fn injected_codec_round_trips_through_the_boundary() {
         let _guard = lock_registry();
-        set_codec_registry(Arc::new(MockRegistry { syntax: &syntaxes::JPEG_2000_LOSSLESS }));
-        let codec = codec_registry().get_codec(&syntaxes::JPEG_2000_LOSSLESS).unwrap();
+        set_codec_registry(Arc::new(MockRegistry {
+            syntax: &syntaxes::JPEG_2000_LOSSLESS,
+        }));
+        let codec = codec_registry()
+            .get_codec(&syntaxes::JPEG_2000_LOSSLESS)
+            .unwrap();
 
         let mut source = dataset(8, 2, 2);
         source.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
@@ -429,11 +480,16 @@ mod tests {
         {
             let src = PixelDataRef::from_dataset(&source).unwrap();
             let mut dst = PixelData::from_dataset(&mut target).unwrap();
-            codec.encode(&src, &mut dst, &codec.default_params()).unwrap();
+            codec
+                .encode(&src, &mut dst, &codec.default_params())
+                .unwrap();
         }
         // the mock flips every byte, so the payload is provably transformed
         let pd = PixelData::from_dataset(&mut target).unwrap();
-        assert_eq!(pd.get_frame(0).unwrap().data().as_ref(), &[0xFE, 0xFD, 0xFC, 0xFB]);
+        assert_eq!(
+            pd.get_frame(0).unwrap().data().as_ref(),
+            &[0xFE, 0xFD, 0xFC, 0xFB]
+        );
         reset_codec_registry();
     }
 
@@ -455,12 +511,19 @@ mod tests {
     fn jpeg_bit_depth_rejects_non_jpeg_and_truncated_data() {
         assert_eq!(jpeg_bit_depth(b"not a jpeg"), None);
         assert_eq!(jpeg_bit_depth(&[0xFF, 0xD8]), None, "no marker yet");
-        assert_eq!(jpeg_bit_depth(&[0xFF, 0xD8, 0xFF, 0xC0, 0x00]), None, "truncated SOF");
+        assert_eq!(
+            jpeg_bit_depth(&[0xFF, 0xD8, 0xFF, 0xC0, 0x00]),
+            None,
+            "truncated SOF"
+        );
     }
 
     #[test]
     fn params_accessors_dispatch_by_variant() {
-        let p = CodecParams::Jpeg(JpegParams { quality: 42, ..Default::default() });
+        let p = CodecParams::Jpeg(JpegParams {
+            quality: 42,
+            ..Default::default()
+        });
         assert_eq!(p.as_jpeg().unwrap().quality, 42);
         assert!(p.as_j2k().is_none());
         assert!(CodecParams::None.as_jpeg().is_none());
