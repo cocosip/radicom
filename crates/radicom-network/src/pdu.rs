@@ -512,7 +512,13 @@ fn decode_user_information(value: &[u8], is_rq: bool) -> Result<UserInformation>
                 }
             }
             item::USER_IDENTITY_AC => {
-                out.user_identity_response = Some(raw.to_vec());
+                // PS3.8 §D.3.3.7: the item body is a length-prefixed server
+                // response, `[server-response-length u16][response bytes]`.
+                let server_len = u16_at(raw, 0)? as usize;
+                let response = raw.get(2..2 + server_len).ok_or(NetworkError::protocol(
+                    "user identity server response runs past the item",
+                ))?;
+                out.user_identity_response = Some(response.to_vec());
             }
             // unknown sub-items are skipped by length
             _ => {}
@@ -779,7 +785,14 @@ fn encode_associate(a: &Associate, is_rq: bool) -> Result<Vec<u8>> {
     }
     if let Some(response) = &a.user_information.user_identity_response {
         if !is_rq {
-            push_item(&mut user, item::USER_IDENTITY_AC, response)?;
+            // PS3.8 §D.3.3.7: server-response-length (u16) then the response
+            if response.len() > u16::MAX as usize {
+                return Err(NetworkError::protocol("user identity server response exceeds 65535 bytes"));
+            }
+            let mut value = Vec::with_capacity(2 + response.len());
+            value.extend_from_slice(&(response.len() as u16).to_be_bytes());
+            value.extend_from_slice(response);
+            push_item(&mut user, item::USER_IDENTITY_AC, &value)?;
         }
     }
     push_item(&mut out, item::USER_INFORMATION, &user)?;
@@ -1532,6 +1545,58 @@ mod tests {
         let value = item_value(&user_items(&bytes), item::USER_IDENTITY_RQ).expect("identity item");
         let expected = b"\x02\x01\x00\x05alice\x00\x06secret".to_vec();
         assert_eq!(&value[..expected.len()], &expected[..], "type, positive, then each length+value");
+    }
+
+    #[test]
+    fn user_identity_server_response_is_length_prefixed_and_validated() {
+        // PS3.8 §D.3.3.7: the AC item body is `[server-response-length u16][bytes]`.
+        let mut response = Vec::new();
+        response.extend_from_slice(&2u16.to_be_bytes());
+        response.extend_from_slice(b"OK");
+        let frame = associate_frame(
+            0x02,
+            &[
+                item(item::APPLICATION_CONTEXT, APPLICATION_CONTEXT.as_bytes()),
+                item(
+                    item::USER_INFORMATION,
+                    &[
+                        item(item::MAX_PDU_LENGTH, &16384u32.to_be_bytes()),
+                        item(item::USER_IDENTITY_AC, &response),
+                    ]
+                    .concat(),
+                ),
+            ],
+        );
+        match decode(&frame).expect("decode") {
+            Pdu::AssociateAc(ac) => {
+                assert_eq!(ac.user_information.user_identity_response.as_deref(), Some(&b"OK"[..]))
+            }
+            other => panic!("expected AssociateAc, got {other:?}"),
+        }
+
+        // a declared length past the item is malformed, not silently truncated
+        let mut bad = Vec::new();
+        bad.extend_from_slice(&9u16.to_be_bytes());
+        bad.extend_from_slice(b"OK");
+        let bad_frame = associate_frame(
+            0x02,
+            &[
+                item(item::APPLICATION_CONTEXT, APPLICATION_CONTEXT.as_bytes()),
+                item(
+                    item::USER_INFORMATION,
+                    &[item(item::MAX_PDU_LENGTH, &16384u32.to_be_bytes()), item(item::USER_IDENTITY_AC, &bad)]
+                        .concat(),
+                ),
+            ],
+        );
+        assert!(decode(&bad_frame).is_err(), "an overlong server response is rejected");
+
+        // encode direction: the item body carries the u16 length prefix
+        let mut ac = Associate::new("SCP", "SCU");
+        ac.user_information.user_identity_response = Some(b"OK".to_vec());
+        let bytes = encode(&Pdu::AssociateAc(ac));
+        let value = item_value(&user_items(&bytes), item::USER_IDENTITY_AC).expect("response item");
+        assert_eq!(value, b"\x00\x02OK", "server-response-length precedes the bytes");
     }
 
     #[test]

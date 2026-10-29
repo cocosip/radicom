@@ -59,7 +59,7 @@
 
 | 子项 | fo-dicom 参照 | 状态 | radicom 符号（file:line） | 说明 |
 | --- | --- | --- | --- | --- |
-| 0x51 Max-PDU-Length | `PDU.cs:596-600` | **部分实现（有界）** | `pdu.rs:396` 解码 / `pdu.rs:648` 编码 | 对外通告值钳到 `MAX_PDU_SIZE=65535`；不能表达 fo-dicom 的 >64 KiB / unlimited 能力，见 §2.5 |
+| 0x51 Max-PDU-Length | `PDU.cs:596-600` | 已实现（有界） | `pdu.rs` 解码 / 编码 | 通告值钳到 `MAX_PDU_SIZE=262144`（256 KiB）；`0`（unlimited）也落到该上限，见 §2.5 |
 | 0x52 Implementation Class UID | `PDU.cs:602-607` | 已实现 | `pdu.rs:401` / `pdu.rs:649` | — |
 | 0x53 Asynchronous Operations Window | `PDU.cs:609-617`（仅在非 (1,1) 时发送） | 部分实现 | `pdu.rs:407` / `pdu.rs:655-662` | 编解码正确、默认省略也正确；但**协商结果从不被引擎使用**，无并发窗口控制 |
 | 0x54 SCP/SCU Role Selection | `PDU.cs:619-634` | **已实现** | `pdu.rs:445-466` 解码 / `pdu.rs:732-744` 编码 | `[uid_len][uid][scu][scp]` 线格和手工字节测试均正确 |
@@ -67,7 +67,7 @@
 | 0x56 SOP Class Extended Negotiation | `PDU.cs:643-654` | **已实现** | `pdu.rs:480-538` / `pdu.rs:752-762` | application information 使用扁平字段数组，RQ/AC 方向有回归覆盖 |
 | 0x57 SOP Class Common Extended Negotiation | `PDU.cs:656-677` | 已实现 | `pdu.rs:432` / `pdu.rs:683-694` | 仅 RQ，符合 §9.3.2.3 |
 | 0x58 User Identity Negotiation (RQ) | `PDU.cs:679-694` | **已实现** | `pdu.rs:490-517` / `pdu.rs:780-793` | type/positive/length/payload 顺序按 PS3.8 编解码，字节级回归覆盖 |
-| 0x59 User Identity Negotiation (AC) | `PDU.cs:1017-1024` | 部分实现 | `pdu.rs:452` / `pdu.rs:707-711` | 应答体是不透明 `Vec<u8>`，无长度/类型校验 |
+| 0x59 User Identity Negotiation (AC) | `PDU.cs:1017-1024` | 已实现 | `pdu.rs` 解码/编码 | AC 项体按 PS3.8 §D.3.3.7 为 `[server-response-length u16][response bytes]`，长度越界报协议错误；有字节级回归 |
 | 未知子项按长度跳过 | `PDU.cs:1164` `SkipBytes` | 已实现 | `pdu.rs:455`、`pdu.rs:345` | — |
 
 ### 1.3 关联协商与策略

@@ -172,6 +172,8 @@
   的 fd 数量从 O(大值数) 降为 1。（含 `windows_over_one_shared_file_read_independently` 测试）
 - **内存 / UID 枚举缓存**：修复并发丢失——新增 `ENUM_GEN` 版本号，构建快照期间若有 `register`
   则不发布该陈旧快照，消除并行测试下的偶发缺失。
+- **网络 / User Identity (AC)**：AC 项体按 PS3.8 §D.3.3.7 编解码为 `[server-response-length u16][bytes]`，
+  长度越界报协议错误（此前把应答当不透明字节，编码缺少长度前缀）；补字节级回归。
 - .NET 专属抽象，Rust 不适用（按能力已覆盖）→ `INetworkManager`、`DicomTimeout`、`NetworkStreamCreationOptions`、
   `IImage`/`IImageManager`、`IPixelData` 接口、每服务独立 provider 接口、`DirectoryRecord` 指针、`CacheType`、`ArrayPool`。
 

@@ -56,8 +56,8 @@
 | `IsPrivateSequenceBad`（跳过空 item 后重判隐式/显式） | ✅ | `reader.rs:246` | 跳过空 item 直到有 body 再判定（fo-dicom `IsPrivateSequenceBad`） |
 | `handleBadPrivateSequence` 状态贯通（ParseVR/ParseLength/ParseValue 三处） | ✅ | `Step`/`Mode` 的 `private_probe`/`cp246` 标志 | 三处解析共享同一状态位 |
 | 私有 tag 走私有字典解析 VR | 🟡（范围取舍） | `reader.rs:208` `dictionary_vr` | radicom 不内置私有字典，未知私有 tag 取 `UN`（隐式 VR 下可正确解析为序列）；标准字典覆盖的 tag 正常 |
-| `FFFE,E000` 孤立 item → `DicomTag.Item` 身份（#364 修复） | 🟡 | `reader.rs:605-625` | 结构上还原成了匿名序列，但 tag 用的是 `Tag::UNKNOWN` = `(FFFF,FFFF)`（`reader.rs:609`），fo-dicom 用 `DicomTag.Item` = `(FFFE,E000)`（`DicomReader.cs:583-589`）。实测 GH364.dcm / FreezePattern.dcm 均输出 `(FFFF,FFFF) Sq` |
-| 序列中 `FFFE,E00D` 后缺 `FFFE,E0DD`（k-pacs 兼容） | 🟡 | `reader.rs:597-604` | `Step::Item` 遇到 `SequenceEnd` 会向上冒泡（T7），覆盖了部分场景；但缺 `DicomReader.cs:920-933` 里把 `SequenceDelimitationItem` 直接当作 item 结束的显式分支 |
+| `FFFE,E000` 孤立 item → `DicomTag.Item` 身份（#364 修复） | ✅ | `reader.rs` `Step::Orphan` 用 `Tag::ITEM` | 匿名序列以 `(FFFE,E000)` 作为序列 tag（fo-dicom `DicomTag.Item`），GH364/FreezePattern 正确输出 |
+| 序列中 `FFFE,E00D` 后缺 `FFFE,E0DD`（k-pacs 兼容） | ✅ | `reader.rs` T7：`Step::Item` 遇 `SequenceEnd` 向上冒泡 | `parse_level` 的 T7 把 `SequenceDelimitationItem` 当作 item/序列结束，k-pacs 截断序列可解析 |
 | `Suspended` 结果 + 部分数据集（`IsPartial`） | ✅ | `ReadOutcome::Suspended` / `DicomFile.is_partial` | `is_partial` 由解析结果（非 Success 即部分）置位，截断文件返回部分数据集（GH179B） |
 | CP-246：UN 定义的 SQ 在 Big Endian 下强制按 LE 读 | ✅ | `reader.rs` `cp246 = raw_vr == Vr::Un && !tag.is_private()` | 条件与 fo-dicom 一致（非私有 UN 才按 LE），GH177 正确解析 |
 | 片段序列第一片段按 4 字节单位换序 | ✅ | `decode_offset_table`（`reader.rs:806`） | 按 `big_endian` 显式以 4 字节为单位解码，尾部非 4 倍数字节记录 debug 后忽略 |
