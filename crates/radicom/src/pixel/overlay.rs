@@ -126,17 +126,31 @@ impl OverlayData {
     }
 
     /// Resolves the overlay bytes, extracting an embedded bit plane when
-    /// `(60xx,3000)` is absent (§1.7 rules 1 and 2).
+    /// `(60xx,3000)` is absent (§1.7 rules 1 and 2). Embedded planes are taken
+    /// from frame 0; use [`OverlayData::load_frame`] for multi-frame images.
     pub fn load(&self, ds: &Dataset) -> Result<SharedBuffer, Error> {
+        self.load_frame(ds, 0)
+    }
+
+    /// Resolves the overlay bytes for `frame`. A standalone `(60xx,3000)`
+    /// element is returned as-is; an embedded plane is carved out of that
+    /// image frame.
+    pub fn load_frame(&self, ds: &Dataset, frame: u32) -> Result<SharedBuffer, Error> {
         if let Some(data) = &self.data {
             return Ok(data.clone());
         }
-        Self::extract_embedded(ds, self.group)
+        Self::extract_embedded_frame(ds, self.group, frame)
     }
 
     /// Extracts the embedded bit plane of `group` from frame 0 into an
     /// unpacked 1-bit buffer.
     pub fn extract_embedded(ds: &Dataset, group: u16) -> Result<SharedBuffer, Error> {
+        Self::extract_embedded_frame(ds, group, 0)
+    }
+
+    /// Extracts the embedded bit plane of `group` from `frame` into an
+    /// unpacked 1-bit buffer.
+    pub fn extract_embedded_frame(ds: &Dataset, group: u16, frame: u32) -> Result<SharedBuffer, Error> {
         let syntax = ds.transfer_syntax();
         if syntax.is_encapsulated() {
             return Err(Error::Imaging(ImagingError(
@@ -192,11 +206,14 @@ impl OverlayData {
 
         let raw = pixel.data();
         let unit = (bits / 8) as usize;
-        if raw.len() < image_columns * image_rows * unit {
-            return Err(Error::Imaging(ImagingError(
-                "frame is shorter than the image shape".into(),
-            )));
+        let frame_size = image_columns * image_rows * unit;
+        let start = frame as usize * frame_size;
+        if raw.len() < start + frame_size {
+            return Err(Error::Imaging(ImagingError(format!(
+                "frame {frame} is shorter than the image shape"
+            ))));
         }
+        let frame_bytes = &raw[start..start + frame_size];
         // 1 bit per pixel, row-packed, LSB first (PS3.5 §8.1.2)
         let row_bytes = columns.div_ceil(8) as usize;
         let mut out = vec![0u8; row_bytes * rows as usize];
@@ -209,10 +226,10 @@ impl OverlayData {
                 }
                 let idx = (iy * image_columns + ix) * unit;
                 let value = if unit == 1 {
-                    raw[idx] as u16
+                    frame_bytes[idx] as u16
                 } else {
                     // pixel data is in the dataset's byte order, not the host's
-                    let pair = [raw[idx], raw[idx + 1]];
+                    let pair = [frame_bytes[idx], frame_bytes[idx + 1]];
                     match syntax.endian() {
                         crate::model::endian::Endian::Big => u16::from_be_bytes(pair),
                         crate::model::endian::Endian::Little => u16::from_le_bytes(pair),
@@ -334,6 +351,30 @@ mod tests {
         let overlays = OverlayData::from_dataset(&ds);
         let data = overlays[0].load(&ds).unwrap();
         assert_eq!(data.data().as_ref(), &[0x01, 0x01], "one byte per row, LSB first");
+    }
+
+    #[test]
+    fn embedded_overlay_extracts_the_plane_from_the_requested_frame() {
+        let mut ds = base(8, 8, 2);
+        ds.insert_value(BITS_STORED, 7u16);
+        add_overlay_shape(&mut ds, 0x6000, 8, 2, 7);
+        // Two 8x2 frames; only frame 1 has bit 7 set on the first pixel of each row.
+        let mut pixels = vec![0u8; 32];
+        pixels[16] = 0x80;
+        pixels[24] = 0x80;
+        ds.insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_bytes(
+            PIXEL_DATA,
+            Vr::Ob,
+            Arc::new(MemoryBuffer::from(pixels)),
+        )));
+        let overlay = &OverlayData::from_dataset(&ds)[0];
+        assert_eq!(overlay.load_frame(&ds, 0).unwrap().data().as_ref(), &[0x00, 0x00]);
+        assert_eq!(
+            overlay.load_frame(&ds, 1).unwrap().data().as_ref(),
+            &[0x01, 0x01],
+            "frame 1's overlay plane"
+        );
+        assert!(overlay.load_frame(&ds, 2).is_err(), "frame out of range");
     }
 
     #[test]

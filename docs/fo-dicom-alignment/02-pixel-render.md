@@ -333,11 +333,16 @@ fo-dicom `OverlayGraphic.cs:93` 是 `pixels[p] |= _color`（按位 OR 合成，�
 
 ### 2.12 【中】嵌入式 overlay 只处理 frame 0，且忽略 Origin 偏移
 
-**位置**：`pixel/overlay.rs:132-201`（`extract_embedded`）。
+**已修复**：
 
-- 只解出 **第 0 帧** 的位平面（`pixel.data()` 直接取整个元素，起始于第 0 个像素），不按 `index` 偏移。
-- 不应用 `OriginX-1`/`OriginY-1`（fo-dicom `DicomOverlayData.cs:303-311` 会先算 `ox = max(0, OriginX-1)` 再定位）。
-- bit-position 合法性判据是 `bit_position < bits_stored`（:158），fo-dicom 是 `BitPosition <= HighBit && BitPosition > HighBit - BitsStored`（`DicomOverlayData.cs:314`）；radicom 忽略 `HighBit`，对高位对齐数据会接受/拒绝相反的集合。
+- `OverlayData::extract_embedded_frame(ds, group, frame)` 现按帧切取像素窗口（`frame * rows * cols * unit`），
+  `load_frame` 把当前渲染帧传进去；`RawImage::composite_overlay_at_frame` 由 `composite_overlays`
+  按 `render_frame` 的帧号调用，因此多帧图像的 overlay 取自正确的帧。回归测试
+  `embedded_overlay_extracts_the_plane_from_the_requested_frame` 覆盖 frame 0/1 与越界帧。
+- `OverlayOrigin` 的行列语义与 1-based 偏移已在 §2.4 修复，`extract_embedded` 现在按
+  `ox = max(0, OriginColumn-1)`、`oy = max(0, OriginRow-1)` 定位。
+- bit-position 合法性判据已改为 fo-dicom 的 `BitPosition <= HighBit && BitPosition > HighBit - BitsStored`
+  （见本节上文代码与 `bit_position_inside_stored_bits_is_rejected`）。
 
 ### 2.13 【低】`WindowWidth == 1` 的边界与 fo-dicom 不同
 

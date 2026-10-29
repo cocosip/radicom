@@ -949,7 +949,19 @@ impl RawImage {
         dataset: &Dataset,
         color: crate::pixel::Color32,
     ) -> Result<(), Error> {
-        let bits = overlay.load(dataset)?;
+        self.composite_overlay_at_frame(overlay, dataset, 0, color)
+    }
+
+    /// Like [`Self::composite_overlay`], but resolves an embedded overlay plane
+    /// from `frame` instead of frame 0.
+    pub fn composite_overlay_at_frame(
+        &mut self,
+        overlay: &OverlayData,
+        dataset: &Dataset,
+        frame: u32,
+        color: crate::pixel::Color32,
+    ) -> Result<(), Error> {
+        let bits = overlay.load_frame(dataset, frame)?;
         let bits = bits.data();
         let bits: &[u8] = bits.as_ref();
         let ov_rows = overlay.rows() as usize;
@@ -1316,7 +1328,7 @@ fn composite_overlays(
         if !overlay_covers_frame(&overlay, frame) {
             continue;
         }
-        if let Err(error) = image.composite_overlay(&overlay, dataset, color) {
+        if let Err(error) = image.composite_overlay_at_frame(&overlay, dataset, frame, color) {
             // a malformed overlay must not break the render (docs §10), but it
             // must not vanish silently either: a blank image is not a diagnosis
             tracing::warn!(
