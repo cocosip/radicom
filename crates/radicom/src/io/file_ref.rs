@@ -316,3 +316,38 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 }
+
+#[cfg(test)]
+mod extra_tests {
+    use super::*;
+
+    #[test]
+    fn path_files_and_directory_refs_report_metadata() {
+        let dir = std::env::temp_dir().join(format!("radicom-fileref-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let path = dir.join("a.bin");
+        std::fs::write(&path, b"xyz").unwrap();
+
+        let file = PathFile::new(&path);
+        assert_eq!(file.path(), path.as_path());
+        assert_eq!(file.len().unwrap(), 3);
+        assert!(!file.is_empty().unwrap());
+        assert!(file.exists());
+        assert_eq!(file.read_range(1, 2).unwrap(), b"yz");
+
+        let reference = DirectoryRef::new(&dir);
+        assert_eq!(reference.path(), dir.as_path());
+        assert!(reference.files(None).unwrap().contains(&path));
+        assert!(reference.subdirs().unwrap().contains(&dir.join("sub")));
+
+        // deleting an already-absent file is not an error (NotFound branch)
+        let provider = TempFileProvider::new();
+        assert!(provider.dir().exists());
+        let missing = PathFile::new(dir.join("missing"));
+        provider.delete(&missing).unwrap();
+        provider.delete(&missing).unwrap();
+        let _ = provider.sweep();
+        let _ = TempFileProvider::default();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

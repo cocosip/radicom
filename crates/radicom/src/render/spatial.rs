@@ -52,6 +52,16 @@ impl SpatialTransform {
         self.scale != 1.0 || self.rotation != 0 || self.pan != Point2::ORIGIN
     }
 
+    /// True when [`apply_to`](Self::apply_to) would change the pixels.
+    ///
+    /// [`is_transformed`](Self::is_transformed) deliberately omits the flips to
+    /// match fo-dicom's `IsTransformed`, so a renderer that gates on it alone
+    /// silently drops `flip_x`/`flip_y`. This is the gate to use before
+    /// applying the transform (FEAT-07).
+    pub fn changes_pixels(&self) -> bool {
+        self.is_transformed() || self.flip_x || self.flip_y
+    }
+
     /// Rotate, flip and pan a [`RawImage`] into a new image (fo-dicom `Rotate`
     /// then `Flip`, then pan). Scale is not pixel-geometric here and is left to
     /// the caller; rotation-by-90°, flips and integer pan reshape/translate the

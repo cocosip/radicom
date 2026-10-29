@@ -357,4 +357,21 @@ mod tests {
     fn wrong_command_field_is_rejected() {
         assert!(CGetResponse::from_command(&Command::request(CommandField::CFindRsp, 1)).is_err());
     }
+
+    #[test]
+    fn a_query_key_can_be_added_fluently() {
+        let request = CGetRequest::study("1.2.3", 1).with_key(
+            0x0008,
+            0x0052,
+            radicom::model::vr::Vr::Cs,
+            "T-D0100",
+        );
+        assert_eq!(
+            request
+                .identifier
+                .get_str(Tag::new(0x0008, 0x0052))
+                .unwrap(),
+            "T-D0100"
+        );
+    }
 }

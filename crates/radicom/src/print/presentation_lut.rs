@@ -155,14 +155,24 @@ impl PresentationLutTable {
     }
 
     /// Maps an 8-bit input value through the table to an 8-bit output byte,
-    /// rescaling from the descriptor's `bits` output range. Out-of-range input
-    /// maps to 0 (black).
+    /// rescaling from the descriptor's `bits` output range. Inputs below
+    /// `first_mapped` clamp to the first entry and inputs past the table clamp
+    /// to the last one (PS3.3 C.11.4/C.11.2.1.1, like `LutTable::map_byte`).
     pub fn map_byte(&self, input: i32) -> u8 {
-        let Some(value) = self.value_at(input) else {
+        let Some(value) = self.value_at_clamped(input) else {
             return 0;
         };
         let max = ((1u32 << self.bits) - 1) as f64;
         ((value as f64).clamp(0.0, max) * 255.0 / max).round() as u8
+    }
+
+    /// The entry for `input`, clamping out-of-range inputs to the end entries.
+    fn value_at_clamped(&self, input: i32) -> Option<i32> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        let index = (input - self.first_mapped).clamp(0, self.entries.len() as i32 - 1);
+        Some(self.entries[index as usize])
     }
 }
 
@@ -323,5 +333,129 @@ mod tests {
         film.insert_sequence(Tag::PRESENTATION_LUT_SEQUENCE)
             .push(item);
         assert!(FilmBox::from_dataset(film).presentation_lut().is_err());
+    }
+
+    fn film_with_lut_item(item: Dataset) -> Result<PresentationLut, Error> {
+        let mut film = Dataset::new();
+        film.insert_sequence(Tag::PRESENTATION_LUT_SEQUENCE)
+            .push(item);
+        FilmBox::from_dataset(film).presentation_lut()
+    }
+
+    fn lut_item(descriptor: &[u8], data: &[u8], data_vr: Vr) -> Dataset {
+        let mut item = Dataset::new();
+        item.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::LUT_DESCRIPTOR,
+            Vr::Us,
+            Arc::new(MemoryBuffer::from(descriptor.to_vec())),
+        )));
+        if !data.is_empty() {
+            item.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+                Tag::LUT_DATA,
+                data_vr,
+                Arc::new(MemoryBuffer::from(data.to_vec())),
+            )));
+        }
+        item
+    }
+
+    #[test]
+    fn malformed_presentation_lut_items_are_rejected() {
+        // no descriptor at all
+        assert!(film_with_lut_item(Dataset::new()).is_err());
+
+        // descriptor shorter than three US values
+        assert!(film_with_lut_item(lut_item(&[1, 0, 0], &[0], Vr::Ow)).is_err());
+
+        // bits per entry other than 8/16
+        assert!(film_with_lut_item(lut_item(&[1, 0, 0, 0, 12, 0], &[0, 0], Vr::Ow)).is_err());
+
+        // no data element
+        assert!(film_with_lut_item(lut_item(&[1, 0, 0, 0, 8, 0], &[], Vr::Ow)).is_err());
+    }
+
+    #[test]
+    fn eight_and_sixteen_bit_tables_produce_expected_bytes() {
+        // 8-bit, four entries: one byte per entry
+        let table = film_with_lut_item(lut_item(&[4, 0, 0, 0, 8, 0], &[0, 85, 170, 255], Vr::Ow))
+            .unwrap()
+            .table()
+            .unwrap()
+            .clone();
+        assert_eq!(table.len(), 4);
+        assert!(!table.is_empty());
+        assert_eq!(table.first_mapped(), 0);
+        assert_eq!(table.value_at(1), Some(85));
+        assert_eq!(table.value_at(-1), None);
+        assert_eq!(table.map_byte(0), 0);
+        assert_eq!(table.map_byte(3), 255);
+
+        // 16-bit unsigned entries are rescaled to 8 bits
+        let table = film_with_lut_item(lut_item(
+            &[2, 0, 0, 0, 16, 0],
+            &[0x00, 0x00, 0xFF, 0xFF],
+            Vr::Ow,
+        ))
+        .unwrap()
+        .table()
+        .unwrap()
+        .clone();
+        assert_eq!(table.bits(), 16);
+        assert_eq!(table.map_byte(0), 0);
+        assert_eq!(table.map_byte(1), 255);
+
+        // 16-bit signed data is sign-extended before clamping
+        let table = film_with_lut_item(lut_item(
+            &[2, 0, 0, 0, 16, 0],
+            &[0xFF, 0xFF, 0x10, 0x00],
+            Vr::Ss,
+        ))
+        .unwrap()
+        .table()
+        .unwrap()
+        .clone();
+        assert_eq!(table.value_at(0), Some(-1));
+        assert_eq!(table.map_byte(0), 0, "negative entries clamp to black");
+        assert_eq!(table.map_byte(1), 0, "16 of 65535 is below one 8-bit step");
+    }
+
+    #[test]
+    fn a_film_box_without_presentation_lut_attributes_is_empty() {
+        let lut = FilmBox::from_dataset(Dataset::new())
+            .presentation_lut()
+            .unwrap();
+        assert!(lut.is_empty());
+        assert!(lut.shape().is_none());
+        assert!(lut.table().is_none());
+    }
+    #[test]
+    fn out_of_range_inputs_clamp_to_the_end_entries() {
+        // first mapped 10: inputs 10 and 11 select 100 and 200
+        let mut item = Dataset::new();
+        let descriptor = [2u8, 0x00, 0x0A, 0x00, 0x08, 0x00]; // US 2, SS 10, US 8
+        item.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::LUT_DESCRIPTOR,
+            Vr::Us,
+            Arc::new(MemoryBuffer::from(descriptor.to_vec())),
+        )));
+        item.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::LUT_DATA,
+            Vr::Ow,
+            Arc::new(MemoryBuffer::from(vec![100u8, 200])),
+        )));
+        let mut film = Dataset::new();
+        film.insert_sequence(Tag::PRESENTATION_LUT_SEQUENCE)
+            .push(item);
+        let table = FilmBox::from_dataset(film)
+            .presentation_lut()
+            .unwrap()
+            .table()
+            .cloned()
+            .unwrap();
+        assert_eq!(table.map_byte(10), 100);
+        assert_eq!(table.map_byte(11), 200);
+        assert_eq!(table.map_byte(0), 100, "below first_mapped clamps to entry 0");
+        assert_eq!(table.map_byte(-5), 100);
+        assert_eq!(table.map_byte(999), 200, "past the table clamps to the last entry");
     }
 }

@@ -138,10 +138,15 @@ fn ensure_registry() {
 
 /// Reverse lookup: encoding → DICOM term (for writing SpecificCharacterSet,
 /// ENC-04). Returns the single-byte/Unicode term, not the ISO 2022 variant.
+///
+/// `encoding_rs` maps both the `ASCII` and `windows-1252` labels to
+/// `WINDOWS_1252`, so the bare-ASCII row is skipped: reporting `ISO_IR 6` for
+/// a decoder that accepts the full Latin-1 range would misdescribe the bytes
+/// (CORE-24). `ISO_IR 100` is the correct term for that encoding.
 pub fn charset_for_encoding(encoding: &'static Encoding) -> Option<&'static str> {
     BUILTINS
         .iter()
-        .filter(|(term, _)| !term.starts_with("ISO 2022"))
+        .filter(|(term, enc)| !term.starts_with("ISO 2022") && *enc != "ASCII")
         .find(|(_, enc)| Encoding::for_label(enc.as_bytes()) == Some(encoding))
         .map(|(term, _)| *term)
 }
@@ -178,11 +183,25 @@ pub fn decode_multi_charset(bytes: &[u8], first: &'static Encoding, pn: bool) ->
         range: std::ops::Range<usize>,
         enc: &'static Encoding,
         korean: bool,
+        designator: Option<&[u8]>,
     ) {
         if range.start >= range.end {
             return;
         }
         let slice = &bytes[range];
+        // ISO-2022-JP is a stateful decoder: it only decodes JIS X 0208 bytes
+        // correctly when the ESC designator that selected them is part of the
+        // input. Replay it, or the bare bytes decode as ASCII garbage
+        // (CORE-26).
+        if enc.name() == "ISO-2022-JP" {
+            let mut input = Vec::with_capacity(slice.len() + 4);
+            if let Some(designator) = designator {
+                input.extend_from_slice(designator);
+            }
+            input.extend_from_slice(slice);
+            out.push_str(&enc.decode(&input).0);
+            return;
+        }
         // ISO 2022 Korean: 7-bit double bytes (0x21-0x7E) after `ESC $ ) C`
         // must be shifted to their EUC-KR 8-bit form. Bytes already in 8-bit
         // form (mixed encodings) are passed through unchanged.
@@ -196,14 +215,23 @@ pub fn decode_multi_charset(bytes: &[u8], first: &'static Encoding, pn: bool) ->
     let mut out = String::with_capacity(bytes.len());
     let mut current = first;
     let mut korean = false;
+    let mut designator: Option<&[u8]> = None;
     let mut segment_start = 0usize;
     let mut i = 0usize;
     while i < bytes.len() {
         let b = bytes[i];
         if b == 0x1B {
             if let Some(len) = escape_sequence_len(bytes, i) {
-                flush(&mut out, bytes, segment_start..i, current, korean);
+                flush(
+                    &mut out,
+                    bytes,
+                    segment_start..i,
+                    current,
+                    korean,
+                    designator,
+                );
                 korean = bytes[i..i + len] == [0x1B, 0x24, 0x29, 0x43];
+                designator = Some(&bytes[i..i + len]);
                 if let Some(enc) = encoding_for_escape(&bytes[i..i + len]) {
                     current = enc;
                 }
@@ -214,14 +242,29 @@ pub fn decode_multi_charset(bytes: &[u8], first: &'static Encoding, pn: bool) ->
         }
         let reset = (pn && (b == b'^' || b == b'=')) || matches!(b, b'\r' | b'\n' | b'\t' | 0x0C);
         if reset {
-            flush(&mut out, bytes, segment_start..i, current, korean);
+            flush(
+                &mut out,
+                bytes,
+                segment_start..i,
+                current,
+                korean,
+                designator,
+            );
             segment_start = i;
             current = first;
             korean = false;
+            designator = None;
         }
         i += 1;
     }
-    flush(&mut out, bytes, segment_start..bytes.len(), current, korean);
+    flush(
+        &mut out,
+        bytes,
+        segment_start..bytes.len(),
+        current,
+        korean,
+        designator,
+    );
     out
 }
 
@@ -301,6 +344,127 @@ fn encoding_for_escape(seq: &[u8]) -> Option<&'static Encoding> {
 /// escape prefix injected. When everything fails, encodes with `first` and
 /// replacement characters (documented last resort).
 pub fn encode_multi_charset(
+    text: &str,
+    first: &'static Encoding,
+    alternates: &[&'static Encoding],
+    pn: bool,
+) -> Vec<u8> {
+    encode_multi_charset_with(text, first, alternates, pn, None)
+}
+
+/// The ISO 2022 designation that a declared charset term requires before its
+/// (8-bit) characters (PS3.5 §6.1.2.5.3). `None` for the default repertoire
+/// and for stateful ISO-2022-JP, whose encoder emits its own escapes.
+pub fn iso2022_designator_for_term(term: &str) -> Option<&'static [u8]> {
+    match normalize_term(term).as_str() {
+        "ISO2022IR58" => Some(b"\x1B$)A"),
+        "ISO2022IR149" => Some(b"\x1B$)C"),
+        "ISO2022IR13" => Some(b"\x1B(J"),
+        "ISO2022IR100" => Some(b"\x1B-A"),
+        "ISO2022IR101" => Some(b"\x1B-B"),
+        "ISO2022IR109" => Some(b"\x1B-C"),
+        "ISO2022IR110" => Some(b"\x1B-D"),
+        "ISO2022IR126" => Some(b"\x1B-F"),
+        "ISO2022IR127" => Some(b"\x1B-G"),
+        "ISO2022IR138" => Some(b"\x1B-H"),
+        "ISO2022IR144" => Some(b"\x1B-L"),
+        "ISO2022IR148" => Some(b"\x1B-M"),
+        "ISO2022IR166" => Some(b"\x1B-T"),
+        _ => None,
+    }
+}
+
+/// Encodes like [`encode_multi_charset`], additionally emitting
+/// `first_designator` before every non-ASCII run.
+///
+/// PS3.5 §6.1.2.5.3 requires the designation to be (re)established after each
+/// PN/text delimiter, so this splits at the same reset positions as the
+/// fallback path and writes the ASCII prefix of a segment before the
+/// designator. `first_designator` comes from the declared
+/// SpecificCharacterSet term ([`iso2022_designator_for_term`]); passing `None`
+/// is exactly [`encode_multi_charset`].
+pub fn encode_multi_charset_with(
+    text: &str,
+    first: &'static Encoding,
+    alternates: &[&'static Encoding],
+    pn: bool,
+    first_designator: Option<&'static [u8]>,
+) -> Vec<u8> {
+    let Some(designator) = first_designator else {
+        return encode_multi_charset_plain(text, first, alternates, pn);
+    };
+    if text.is_ascii() {
+        return text.as_bytes().to_vec();
+    }
+
+    let reset_points: Vec<usize> = if pn {
+        text.char_indices()
+            .filter(|(_, c)| *c == '^' || *c == '=')
+            .map(|(i, _)| i)
+            .collect()
+    } else {
+        text.char_indices()
+            .filter(|(_, c)| matches!(c, '\r' | '\n' | '\t' | '\u{0C}'))
+            .map(|(i, _)| i)
+            .collect()
+    };
+    let mut segments: Vec<&str> = Vec::new();
+    let mut start = 0usize;
+    for p in reset_points {
+        segments.push(&text[start..p]);
+        start = p;
+    }
+    segments.push(&text[start..]);
+
+    let mut bytes = Vec::with_capacity(text.len() + 8);
+    // a G0 designation (JIS X 0201) must be undone before ASCII runs
+    let g0_designation = designator.starts_with(b"\x1B(");
+    let mut g0_active = false;
+    for segment in segments {
+        match segment.find(|c: char| !c.is_ascii()) {
+            None => {
+                if g0_active {
+                    bytes.extend_from_slice(b"\x1B(B");
+                    g0_active = false;
+                }
+                bytes.extend_from_slice(segment.as_bytes());
+            }
+            Some(split) => {
+                bytes.extend_from_slice(&segment.as_bytes()[..split]);
+                if g0_active {
+                    bytes.extend_from_slice(b"\x1B(B");
+                }
+                let rest = &segment[split..];
+                if segment_can_encode(first, rest) {
+                    bytes.extend_from_slice(designator);
+                    g0_active = g0_designation;
+                    let (encoded, _, _) = first.encode(rest);
+                    bytes.extend_from_slice(&encoded);
+                } else if let Some(enc) = alternates
+                    .iter()
+                    .copied()
+                    .find(|enc| segment_can_encode(enc, rest))
+                {
+                    if let Some(esc) = escape_for_encoding(enc) {
+                        bytes.extend_from_slice(esc);
+                        g0_active = esc.starts_with(b"\x1B(");
+                    }
+                    let (encoded, _, _) = enc.encode(rest);
+                    bytes.extend_from_slice(&encoded);
+                } else {
+                    bytes.extend_from_slice(designator);
+                    g0_active = g0_designation;
+                    let (encoded, _, _) = first.encode(rest);
+                    bytes.extend_from_slice(&encoded);
+                }
+            }
+        }
+    }
+    bytes
+}
+
+/// The original per-segment fallback encoder (no first-charset designation).
+fn encode_multi_charset_plain(
     text: &str,
     first: &'static Encoding,
     alternates: &[&'static Encoding],
@@ -397,7 +561,9 @@ fn escape_for_encoding(enc: &'static Encoding) -> Option<&'static [u8]> {
         "ISO-2022-JP" => Some(b"\x1B$B"),
         "GBK" => Some(b"\x1B$)A"),
         "EUC-KR" => Some(b"\x1B$)C"),
-        "UTF-8" | "ASCII" => Some(b"\x1B(B"),
+        // CORE-26: no `UTF-8`/`ASCII` arm - neither is a valid ISO 2022
+        // target, and `encoding_rs` has no encoding named "ASCII" (the label
+        // resolves to windows-1252, handled above), so those arms were dead.
         _ => None,
     }
 }
@@ -509,6 +675,12 @@ mod tests {
         assert_eq!(charset_for_encoding(utf8), Some("ISO_IR 192"));
         let cyrillic = Encoding::for_label(b"iso-8859-5").unwrap();
         assert_eq!(charset_for_encoding(cyrillic), Some("ISO_IR 144"));
+        // CORE-24: windows-1252 is Latin-1 on the wire, not bare ASCII
+        assert_eq!(
+            charset_for_encoding(encoding_rs::WINDOWS_1252),
+            Some("ISO_IR 100")
+        );
+        assert_eq!(charset_for_encoding(encoding_rs::BIG5), None);
     }
 
     #[test]
@@ -625,5 +797,122 @@ mod tests {
         let out = encode_multi_charset("café", ascii, &[], false);
         let (text, _, _) = encoding_rs::WINDOWS_1252.decode(&out);
         assert!(text.contains("caf"));
+    }
+
+    #[test]
+    fn iso2022_designator_is_resolved_from_the_declared_term() {
+        assert_eq!(
+            iso2022_designator_for_term("ISO 2022 IR 58"),
+            Some(&b"\x1B$)A"[..])
+        );
+        assert_eq!(
+            iso2022_designator_for_term("ISO 2022 IR 149"),
+            Some(&b"\x1B$)C"[..])
+        );
+        // the default repertoire and stateful JIS need no injected designation
+        assert!(iso2022_designator_for_term("ISO_IR 6").is_none());
+        assert!(iso2022_designator_for_term("ISO 2022 IR 87").is_none());
+    }
+
+    #[test]
+    fn encode_emits_iso2022_designation_after_delimiters() {
+        // PS3.5 §6.1.2.5.3: the designation must follow every PN delimiter.
+        let gbk = charset_encoding("ISO 2022 IR 58");
+        let encoded = encode_multi_charset_with(
+            "Zhang^XiaoDong=张^小东",
+            gbk,
+            &[],
+            true,
+            iso2022_designator_for_term("ISO 2022 IR 58"),
+        );
+        assert_eq!(
+            encoded,
+            b"Zhang^XiaoDong=\x1B$)A\xD5\xC5^\x1B$)A\xD0\xA1\xB6\xAB".to_vec()
+        );
+        // ASCII-only values never gain an escape
+        let plain = encode_multi_charset_with(
+            "Doe^John",
+            gbk,
+            &[],
+            true,
+            iso2022_designator_for_term("ISO 2022 IR 58"),
+        );
+        assert_eq!(plain, b"Doe^John".to_vec());
+    }
+
+    #[test]
+    fn escape_sequence_parsing_rejects_truncated_and_unknown_designators() {
+        assert_eq!(escape_sequence_len(b"\x1B$", 0), None);
+        assert_eq!(escape_sequence_len(b"\x1B$(", 0), None);
+        assert_eq!(escape_sequence_len(b"\x1B(", 0), None);
+        assert_eq!(escape_sequence_len(b"\x1BXY", 0), None);
+        assert_eq!(escape_sequence_len(b"\x1B$)A", 0), Some(4));
+        assert_eq!(escape_sequence_len(b"\x1B$B", 0), Some(3));
+        assert_eq!(escape_sequence_len(b"\x1B-A", 0), Some(3));
+
+        assert_eq!(encoding_for_escape(b"XY"), None);
+        assert_eq!(encoding_for_escape(b"\x1B"), None);
+        assert_eq!(encoding_for_escape(b"\x1BZZ"), None);
+        assert_eq!(encoding_for_escape(b"\x1B$)Z"), None);
+        assert_eq!(encoding_for_escape(b"\x1B-Z"), None);
+        assert!(encoding_for_escape(b"\x1B(B").is_some());
+        assert!(encoding_for_escape(b"\x1B$)C").is_some());
+    }
+
+    #[test]
+    fn decode_switches_and_resets_between_segments() {
+        let base = charset_encoding("ISO_IR 6");
+        // ESC - A switches to Latin 1; CR resets to the base encoding
+        let out = decode_multi_charset(b"a\x1B-A\xE9\rb\xE9", base, false);
+        assert!(out.starts_with("aé\rb"), "{out}");
+        // an unknown designator does not abort the decode
+        let out = decode_multi_charset(b"a\x1BZYb", base, false);
+        assert!(out.starts_with('a'), "{out}");
+    }
+
+    #[test]
+    fn a_designated_jis_segment_is_decoded_with_its_escape() {
+        // CORE-26: the base charset is not Japanese, so the JIS X 0208 bytes
+        // only decode when the designator reaches the stateful decoder.
+        let base = charset_encoding("ISO_IR 100");
+        let bytes = [0x1Bu8, 0x24, 0x42, 0x24, 0x22];
+        assert_eq!(decode_multi_charset(&bytes, base, false), "あ");
+    }
+
+    #[test]
+    fn designator_encoder_covers_fallback_and_last_resort() {
+        let gbk = charset_encoding("ISO 2022 IR 58");
+        let designator = iso2022_designator_for_term("ISO 2022 IR 58");
+        // first encoding cannot encode → the alternate's escape is used
+        let ascii = charset_encoding("ISO_IR 6");
+        let greek = charset_encoding("ISO_IR 126");
+        let out = encode_multi_charset_with("Ω", ascii, &[greek], false, Some(b"\x1B(B"));
+        assert!(
+            out.windows(2).any(|w| w == b"\x1B-"),
+            "Greek escape present: {out:02X?}"
+        );
+        // nothing can encode → replacement characters, still designated
+        let out = encode_multi_charset_with("张\u{1F600}", gbk, &[], false, designator);
+        assert!(out.starts_with(b"\x1B$)A"), "designator still written");
+    }
+
+    #[test]
+    fn fallback_encoder_covers_reset_and_failure_branches() {
+        let latin = charset_encoding("ISO_IR 100");
+        let gbk = charset_encoding("GBK");
+        // a '^' restarts the segment at the first encoding
+        let out = encode_multi_charset("Doe^参数", latin, &[gbk], true);
+        assert!(out.contains(&0x1B), "GBK escape injected after the reset");
+        // no alternate can encode: replacement characters, no panic
+        let out = encode_multi_charset("x\u{1F600}y", latin, &[], false);
+        assert!(out.starts_with(b"x"));
+        // the escape table covers Korean, and rejects non-ISO-2022 encodings
+        assert_eq!(
+            escape_for_encoding(charset_encoding("ISO 2022 IR 149")),
+            Some(&b"\x1B$)C"[..])
+        );
+        // UTF-8 is not a valid ISO 2022 target (dead arm removed, CORE-26)
+        assert_eq!(escape_for_encoding(charset_encoding("ISO_IR 192")), None);
+        assert_eq!(escape_for_encoding(encoding_rs::BIG5), None);
     }
 }

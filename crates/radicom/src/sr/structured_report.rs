@@ -14,7 +14,7 @@ use crate::sr::content_item::{tags, ContentItem, ValueType};
 use std::path::Path;
 
 /// Basic Text SR Storage, the SOP class a `StructuredReport` document is.
-pub const BASIC_TEXT_SR_STORAGE: &str = "1.2.840.10008.5.1.4.1.1.88.11";
+pub const BASIC_TEXT_SR_STORAGE: &str = crate::uids::BASIC_TEXT_SR_STORAGE;
 
 /// A structured report document (§12.3).
 #[derive(Debug, Clone)]

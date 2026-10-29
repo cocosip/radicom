@@ -293,6 +293,11 @@ impl CMoveResponse {
 /// The SCP owns the AE→address mapping; this helper takes the resolved address.
 /// Every instance is pushed with the Move Originator AE title and message ID set
 /// (divergence D5: always written), so the destination can report back.
+///
+/// Returns the counters plus the transport error that ended the batch early, if
+/// any: a failed destination must not erase the sub-operations already counted
+/// (NET-16). Only a failure *before* the first instance (connect/negotiate) is
+/// returned as `Err`.
 pub async fn store_to_destination(
     destination: impl tokio::net::ToSocketAddrs,
     calling_ae: &str,
@@ -300,10 +305,10 @@ pub async fn store_to_destination(
     files: &[DicomFile],
     originator: Option<(&str, u16)>,
     options: ClientOptions,
-) -> Result<SubOperationSummary> {
+) -> Result<(SubOperationSummary, Option<NetworkError>)> {
     let mut summary = SubOperationSummary::default();
     if files.is_empty() {
-        return Ok(summary);
+        return Ok((summary, None));
     }
 
     // one presentation context per (storage class, syntax) the batch needs
@@ -334,15 +339,27 @@ pub async fn store_to_destination(
         None => (None, None),
     };
     for file in files {
-        let response = association
+        match association
             .send_c_store_with_originator(file, originator_ae, originator_id)
-            .await?;
-        summary.record(response.state());
+            .await
+        {
+            Ok(response) => summary.record(response.state()),
+            Err(error) => {
+                // A broken destination ends the batch, but the instances already
+                // delivered must stay countable: PS3.4 §C.4.2 reports progress
+                // through the sub-operation counters, not by discarding them
+                // (NET-16). The error travels back alongside them so the caller
+                // can report it in the terminal response.
+                summary.failed = summary.failed.saturating_add(1);
+                let _ = association.release().await;
+                return Ok((summary, Some(error)));
+            }
+        }
     }
     // the deliveries above are the result; a peer that fumbles the release
     // afterwards must not turn them into a failure
     let _ = association.release().await;
-    Ok(summary)
+    Ok((summary, None))
 }
 
 #[cfg(test)]
@@ -566,7 +583,7 @@ mod tests {
     #[tokio::test]
     async fn an_empty_batch_needs_no_association() {
         // an unreachable address proves no connection is attempted
-        let summary = store_to_destination(
+        let (summary, error) = store_to_destination(
             "127.0.0.1:1",
             "SCP",
             "ARCHIVE",
@@ -577,6 +594,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(summary.total(), 0);
+        assert!(error.is_none(), "an empty batch attempts nothing");
     }
 
     #[test]
@@ -585,6 +603,23 @@ mod tests {
         assert_eq!(
             file.dataset.get_str(Tag::SOP_INSTANCE_UID).unwrap(),
             "1.2.3.4"
+        );
+    }
+
+    #[test]
+    fn a_query_key_can_be_added_fluently() {
+        let request = CMoveRequest::study("1.2.3", "DEST", 1).with_key(
+            0x0008,
+            0x0052,
+            radicom::model::vr::Vr::Cs,
+            "T-D0100",
+        );
+        assert_eq!(
+            request
+                .identifier
+                .get_str(Tag::new(0x0008, 0x0052))
+                .unwrap(),
+            "T-D0100"
         );
     }
 }

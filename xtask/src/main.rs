@@ -1,4 +1,5 @@
-//! xtask: workspace code generation tasks (`cargo xtask gen-dict`).
+//! xtask: workspace code generation and maintenance tasks
+//! (`cargo xtask gen-dict`, `cargo xtask coverage`).
 
 use std::fmt::Write as _;
 use std::fs;
@@ -9,13 +10,20 @@ use flate2::read::GzDecoder;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
+mod coverage;
+
 fn main() {
     let arg = std::env::args().nth(1);
     match arg.as_deref() {
         Some("gen-dict") => gen_dict(),
         Some("regen-goldens") => regen_goldens(),
+        Some("coverage") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            std::process::exit(coverage::run(&root(), &args));
+        }
         _ => {
-            eprintln!("usage: cargo xtask <gen-dict|regen-goldens>");
+            eprintln!("usage: cargo xtask <gen-dict|regen-goldens|coverage>");
+            eprintln!("  coverage [--min PCT] [--lcov PATH]  production line coverage floor");
             std::process::exit(2);
         }
     }

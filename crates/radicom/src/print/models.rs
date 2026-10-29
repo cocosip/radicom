@@ -64,6 +64,35 @@ pub mod tags {
     pub const LUT_DATA: Tag = Tag::LUT_DATA;
 }
 
+/// Film orientation `(2010,0040)` (PS3.3 C.13.3.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FilmOrientation {
+    /// `PORTRAIT`: the film is laid out in its nominal portrait dimensions.
+    #[default]
+    Portrait,
+    /// `LANDSCAPE`: the film is rotated, swapping width and height.
+    Landscape,
+}
+
+impl FilmOrientation {
+    /// Parses the CS value; anything else is an error.
+    pub fn parse(text: &str) -> Result<Self, Error> {
+        match text.trim().to_ascii_uppercase().as_str() {
+            "PORTRAIT" => Ok(FilmOrientation::Portrait),
+            "LANDSCAPE" => Ok(FilmOrientation::Landscape),
+            other => Err(format_error(other)),
+        }
+    }
+
+    /// The canonical CS spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FilmOrientation::Portrait => "PORTRAIT",
+            FilmOrientation::Landscape => "LANDSCAPE",
+        }
+    }
+}
+
 /// A print film session (§12.4): film destination/label/medium/priority/copies.
 #[derive(Debug, Clone)]
 pub struct FilmSession {
@@ -89,48 +118,43 @@ impl FilmSession {
         self.dataset
     }
 
-    pub fn set_copies(&mut self, copies: u16) -> &mut Self {
+    pub fn set_copies(&mut self, copies: u16) {
         self.dataset.insert_value(tags::NUMBER_OF_COPIES, copies);
-        self
     }
 
     pub fn copies(&self) -> Option<u16> {
         self.dataset.try_get(tags::NUMBER_OF_COPIES)
     }
 
-    pub fn set_label(&mut self, label: impl Into<String>) -> &mut Self {
+    pub fn set_label(&mut self, label: impl Into<String>) {
         self.dataset
             .insert_str(tags::FILM_SESSION_LABEL, Vr::Sh, label);
-        self
     }
 
     pub fn label(&self) -> Option<String> {
         self.dataset.try_get_str(tags::FILM_SESSION_LABEL)
     }
 
-    pub fn set_priority(&mut self, priority: impl Into<String>) -> &mut Self {
+    pub fn set_priority(&mut self, priority: impl Into<String>) {
         self.dataset
             .insert_str(tags::PRINT_PRIORITY, Vr::Cs, priority);
-        self
     }
 
     pub fn priority(&self) -> Option<String> {
         self.dataset.try_get_str(tags::PRINT_PRIORITY)
     }
 
-    pub fn set_medium_type(&mut self, medium: impl Into<String>) -> &mut Self {
+    pub fn set_medium_type(&mut self, medium: impl Into<String>) {
         self.dataset.insert_str(tags::MEDIUM_TYPE, Vr::Cs, medium);
-        self
     }
 
     pub fn medium_type(&self) -> Option<String> {
         self.dataset.try_get_str(tags::MEDIUM_TYPE)
     }
 
-    pub fn set_destination(&mut self, destination: impl Into<String>) -> &mut Self {
+    pub fn set_destination(&mut self, destination: impl Into<String>) {
         self.dataset
             .insert_str(tags::FILM_DESTINATION, Vr::Cs, destination);
-        self
     }
 
     pub fn destination(&self) -> Option<String> {
@@ -170,15 +194,12 @@ impl FilmBox {
     }
 
     /// Sets the display format string and validates it parses (§12.4).
-    pub fn set_image_display_format(
-        &mut self,
-        format: impl Into<String>,
-    ) -> Result<&mut Self, Error> {
+    pub fn set_image_display_format(&mut self, format: impl Into<String>) -> Result<(), Error> {
         let text = format.into();
         ImageDisplayFormat::parse(&text)?;
         self.dataset
             .insert_str(tags::IMAGE_DISPLAY_FORMAT, Vr::Cs, text);
-        Ok(self)
+        Ok(())
     }
 
     /// The parsed display format, if any.
@@ -189,13 +210,13 @@ impl FilmBox {
     }
 
     /// Sets the film size string and validates it parses (§12.4).
-    pub fn set_film_size(&mut self, size: impl Into<String>) -> Result<&mut Self, Error> {
+    pub fn set_film_size(&mut self, size: impl Into<String>) -> Result<(), Error> {
         let text = size.into();
         if FilmSize::parse(&text).is_none() {
             return Err(format_error(&text));
         }
         self.dataset.insert_str(tags::FILM_SIZE_ID, Vr::Cs, text);
-        Ok(self)
+        Ok(())
     }
 
     /// The film's physical size, if recognised.
@@ -203,10 +224,33 @@ impl FilmBox {
         FilmSize::parse(&self.dataset.try_get_str(tags::FILM_SIZE_ID)?)
     }
 
-    pub fn set_trim(&mut self, trim: bool) -> &mut Self {
+    /// The film size after applying `FilmOrientation` (PS3.3 C.13.3.1):
+    /// LANDSCAPE swaps width and height.
+    pub fn effective_film_size(&self) -> Option<FilmSize> {
+        let size = self.film_size()?;
+        Some(match self.film_orientation() {
+            FilmOrientation::Portrait => size,
+            FilmOrientation::Landscape => FilmSize::new(size.height_mm, size.width_mm),
+        })
+    }
+
+    /// Sets the film orientation (PORTRAIT by default).
+    pub fn set_film_orientation(&mut self, orientation: FilmOrientation) {
+        self.dataset
+            .insert_str(tags::FILM_ORIENTATION, Vr::Cs, orientation.as_str());
+    }
+
+    /// The film orientation; missing or malformed values read as PORTRAIT.
+    pub fn film_orientation(&self) -> FilmOrientation {
+        self.dataset
+            .try_get_str(tags::FILM_ORIENTATION)
+            .and_then(|text| FilmOrientation::parse(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn set_trim(&mut self, trim: bool) {
         self.dataset
             .insert_str(tags::TRIM, Vr::Cs, if trim { "YES" } else { "NO" });
-        self
     }
 
     pub fn trim(&self) -> bool {
@@ -216,9 +260,10 @@ impl FilmBox {
     /// Lays out this film's image cells, inset by `margin` mm (§12.4).
     ///
     /// Returns an empty vector when the display format or film size is missing
-    /// or unparseable, rather than guessing a grid.
+    /// or unparseable, rather than guessing a grid. The grid is laid out on the
+    /// orientation-adjusted film size, so LANDSCAPE rotates the cells too.
     pub fn layout(&self, margin: f64) -> Vec<LayoutCell> {
-        match (self.image_display_format(), self.film_size()) {
+        match (self.image_display_format(), self.effective_film_size()) {
             (Some(format), Some(size)) => format.layout(size, margin),
             _ => Vec::new(),
         }
@@ -226,7 +271,7 @@ impl FilmBox {
 
     /// Initialises the ReferencedImageBoxSequence with `count` image boxes,
     /// numbering positions 1..=count (§12.4, `initialize`).
-    pub fn initialize_image_boxes(&mut self, count: u32) -> &mut Self {
+    pub fn initialize_image_boxes(&mut self, count: u32) {
         let sequence = self
             .dataset
             .insert_sequence(tags::REFERENCED_IMAGE_BOX_SEQUENCE);
@@ -236,7 +281,6 @@ impl FilmBox {
             boxed.insert_value(tags::IMAGE_POSITION, position as u16);
             sequence.push(boxed);
         }
-        self
     }
 
     /// Number of image boxes currently in the ReferencedImageBoxSequence.
@@ -270,10 +314,9 @@ impl FilmBox {
     }
 
     /// Sets the Presentation LUT Shape `(2050,0020)`.
-    pub fn set_presentation_lut_shape(&mut self, shape: PresentationLutShape) -> &mut Self {
+    pub fn set_presentation_lut_shape(&mut self, shape: PresentationLutShape) {
         self.dataset
             .insert_str(tags::PRESENTATION_LUT_SHAPE, Vr::Cs, shape.as_str());
-        self
     }
 }
 
@@ -302,9 +345,8 @@ impl ImageBox {
         self.dataset.try_get(tags::IMAGE_POSITION)
     }
 
-    pub fn set_position(&mut self, position: u16) -> &mut Self {
+    pub fn set_position(&mut self, position: u16) {
         self.dataset.insert_value(tags::IMAGE_POSITION, position);
-        self
     }
 
     /// Polarity `NORMAL` (default) or `REVERSE` (§12.4).
@@ -313,56 +355,52 @@ impl ImageBox {
         self.dataset.try_get_str(tags::POLARITY).as_deref() == Some("REVERSE")
     }
 
-    pub fn set_polarity(&mut self, reverse: bool) -> &mut Self {
+    pub fn set_polarity(&mut self, reverse: bool) {
         self.dataset.insert_str(
             tags::POLARITY,
             Vr::Cs,
             if reverse { "REVERSE" } else { "NORMAL" },
         );
-        self
     }
 
-    pub fn set_magnification_type(&mut self, value: impl Into<String>) -> &mut Self {
+    pub fn set_magnification_type(&mut self, value: impl Into<String>) {
         self.dataset
             .insert_str(tags::MAGNIFICATION_TYPE, Vr::Cs, value);
-        self
     }
 
     pub fn magnification_type(&self) -> Option<String> {
         self.dataset.try_get_str(tags::MAGNIFICATION_TYPE)
     }
 
-    pub fn set_smoothing_type(&mut self, value: impl Into<String>) -> &mut Self {
+    /// Sets `(2010,0080)`; the renderer does not apply smoothing (see
+    /// `docs/06-backlog.md`).
+    pub fn set_smoothing_type(&mut self, value: impl Into<String>) {
         self.dataset.insert_str(tags::SMOOTHING_TYPE, Vr::Cs, value);
-        self
     }
 
     pub fn smoothing_type(&self) -> Option<String> {
         self.dataset.try_get_str(tags::SMOOTHING_TYPE)
     }
 
-    pub fn set_min_density(&mut self, value: u16) -> &mut Self {
+    pub fn set_min_density(&mut self, value: u16) {
         self.dataset.insert_value(tags::MIN_DENSITY, value);
-        self
     }
 
     pub fn min_density(&self) -> Option<u16> {
         self.dataset.try_get(tags::MIN_DENSITY)
     }
 
-    pub fn set_max_density(&mut self, value: u16) -> &mut Self {
+    pub fn set_max_density(&mut self, value: u16) {
         self.dataset.insert_value(tags::MAX_DENSITY, value);
-        self
     }
 
     pub fn max_density(&self) -> Option<u16> {
         self.dataset.try_get(tags::MAX_DENSITY)
     }
 
-    pub fn set_requested_image_size(&mut self, value: f64) -> &mut Self {
+    pub fn set_requested_image_size(&mut self, value: f64) {
         self.dataset
             .insert_str(tags::REQUESTED_IMAGE_SIZE, Vr::Ds, value.to_string());
-        self
     }
 
     pub fn requested_image_size(&self) -> Option<f64> {
@@ -372,11 +410,10 @@ impl ImageBox {
     }
 
     /// Attaches one image (a dataset holding pixel data) to the image sequence.
-    pub fn push_image(&mut self, image: Dataset) -> &mut Self {
+    pub fn push_image(&mut self, image: Dataset) {
         self.dataset
             .insert_sequence(Tag::BASIC_GRAYSCALE_IMAGE_SEQUENCE)
             .push(image);
-        self
     }
 
     pub fn image_count(&self) -> usize {
@@ -408,17 +445,44 @@ mod tests {
     #[test]
     fn a_film_session_carries_its_attributes() {
         let mut session = FilmSession::new();
-        session
-            .set_copies(2)
-            .set_label("FS-1")
-            .set_priority("HIGH")
-            .set_medium_type("PAPER")
-            .set_destination("PROCESSOR");
+        session.set_copies(2);
+        session.set_label("FS-1");
+        session.set_priority("HIGH");
+        session.set_medium_type("PAPER");
+        session.set_destination("PROCESSOR");
         assert_eq!(session.copies(), Some(2));
         assert_eq!(session.label().as_deref(), Some("FS-1"));
         assert_eq!(session.priority().as_deref(), Some("HIGH"));
         assert_eq!(session.medium_type().as_deref(), Some("PAPER"));
         assert_eq!(session.destination().as_deref(), Some("PROCESSOR"));
+    }
+
+    #[test]
+    fn wrappers_round_trip_their_datasets() {
+        let mut session = FilmSession::new();
+        session.set_copies(3);
+        assert_eq!(session.dataset().try_get(tags::NUMBER_OF_COPIES), Some(3));
+        assert!(session.into_dataset().contains(&tags::NUMBER_OF_COPIES));
+        assert!(FilmSession::from_dataset(Dataset::new())
+            .dataset()
+            .items()
+            .next()
+            .is_none());
+        assert!(FilmSession::default().copies().is_none());
+
+        let mut film = FilmBox::new();
+        film.set_film_size("A4").unwrap();
+        assert_eq!(
+            film.dataset().try_get_str(tags::FILM_SIZE_ID).as_deref(),
+            Some("A4")
+        );
+        assert!(film.into_dataset().contains(&tags::FILM_SIZE_ID));
+        assert!(FilmBox::default().film_size().is_none());
+
+        let mut image_box = ImageBox::from_dataset(Dataset::new());
+        image_box.set_position(4);
+        assert_eq!(image_box.position(), Some(4));
+        assert!(image_box.dataset().contains(&tags::IMAGE_POSITION));
     }
 
     #[test]
@@ -493,16 +557,16 @@ mod tests {
     #[test]
     fn an_image_box_reports_position_polarity_and_images() {
         let mut image_box = ImageBox::from_dataset(Dataset::new());
-        image_box.set_position(2).set_polarity(true);
+        image_box.set_position(2);
+        image_box.set_polarity(true);
         assert_eq!(image_box.position(), Some(2));
         assert!(image_box.polarity(), "REVERSE maps to true");
 
-        image_box
-            .set_magnification_type("REPLICATE")
-            .set_smoothing_type("MEDIUM")
-            .set_min_density(10)
-            .set_max_density(200)
-            .set_requested_image_size(25.5);
+        image_box.set_magnification_type("REPLICATE");
+        image_box.set_smoothing_type("MEDIUM");
+        image_box.set_min_density(10);
+        image_box.set_max_density(200);
+        image_box.set_requested_image_size(25.5);
         assert_eq!(image_box.magnification_type().as_deref(), Some("REPLICATE"));
         assert_eq!(image_box.smoothing_type().as_deref(), Some("MEDIUM"));
         assert_eq!(image_box.min_density(), Some(10));
@@ -511,6 +575,31 @@ mod tests {
 
         image_box.push_image(Dataset::new());
         assert_eq!(image_box.image_count(), 1);
+    }
+
+    #[test]
+    fn landscape_swaps_the_film_and_cell_dimensions() {
+        let mut film = FilmBox::new();
+        film.set_image_display_format("STANDARD\\2,2").unwrap();
+        film.set_film_size("A4").unwrap(); // 210 x 297 portrait
+        assert_eq!(film.film_orientation(), FilmOrientation::Portrait);
+        let portrait = film.layout(10.0);
+        assert!((portrait[0].width - (210.0 - 20.0) / 2.0).abs() < 1e-9);
+
+        film.set_film_orientation(FilmOrientation::Landscape);
+        assert_eq!(film.film_orientation(), FilmOrientation::Landscape);
+        assert_eq!(film.effective_film_size(), Some(FilmSize::new(297.0, 210.0)));
+        let landscape = film.layout(10.0);
+        // the grid is now wider than tall: each cell is (297-20)/2 wide
+        assert!((landscape[0].width - (297.0 - 20.0) / 2.0).abs() < 1e-9);
+        assert!((landscape[0].height - (210.0 - 20.0) / 2.0).abs() < 1e-9);
+
+        // malformed and missing values read as PORTRAIT
+        film.dataset
+            .insert_str(tags::FILM_ORIENTATION, Vr::Cs, "SIDEWAYS");
+        assert_eq!(film.film_orientation(), FilmOrientation::Portrait);
+        assert!(FilmOrientation::parse("landscape ").is_ok());
+        assert!(FilmOrientation::parse("").is_err());
     }
 
     #[test]

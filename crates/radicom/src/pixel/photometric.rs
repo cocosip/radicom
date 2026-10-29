@@ -307,4 +307,22 @@ mod tests {
             PhotometricInterpretation::Rgb
         );
     }
+    #[test]
+    fn grayscale_vr_and_display_helpers() {
+        let gray = ColorSpace {
+            kind: ColorSpaceType::Grayscale,
+            components: 1,
+            subsampling: [(1, 1); 3],
+        };
+        assert!(gray.is_grayscale());
+        let rgb = ColorSpace {
+            kind: ColorSpaceType::Rgb,
+            components: 3,
+            subsampling: [(1, 1); 3],
+        };
+        assert!(!rgb.is_grayscale());
+        assert_eq!(PhotometricInterpretation::vr(), Vr::Cs);
+        assert_eq!(PhotometricInterpretation::Other.to_string(), "OTHER");
+        assert_eq!(PhotometricInterpretation::Rgb.to_string(), "RGB");
+    }
 }

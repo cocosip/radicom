@@ -6,7 +6,7 @@
 
 use bytes::Bytes;
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// A reference to a possibly lazily materialized byte sequence.
 ///
@@ -359,11 +359,19 @@ impl ByteBuffer for CompositeBuffer {
 pub struct EndianBuffer {
     inner: SharedBuffer,
     unit: usize,
+    /// Swapped copy, computed on first whole-value read. Big-endian numeric
+    /// values are read one element at a time by `FromElement`, so without this
+    /// cache an n-element array costs O(n²) bytes of copying/swapping.
+    swapped: OnceLock<Vec<u8>>,
 }
 
 impl EndianBuffer {
     pub fn new(inner: SharedBuffer, unit: usize) -> Self {
-        EndianBuffer { inner, unit }
+        EndianBuffer {
+            inner,
+            unit,
+            swapped: OnceLock::new(),
+        }
     }
 
     pub fn unit(&self) -> usize {
@@ -379,7 +387,7 @@ impl EndianBuffer {
         if unit <= 1 {
             inner
         } else {
-            Arc::new(EndianBuffer { inner, unit })
+            Arc::new(EndianBuffer::new(inner, unit))
         }
     }
 }
@@ -392,11 +400,34 @@ impl ByteBuffer for EndianBuffer {
         self.inner.is_memory()
     }
     fn data(&self) -> io::Result<std::borrow::Cow<'_, [u8]>> {
+        if let Some(cached) = self.swapped.get() {
+            return Ok(std::borrow::Cow::Borrowed(cached));
+        }
         let mut data = self.inner.data()?.into_owned();
         crate::model::endian::Endian::swap_buffer(&mut data, self.unit);
-        Ok(std::borrow::Cow::Owned(data))
+        // A concurrent first read may win the race; both compute the same bytes,
+        // so keeping theirs is fine.
+        let _ = self.swapped.set(data);
+        Ok(std::borrow::Cow::Borrowed(
+            self.swapped.get().expect("swapped bytes just set"),
+        ))
     }
     fn get_byte_range(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        if let Some(cached) = self.swapped.get() {
+            let start = usize::try_from(offset)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "offset too large"))?;
+            let end = start
+                .checked_add(buf.len())
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "range overflow"))?;
+            let slice = cached.get(start..end).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "byte range is past the swapped value",
+                )
+            })?;
+            buf.copy_from_slice(slice);
+            return Ok(());
+        }
         let mut tmp = vec![0u8; buf.len()];
         self.inner.get_byte_range(offset, &mut tmp)?;
         crate::model::endian::Endian::swap_buffer(&mut tmp, self.unit);
@@ -509,14 +540,45 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Mutex;
 
-/// A process-unique temp path (never collides across concurrent callers/PIDs).
+/// A process-unique temp path with a non-guessable suffix.
+///
+/// A fixed name in the shared temp directory would let another local user
+/// pre-create a symlink (the classic temp-file race); `create_temp` opens the
+/// file with `create_new` so an existing path is never followed.
 fn temp_path(tag: &str) -> PathBuf {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, AtomicOrdering::Relaxed);
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+        ^ ((seq as u128) << 32);
     std::env::temp_dir().join(format!(
-        "radicom-buf-{}-{seq}-{tag}.tmp",
+        "radicom-buf-{}-{seq}-{nonce:x}-{tag}.tmp",
         std::process::id()
     ))
+}
+
+/// Creates a fresh temp file, never following an existing path.
+///
+/// On Unix the file is created `0600` so a spilled value (possibly PHI) is not
+/// readable by other local users.
+fn create_temp(tag: &str) -> io::Result<(PathBuf, std::fs::File)> {
+    loop {
+        let path = temp_path(tag);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Deletes the temp file on drop (after the owning file handle has closed).
@@ -686,9 +748,12 @@ pub struct TempFileSpill {
 impl TempFileSpill {
     /// Writes `bytes` to a temp file and windows the whole file.
     pub fn from_bytes(bytes: impl AsRef<[u8]>) -> io::Result<Self> {
+        use std::io::Write as _;
         let bytes = bytes.as_ref();
-        let path = temp_path("spill");
-        std::fs::write(&path, bytes)?;
+        let (path, mut file) = create_temp("spill")?;
+        file.write_all(bytes)?;
+        file.flush()?;
+        drop(file);
         let window = FileWindow::open(&path, 0, bytes.len() as u64)?;
         Ok(TempFileSpill {
             window,
@@ -699,8 +764,7 @@ impl TempFileSpill {
     /// Reads exactly `len` bytes from `reader` into a temp file, then windows it.
     pub fn from_reader<R: Read>(mut reader: R, len: u64) -> io::Result<Self> {
         use std::io::Write as _;
-        let path = temp_path("spill");
-        let mut file = std::fs::File::create(&path)?;
+        let (path, mut file) = create_temp("spill")?;
         let mut remaining = len;
         let mut chunk = vec![0u8; 8192];
         while remaining > 0 {
@@ -1165,5 +1229,110 @@ mod tests {
             sw.copy_to(&mut Vec::new()).unwrap_err().kind(),
             io::ErrorKind::UnexpectedEof
         );
+    }
+
+    #[test]
+    fn temp_files_use_fresh_paths_and_never_follow_an_existing_one() {
+        let (first, file1) = create_temp("spill").unwrap();
+        let (second, file2) = create_temp("spill").unwrap();
+        assert_ne!(first, second, "concurrent spills must not share a path");
+        // the name is not reused: create_new on an existing path fails instead
+        // of following it (temp-file symlink race)
+        assert!(std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&first)
+            .is_err());
+        drop(file1);
+        drop(file2);
+        std::fs::remove_file(&first).ok();
+        std::fs::remove_file(&second).ok();
+    }
+
+    #[test]
+    fn window_accessors_endian_edges_and_lazy_debug() {
+        let path = std::env::temp_dir().join(format!("radicom-acc-{}.bin", std::process::id()));
+        std::fs::write(&path, b"0123456789").unwrap();
+        {
+            let fw = FileWindow::open(&path, 2, 4).unwrap();
+            assert_eq!(fw.offset(), 2);
+            assert_eq!(fw.len(), 4);
+            assert!(!fw.is_empty());
+            assert!(!fw.is_memory());
+            assert_eq!(&*fw.data().unwrap(), b"2345");
+            let mut out = [0u8; 2];
+            assert!(fw.get_byte_range(10, &mut out).is_err());
+            let shared_file = Arc::new(std::fs::File::open(&path).unwrap());
+            let from_shared = FileWindow::from_shared(shared_file, 0, 3);
+            assert_eq!(&*from_shared.data().unwrap(), b"012");
+            let empty =
+                FileWindow::from_shared(Arc::new(std::fs::File::open(&path).unwrap()), 0, 0);
+            assert!(empty.is_empty());
+        }
+        std::fs::remove_file(&path).ok();
+
+        let composite = CompositeBuffer::new(vec![shared(MemoryBuffer::from(vec![1u8]))]);
+        assert_eq!(composite.parts().len(), 1);
+        assert!(composite.is_memory());
+
+        let inner = shared(MemoryBuffer::from(vec![1u8, 2, 3, 4, 5, 6]));
+        let endian = EndianBuffer::new(inner.clone(), 4);
+        assert_eq!(endian.unit(), 4);
+        assert_eq!(endian.inner().size(), 6);
+        assert!(endian.is_memory());
+        let mut out = [0u8; 2];
+        endian.get_byte_range(1, &mut out).unwrap();
+        assert!(endian.get_byte_range(100, &mut out).is_err());
+
+        let even = EvenLengthBuffer::new(shared(MemoryBuffer::from(vec![7u8, 8])));
+        assert!(even.is_memory());
+        assert_eq!(&*even.data().unwrap(), &[7, 8]);
+        let mut out = [0u8; 1];
+        even.get_byte_range(1, &mut out).unwrap();
+        assert_eq!(out, [8]);
+
+        let lazy = LazyBuffer::new(|| vec![1u8]);
+        assert!(lazy.is_memory());
+        assert!(format!("{lazy:?}").contains("materialized"));
+
+        let sw = StreamWindow::new(Box::new(std::io::Cursor::new(b"abcdefgh".to_vec())), 8);
+        assert!(format!("{sw:?}").contains("len"));
+        assert_eq!(&*sw.data().unwrap(), b"abcdefgh");
+
+        let uri = BulkDataUri::new("file:///x");
+        assert!(!uri.is_memory());
+        assert!(uri.as_slice().is_none());
+    }
+
+    #[test]
+    fn endian_buffer_caches_the_swapped_bytes() {
+        let inner = shared(MemoryBuffer::from(vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06]));
+        let endian = EndianBuffer::new(inner, 2);
+        let first = endian.data().unwrap();
+        assert_eq!(&*first, &[0x02, 0x01, 0x04, 0x03, 0x06, 0x05]);
+        let first_ptr = first.as_ptr();
+        drop(first);
+
+        // the second whole-value read reuses the cache instead of copying again
+        let second = endian.data().unwrap();
+        assert_eq!(second.as_ptr(), first_ptr);
+        // and range reads are served from it
+        let mut range = [0u8; 4];
+        endian.get_byte_range(2, &mut range).unwrap();
+        assert_eq!(range, [0x04, 0x03, 0x06, 0x05]);
+        assert!(endian.get_byte_range(5, &mut range).is_err());
+    }
+
+    #[test]
+    fn range_and_memory_buffer_accessors() {
+        let memory = MemoryBuffer::from(vec![1u8, 2, 3]);
+        assert!(memory.is_memory());
+        assert_eq!(memory.as_slice(), Some(&[1, 2, 3][..]));
+        let range = RangeBuffer::new(shared(memory), 1, 2);
+        assert_eq!(range.offset(), 1);
+        assert_eq!(range.len(), 2);
+        assert!(!range.is_empty());
+        assert_eq!(range.inner().size(), 3);
+        assert_eq!(&*range.data().unwrap(), &[2, 3]);
     }
 }

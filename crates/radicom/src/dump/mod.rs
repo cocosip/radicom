@@ -109,34 +109,43 @@ fn render_value(value: &ElementValue, vr: crate::model::vr::Vr, options: &DumpOp
             }
         }
         ElementValue::Bytes(buffer) => {
-            let data = match buffer.data() {
-                Ok(data) => data,
-                Err(e) => return format!("(unreadable: {e})"),
+            let size = buffer.size();
+            if size == 0 {
+                return "(empty)".to_string();
+            }
+            // Never materialize a large on-demand value just to preview a few
+            // bytes (review CORE-09): read only the preview range.
+            let shown = size.min(options.max_binary_bytes as u64) as usize;
+            let mut preview = vec![0u8; shown];
+            let bytes: &[u8] = match buffer.as_slice() {
+                Some(slice) => &slice[..shown.min(slice.len())],
+                None => match buffer.get_byte_range(0, &mut preview) {
+                    Ok(()) => &preview,
+                    Err(e) => return format!("(unreadable: {e})"),
+                },
             };
-            let bytes: &[u8] = data.as_ref();
-            if vr.is_string() && !bytes.is_empty() {
-                // string-typed Other values: show as text when printable
-                if let Ok(text) = std::str::from_utf8(bytes) {
-                    let text = text.trim_end_matches('\0');
-                    if text.is_empty() {
-                        return "(empty)".to_string();
-                    }
-                    if text
-                        .chars()
-                        .take(options.max_value_chars)
-                        .all(|c| !c.is_control() || c == '\n')
-                    {
-                        return render_str(text, options);
+            if vr.is_string() {
+                // string-typed Other values: show as text when printable, but
+                // only for values already in memory
+                if let Some(full) = buffer.as_slice() {
+                    if let Ok(text) = std::str::from_utf8(full) {
+                        let text = text.trim_end_matches('\0');
+                        if text.is_empty() {
+                            return "(empty)".to_string();
+                        }
+                        if text
+                            .chars()
+                            .take(options.max_value_chars)
+                            .all(|c| !c.is_control() || c == '\n')
+                        {
+                            return render_str(text, options);
+                        }
                     }
                 }
             }
-            if bytes.is_empty() {
-                return "(empty)".to_string();
-            }
-            let shown = bytes.len().min(options.max_binary_bytes);
-            let hex: Vec<String> = bytes[..shown].iter().map(|b| format!("{b:02X}")).collect();
-            let suffix = if bytes.len() > shown {
-                format!(" … ({} bytes)", bytes.len())
+            let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02X}")).collect();
+            let suffix = if size > shown as u64 {
+                format!(" … ({size} bytes)")
             } else {
                 String::new()
             };
@@ -376,5 +385,31 @@ mod tests {
     #[test]
     fn a_non_image_dataset_has_no_pixel_summary() {
         assert!(pixel_summary(&sample_dataset()).is_none());
+    }
+
+    #[test]
+    fn dump_previews_file_windows_and_truncates_long_text() {
+        let path = std::env::temp_dir().join(format!("radicom-dump-{}.bin", std::process::id()));
+        std::fs::write(&path, b"\x01\x02\x03\x04").unwrap();
+        let mut ds = Dataset::new();
+        let window = crate::model::buffer::FileWindow::open(&path, 0, 4).unwrap();
+        ds.insert_or_update(crate::model::element::DicomElement::new_bytes(
+            Tag::new(0x0009, 0x1001),
+            Vr::Ob,
+            Arc::new(window),
+        ));
+        ds.insert_str(Tag::MODALITY, Vr::Cs, "CT");
+        let out = dump_dataset(&ds, &DumpOptions::default());
+        assert!(out.contains("01 02 03 04"), "{out}");
+        std::fs::remove_file(&path).ok();
+
+        // text longer than max_value_chars is truncated with a count
+        let mut long = Dataset::new();
+        long.insert_str(Tag::STUDY_DESCRIPTION, Vr::Lo, "abcdefghij");
+        let options = DumpOptions {
+            max_value_chars: 4,
+            ..DumpOptions::default()
+        };
+        assert!(dump_dataset(&long, &options).contains("… (10 chars)"));
     }
 }

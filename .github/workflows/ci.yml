@@ -45,6 +45,25 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
 
+  coverage:
+    name: coverage (95% floor)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      # Production lines only: test/bench/example targets and inline
+      # `#[cfg(test)]` modules are excluded by the xtask.
+      - name: Production line coverage
+        run: cargo xtask coverage
+
   msrv:
     name: msrv (1.89)
     runs-on: ubuntu-latest

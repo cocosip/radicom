@@ -38,3 +38,7 @@ tracing-core = { version = "0.1", default-features = false }
 [[bench]]
 name = "core"
 harness = false
+
+[[bench]]
+name = "workflows"
+harness = false

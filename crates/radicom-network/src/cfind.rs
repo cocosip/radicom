@@ -528,4 +528,32 @@ mod tests {
             vec![status::PENDING, status::PENDING, status::SUCCESS]
         );
     }
+
+    #[test]
+    fn the_patient_and_image_queries_use_their_own_key_sets() {
+        let patient = CFindRequest::patient_query(1);
+        assert_eq!(
+            patient
+                .identifier
+                .get_str(Tag::QUERY_RETRIEVE_LEVEL)
+                .unwrap(),
+            "PATIENT"
+        );
+        let keys = patient.identifier.len();
+        assert!(
+            patient.identifier.contains(&Tag::new(0x0010, 0x0010)),
+            "the patient level returns the PatientName"
+        );
+
+        let image = CFindRequest::image_query(2);
+        assert_eq!(
+            image.identifier.get_str(Tag::QUERY_RETRIEVE_LEVEL).unwrap(),
+            "IMAGE"
+        );
+        assert!(
+            image.identifier.contains(&Tag::new(0x0008, 0x0018)),
+            "the image level returns the SOP instance UID"
+        );
+        assert_ne!(keys, image.identifier.len(), "each level has its own keys");
+    }
 }

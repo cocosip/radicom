@@ -33,6 +33,11 @@ otel = []
 tokio = { workspace = true, features = ["test-util"] }
 rcgen = "0.13"
 
+# the interop tool's exit-code policy is unit-tested, so `cargo test` runs it
+[[example]]
+name = "peer_interop"
+test = true
+
 [[bench]]
 name = "throughput"
 harness = false

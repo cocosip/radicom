@@ -5,19 +5,40 @@ use crate::model::buffer::SharedBuffer;
 use crate::model::element::{DicomElement, FromElement, IntoElement};
 use crate::model::item::{DicomFragmentSequence, DicomItem, DicomSequence};
 use crate::model::masked_tag::MaskedTag;
+use crate::model::private_creator::PrivateCreator;
 use crate::model::tag::Tag;
 use crate::model::transfer_syntax::{syntaxes, TransferSyntax};
 use crate::model::vr::Vr;
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex};
 
 /// An ordered DICOM dataset: items sorted by tag (iteration equals file
 /// order), plus its transfer syntax and validation switch (DS-01).
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Dataset {
     items: BTreeMap<Tag, DicomItem>,
     transfer_syntax: Arc<TransferSyntax>,
     validate: bool,
+    /// Resolved `(group, creator)` → private block memo (CORE-13). A hit is
+    /// verified against the creator slot before use, so dataset mutations
+    /// cannot make it stale; `clear` drops it.
+    private_blocks: Mutex<HashMap<(u16, Arc<PrivateCreator>), u16>>,
+}
+
+impl Clone for Dataset {
+    fn clone(&self) -> Self {
+        Dataset {
+            items: self.items.clone(),
+            transfer_syntax: self.transfer_syntax.clone(),
+            validate: self.validate,
+            private_blocks: Mutex::new(
+                self.private_blocks
+                    .lock()
+                    .expect("private block cache")
+                    .clone(),
+            ),
+        }
+    }
 }
 
 impl Default for Dataset {
@@ -33,6 +54,7 @@ impl Dataset {
             items: BTreeMap::new(),
             transfer_syntax: syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
             validate: true,
+            private_blocks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -41,6 +63,7 @@ impl Dataset {
             items: BTreeMap::new(),
             transfer_syntax: ts,
             validate: true,
+            private_blocks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -244,7 +267,7 @@ impl Dataset {
                         tag: TagRef(t.group(), t.element()),
                     }));
                 }
-                self.items.insert(t, item);
+                self.items.insert(t.clone(), item.with_tag(t));
                 Ok(self)
             }
             None => Err(Error::Data(DataError::PrivateTagResolution {
@@ -258,8 +281,16 @@ impl Dataset {
     /// A dictionary-style private tag allocates its creator block on demand.
     pub fn insert_or_update(&mut self, item: impl Into<DicomItem>) -> &mut Self {
         let item: DicomItem = item.into();
+        let (group, element) = (item.tag().group(), item.tag().element());
         if let Some(t) = self.resolve_private_write(item.tag(), true) {
             self.items.insert(t.clone(), item.with_tag(t));
+        } else {
+            // the private creator group has no free block: the item cannot be
+            // stored. Report it instead of dropping it without a trace.
+            tracing::warn!(
+                tag = %TagRef(group, element),
+                "private creator group is full; item was not stored"
+            );
         }
         self
     }
@@ -316,12 +347,18 @@ impl Dataset {
     }
 
     /// Appends a sequence and returns it for item population.
+    ///
+    /// A dictionary-style private tag is resolved (and its creator block
+    /// claimed) before insertion, exactly like [`Self::insert_or_update`].
     pub fn insert_sequence(&mut self, tag: Tag) -> &mut DicomSequence {
-        let seq = DicomSequence::new(tag.clone());
-        self.insert_or_update(DicomItem::Sequence(seq));
+        let tag = self.resolved_insert_tag(tag);
+        self.items.insert(
+            tag.clone(),
+            DicomItem::Sequence(DicomSequence::new(tag.clone())),
+        );
         match self.items.get_mut(&tag) {
             Some(DicomItem::Sequence(s)) => s,
-            _ => unreachable!("just inserted"),
+            _ => unreachable!("just inserted a sequence at the resolved tag"),
         }
     }
 
@@ -335,12 +372,32 @@ impl Dataset {
     }
 
     /// Appends a fragment sequence for encapsulated pixel data.
+    ///
+    /// A dictionary-style private tag is resolved (and its creator block
+    /// claimed) before insertion, exactly like [`Self::insert_or_update`].
     pub fn insert_fragments(&mut self, tag: Tag, vr: Vr) -> &mut DicomFragmentSequence {
-        let frags = DicomFragmentSequence::new(tag.clone(), vr);
-        self.insert_or_update(DicomItem::Fragments(frags));
+        let tag = self.resolved_insert_tag(tag);
+        self.items.insert(
+            tag.clone(),
+            DicomItem::Fragments(DicomFragmentSequence::new(tag.clone(), vr)),
+        );
         match self.items.get_mut(&tag) {
             Some(DicomItem::Fragments(f)) => f,
-            _ => unreachable!("just inserted"),
+            _ => unreachable!("just inserted fragments at the resolved tag"),
+        }
+    }
+
+    /// The concrete tag an item will be stored under, claiming a private
+    /// creator block when the tag is private and dictionary-style.
+    ///
+    /// The infallible insert helpers have no `Result` to return, so an
+    /// exhausted private group (all 240 creator slots taken) is a programmer's
+    /// error there; the fallible [`Self::try_insert_or_update`] exists for
+    /// callers that must handle it.
+    fn resolved_insert_tag(&mut self, tag: Tag) -> Tag {
+        match self.get_private_tag_ref(&tag, true) {
+            Some(resolved) => resolved,
+            None => panic!("private creator group of {tag} has no free block"),
         }
     }
 
@@ -355,6 +412,10 @@ impl Dataset {
 
     pub fn clear(&mut self) {
         self.items.clear();
+        self.private_blocks
+            .lock()
+            .expect("private block cache")
+            .clear();
     }
 
     /// Copies all (or the selected) items into `dest` (DS-05).
@@ -386,16 +447,38 @@ impl Dataset {
 
     // -- private tags (DS-04) --------------------------------------------------
 
-    /// Scans the group's creator slots for `creator` and returns the block
-    /// number (0x10..=0xFF).
-    fn find_private_block(&self, creator: &str, group: u16) -> Option<u16> {
+    /// True when the creator slot `(group, block)` holds `creator`.
+    fn private_slot_matches(&self, group: u16, block: u16, creator: &str) -> bool {
+        match self.items.get(&Tag::new(group, block)) {
+            Some(DicomItem::Element(e)) => e.string_value().trim() == creator,
+            _ => false,
+        }
+    }
+
+    /// Returns the block number (0x10..=0xFF) whose creator slot holds
+    /// `creator`, caching the answer per (group, creator) (CORE-13). The cache
+    /// hit is re-verified against the slot, so it never masks a mutation.
+    fn find_private_block(&self, creator: &Arc<PrivateCreator>, group: u16) -> Option<u16> {
+        let key = (group, Arc::clone(creator));
+        let cached = self
+            .private_blocks
+            .lock()
+            .expect("private block cache")
+            .get(&key)
+            .copied();
+        if let Some(block) = cached {
+            if self.private_slot_matches(group, block, creator.as_str()) {
+                return Some(block);
+            }
+        }
         for block in 0x10u16..=0xFF {
             // the creator slot element number IS the block number
-            let slot = Tag::new(group, block);
-            if let Some(DicomItem::Element(e)) = self.items.get(&slot) {
-                if e.string_value().trim() == creator {
-                    return Some(block);
-                }
+            if self.private_slot_matches(group, block, creator.as_str()) {
+                self.private_blocks
+                    .lock()
+                    .expect("private block cache")
+                    .insert(key, block);
+                return Some(block);
             }
         }
         None
@@ -416,14 +499,15 @@ impl Dataset {
         if !tag.is_private() || tag.element() > 0x00FF {
             return Some(tag.clone());
         }
-        let creator_arc = match tag.private_creator() {
-            Some(c) => Arc::new(c.clone()),
+        let creator_arc = match tag.private_creator_arc() {
+            Some(c) => c,
+            // no creator to resolve: the tag passes through unchanged
             None => return Some(tag.clone()),
         };
         let creator = creator_arc.as_str();
         let group = tag.group();
         let low = tag.element() & 0xFF;
-        if let Some(block) = self.find_private_block(creator, group) {
+        if let Some(block) = self.find_private_block(&creator_arc, group) {
             return Some(Tag::private(group, block << 8 | low, creator_arc));
         }
         if create {
@@ -440,6 +524,10 @@ impl Dataset {
                 });
                 if let DicomItem::Element(e) = entry {
                     if e.string_value().trim() == creator {
+                        self.private_blocks
+                            .lock()
+                            .expect("private block cache")
+                            .insert((group, Arc::clone(&creator_arc)), block);
                         return Some(Tag::private(group, block << 8 | low, creator_arc));
                     }
                 }
@@ -453,12 +541,12 @@ impl Dataset {
     /// present; otherwise the tag passes through unchanged.
     fn normalize_read(&self, tag: &Tag) -> Tag {
         if tag.is_private() && tag.element() <= 0x00FF {
-            if let Some(creator) = tag.private_creator() {
-                if let Some(block) = self.find_private_block(creator.as_str(), tag.group()) {
+            if let Some(creator) = tag.private_creator_arc() {
+                if let Some(block) = self.find_private_block(&creator, tag.group()) {
                     return Tag::private(
                         tag.group(),
                         block << 8 | (tag.element() & 0xFF),
-                        Arc::new(creator.clone()),
+                        creator,
                     );
                 }
             }
@@ -983,6 +1071,63 @@ mod tests {
     }
 
     #[test]
+    fn insert_sequence_and_fragments_resolve_private_creator_tags() {
+        // `insert_sequence`/`insert_fragments` used to insert under the
+        // resolved block tag and then look up the unresolved dictionary-style
+        // tag, panicking with "just inserted" on valid input.
+        let mut ds = Dataset::new();
+        let creator = Arc::new(crate::model::private_creator::PrivateCreator::new(
+            "ACME 1.2",
+        ));
+        let sequence_tag = Tag::private(0x0029, 0x0002, creator.clone());
+        {
+            let seq = ds.insert_sequence(sequence_tag.clone());
+            seq.push(Dataset::new());
+        }
+        assert_eq!(ds.get_sequence(sequence_tag).unwrap().len(), 1);
+        assert_eq!(
+            ds.get_sequence(Tag::private(0x0029, 0x1002, creator.clone()))
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let fragments_tag = Tag::private(0x0029, 0x0003, creator);
+        {
+            let fragments = ds.insert_fragments(fragments_tag.clone(), Vr::Ob);
+            fragments.push_fragment(Arc::new(MemoryBuffer::from(vec![1u8, 2])));
+        }
+        let fragments = match ds.item(&fragments_tag).expect("fragments present") {
+            DicomItem::Fragments(f) => f,
+            other => panic!("expected fragments, got {other:?}"),
+        };
+        assert_eq!(fragments.fragments()[0].size(), 2);
+        assert_eq!(ds.len(), 3, "both creator slots plus the fragment sequence");
+    }
+
+    #[test]
+    #[should_panic(expected = "no free block")]
+    fn insert_sequence_panics_when_the_private_group_is_full() {
+        let mut ds = Dataset::new();
+        for i in 0..240u32 {
+            let creator = Arc::new(crate::model::private_creator::PrivateCreator::new(format!(
+                "C{i}"
+            )));
+            assert!(ds
+                .get_private_tag(Tag::private(0x002B, 0x0001, creator), true)
+                .is_some());
+        }
+        let overflow = Tag::private(
+            0x002B,
+            0x0001,
+            Arc::new(crate::model::private_creator::PrivateCreator::new(
+                "overflow",
+            )),
+        );
+        let _ = ds.insert_sequence(overflow);
+    }
+
+    #[test]
     fn private_group_exhaustion() {
         let mut ds = Dataset::new();
         let mk = |name: &str| {
@@ -1243,10 +1388,10 @@ fn skips_unresolved_bulk(element: &DicomElement) -> bool {
         .is_some_and(|buffer| buffer.bulk_uri().is_some() && !buffer.is_memory())
 }
 
-/// Shared functional groups sequence (0020,9116).
-pub const SHARED_FUNCTIONAL_GROUPS: Tag = Tag::PLANE_ORIENTATION_SEQUENCE;
-/// Per-frame functional groups sequence (0020,9111).
-pub const PER_FRAME_FUNCTIONAL_GROUPS: Tag = Tag::FRAME_CONTENT_SEQUENCE;
+/// Shared functional groups sequence (5200,9229).
+pub const SHARED_FUNCTIONAL_GROUPS: Tag = Tag::SHARED_FUNCTIONAL_GROUPS_SEQUENCE;
+/// Per-frame functional groups sequence (5200,9230).
+pub const PER_FRAME_FUNCTIONAL_GROUPS: Tag = Tag::PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE;
 /// Timezone offset from UTC (0008,0201), `±hhmm`.
 pub const TIMEZONE_OFFSET_FROM_UTC: Tag = Tag::TIMEZONE_OFFSET_FROM_UTC;
 
@@ -1399,6 +1544,217 @@ mod derived_tests {
     }
 
     #[test]
+    fn functional_group_constants_are_ps36_tags() {
+        // PS3.6 Table 7-1: (5200,9229) Shared / (5200,9230) Per-frame.
+        assert_eq!(SHARED_FUNCTIONAL_GROUPS, Tag::new(0x5200, 0x9229));
+        assert_eq!(PER_FRAME_FUNCTIONAL_GROUPS, Tag::new(0x5200, 0x9230));
+        assert_eq!(
+            SHARED_FUNCTIONAL_GROUPS,
+            Tag::SHARED_FUNCTIONAL_GROUPS_SEQUENCE
+        );
+        assert_eq!(
+            PER_FRAME_FUNCTIONAL_GROUPS,
+            Tag::PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE
+        );
+    }
+
+    #[test]
+    fn functional_groups_reads_real_shared_and_per_frame_tags() {
+        // The fixture must use the wire tags, not the aliased constants, so a
+        // regression to the old (0020,911x) mapping cannot pass.
+        let mut ds = Dataset::new();
+        {
+            let shared = ds.insert_sequence(Tag::SHARED_FUNCTIONAL_GROUPS_SEQUENCE);
+            let mut item = Dataset::new();
+            item.insert_str(Tag::SLICE_THICKNESS, Vr::Ds, "2.5");
+            shared.push(item);
+        }
+        {
+            let per = ds.insert_sequence(Tag::PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE);
+            for loc in ["-5.0", "-2.5"] {
+                let mut item = Dataset::new();
+                item.insert_str(Tag::SLICE_LOCATION, Vr::Ds, loc);
+                per.push(item);
+            }
+        }
+        let flat = ds.functional_groups(1).unwrap();
+        assert_eq!(flat.get_str(Tag::SLICE_THICKNESS).unwrap(), "2.5");
+        assert_eq!(flat.get_str(Tag::SLICE_LOCATION).unwrap(), "-2.5");
+        assert!(ds.functional_groups(2).is_err());
+    }
+
+    #[test]
+    fn insert_retags_a_resolved_private_item() {
+        let creator =
+            std::sync::Arc::new(crate::model::private_creator::PrivateCreator::new("ACME"));
+        let mut ds = Dataset::new();
+        // create the creator block 0x10 by storing (0029,0002)
+        ds.insert_or_update(DicomElement::new_str(
+            Tag::private(0x0029, 0x0002, creator.clone()),
+            Vr::Lo,
+            "v2",
+        ));
+        // the same creator's (0029,0003) resolves to (0029,1003) in that block
+        let tag = Tag::private(0x0029, 0x0003, creator);
+        ds.insert(DicomElement::new_str(tag, Vr::Lo, "v3")).unwrap();
+        let stored = ds
+            .items()
+            .find(|item| item.tag().element() == 0x1003)
+            .expect("the item carries its resolved block tag");
+        assert_eq!(stored.tag().group(), 0x0029);
+    }
+
+    #[test]
+    fn default_value_count_and_type_mismatches() {
+        let ds = Dataset::default();
+        assert!(ds.is_empty());
+        assert!(ds.validation_enabled());
+        assert!(ds.validate().is_ok());
+
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::ROWS, 5u16);
+        assert_eq!(ds.value_count(Tag::ROWS).unwrap(), 1);
+        assert!(ds.try_get_str_ref(Tag::ROWS).is_none());
+        assert!(ds.value_count(Tag::PATIENT_ID).is_err());
+        assert!(ds.get_element(Tag::PATIENT_ID).is_err());
+        assert!(ds.get_sequence(Tag::ROWS).is_err());
+        assert!(ds.get_element(Tag::PLANE_POSITION_SEQUENCE).is_err());
+
+        ds.insert_fragments(Tag::PIXEL_DATA, Vr::Ob);
+        assert_eq!(ds.value_count(Tag::PIXEL_DATA).unwrap(), 0);
+        assert!(ds.get_element(Tag::PIXEL_DATA).is_err());
+        assert!(ds.get::<String>(Tag::PIXEL_DATA).is_err());
+        // a fragments item is validated without recursing into item datasets
+        assert!(ds.validate().is_ok());
+    }
+
+    #[test]
+    fn private_insert_errors_and_try_insert_success() {
+        let acme = std::sync::Arc::new(crate::model::private_creator::PrivateCreator::new("ACME"));
+        let mut ds = Dataset::new();
+        // no block exists yet and insert() does not create one
+        let tag = Tag::private(0x0029, 0x0002, acme.clone());
+        assert!(ds
+            .insert(DicomElement::new_str(tag.clone(), Vr::Lo, "v"))
+            .is_err());
+        // the fallible update creates the block on demand and reports success
+        ds.try_insert_or_update(DicomElement::new_str(tag, Vr::Lo, "v"))
+            .unwrap();
+        // and the fallible update succeeds once a block can be claimed
+        ds.try_insert_or_update(DicomElement::new_str(
+            Tag::private(0x0029, 0x0002, acme.clone()),
+            Vr::Lo,
+            "v",
+        ))
+        .unwrap();
+        assert!(
+            ds.items().count() >= 2,
+            "the creator element and the resolved private element are stored"
+        );
+    }
+
+    #[test]
+    fn insert_or_update_does_not_panic_when_the_group_is_full() {
+        let mut ds = Dataset::new();
+        for i in 0..300u32 {
+            let creator = std::sync::Arc::new(crate::model::private_creator::PrivateCreator::new(
+                format!("C{i}"),
+            ));
+            ds.insert_or_update(DicomElement::new_str(
+                Tag::private(0x0029, 0x0001, creator),
+                Vr::Lo,
+                "v",
+            ));
+        }
+        // the group holds 240 creator blocks; the rest are dropped with a
+        // warning, never a panic, and the stored elements stay intact
+        assert!(!ds.is_empty());
+    }
+
+    #[test]
+    fn content_equals_covers_sequences_and_fragments() {
+        let mut a = Dataset::new();
+        let mut b = Dataset::new();
+        a.insert_sequence(Tag::PLANE_POSITION_SEQUENCE)
+            .push(Dataset::new());
+        b.insert_sequence(Tag::PLANE_POSITION_SEQUENCE)
+            .push(Dataset::new());
+        assert!(a.content_equals(&b));
+        b.sequence_mut(Tag::PLANE_POSITION_SEQUENCE)
+            .unwrap()
+            .push(Dataset::new());
+        assert!(!a.content_equals(&b), "different item counts");
+
+        let mut x = Dataset::new();
+        let mut y = Dataset::new();
+        x.insert_fragments(Tag::PIXEL_DATA, Vr::Ob);
+        y.insert_fragments(Tag::PIXEL_DATA, Vr::Ob);
+        assert!(x.content_equals(&y));
+        y.insert_fragments(Tag::PIXEL_DATA, Vr::Ow);
+        assert!(!x.content_equals(&y), "different fragment VRs");
+
+        // different item kinds are never equal
+        let mut kind_a = Dataset::new();
+        kind_a.insert_value(Tag::ROWS, 1u16);
+        let mut kind_b = Dataset::new();
+        kind_b.insert_sequence(Tag::ROWS).push(Dataset::new());
+        assert!(!kind_a.content_equals(&kind_b));
+    }
+
+    #[test]
+    fn datetime_composition_with_and_without_offset() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::STUDY_DATE, Vr::Da, "20240305");
+        ds.insert_str(Tag::STUDY_TIME, Vr::Tm, "103015");
+        assert_eq!(
+            ds.try_get_datetime(Tag::STUDY_DATE, Tag::STUDY_TIME)
+                .unwrap()
+                .to_string(),
+            "2024-03-05 10:30:15"
+        );
+        assert!(Dataset::new()
+            .try_get_datetime(Tag::STUDY_DATE, Tag::STUDY_TIME)
+            .is_none());
+        // no TimezoneOffsetFromUTC → presented as UTC
+        assert_eq!(
+            ds.get_datetime_with_offset(Tag::STUDY_DATE, Tag::STUDY_TIME)
+                .unwrap()
+                .offset()
+                .local_minus_utc(),
+            0
+        );
+        // malformed offsets are reported, not silently treated as UTC
+        for bad in ["+1", "1 000", "+0x00", "+9911"] {
+            ds.insert_str(TIMEZONE_OFFSET_FROM_UTC, Vr::Sh, bad);
+            assert!(
+                ds.get_datetime_with_offset(Tag::STUDY_DATE, Tag::STUDY_TIME)
+                    .is_err(),
+                "{bad}"
+            );
+        }
+        ds.insert_str(TIMEZONE_OFFSET_FROM_UTC, Vr::Sh, "+0530");
+        assert_eq!(
+            ds.get_datetime_with_offset(Tag::STUDY_DATE, Tag::STUDY_TIME)
+                .unwrap()
+                .offset()
+                .local_minus_utc(),
+            5 * 3600 + 30 * 60
+        );
+    }
+
+    #[test]
+    fn unknown_tag_values_are_stored_and_read_back() {
+        let mut ds = Dataset::new();
+        ds.insert_new(Tag::new(0x7777, 0x0001), "text").unwrap();
+        assert_eq!(
+            ds.get_element(Tag::new(0x7777, 0x0001))
+                .unwrap()
+                .string_value(),
+            "text"
+        );
+    }
+
+    #[test]
     fn content_equality_is_deep() {
         let mut a = Dataset::new();
         a.insert_str(PATIENT_ID, Vr::Lo, "X");
@@ -1512,5 +1868,38 @@ mod derived_tests {
         assert!(ds
             .get_datetime_with_offset(Tag::ACQUISITION_DATE, Tag::ACQUISITION_TIME)
             .is_err());
+    }
+}
+
+#[cfg(test)]
+mod core13_tests {
+    use super::*;
+    use crate::model::private_creator::PrivateCreator;
+
+    #[test]
+    fn private_block_resolution_is_cached_and_reuses_the_creator_handle() {
+        let creator = Arc::new(PrivateCreator::new("ACME"));
+        let tag = Tag::private(0x0029, 0x0001, Arc::clone(&creator));
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomElement::new_str(tag.clone(), Vr::Lo, "a"));
+
+        // the stored tag carries the caller's handle, not a fresh allocation
+        let stored = ds
+            .items()
+            .find(|item| item.tag().element() == 0x1001)
+            .expect("resolved block tag");
+        assert!(
+            Arc::ptr_eq(&stored.tag().private_creator_arc().unwrap(), &creator),
+            "the creator Arc is reused (CORE-13)"
+        );
+
+        // a repeat insert resolves through the cached (group, creator) entry
+        ds.insert_or_update(DicomElement::new_str(tag.clone(), Vr::Lo, "b"));
+        assert_eq!(ds.len(), 2, "creator slot + element, no duplicate slot");
+
+        // a cached block is verified against the slot: removing the creator
+        // makes the read resolution fail instead of returning a stale tag
+        ds.remove(Tag::new(0x0029, 0x0010));
+        assert!(ds.get_element(tag).is_err(), "stale cache is not trusted");
     }
 }

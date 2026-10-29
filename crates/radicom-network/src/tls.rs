@@ -75,7 +75,12 @@ impl TlsOptions {
         }
     }
 
-    /// Client material trusting the given CA bundle, or anything when `None`.
+    /// Client material trusting the given CA bundle.
+    ///
+    /// Without a CA bundle the configuration is rejected: an empty root store
+    /// can verify nothing, so failing at configuration time is clearer than
+    /// failing later with "unknown issuer". For a test peer, set
+    /// [`TlsOptions::accept_any`] instead (NET-17).
     pub fn client(ca_file: Option<impl Into<std::path::PathBuf>>) -> Self {
         TlsOptions {
             cert_file: ca_file.map(Into::into),
@@ -129,6 +134,13 @@ impl TlsOptions {
                     .add(cert)
                     .map_err(|e| NetworkError::protocol_tls(e.to_string()))?;
             }
+        }
+
+        if roots.is_empty() && !self.accept_any {
+            return Err(NetworkError::protocol_tls(
+                "client TLS has no trusted CA: set cert_file to a CA bundle or accept_any \
+                 for a test peer",
+            ));
         }
 
         let builder = ClientConfig::builder_with_protocol_versions(self.min_version.versions());
@@ -219,21 +231,28 @@ fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
 /// Loads a PEM private key (PKCS#8 or PKCS#1).
 fn load_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
     let data = std::fs::read(path).map_err(NetworkError::Io)?;
-    if let Ok(Some(key)) = pkcs8_private_keys(&mut BufReader::new(data.as_slice()))
+    // keep the parse error: "no key" alone hides a truncated or mislabelled PEM
+    let mut parse_error: Option<String> = None;
+    match pkcs8_private_keys(&mut BufReader::new(data.as_slice()))
         .next()
         .transpose()
     {
-        return Ok(PrivateKeyDer::Pkcs8(key));
+        Ok(Some(key)) => return Ok(PrivateKeyDer::Pkcs8(key)),
+        Ok(None) => {}
+        Err(e) => parse_error = Some(e.to_string()),
     }
-    if let Ok(Some(key)) = rsa_private_keys(&mut BufReader::new(data.as_slice()))
+    match rsa_private_keys(&mut BufReader::new(data.as_slice()))
         .next()
         .transpose()
     {
-        return Ok(PrivateKeyDer::Pkcs1(key));
+        Ok(Some(key)) => return Ok(PrivateKeyDer::Pkcs1(key)),
+        Ok(None) => {}
+        Err(e) => parse_error = parse_error.or_else(|| Some(e.to_string())),
     }
-    Err(NetworkError::protocol_tls(
-        "private key file holds no usable key",
-    ))
+    Err(NetworkError::protocol_tls(match parse_error {
+        Some(detail) => format!("private key file holds no usable key: {detail}"),
+        None => "private key file holds no usable key".to_string(),
+    }))
 }
 
 /// Test-only verifier that accepts any certificate.
@@ -318,12 +337,120 @@ mod tests {
     }
 
     #[test]
-    fn client_config_without_a_ca_builds_an_empty_root_store() {
-        let options = TlsOptions::default();
+    fn a_client_without_a_trust_anchor_is_rejected_at_config_time() {
+        // NET-17: an empty root store verifies nothing, so the configuration
+        // itself fails instead of every handshake doing so
+        let error = TlsOptions::default()
+            .client_config()
+            .expect_err("no CA bundle and no accept_any");
         assert!(
-            options.client_config().is_ok(),
-            "an empty root store is valid"
+            error.to_string().contains("no trusted CA"),
+            "unexpected error: {error}"
         );
+        let error = TlsOptions::client(None::<std::path::PathBuf>)
+            .client_config()
+            .expect_err("a CA-less client cannot verify");
+        assert!(error.to_string().contains("no trusted CA"), "got {error}");
+    }
+
+    #[test]
+    fn a_client_with_a_ca_bundle_and_one_without_are_both_expressible() {
+        let trusting = TlsOptions::client(None::<std::path::PathBuf>);
+        assert!(trusting.cert_file.is_none());
+        assert!(!trusting.accept_any, "a CA-less client still verifies");
+
+        let pinned = TlsOptions::client(Some("ca.pem"));
+        assert_eq!(
+            pinned.cert_file.as_deref(),
+            Some(std::path::Path::new("ca.pem"))
+        );
+    }
+
+    /// A throwaway 2048-bit RSA key in PKCS#1 form, so the PKCS#1 branch of
+    /// `load_key` is exercised (ECDSA is what the fixtures normally produce).
+    const RSA_PKCS1_KEY: &str = r"-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEAvn3ltZc62OGY+vJPltPE/6l3FoB9ZzTeIAOgytaXXqlk90uhqfeDl6369p9W
+BHjYaxGuhR55Vr4TGbkyFxpTPJ6RxCSkWTcfksrbX1qHIS2ylAc/7u2+lTBkCtxw4nObYbebcOom
+/qaSxv4iQlkg85n3VjH38/aGxztEmK5Q/UfZMZN6/RjYq4T0MnT3UedzMHVo4m2aeJ4XyT3XqrcR
+hX6wpFRLo0LnC84RO8tHl0dIK8vwB13H1cjGuWcI+Qap9VLmqoJDQ8VKHLMf9A7tAv3lGDPp7B4e
+mB9tbEOqdvKtu0Bc+85jHi+aeuQaz/02P1PfypLaUqM0CyCdyf56gQIDAQABAoIBAET09i6iLB9O
+qz5McRs8Vdfm1MFEiiDONoqIRbCntewCjhYnPsJ0YyKJTIvyagT8aft4TyDJQ0tvSyLIs6VBVlhf
+Xo0OZqAVIEzXOkpuTvRnwnlrlm07iv4eolh8LDENgHYDLTXWzX7pdcCrRmOWOCN23N5LAGNEHs4I
+WnCayZ6lvnahEDmfaKdT5SsIm+WwUUykwgOB0aX8RQPNRGh21f6s6DBvozLcFI1nYwr5/RYrg+ex
+575wajeq5Ga+MDfrOgqIeZelj2PJMXlm+qgeT8Zg6FaL0Dc+k/UJ2GGVzKhOyxvJpSEJ2sBmdzig
+1NcDWMZaTvapLrYEajidXe8bWbECgYEA+0cjE9xsuDQW2k7wQHB5sEVOwnqBOITYUX9iMOelmr9v
+Sv4t5mIUf7LCRlzJnZPM5u1et4ulyaH3O+jlCIPV4n4mnKqq/WbrZc7b+tnUNJ4sBQVZORc/Pxzk
+wsMjzmC9/76XodcAERxjV+Hd3C/ddwGZ2CC4rGzg1lo41oHbgWcCgYEAwhJTqyqwrXNd6N35cFPO
++bmp92uNBeM4bSfzTXBgQM22PAZ95BV3AqHn603hl+ImUaunG7ukN5u+P2QY9ENX3R1HyFYW/fBE
+qeBfwVzGvgpt1lMfVVYHBfGbHuek6DxpNyGZOcFTewfe6SFrRgIPFqDAqa/kvUszqpiyA1EDq9cC
+gYEAheRU65tTjx+qYa8YU63bGbMEkZpHSr92qI5w2tBELN3+xn4EJTNz6stsu6NrhvyffRlUlAbk
+UzlrjM+/Yrck++fuWSKTtCzoF7qO+u6hJVx25kIAVexuNgoGV0U1yh1AgIqlL4ZpsbRntwdSeaZD
+ossGl+RvoujtMSqoCJzvQtcCgYBt6zFmbhx5cTFMVoUUIPPGr2jcERdjsUlhUdJVFwP9UEYaA1dE
+Wv/4BrmzpX3Tp6wqb72LUKD3OgfsIYacupPGUfI5PsFw/Kf3S3UQsLqEIqYJUTUbAUmjDS/dtjfJ
+rYWuSyJc+umMcm3Hvzzh/wKKv2u/8DbvG+vcgPW6OSWKKwKBgHj/LJ5jzem4stYf9cAfXHAGEPfB
+pIB6CJpBhL3AIWVAZR8MdkNagVKZAK87bzc+6ltZhRLMViKwkrrm9FpwFLEKB/COCZqcnmZgHqkw
+ZfpRQ7oSMvyXNqCGkIuXOez3UtiQ5pUwnznzQF4hBfzAlhysk9/VTzgwbQxMCjDOEd6m
+-----END RSA PRIVATE KEY-----";
+
+    #[test]
+    fn a_pkcs1_rsa_key_is_accepted() {
+        let path = std::env::temp_dir().join("radicom-tls-rsa-pkcs1.key");
+        std::fs::write(&path, RSA_PKCS1_KEY).unwrap();
+        let key = load_key(&path).expect("a PKCS#1 RSA key is usable");
+        assert!(matches!(key, PrivateKeyDer::Pkcs1(_)));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_key_file_without_a_key_is_rejected() {
+        let path = std::env::temp_dir().join("radicom-tls-no-key.key");
+        std::fs::write(
+            &path,
+            "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let error = load_key(&path).expect_err("no private key in the file");
+        assert!(
+            error.to_string().contains("no usable key"),
+            "unexpected error: {error}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_malformed_key_pem_surfaces_the_parse_error() {
+        // NET-17: a truncated or mislabelled PEM used to say only "no key";
+        // the decoder's own message is what tells an operator what to fix
+        let path = std::env::temp_dir().join("radicom-tls-bad-key.key");
+        std::fs::write(
+            &path,
+            "-----BEGIN PRIVATE KEY-----\n!!!!not base64!!!!\n-----END PRIVATE KEY-----\n",
+        )
+        .unwrap();
+        let error = load_key(&path).expect_err("garbage is not a key");
+        let message = error.to_string();
+        assert!(message.contains("no usable key"), "got {message}");
+        assert!(
+            message.contains("no usable key: "),
+            "the parse detail is kept: {message}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_certificate_file_without_a_certificate_is_rejected() {
+        let path = std::env::temp_dir().join("radicom-tls-no-cert.pem");
+        std::fs::write(
+            &path,
+            "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
+        )
+        .unwrap();
+        let error = load_certs(&path).expect_err("there is no certificate in the file");
+        assert!(
+            error.to_string().contains("no certificate"),
+            "unexpected error: {error}"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

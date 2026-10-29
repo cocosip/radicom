@@ -98,7 +98,9 @@ impl UserIdentityPolicy {
     fn answer(&self, identity: &crate::pdu::UserIdentity) -> Option<Option<Vec<u8>>> {
         match self {
             UserIdentityPolicy::Reject => None,
-            UserIdentityPolicy::Accept => Some(None),
+            // PS3.8 §D.3.3.7: a requested positive response must be returned;
+            // the empty response acknowledges the identity without comment.
+            UserIdentityPolicy::Accept => Some(identity.positive_response_requested.then(Vec::new)),
             UserIdentityPolicy::Answer(response) => {
                 // a response only means something when the peer asked for one
                 if identity.positive_response_requested {
@@ -295,8 +297,9 @@ where
     let mut stream = crate::observability::CountingStream::new(stream, metrics.clone());
 
     let result = serve_connection_inner(&mut stream, provider, options).await;
-    if matches!(result, Err(NetworkError::Protocol(message)) if message != "peer sent a command that is not a request")
-    {
+    // a violation the dispatcher already answered with its own A-ABORT must not
+    // be aborted twice: `PeerViolation` is the typed signal for that (NET-26)
+    if matches!(result, Err(NetworkError::Protocol(_))) {
         let abort = Abort {
             source: AbortSource::Provider,
             reason: 0,
@@ -345,24 +348,50 @@ where
         }
     }
 
+    // PS3.8 §9.3.2: the RQ names the protocol version and the application
+    // context; anything else is a rejection, not something to negotiate around.
+    if request.protocol_version != 1 {
+        let reject = AssociateRj {
+            result: RejectResult::Permanent,
+            source: RejectSource::ProviderAcse,
+            reason: 2, // protocol version not supported
+        };
+        write_pdu(&mut stream, &Pdu::AssociateRj(reject)).await?;
+        return Ok(());
+    }
+    if request.application_context != APPLICATION_CONTEXT {
+        let reject = AssociateRj {
+            result: RejectResult::Permanent,
+            source: RejectSource::User,
+            reason: 2, // application context name not supported
+        };
+        write_pdu(&mut stream, &Pdu::AssociateRj(reject)).await?;
+        return Ok(());
+    }
+    // a malformed context set is a broken RQ: the connection wrapper answers
+    // with an A-ABORT, since no rejection reason describes it (§9.3.2/§9.3.8)
+    validate_proposed_contexts(&request.presentation_contexts)?;
+
     let mut policy = NegotiationPolicy::new(provider.supported_sop_classes());
     // this SCP also acts as a Storage SCU during C-GET (reverse C-STORE), so it
     // grants the roles proposed for the classes it supports (review #16)
     policy.accept_roles = true;
     let mut negotiated = policy.negotiate(&request.presentation_contexts);
     policy.negotiate_roles(&mut negotiated, &request.user_information.role_selections);
-    // reject when nothing was accepted
+    // reject when nothing was accepted (PS3.8 Table 9-21, source 1, reason 1:
+    // "no reason given" — there is no dedicated "no acceptable context" code)
     if !negotiated.iter().any(|c| c.is_accepted()) {
         let reject = AssociateRj {
             result: RejectResult::Permanent,
             source: RejectSource::User,
-            reason: 3, // called AE title not recognized / no acceptable PC
+            reason: 1,
         };
         write_pdu(&mut stream, &Pdu::AssociateRj(reject)).await?;
         return Ok(());
     }
 
-    let mut accept = Associate::new(request.calling_ae.clone(), request.called_ae.clone());
+    // the AC repeats the RQ's AE titles in the RQ's order: called first (§9.3.3)
+    let mut accept = Associate::new(request.called_ae.clone(), request.calling_ae.clone());
     accept.presentation_contexts = negotiated.iter().map(|c| c.to_wire()).collect();
     let mut user = crate::association::build_user_information(
         options.max_pdu_length,
@@ -432,6 +461,13 @@ where
                 while let Some(unit) = serving.pending_units.pop_front() {
                     match unit.stream {
                         Stream::Command => {
+                            // PS3.8 §9.3.3: only an accepted context may carry
+                            // messages; anything else is a protocol violation.
+                            if serving.accepted.by_id(unit.context_id).is_none() {
+                                return Err(NetworkError::protocol(
+                                    "command on an unaccepted presentation context",
+                                ));
+                            }
                             let command = command_from_bytes(&unit.bytes)?;
                             // Only C-STORE, C-FIND, C-MOVE and C-GET carry a
                             // dataset (§7.2..§11.4). Any other request is
@@ -471,7 +507,11 @@ where
                             let syntax = accepted
                                 .by_id(context_id)
                                 .map(|c| transfer_syntax_of(&c.transfer_syntax))
-                                .unwrap_or_else(|| syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+                                .ok_or_else(|| {
+                                    NetworkError::protocol(
+                                        "dataset on an unaccepted presentation context",
+                                    )
+                                })?;
                             handle_command_with_dataset(
                                 &mut serving,
                                 context_id,
@@ -513,6 +553,41 @@ where
 fn transfer_syntax_of(uid: &str) -> Arc<radicom::model::transfer_syntax::TransferSyntax> {
     radicom::model::transfer_syntax::parse(uid)
         .unwrap_or_else(|_| syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone())
+}
+
+/// Validates the presentation contexts of an A-ASSOCIATE-RQ (§9.3.2):
+/// identifiers must be odd, non-zero and unique, an RQ context carries no
+/// result code, and both syntaxes must be present.
+fn validate_proposed_contexts(contexts: &[PresentationContext]) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for pc in contexts {
+        if pc.id == 0 || pc.id % 2 == 0 {
+            return Err(NetworkError::protocol(
+                "presentation-context ID must be odd and non-zero",
+            ));
+        }
+        if !seen.insert(pc.id) {
+            return Err(NetworkError::protocol(
+                "duplicate presentation-context ID in the association request",
+            ));
+        }
+        if pc.abstract_syntax.is_empty() {
+            return Err(NetworkError::protocol(
+                "presentation context has no abstract syntax",
+            ));
+        }
+        if pc.transfer_syntaxes.is_empty() {
+            return Err(NetworkError::protocol(
+                "presentation context has no transfer syntax",
+            ));
+        }
+        if pc.result != 0 {
+            return Err(NetworkError::protocol(
+                "an association request carries no presentation-context result",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Writes one DIMSE message's P-DATA PDUs in a single `write_all` (§11.2).
@@ -592,7 +667,7 @@ where
                     reason: 0,
                 };
                 serving.send_pdu(&Pdu::Abort(abort)).await?;
-                return Err(NetworkError::protocol(
+                return Err(NetworkError::PeerViolation(
                     "peer sent a command that is not a request",
                 ));
             }
@@ -886,7 +961,19 @@ where
         } else {
             provider_summary.unwrap_or(summary)
         };
-        let terminal = crate::cget::CGetResponse::completed(&request, summary);
+        // A provider that reports progress but never sends a terminal response
+        // still gets its terminal built from the counters (documented above).
+        // An empty stream is different: it means the provider did nothing, and
+        // declaring "0 sub-operations, success" would hide that (NET-09).
+        let terminal = if summary.total() == 0 {
+            crate::cget::CGetResponse::failure(
+                &request,
+                crate::dimse::status::PROCESSING_FAILURE,
+                "C-GET provider ended without a response",
+            )
+        } else {
+            crate::cget::CGetResponse::completed(&request, summary)
+        };
         serving.send(context_id, &terminal.to_command()).await?;
     }
     Ok(())
@@ -1015,7 +1102,18 @@ where
         }
     }
     if !terminated {
-        let response = crate::cmove::CMoveResponse::completed(&request, summary);
+        // Progress reported without a terminal response keeps the documented
+        // "last Pending carries the result" behaviour; an empty stream does not
+        // get that benefit, because it means nothing happened (NET-09).
+        let response = if summary.total() == 0 {
+            crate::cmove::CMoveResponse::failure(
+                &request,
+                crate::dimse::status::PROCESSING_FAILURE,
+                "C-MOVE provider ended without a response",
+            )
+        } else {
+            crate::cmove::CMoveResponse::completed(&request, summary)
+        };
         serving.send(context_id, &response.to_command()).await?;
     }
     Ok(())
@@ -1110,7 +1208,9 @@ where
                     ),
                 };
                 let identifier = response.identifier.clone();
-                if !response.is_pending() {
+                if response.is_pending() {
+                    matches = matches.saturating_add(1);
+                } else {
                     matches = response.completed;
                     terminated = true;
                 }
@@ -1122,9 +1222,20 @@ where
         }
     }
     if !terminated {
-        // a provider that never terminated its stream still gets a final answer
-        let success = crate::cfind::CFindResponse::success(&request, matches);
-        serving.send(context_id, &success.to_command()).await?;
+        // matches already sent keep the documented "a provider that never
+        // terminates still gets a final answer"; no match at all is a provider
+        // that did nothing and must not read as a successful empty query (NET-09).
+        let mut response = if matches == 0 {
+            crate::cfind::CFindResponse::failure(
+                &request,
+                crate::dimse::status::PROCESSING_FAILURE,
+                "C-FIND provider ended without a response",
+            )
+        } else {
+            crate::cfind::CFindResponse::success(&request, matches)
+        };
+        response.completed = matches;
+        serving.send(context_id, &response.to_command()).await?;
     }
     Ok(())
 }
@@ -1170,6 +1281,13 @@ where
         Ok(request) => request,
         Err(error) => return serving.fail(context_id, &command, &error.to_string()).await,
     };
+
+    // PS3.4 §F.1: the dataset must describe the same instance as the command
+    if let Some(comment) = crate::store::dataset_mismatch(&request) {
+        let response =
+            crate::services::CStoreResponse::failure(&request, crate::store::DATASET_MISMATCH, comment);
+        return serving.send(context_id, &response.to_command()).await;
+    }
 
     let response = match serving.provider.on_c_store(&request).await {
         Ok(response) => response,
@@ -1238,14 +1356,12 @@ where
             None => None,
         };
         // Owned bytes handed straight to the splitter: each PDV is a shared
-        // slice instead of a fresh copy (§11.2).
-        for pdata in self
+        // slice instead of a fresh copy (§11.2). One vectored write per message
+        // instead of a flush per PDU (NET-12).
+        let pdus = self
             .splitter
-            .split_message_bytes(context_id, command_bytes, payload)?
-        {
-            write_pdu(self.stream, &Pdu::PData(pdata)).await?;
-        }
-        Ok(())
+            .split_message_bytes(context_id, command_bytes, payload)?;
+        write_pdata_batch(self.stream, pdus).await
     }
 
     /// Answers with ProcessingFailure and a truncated comment.
@@ -1293,7 +1409,11 @@ where
                 }
                 continue;
             }
-            let Some(pdu) = read_pdu(self.stream).await? else {
+            // Read through the cancel-safe framer: the C-GET loop may have left
+            // a half-read frame in it when a provider event won the `select!`
+            // (NET-01). Reading the bare socket here would resynchronise
+            // mid-frame.
+            let Some(pdu) = self.next_pdu().await? else {
                 return Err(NetworkError::ClosedPrematurely { source: None });
             };
             match pdu {
@@ -1373,14 +1493,13 @@ where
             crate::message::encode_dataset(&transcoded, &target)?
         };
 
-        let command = bytes::Bytes::from(crate::message::encode_command(&request.to_dataset())?);
+        let command = bytes::Bytes::from(command_bytes(&request)?);
         let payload = bytes::Bytes::from(payload);
-        for pdata in self
+        // one vectored write for the whole sub-operation (NET-12)
+        let pdus = self
             .splitter
-            .split_message_bytes(context_id, command, Some(payload))?
-        {
-            write_pdu(self.stream, &Pdu::PData(pdata)).await?;
-        }
+            .split_message_bytes(context_id, command, Some(payload))?;
+        write_pdata_batch(self.stream, pdus).await?;
 
         let (response, cancelled) = self
             .await_store_response(message_id, operation_context_id, operation_message_id)
@@ -1410,21 +1529,11 @@ where
 
 /// Encodes a command set.
 ///
-/// PS3.5 §7.7 fixes every command element's VR in a table of its own, so the
-/// command set is encoded with explicit VRs: the receiver then never needs a
-/// dictionary entry for group 0000 (which the standard dictionary lacks).
-/// The command group length is recomputed and kept (§11.1).
+/// PS3.5 §6.3.1/§7.7: a command set is always Implicit VR Little Endian, no
+/// matter what transfer syntax the presentation context negotiated. The writer
+/// recomputes and keeps (0000,0000) (§11.1).
 pub fn command_bytes(command: &Command) -> Result<Vec<u8>> {
-    let dataset = command.to_dataset();
-    let mut out = Vec::new();
-    let options = radicom::io::writer::WriteOptions {
-        keep_group_lengths: true,
-        ..Default::default()
-    };
-    radicom::io::writer::DicomWriter::new(options)
-        .write_dataset(&dataset, &syntaxes::IMPLICIT_VR_LITTLE_ENDIAN, &mut out)
-        .map_err(|_| NetworkError::protocol("command set could not be encoded"))?;
-    Ok(out)
+    crate::message::encode_command(&command.to_dataset())
 }
 
 /// Parses a command set (§11.2), matching [`command_bytes`].
@@ -1455,10 +1564,8 @@ where
     S: tokio::io::AsyncWrite + Unpin,
 {
     let bytes = bytes::Bytes::from(command_bytes(command)?);
-    for pdata in splitter.split_bytes(context_id, true, bytes)? {
-        write_pdu(stream, &Pdu::PData(pdata)).await?;
-    }
-    Ok(())
+    let pdus = splitter.split_bytes(context_id, true, bytes)?;
+    write_pdata_batch(stream, pdus).await
 }
 
 /// Client options (§11.4, reduced to what M5/M6 need).
@@ -1592,6 +1699,13 @@ pub struct Association {
     peer_extended: Vec<crate::pdu::ExtendedNegotiation>,
     /// The peer's user identity response (§11.2).
     peer_identity_response: Option<Vec<u8>>,
+    /// Cancel-safe framing for every association read (NET-14): a timed-out or
+    /// dropped read keeps its half-frame here instead of resynchronising.
+    pdu_reader: crate::transport::PduReader,
+    /// Transcoder per (source, target) syntax pair, reused across the many
+    /// instances of one C-MOVE batch instead of rebuilt per instance (NET-16).
+    transcoder_cache:
+        std::collections::HashMap<(String, String), radicom::pixel::transcoder::Transcoder>,
 }
 
 /// The SCU-side answer to a reverse C-STORE (§11.4).
@@ -1677,15 +1791,33 @@ impl Association {
                     .presentation_contexts
                     .iter()
                     .map(|pc| {
+                        // PS3.8 §9.3.3: the AC answers exactly the proposed IDs
+                        // and may only select a proposed transfer syntax.
+                        if pc.result > 4 {
+                            return Err(NetworkError::protocol(
+                                "invalid presentation-context result code",
+                            ));
+                        }
+                        let rq = requested_contexts
+                            .iter()
+                            .find(|rq| rq.id == pc.id)
+                            .ok_or_else(|| {
+                                NetworkError::protocol(
+                                    "association accept names a context that was not proposed",
+                                )
+                            })?;
+                        let transfer_syntax =
+                            pc.transfer_syntaxes.first().cloned().unwrap_or_default();
+                        if pc.result == 0 && !rq.transfer_syntaxes.contains(&transfer_syntax) {
+                            return Err(NetworkError::protocol(
+                                "association accept chose a transfer syntax that was not proposed",
+                            ));
+                        }
                         // an A-ASSOCIATE-AC omits the abstract syntax (it is
                         // implied by the presentation-context id), so recover it
                         // from the request we just sent
                         let abstract_syntax = if pc.abstract_syntax.is_empty() {
-                            requested_contexts
-                                .iter()
-                                .find(|rq| rq.id == pc.id)
-                                .map(|rq| rq.abstract_syntax.clone())
-                                .unwrap_or_default()
+                            rq.abstract_syntax.clone()
                         } else {
                             pc.abstract_syntax.clone()
                         };
@@ -1694,19 +1826,15 @@ impl Association {
                             .filter(|role| role.sop_class == abstract_syntax)
                             .cloned()
                             .collect();
-                        crate::association::NegotiatedContext {
+                        Ok(crate::association::NegotiatedContext {
                             id: pc.id,
                             abstract_syntax,
-                            transfer_syntax: pc
-                                .transfer_syntaxes
-                                .first()
-                                .cloned()
-                                .unwrap_or_default(),
+                            transfer_syntax,
                             state: crate::association::ContextState::from_result_code(pc.result),
                             roles,
-                        }
+                        })
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>>>()?;
                 // the peer's advertised maximum caps what we may send (§11.1);
                 // 0 means "unlimited", so fall back to our own value
                 let peer = accept.user_information.max_pdu_length;
@@ -1754,6 +1882,8 @@ impl Association {
             reverse_store: None,
             peer_extended,
             peer_identity_response,
+            pdu_reader: crate::transport::PduReader::new(),
+            transcoder_cache: std::collections::HashMap::new(),
         })
     }
 
@@ -1820,10 +1950,7 @@ impl Association {
         let pdus = self.splitter.split_bytes(context_id, true, bytes)?;
         write_pdata_batch(&mut self.stream, pdus).await?;
 
-        self.pending.insert(crate::engine::PendingRequest::new(
-            command,
-            std::time::Instant::now(),
-        ));
+        self.pending.insert(command.message_id);
         let response = self
             .await_response(message_id, CommandField::CEchoRsp)
             .await;
@@ -1883,8 +2010,7 @@ impl Association {
         let payload = if source.uid() == target.uid() {
             crate::message::encode_dataset(dataset, &target)?
         } else {
-            let transcoder =
-                radicom::pixel::transcoder::Transcoder::new(source, target.clone(), None, None);
+            let transcoder = transcoder_for(&mut self.transcoder_cache, &source, &target);
             let transcoded = transcoder.transcode_dataset(dataset).map_err(|e| {
                 NetworkError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -1894,17 +2020,14 @@ impl Association {
             crate::message::encode_dataset(&transcoded, &target)?
         };
 
-        let command = bytes::Bytes::from(crate::message::encode_command(&request.to_dataset())?);
+        let command = bytes::Bytes::from(command_bytes(&request)?);
         let payload = bytes::Bytes::from(payload);
         let pdus = self
             .splitter
             .split_message_bytes(context_id, command, Some(payload))?;
         write_pdata_batch(&mut self.stream, pdus).await?;
 
-        self.pending.insert(crate::engine::PendingRequest::new(
-            request.clone(),
-            std::time::Instant::now(),
-        ));
+        self.pending.insert(request.message_id);
         let response = self
             .await_response(message_id, CommandField::CStoreRsp)
             .await;
@@ -2222,9 +2345,18 @@ impl Association {
                                     crate::store::ReceivedInstance::from_file(file),
                                 )?;
                                 // the handler's verdict goes straight back
-                                let response = match handler(&request) {
-                                    Ok(response) => response,
-                                    Err(error) => crate::store::failure_response(&request, &error),
+                                let response = match crate::store::dataset_mismatch(&request) {
+                                    Some(comment) => crate::services::CStoreResponse::failure(
+                                        &request,
+                                        crate::store::DATASET_MISMATCH,
+                                        comment,
+                                    ),
+                                    None => match handler(&request) {
+                                        Ok(response) => response,
+                                        Err(error) => {
+                                            crate::store::failure_response(&request, &error)
+                                        }
+                                    },
                                 };
                                 let bytes =
                                     bytes::Bytes::from(command_bytes(&response.to_command())?);
@@ -2253,12 +2385,18 @@ impl Association {
     }
 
     /// Reads PDUs until the response for `message_id` arrives (§11.2).
+    ///
+    /// Reads go through the cancel-safe framer: a request timeout drops the
+    /// read future, and without the retained half-frame the next call would
+    /// start in the middle of a PDU (NET-14).
     async fn read_request_pdu(&mut self, message_id: u16) -> Result<Option<Pdu>> {
         match self.request_timeout {
-            Some(timeout) => tokio::time::timeout(timeout, read_pdu(&mut self.stream))
-                .await
-                .map_err(|_| NetworkError::RequestTimedOut { message_id })?,
-            None => read_pdu(&mut self.stream).await,
+            Some(timeout) => {
+                tokio::time::timeout(timeout, self.pdu_reader.read_pdu(&mut self.stream))
+                    .await
+                    .map_err(|_| NetworkError::RequestTimedOut { message_id })?
+            }
+            None => self.pdu_reader.read_pdu(&mut self.stream).await,
         }
     }
 
@@ -2427,11 +2565,12 @@ impl Association {
     pub async fn release(mut self) -> Result<()> {
         write_pdu(&mut self.stream, &Pdu::ReleaseRq).await?;
         let release_timeout = self.release_timeout;
-        let response = tokio::time::timeout(release_timeout, read_pdu(&mut self.stream))
-            .await
-            .map_err(|_| NetworkError::ReleaseTimedOut {
-                timeout_ms: release_timeout.as_millis() as u64,
-            })??;
+        let response =
+            tokio::time::timeout(release_timeout, self.pdu_reader.read_pdu(&mut self.stream))
+                .await
+                .map_err(|_| NetworkError::ReleaseTimedOut {
+                    timeout_ms: release_timeout.as_millis() as u64,
+                })??;
         match response {
             Some(Pdu::ReleaseRp) => Ok(()),
             Some(Pdu::Abort(abort)) => Err(NetworkError::Abort {
@@ -2722,6 +2861,8 @@ mod tests {
     /// A provider that records every stored instance.
     struct RecordingProvider {
         stored: std::sync::Mutex<Vec<String>>,
+        /// PatientName as the provider saw it, proving the dataset parsed.
+        names: std::sync::Mutex<Vec<String>>,
         /// `(originator AE, originator message ID)` per C-STORE (§11.4, D5).
         origins: std::sync::Mutex<Vec<(Option<String>, Option<u16>)>>,
     }
@@ -2730,12 +2871,17 @@ mod tests {
         fn new() -> Self {
             RecordingProvider {
                 stored: std::sync::Mutex::new(Vec::new()),
+                names: std::sync::Mutex::new(Vec::new()),
                 origins: std::sync::Mutex::new(Vec::new()),
             }
         }
 
         fn instance_uids(&self) -> Vec<String> {
             self.stored.lock().unwrap().clone()
+        }
+
+        fn patient_names(&self) -> Vec<String> {
+            self.names.lock().unwrap().clone()
         }
 
         fn origins(&self) -> Vec<(Option<String>, Option<u16>)> {
@@ -2761,6 +2907,15 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(request.affected_sop_instance_uid.clone());
+            self.names.lock().unwrap().push(
+                request
+                    .file
+                    .dataset
+                    .try_get_str(Tag::PATIENT_NAME)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+            );
             self.origins.lock().unwrap().push((
                 request.move_originator_ae_title.clone(),
                 request.move_originator_message_id,
@@ -2858,6 +3013,166 @@ mod tests {
         association.release().await.unwrap();
         handle.await.unwrap().unwrap();
         assert_eq!(provider.instance_uids().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_store_dataset_is_parsed_with_the_negotiated_syntax() {
+        // NET-24: the peer's accepted syntax is explicit VR big endian; the
+        // SCU encodes the dataset that way and the SCP must read it that way.
+        // Sniffing (the old path) reads big-endian explicit as little-endian
+        // implicit and loses PatientName.
+        let provider = Arc::new(RecordingProvider::new());
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            provider.clone(),
+            ServerOptions {
+                store_sink: crate::store::StoreSink::Memory,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let contexts = vec![PresentationContext::new(
+            3,
+            "1.2.840.10008.5.1.4.1.1.7",
+            vec![syntaxes::EXPLICIT_VR_BIG_ENDIAN.uid().to_string()],
+        )];
+        let mut association =
+            Association::open(addr, "SCU", "SCP", contexts, ClientOptions::default())
+                .await
+                .unwrap();
+        let response = association.send_c_store(&instance_file()).await.unwrap();
+        assert_eq!(response.status, crate::dimse::status::SUCCESS);
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+        assert_eq!(
+            provider.patient_names(),
+            vec!["Doe^John".to_string()],
+            "the dataset was parsed with the negotiated syntax"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_store_whose_dataset_disagrees_with_its_command_is_refused() {
+        // NET-23: the command names instance 9.9.9, the dataset says 1.2.3.4.5.6
+        use tokio::io::AsyncWriteExt as _;
+        let provider = Arc::new(RecordingProvider::new());
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            provider.clone(),
+            ServerOptions {
+                store_sink: crate::store::StoreSink::Memory,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut open = Associate::new("CALLED-SCP", "CALLING-SCU");
+        open.presentation_contexts = vec![echo_context(), store_context()];
+        write_pdu(&mut tcp, &Pdu::AssociateRq(open)).await.unwrap();
+        assert!(matches!(
+            read_pdu(&mut tcp).await.unwrap(),
+            Some(Pdu::AssociateAc(_))
+        ));
+
+        let store_id = 3;
+        let mut command = Command::request(CommandField::CStoreRq, 5);
+        command.affected_sop_class_uid = Some("1.2.840.10008.5.1.4.1.1.7".into());
+        command.affected_sop_instance_uid = Some("9.9.9".into());
+        command.no_dataset = false;
+        let dataset = crate::message::encode_dataset(
+            &instance_file().dataset,
+            &syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone(),
+        )
+        .unwrap();
+        let mut wire =
+            crate::pdu::encode(&pdata(store_id, true, command_bytes(&command).unwrap())).unwrap();
+        wire.extend_from_slice(&crate::pdu::encode(&pdata(store_id, false, dataset)).unwrap());
+        tcp.write_all(&wire).await.unwrap();
+
+        let mut status = None;
+        while status.is_none() {
+            match read_pdu(&mut tcp).await.unwrap() {
+                Some(Pdu::PData(pdata)) => {
+                    let pdv = pdata.pdvs.first().unwrap();
+                    let reply = command_from_bytes(&pdv.data).unwrap();
+                    if reply.field == CommandField::CStoreRsp {
+                        status = reply.status;
+                    }
+                }
+                other => panic!("expected a C-STORE response, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            status,
+            Some(crate::dimse::status::STORAGE_DATA_SET_DOES_NOT_MATCH_SOP_CLASS),
+            "a dataset/command mismatch is 0xA900"
+        );
+        assert!(
+            provider.instance_uids().is_empty(),
+            "the provider never saw the mismatched instance"
+        );
+
+        // the connection survives: a C-ECHO still gets an answer
+        let echo = Command::request(CommandField::CEchoRq, 6);
+        tcp.write_all(
+            &crate::pdu::encode(&pdata(1, true, command_bytes(&echo).unwrap())).unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut echoed = None;
+        while echoed.is_none() {
+            match read_pdu(&mut tcp).await.unwrap() {
+                Some(Pdu::PData(pdata)) => {
+                    let pdv = pdata.pdvs.first().unwrap();
+                    let reply = command_from_bytes(&pdv.data).unwrap();
+                    if reply.field == CommandField::CEchoRsp {
+                        echoed = reply.status;
+                    }
+                }
+                other => panic!("expected a C-ECHO response, got {other:?}"),
+            }
+        }
+        assert_eq!(echoed, Some(crate::dimse::status::SUCCESS));
+        write_pdu(&mut tcp, &Pdu::ReleaseRq).await.unwrap();
+        assert!(matches!(
+            read_pdu(&mut tcp).await.unwrap(),
+            Some(Pdu::ReleaseRp)
+        ));
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_response_command_is_aborted_exactly_once() {
+        // NET-26: the dispatcher sends the A-ABORT itself and returns a typed
+        // error; the connection wrapper must not abort a second time
+        use tokio::io::AsyncWriteExt as _;
+        let (mut tcp, handle) = raw_associated_stream().await;
+        let mut response = Command::request(CommandField::CEchoRsp, 3);
+        response.message_id_being_responded_to = Some(2);
+        response.status = Some(crate::dimse::status::SUCCESS);
+        tcp.write_all(
+            &crate::pdu::encode(&pdata(1, true, command_bytes(&response).unwrap())).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(read_pdu(&mut tcp).await.unwrap(), Some(Pdu::Abort(_))),
+            "the dispatcher aborts"
+        );
+        // and then the association is gone: no second abort, just the close
+        match read_pdu(&mut tcp).await {
+            Ok(None) | Err(_) => {}
+            Ok(Some(other)) => panic!("a second PDU arrived: {other:?}"),
+        }
+        let _ = handle.await;
     }
 
     #[tokio::test]
@@ -3413,7 +3728,7 @@ mod tests {
             let originator_ae = originator.as_ref().map(|(ae, _)| ae.clone());
             let originator_id = originator.as_ref().map(|(_, id)| *id);
             Box::pin(futures::stream::once(async move {
-                let summary = crate::cmove::store_to_destination(
+                let (summary, error) = crate::cmove::store_to_destination(
                     destination,
                     "MOVE-SCP",
                     "STORE-SCP",
@@ -3424,7 +3739,18 @@ mod tests {
                     ClientOptions::default(),
                 )
                 .await?;
-                Ok(crate::cmove::CMoveResponse::completed(request, summary))
+                match error {
+                    None => Ok(crate::cmove::CMoveResponse::completed(request, summary)),
+                    Some(error) => {
+                        let mut response = crate::cmove::CMoveResponse::failure(
+                            request,
+                            crate::dimse::status::PROCESSING_FAILURE,
+                            error.to_string(),
+                        );
+                        response.summary = summary;
+                        Ok(response)
+                    }
+                }
             }))
         }
     }
@@ -4664,8 +4990,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_required_identity_response_that_is_missing_fails_the_association() {
-        // Accept without echoing: the peer asked for a positive response
+    async fn accept_answers_a_required_identity_response() {
+        // NET-04: `Accept` used to send no 0x59 item even when the peer asked
+        // for a positive response, so the association could never succeed.
         let options = ServerOptions {
             user_identity: UserIdentityPolicy::Accept,
             ..Default::default()
@@ -4685,12 +5012,16 @@ mod tests {
             }),
             ..Default::default()
         };
-        match Association::open(addr, "SCU", "SCP", vec![echo_context()], client_options).await {
-            Err(NetworkError::Protocol(message)) => {
-                assert!(message.contains("user identity response"), "got {message}")
-            }
-            other => panic!("expected a protocol error, got {other:?}"),
-        }
+        let association =
+            Association::open(addr, "SCU", "SCP", vec![echo_context()], client_options)
+                .await
+                .expect("the requested positive response is returned");
+        assert_eq!(
+            association.user_identity_response(),
+            Some(&[][..]),
+            "an empty positive response is still a response"
+        );
+        association.release().await.unwrap();
         handle.await.unwrap().unwrap();
     }
 
@@ -5939,12 +6270,7 @@ mod tests {
         .await
         .unwrap();
         // message ID 1 is still awaiting a response
-        association
-            .pending
-            .insert(crate::engine::PendingRequest::new(
-                Command::request(CommandField::CEchoRq, 1),
-                std::time::Instant::now(),
-            ));
+        association.pending.insert(1);
         assert_eq!(
             association.allocate_message_id().unwrap(),
             2,
@@ -6068,5 +6394,1208 @@ mod tests {
         let third = transcoder_for(&mut cache, &source, &other) as *const _;
         assert_ne!(first, third, "a different target gets its own transcoder");
         assert_eq!(cache.len(), 2);
+    }
+
+    // -- association validation and AC layout --------------------------------
+
+    /// Sends an A-ASSOCIATE-RQ shaped by `configure` and returns whatever the
+    /// server answers with.
+    async fn raw_association_handshake(configure: impl FnOnce(&mut Associate)) -> crate::pdu::Pdu {
+        use tokio::io::AsyncWriteExt as _;
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(VerificationProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut request = Associate::new("CALLED-SCP", "CALLING-SCU");
+        request.presentation_contexts = vec![echo_context()];
+        configure(&mut request);
+
+        let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        write_pdu(&mut tcp, &Pdu::AssociateRq(request))
+            .await
+            .unwrap();
+        let answer = read_pdu(&mut tcp).await.unwrap().expect("an answer PDU");
+        let _ = tcp.shutdown().await;
+        let _ = handle.await;
+        answer
+    }
+
+    #[tokio::test]
+    async fn the_accept_repeats_the_request_ae_titles() {
+        // NET-02: the AC carries the RQ's AE titles in the RQ's order.
+        let answer = raw_association_handshake(|_| {}).await;
+        let Pdu::AssociateAc(accept) = answer else {
+            panic!("expected A-ASSOCIATE-AC, got {answer:?}");
+        };
+        assert_eq!(accept.called_ae, "CALLED-SCP", "called AE is not swapped");
+        assert_eq!(accept.calling_ae, "CALLING-SCU");
+    }
+
+    #[tokio::test]
+    async fn an_unsupported_protocol_version_is_rejected() {
+        let answer = raw_association_handshake(|request| request.protocol_version = 2).await;
+        let Pdu::AssociateRj(reject) = answer else {
+            panic!("expected A-ASSOCIATE-RJ, got {answer:?}");
+        };
+        assert_eq!(reject.source.code(), 2, "provider-ACSE source");
+        assert_eq!(reject.reason, 2, "protocol version not supported");
+    }
+
+    #[tokio::test]
+    async fn a_foreign_application_context_is_rejected() {
+        let answer =
+            raw_association_handshake(|request| request.application_context = "9.9.9".into()).await;
+        let Pdu::AssociateRj(reject) = answer else {
+            panic!("expected A-ASSOCIATE-RJ, got {answer:?}");
+        };
+        assert_eq!(reject.source.code(), 1, "service-user source");
+        assert_eq!(reject.reason, 2, "application context not supported");
+    }
+
+    #[tokio::test]
+    async fn no_acceptable_context_is_rejected_without_a_reason() {
+        // NET-06: reason 3 means "calling AE not recognized"; "nothing
+        // acceptable" has no dedicated code, so it is 1 (no reason given).
+        let answer = raw_association_handshake(|request| {
+            request.presentation_contexts = vec![PresentationContext::new(
+                1,
+                "9.9.9",
+                vec!["1.2.840.10008.1.2".to_string()],
+            )];
+        })
+        .await;
+        let Pdu::AssociateRj(reject) = answer else {
+            panic!("expected A-ASSOCIATE-RJ, got {answer:?}");
+        };
+        assert_eq!(reject.source.code(), 1);
+        assert_eq!(reject.reason, 1, "no reason given, not 3");
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_presentation_context_id_aborts_the_association() {
+        let answer = raw_association_handshake(|request| {
+            request.presentation_contexts = vec![
+                echo_context(),
+                PresentationContext::new(
+                    1,
+                    sop_class::VERIFICATION,
+                    vec!["1.2.840.10008.1.2.1".to_string()],
+                ),
+            ];
+        })
+        .await;
+        assert!(
+            matches!(answer, Pdu::Abort(_)),
+            "a malformed context set is aborted, got {answer:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_even_presentation_context_id_aborts_the_association() {
+        let answer = raw_association_handshake(|request| {
+            request.presentation_contexts = vec![PresentationContext::new(
+                2,
+                sop_class::VERIFICATION,
+                vec!["1.2.840.10008.1.2".to_string()],
+            )];
+        })
+        .await;
+        assert!(
+            matches!(answer, Pdu::Abort(_)),
+            "an even context ID is aborted, got {answer:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_command_on_an_unaccepted_context_aborts_the_association() {
+        use tokio::io::AsyncWriteExt as _;
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(VerificationProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut request = Associate::new("SCP", "SCU");
+        request.presentation_contexts = vec![echo_context()];
+        write_pdu(&mut tcp, &Pdu::AssociateRq(request))
+            .await
+            .unwrap();
+        assert!(matches!(
+            read_pdu(&mut tcp).await.unwrap(),
+            Some(Pdu::AssociateAc(_))
+        ));
+
+        // context 5 was never proposed: PS3.8 §9.3.3 forbids sending on it
+        let command = Command::request(CommandField::CEchoRq, 1);
+        let pdata = crate::pdu::PData {
+            pdvs: vec![crate::pdu::Pdv {
+                context_id: 5,
+                is_command: true,
+                is_last: true,
+                data: command_bytes(&command).unwrap().into(),
+            }],
+        };
+        write_pdu(&mut tcp, &Pdu::PData(pdata)).await.unwrap();
+        let answer = read_pdu(&mut tcp).await.unwrap();
+        assert!(
+            matches!(answer, Some(Pdu::Abort(_))),
+            "the association is aborted, got {answer:?}"
+        );
+        let _ = tcp.shutdown().await;
+        let _ = handle.await;
+    }
+
+    // -- reverse sub-operations and terminal responses ----------------------
+
+    #[tokio::test]
+    async fn a_split_store_response_keeps_the_framer_in_sync() {
+        // NET-01: the C-GET loop can leave a half-read frame in the PduReader.
+        // await_store_response must use the same framer, never the bare socket.
+        use tokio::io::AsyncWriteExt as _;
+        let (mut peer, mut server_io) = tokio::io::duplex(4096);
+        let provider = Arc::new(VerificationProvider);
+        let options = ServerOptions::default();
+        let accepted = AcceptedContexts::default();
+        let splitter = PduSplitter::new(16384, 16);
+        let mut serving = Serving {
+            stream: &mut server_io,
+            splitter: &splitter,
+            provider: &provider,
+            options: &options,
+            assembler: PdvAssembler::new(),
+            pending_units: VecDeque::new(),
+            accepted: &accepted,
+            reverse_message_id: 1,
+            transcoder_cache: std::collections::HashMap::new(),
+            pdu_reader: crate::transport::PduReader::new(),
+        };
+
+        let mut response = Command::request(CommandField::CStoreRsp, 7);
+        response.message_id_being_responded_to = Some(7);
+        response.status = Some(crate::dimse::status::SUCCESS);
+        response.no_dataset = true;
+        let wire = crate::pdu::encode(&Pdu::PData(crate::pdu::PData {
+            pdvs: vec![crate::pdu::Pdv {
+                context_id: 1,
+                is_command: true,
+                is_last: true,
+                data: command_bytes(&response).unwrap().into(),
+            }],
+        }))
+        .unwrap();
+
+        // The peer writes in two pieces while this side reads: the first read
+        // times out with the header half-read and must keep those bytes in the
+        // framer, or the continuation bytes below would be read as a header.
+        let writer = tokio::spawn(async move {
+            peer.write_all(&wire[..3]).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            peer.write_all(&wire[3..]).await.unwrap();
+            peer.write_all(&crate::pdu::encode(&Pdu::ReleaseRq).unwrap())
+                .await
+                .unwrap();
+        });
+
+        let partial =
+            tokio::time::timeout(std::time::Duration::from_millis(20), serving.next_pdu()).await;
+        assert!(partial.is_err(), "the read waits for the rest of the frame");
+
+        // a hard timeout turns a future regression into a failure, not a hang
+        let (command, cancelled) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            serving.await_store_response(7, 1, 99),
+        )
+        .await
+        .expect("the reverse-store wait must not deadlock")
+        .unwrap();
+        assert_eq!(command.field, CommandField::CStoreRsp);
+        assert!(!cancelled);
+        assert_eq!(
+            serving.next_pdu().await.unwrap(),
+            Some(Pdu::ReleaseRq),
+            "the following PDU is still framed correctly"
+        );
+        writer.await.unwrap();
+    }
+
+    /// A provider that serves Q/R classes but never produces a response.
+    struct SilentProvider(Vec<String>);
+
+    #[async_trait::async_trait]
+    impl ServiceProvider for SilentProvider {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            self.0.clone()
+        }
+        fn on_c_find<'a>(
+            &'a self,
+            _request: &'a crate::cfind::CFindRequest,
+        ) -> futures::stream::BoxStream<'a, Result<crate::cfind::CFindResponse>> {
+            Box::pin(futures::stream::empty())
+        }
+        fn on_c_move<'a>(
+            &'a self,
+            _request: &'a crate::cmove::CMoveRequest,
+        ) -> futures::stream::BoxStream<'a, Result<crate::cmove::CMoveResponse>> {
+            Box::pin(futures::stream::empty())
+        }
+    }
+
+    fn qr_context(sop_class_uid: &str) -> PresentationContext {
+        PresentationContext::new(1, sop_class_uid, vec!["1.2.840.10008.1.2".to_string()])
+    }
+
+    #[tokio::test]
+    async fn an_empty_c_move_provider_reports_a_failure() {
+        // NET-09: an unterminated provider stream must not read as success with
+        // zero sub-operations.
+        let provider = Arc::new(SilentProvider(vec![
+            sop_class::STUDY_ROOT_QR_MOVE.to_string()
+        ]));
+        let server = DicomServer::bind("127.0.0.1:0", provider, ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association = Association::open(
+            addr,
+            "SCU",
+            "SCP",
+            vec![qr_context(sop_class::STUDY_ROOT_QR_MOVE)],
+            ClientOptions::default(),
+        )
+        .await
+        .unwrap();
+        let request = crate::cmove::CMoveRequest::study("1.2.3.4", "DEST", 3);
+        let responses = association.send_c_move(&request).await.unwrap();
+        let terminal = responses.last().expect("one terminal response");
+        assert_eq!(
+            terminal.status,
+            crate::dimse::status::PROCESSING_FAILURE,
+            "an empty provider stream is a provider bug"
+        );
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unterminated_c_find_provider_reports_a_failure() {
+        let provider = Arc::new(SilentProvider(vec![
+            sop_class::STUDY_ROOT_QR_FIND.to_string()
+        ]));
+        let server = DicomServer::bind("127.0.0.1:0", provider, ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association = Association::open(
+            addr,
+            "SCU",
+            "SCP",
+            vec![qr_context(sop_class::STUDY_ROOT_QR_FIND)],
+            ClientOptions::default(),
+        )
+        .await
+        .unwrap();
+        let responses = association
+            .send_c_find(&crate::cfind::CFindRequest::study_query(1))
+            .await
+            .unwrap();
+        assert_eq!(responses.len(), 1);
+        assert_eq!(
+            responses[0].status,
+            crate::dimse::status::PROCESSING_FAILURE
+        );
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    // -- raw request rejections and dispatcher guards ------------------------
+
+    #[tokio::test]
+    async fn a_context_without_an_abstract_syntax_aborts_the_association() {
+        let answer = raw_association_handshake(|request| {
+            request.presentation_contexts = vec![PresentationContext {
+                id: 1,
+                abstract_syntax: String::new(),
+                transfer_syntaxes: vec!["1.2.840.10008.1.2".to_string()],
+                result: 0,
+            }];
+        })
+        .await;
+        assert!(
+            matches!(answer, Pdu::Abort(_)),
+            "an empty abstract syntax is aborted, got {answer:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_context_without_a_transfer_syntax_aborts_the_association() {
+        let answer = raw_association_handshake(|request| {
+            request.presentation_contexts = vec![PresentationContext {
+                id: 1,
+                abstract_syntax: sop_class::VERIFICATION.to_string(),
+                transfer_syntaxes: Vec::new(),
+                result: 0,
+            }];
+        })
+        .await;
+        assert!(
+            matches!(answer, Pdu::Abort(_)),
+            "an empty transfer-syntax list is aborted, got {answer:?}"
+        );
+    }
+
+    #[test]
+    fn a_request_context_with_a_result_is_rejected() {
+        // The RQ wire format has no result field, so only a hand-built request
+        // can carry one; the validator still refuses it (§9.3.2).
+        let context = PresentationContext {
+            id: 1,
+            abstract_syntax: sop_class::VERIFICATION.to_string(),
+            transfer_syntaxes: vec!["1.2.840.10008.1.2".to_string()],
+            result: 1,
+        };
+        let error = validate_proposed_contexts(&[context]).expect_err("an RQ carries no result");
+        assert!(
+            error.to_string().contains("no presentation-context result"),
+            "{error}"
+        );
+    }
+
+    /// Opens an association over a raw socket so the test can send PDUs the
+    /// high-level client would never produce.
+    async fn raw_associated_stream() -> (
+        tokio::net::TcpStream,
+        tokio::task::JoinHandle<crate::error::Result<()>>,
+    ) {
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(VerificationProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut request = Associate::new("CALLED-SCP", "CALLING-SCU");
+        request.presentation_contexts = vec![echo_context()];
+        write_pdu(&mut tcp, &Pdu::AssociateRq(request))
+            .await
+            .unwrap();
+        match read_pdu(&mut tcp).await.unwrap() {
+            Some(Pdu::AssociateAc(_)) => {}
+            other => panic!("expected an accept, got {other:?}"),
+        }
+        (tcp, handle)
+    }
+
+    #[tokio::test]
+    async fn an_unexpected_pdu_after_association_is_aborted() {
+        for anomaly in [
+            Pdu::AssociateRq(Associate::new("A", "B")),
+            Pdu::AssociateAc(Associate::new("A", "B")),
+            Pdu::AssociateRj(AssociateRj {
+                result: crate::error::RejectResult::Permanent,
+                source: crate::error::RejectSource::User,
+                reason: 1,
+            }),
+            Pdu::ReleaseRp,
+        ] {
+            let (mut tcp, handle) = raw_associated_stream().await;
+            write_pdu(&mut tcp, &anomaly).await.unwrap();
+            match read_pdu(&mut tcp).await.unwrap() {
+                Some(Pdu::Abort(_)) => {}
+                other => panic!("expected an abort for {anomaly:?}, got {other:?}"),
+            }
+            let _ = handle.await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dataset_pdv_without_a_command_aborts_the_association() {
+        use tokio::io::AsyncWriteExt as _;
+        let (mut tcp, handle) = raw_associated_stream().await;
+        let bytes = crate::pdu::encode(&Pdu::PData(crate::pdu::PData {
+            pdvs: vec![crate::pdu::Pdv {
+                context_id: 1,
+                is_command: false,
+                is_last: true,
+                data: bytes::Bytes::from_static(&[0x01, 0x02]),
+            }],
+        }))
+        .unwrap();
+        tcp.write_all(&bytes).await.unwrap();
+        match read_pdu(&mut tcp).await.unwrap() {
+            Some(Pdu::Abort(_)) => {}
+            other => panic!("expected an abort, got {other:?}"),
+        }
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn a_response_command_aborts_and_a_non_request_is_refused() {
+        let provider = Arc::new(VerificationProvider);
+        let options = ServerOptions::default();
+        let accepted = AcceptedContexts::default();
+        let splitter = PduSplitter::new(16384, 16);
+        let (mut _peer, mut io) = tokio::io::duplex(65536);
+        let mut serving = Serving {
+            stream: &mut io,
+            splitter: &splitter,
+            provider: &provider,
+            options: &options,
+            assembler: PdvAssembler::new(),
+            pending_units: VecDeque::new(),
+            accepted: &accepted,
+            reverse_message_id: 1,
+            transcoder_cache: std::collections::HashMap::new(),
+            pdu_reader: crate::transport::PduReader::new(),
+        };
+        // a C-STORE response is not a request: the peer violated DIMSE
+        let error = handle_command(
+            &mut serving,
+            1,
+            Command::request(CommandField::CStoreRsp, 1),
+        )
+        .await
+        .expect_err("a response command is aborted");
+        assert!(error.to_string().contains("not a request"), "{error}");
+
+        // a request this side does not serve is answered, not aborted
+        handle_command(&mut serving, 1, Command::request(CommandField::CStoreRq, 2))
+            .await
+            .expect("an unsupported request is answered");
+        // a dataset sent for a command that has none is refused the same way
+        handle_command_with_dataset(
+            &mut serving,
+            1,
+            Command::request(CommandField::CEchoRq, 3),
+            bytes::Bytes::from_static(&[0x00]),
+            &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        )
+        .await
+        .expect("a stray dataset is answered");
+        // an N-service dispatcher only accepts N requests
+        handle_n_service(
+            &mut serving,
+            1,
+            Command::request(CommandField::CEchoRq, 4),
+            None,
+            &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        )
+        .await
+        .expect("a non-N command is answered");
+    }
+
+    #[tokio::test]
+    async fn a_store_response_without_a_request_keeps_the_framer_in_sync() {
+        use tokio::io::AsyncWriteExt as _;
+        let (mut peer, mut io) = tokio::io::duplex(4096);
+        let provider = Arc::new(VerificationProvider);
+        let options = ServerOptions::default();
+        let accepted = AcceptedContexts::default();
+        let splitter = PduSplitter::new(16384, 16);
+        let mut serving = Serving {
+            stream: &mut io,
+            splitter: &splitter,
+            provider: &provider,
+            options: &options,
+            assembler: PdvAssembler::new(),
+            pending_units: VecDeque::new(),
+            accepted: &accepted,
+            reverse_message_id: 1,
+            transcoder_cache: std::collections::HashMap::new(),
+            pdu_reader: crate::transport::PduReader::new(),
+        };
+
+        let mut response = Command::request(CommandField::CStoreRsp, 7);
+        response.message_id_being_responded_to = Some(7);
+        response.status = Some(crate::dimse::status::SUCCESS);
+        response.no_dataset = true;
+        // a C-CANCEL for the operation arrives before the store response
+        let mut cancel = Command::request(CommandField::CCancelRq, 8);
+        cancel.message_id_being_responded_to = Some(99);
+        let mut wire = crate::pdu::encode(&Pdu::PData(crate::pdu::PData {
+            pdvs: vec![crate::pdu::Pdv {
+                context_id: 1,
+                is_command: true,
+                is_last: true,
+                data: command_bytes(&cancel).unwrap().into(),
+            }],
+        }))
+        .unwrap();
+        wire.extend_from_slice(
+            &crate::pdu::encode(&Pdu::PData(crate::pdu::PData {
+                pdvs: vec![crate::pdu::Pdv {
+                    context_id: 1,
+                    is_command: true,
+                    is_last: true,
+                    data: command_bytes(&response).unwrap().into(),
+                }],
+            }))
+            .unwrap(),
+        );
+        peer.write_all(&wire).await.unwrap();
+
+        let (command, cancelled) = serving.await_store_response(7, 1, 99).await.unwrap();
+        assert_eq!(command.field, CommandField::CStoreRsp);
+        assert!(cancelled, "the C-CANCEL is remembered");
+
+        // a dataset unit is skipped without decoding it
+        serving
+            .pending_units
+            .push_back(crate::assembler::MessageUnit {
+                context_id: 1,
+                stream: crate::assembler::Stream::Data,
+                bytes: bytes::Bytes::from_static(&[0xAA]),
+            });
+        serving
+            .pending_units
+            .push_back(crate::assembler::MessageUnit {
+                context_id: 1,
+                stream: crate::assembler::Stream::Command,
+                bytes: command_bytes(&response).unwrap().into(),
+            });
+        let (again, _) = serving.await_store_response(7, 1, 99).await.unwrap();
+        assert_eq!(again.field, CommandField::CStoreRsp);
+    }
+
+    #[tokio::test]
+    async fn a_broken_peer_while_waiting_for_a_store_response_is_reported() {
+        use tokio::io::AsyncWriteExt as _;
+        // EOF
+        let (peer, mut io) = tokio::io::duplex(4096);
+        drop(peer);
+        let provider = Arc::new(VerificationProvider);
+        let options = ServerOptions::default();
+        let accepted = AcceptedContexts::default();
+        let splitter = PduSplitter::new(16384, 16);
+        let mut serving = Serving {
+            stream: &mut io,
+            splitter: &splitter,
+            provider: &provider,
+            options: &options,
+            assembler: PdvAssembler::new(),
+            pending_units: VecDeque::new(),
+            accepted: &accepted,
+            reverse_message_id: 1,
+            transcoder_cache: std::collections::HashMap::new(),
+            pdu_reader: crate::transport::PduReader::new(),
+        };
+        assert!(matches!(
+            serving.await_store_response(7, 1, 99).await,
+            Err(NetworkError::ClosedPrematurely { .. })
+        ));
+
+        // a peer abort
+        let (mut peer, mut io) = tokio::io::duplex(4096);
+        peer.write_all(
+            &crate::pdu::encode(&Pdu::Abort(Abort {
+                source: AbortSource::User,
+                reason: 5,
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut serving = Serving {
+            stream: &mut io,
+            splitter: &splitter,
+            provider: &provider,
+            options: &options,
+            assembler: PdvAssembler::new(),
+            pending_units: VecDeque::new(),
+            accepted: &accepted,
+            reverse_message_id: 1,
+            transcoder_cache: std::collections::HashMap::new(),
+            pdu_reader: crate::transport::PduReader::new(),
+        };
+        assert!(matches!(
+            serving.await_store_response(7, 1, 99).await,
+            Err(NetworkError::Abort { reason: 5, .. })
+        ));
+
+        // a release request while a sub-operation is outstanding
+        let (mut peer, mut io) = tokio::io::duplex(4096);
+        peer.write_all(&crate::pdu::encode(&Pdu::ReleaseRq).unwrap())
+            .await
+            .unwrap();
+        let mut serving = Serving {
+            stream: &mut io,
+            splitter: &splitter,
+            provider: &provider,
+            options: &options,
+            assembler: PdvAssembler::new(),
+            pending_units: VecDeque::new(),
+            accepted: &accepted,
+            reverse_message_id: 1,
+            transcoder_cache: std::collections::HashMap::new(),
+            pdu_reader: crate::transport::PduReader::new(),
+        };
+        assert!(matches!(
+            serving.await_store_response(7, 1, 99).await,
+            Err(NetworkError::ClosedPrematurely { .. })
+        ));
+
+        // an unrelated PDU
+        let (mut peer, mut io) = tokio::io::duplex(4096);
+        peer.write_all(&crate::pdu::encode(&Pdu::AssociateRq(Associate::new("A", "B"))).unwrap())
+            .await
+            .unwrap();
+        let mut serving = Serving {
+            stream: &mut io,
+            splitter: &splitter,
+            provider: &provider,
+            options: &options,
+            assembler: PdvAssembler::new(),
+            pending_units: VecDeque::new(),
+            accepted: &accepted,
+            reverse_message_id: 1,
+            transcoder_cache: std::collections::HashMap::new(),
+            pdu_reader: crate::transport::PduReader::new(),
+        };
+        assert!(serving
+            .await_store_response(7, 1, 99)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("unexpected PDU"));
+    }
+
+    // -- client-side A-ASSOCIATE-AC validation --------------------------------
+
+    /// Starts a one-shot mock peer: it reads the RQ, hands it to `configure`,
+    /// writes back the resulting PDU and keeps the socket open briefly.
+    async fn mock_associate_answer(
+        configure: impl FnOnce(&mut Associate, &Associate) -> Pdu + Send + 'static,
+    ) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let Some(Pdu::AssociateRq(rq)) = read_pdu(&mut stream).await.unwrap_or(None) else {
+                return;
+            };
+            let mut answer = Associate::new(rq.called_ae.clone(), rq.calling_ae.clone());
+            // an AC echoes the accepted contexts without the abstract syntax
+            answer.presentation_contexts = rq
+                .presentation_contexts
+                .iter()
+                .map(|pc| PresentationContext {
+                    id: pc.id,
+                    abstract_syntax: String::new(),
+                    transfer_syntaxes: pc.transfer_syntaxes.first().cloned().into_iter().collect(),
+                    result: 0,
+                })
+                .collect();
+            answer.user_information = rq.user_information.clone();
+            answer.user_information.user_identity = None;
+            answer.user_information.user_identity_response = None;
+            let pdu = configure(&mut answer, &rq);
+            let _ = write_pdu(&mut stream, &pdu).await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        });
+        addr
+    }
+
+    async fn open_against(answer: std::net::SocketAddr) -> Result<Association> {
+        Association::open(
+            answer,
+            "SCU",
+            "SCP",
+            vec![echo_context()],
+            ClientOptions::default(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_peer_accept_with_an_invalid_result_code_is_rejected() {
+        let addr = mock_associate_answer(|accept, _| {
+            accept.presentation_contexts[0].result = 5;
+            Pdu::AssociateAc(accept.clone())
+        })
+        .await;
+        let error = open_against(addr).await.expect_err("result 5 is invalid");
+        assert!(error.to_string().contains("result code"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_peer_accept_for_an_unproposed_context_is_rejected() {
+        let addr = mock_associate_answer(|accept, _| {
+            accept.presentation_contexts[0].id = 3;
+            Pdu::AssociateAc(accept.clone())
+        })
+        .await;
+        let error = open_against(addr)
+            .await
+            .expect_err("context 3 was never proposed");
+        assert!(error.to_string().contains("not proposed"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_peer_accept_with_an_unproposed_syntax_is_rejected() {
+        let addr = mock_associate_answer(|accept, _| {
+            // JPEG baseline was never proposed (echo_context proposes the
+            // implicit and explicit uncompressed syntaxes)
+            accept.presentation_contexts[0].transfer_syntaxes =
+                vec!["1.2.840.10008.1.2.4.50".to_string()];
+            Pdu::AssociateAc(accept.clone())
+        })
+        .await;
+        let error = open_against(addr)
+            .await
+            .expect_err("a syntax that was not proposed cannot be selected");
+        assert!(error.to_string().contains("not proposed"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_peer_accept_naming_an_abstract_syntax_is_honoured() {
+        let addr = mock_associate_answer(|accept, _| {
+            accept.presentation_contexts[0].abstract_syntax = sop_class::VERIFICATION.to_string();
+            Pdu::AssociateAc(accept.clone())
+        })
+        .await;
+        let association = open_against(addr).await.expect("the accept is valid");
+        assert!(association.accepted_extended_negotiations().is_empty());
+        assert_eq!(association.user_identity_response(), None);
+    }
+
+    #[tokio::test]
+    async fn a_peer_accept_claiming_zero_max_pdu_uses_our_limit() {
+        let addr = mock_associate_answer(|accept, _| {
+            accept.user_information.max_pdu_length = 0;
+            Pdu::AssociateAc(accept.clone())
+        })
+        .await;
+        open_against(addr).await.expect("0 means unlimited");
+    }
+
+    #[tokio::test]
+    async fn a_peer_answer_that_is_not_an_accept_or_reject_is_a_protocol_error() {
+        let addr = mock_associate_answer(|_, _| Pdu::ReleaseRq).await;
+        let error = open_against(addr)
+            .await
+            .expect_err("a release is not an answer");
+        assert!(error.to_string().contains("A-ASSOCIATE-AC"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_required_identity_response_must_come_back() {
+        let addr = mock_associate_answer(|accept, _| Pdu::AssociateAc(accept.clone())).await;
+        let options = ClientOptions {
+            user_identity: Some(crate::pdu::UserIdentity {
+                identity_type: 1,
+                primary: b"user".to_vec(),
+                secondary: Vec::new(),
+                positive_response_requested: true,
+            }),
+            ..ClientOptions::default()
+        };
+        let error = Association::open(addr, "SCU", "SCP", vec![echo_context()], options)
+            .await
+            .expect_err("the peer did not answer the identity request");
+        assert!(
+            error.to_string().contains("user identity response"),
+            "{error}"
+        );
+    }
+
+    // -- provider streams that report progress without a terminal ------------
+
+    /// One provider that reports progress but never terminates its stream.
+    struct MovePendingThenEnd;
+
+    #[async_trait::async_trait]
+    impl ServiceProvider for MovePendingThenEnd {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec![sop_class::STUDY_ROOT_QR_MOVE.to_string()]
+        }
+
+        fn on_c_move<'a>(
+            &'a self,
+            request: &'a crate::cmove::CMoveRequest,
+        ) -> futures::stream::BoxStream<'a, Result<crate::cmove::CMoveResponse>> {
+            let summary = crate::cmove::SubOperationSummary {
+                completed: 2,
+                ..Default::default()
+            };
+            let events = vec![Ok(crate::cmove::CMoveResponse::pending(
+                request, 2, summary,
+            ))];
+            Box::pin(futures::stream::iter(events))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_move_stream_that_reports_progress_without_a_terminal_completes() {
+        // the last Pending carries the counters; the terminal is synthesized
+        let provider = Arc::new(MovePendingThenEnd);
+        let server = DicomServer::bind("127.0.0.1:0", provider, ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+        let mut association = Association::open(
+            addr,
+            "SCU",
+            "SCP",
+            vec![qr_context(sop_class::STUDY_ROOT_QR_MOVE)],
+            ClientOptions::default(),
+        )
+        .await
+        .unwrap();
+        association.collect_reverse_stores(Arc::new(std::sync::Mutex::new(Vec::new())));
+        let responses = association
+            .send_c_move(&crate::cmove::CMoveRequest::study("1.2.3", "DEST", 1))
+            .await
+            .unwrap();
+        let terminal = responses.last().unwrap();
+        assert_eq!(terminal.status, crate::dimse::status::SUCCESS);
+        assert_eq!(terminal.summary.completed, 2);
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    struct FindPendingThenEnd;
+
+    #[async_trait::async_trait]
+    impl ServiceProvider for FindPendingThenEnd {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec![sop_class::STUDY_ROOT_QR_FIND.to_string()]
+        }
+
+        fn on_c_find<'a>(
+            &'a self,
+            request: &'a crate::cfind::CFindRequest,
+        ) -> futures::stream::BoxStream<'a, Result<crate::cfind::CFindResponse>> {
+            let mut item = Dataset::new();
+            item.insert_str(Tag::STUDY_INSTANCE_UID, Vr::Ui, "1.2.3");
+            let events = vec![Ok(crate::cfind::CFindResponse::pending(request, item))];
+            Box::pin(futures::stream::iter(events))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_find_stream_with_matches_but_no_terminal_completes() {
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(FindPendingThenEnd),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+        let mut association = Association::open(
+            addr,
+            "SCU",
+            "SCP",
+            vec![qr_context(sop_class::STUDY_ROOT_QR_FIND)],
+            ClientOptions::default(),
+        )
+        .await
+        .unwrap();
+        let responses = association
+            .send_c_find(&crate::cfind::CFindRequest::study_query(1))
+            .await
+            .unwrap();
+        let terminal = responses.last().unwrap();
+        assert_eq!(terminal.status, crate::dimse::status::SUCCESS);
+        assert_eq!(terminal.completed, 1);
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    struct GetInstanceInExplicitVr;
+
+    #[async_trait::async_trait]
+    impl ServiceProvider for GetInstanceInExplicitVr {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            // the retrieve model plus the storage class the instances travel on
+            vec![
+                sop_class::STUDY_ROOT_QR_GET.to_string(),
+                "1.2.840.10008.5.1.4.1.1.7".to_string(),
+            ]
+        }
+
+        fn on_c_get<'a>(
+            &'a self,
+            _request: &'a crate::cget::CGetRequest,
+        ) -> futures::stream::BoxStream<'a, Result<crate::cget::CGetEvent>> {
+            let mut dataset = Dataset::new();
+            dataset.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+            dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+            dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5.6");
+            let file = radicom::io::file::DicomFile::from_dataset(dataset);
+            let events = vec![Ok(crate::cget::CGetEvent::instance(file))];
+            Box::pin(futures::stream::iter(events))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_get_instance_in_another_syntax_is_transcoded() {
+        // the provider hands back Explicit VR LE while the context is Implicit
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(GetInstanceInExplicitVr),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+        let mut association = Association::open(
+            addr,
+            "SCU",
+            "SCP",
+            vec![
+                qr_context(sop_class::STUDY_ROOT_QR_GET),
+                PresentationContext::new(
+                    3,
+                    "1.2.840.10008.5.1.4.1.1.7",
+                    vec!["1.2.840.10008.1.2".to_string()],
+                ),
+            ],
+            ClientOptions::default(),
+        )
+        .await
+        .unwrap();
+        let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+        association.collect_reverse_stores(received.clone());
+        let responses = association
+            .send_c_get(&crate::cget::CGetRequest::study("1.2.3.4", 1))
+            .await
+            .unwrap();
+        assert!(!received.lock().unwrap().is_empty(), "the instance arrives");
+        assert!(!responses.last().unwrap().is_pending());
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    // -- PDUs that arrive while a C-FIND/C-MOVE/C-GET is in flight -----------
+
+    fn pdata(context_id: u8, is_command: bool, body: Vec<u8>) -> Pdu {
+        Pdu::PData(crate::pdu::PData {
+            pdvs: vec![crate::pdu::Pdv {
+                context_id,
+                is_command,
+                is_last: true,
+                data: body.into(),
+            }],
+        })
+    }
+
+    fn identifier_bytes() -> Vec<u8> {
+        crate::message::encode_dataset(
+            &Dataset::new(),
+            &syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone(),
+        )
+        .unwrap()
+    }
+
+    fn find_request() -> Command {
+        let mut request = Command::request(CommandField::CFindRq, 1);
+        request.affected_sop_class_uid = Some(sop_class::STUDY_ROOT_QR_FIND.to_string());
+        request.no_dataset = false;
+        request
+    }
+
+    fn move_request() -> Command {
+        let mut request = Command::request(CommandField::CMoveRq, 1);
+        request.affected_sop_class_uid = Some(sop_class::STUDY_ROOT_QR_MOVE.to_string());
+        request.move_destination = Some("DEST".to_string());
+        request.no_dataset = false;
+        request
+    }
+
+    fn get_request() -> Command {
+        let mut request = Command::request(CommandField::CGetRq, 1);
+        request.affected_sop_class_uid = Some(sop_class::STUDY_ROOT_QR_GET.to_string());
+        request.no_dataset = false;
+        request
+    }
+
+    /// The anomalies a peer can send while a query/retrieve is running.
+    fn in_flight_anomalies() -> Vec<Pdu> {
+        vec![
+            pdata(1, false, vec![0xAA]), // a dataset with no command
+            pdata(
+                1,
+                true,
+                command_bytes(&Command::request(CommandField::CEchoRq, 2)).unwrap(),
+            ),
+            Pdu::ReleaseRq,
+            Pdu::AssociateRq(Associate::new("A", "B")),
+        ]
+    }
+
+    /// Sends `request` and then `anomaly` on one association; the anomaly must
+    /// end the association with an error.
+    async fn inject_anomaly<P: ServiceProvider + 'static>(
+        provider: P,
+        context: PresentationContext,
+        request: Command,
+        anomaly: Pdu,
+    ) {
+        use tokio::io::AsyncWriteExt as _;
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(provider), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut open = Associate::new("CALLED-SCP", "CALLING-SCU");
+        open.presentation_contexts = vec![context];
+        write_pdu(&mut tcp, &Pdu::AssociateRq(open)).await.unwrap();
+        assert!(matches!(
+            read_pdu(&mut tcp).await.unwrap(),
+            Some(Pdu::AssociateAc(_))
+        ));
+
+        let mut wire = crate::pdu::encode(&pdata(
+            1,
+            true,
+            command_bytes(&request).expect("encode request"),
+        ))
+        .unwrap();
+        wire.extend_from_slice(&crate::pdu::encode(&pdata(1, false, identifier_bytes())).unwrap());
+        wire.extend_from_slice(&crate::pdu::encode(&anomaly).unwrap());
+        tcp.write_all(&wire).await.unwrap();
+
+        // the server either aborts, answers the release, or just closes
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match read_pdu(&mut tcp).await {
+                    Ok(Some(Pdu::Abort(_) | Pdu::ReleaseRp)) | Ok(None) | Err(_) => return,
+                    Ok(Some(_)) => continue,
+                }
+            }
+        })
+        .await;
+        assert!(
+            handle.await.unwrap().is_err(),
+            "an in-flight anomaly ends the association with an error"
+        );
+    }
+
+    /// A provider whose stream yields one Pending response and then stalls.
+    struct StalledFind;
+    struct StalledMove;
+    struct StalledGet;
+
+    #[async_trait::async_trait]
+    impl ServiceProvider for StalledFind {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec![sop_class::STUDY_ROOT_QR_FIND.to_string()]
+        }
+        fn on_c_find<'a>(
+            &'a self,
+            request: &'a crate::cfind::CFindRequest,
+        ) -> futures::stream::BoxStream<'a, Result<crate::cfind::CFindResponse>> {
+            use futures::StreamExt as _;
+            let first = Ok(crate::cfind::CFindResponse::pending(
+                request,
+                Dataset::new(),
+            ));
+            Box::pin(futures::stream::once(async move { first }).chain(futures::stream::pending()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ServiceProvider for StalledMove {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec![sop_class::STUDY_ROOT_QR_MOVE.to_string()]
+        }
+        fn on_c_move<'a>(
+            &'a self,
+            request: &'a crate::cmove::CMoveRequest,
+        ) -> futures::stream::BoxStream<'a, Result<crate::cmove::CMoveResponse>> {
+            use futures::StreamExt as _;
+            let first = Ok(crate::cmove::CMoveResponse::pending(
+                request,
+                1,
+                crate::cmove::SubOperationSummary::default(),
+            ));
+            Box::pin(futures::stream::once(async move { first }).chain(futures::stream::pending()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ServiceProvider for StalledGet {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec![sop_class::STUDY_ROOT_QR_GET.to_string()]
+        }
+        fn on_c_get<'a>(
+            &'a self,
+            request: &'a crate::cget::CGetRequest,
+        ) -> futures::stream::BoxStream<'a, Result<crate::cget::CGetEvent>> {
+            use futures::StreamExt as _;
+            let first = Ok(crate::cget::CGetEvent::Response(
+                crate::cget::CGetResponse::pending(
+                    request,
+                    1,
+                    crate::cmove::SubOperationSummary::default(),
+                ),
+            ));
+            Box::pin(futures::stream::once(async move { first }).chain(futures::stream::pending()))
+        }
+    }
+
+    #[tokio::test]
+    async fn anomalies_during_a_find_are_rejected() {
+        for anomaly in in_flight_anomalies() {
+            inject_anomaly(
+                StalledFind,
+                qr_context(sop_class::STUDY_ROOT_QR_FIND),
+                find_request(),
+                anomaly,
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn anomalies_during_a_move_are_rejected() {
+        for anomaly in in_flight_anomalies() {
+            inject_anomaly(
+                StalledMove,
+                qr_context(sop_class::STUDY_ROOT_QR_MOVE),
+                move_request(),
+                anomaly,
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn anomalies_during_a_get_are_rejected() {
+        for anomaly in in_flight_anomalies() {
+            inject_anomaly(
+                StalledGet,
+                qr_context(sop_class::STUDY_ROOT_QR_GET),
+                get_request(),
+                anomaly,
+            )
+            .await;
+        }
     }
 }

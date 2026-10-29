@@ -784,3 +784,50 @@ mod tests {
         assert_eq!(dict.entry(&Tag::new(0x0043, 0x9999)).keyword, "Unknown");
     }
 }
+
+#[cfg(test)]
+mod extra_tests {
+    use super::*;
+
+    const XML: &[u8] = br#"<dictionary creator="ACME">
+        <tag group="0029" element="10xx" keyword="AcmeThing" vr="LO/OB" vm="1-2" retired="true">Thing</tag>
+        <tag group="0029" element="1001" keyword="AcmeExact" vr="LO" vm="1">Exact</tag>
+        <tag group="0099" element="xx05" keyword="MaskedPublic" vr="LO" vm="1">Masked</tag>
+        <tag group="0010" element="0010" keyword="PatientName" vr="PN" vm="1">Patient Name</tag>
+    </dictionary>"#;
+
+    #[test]
+    fn runtime_xml_loading_merges_private_and_masked_rows() {
+        let entries = load_xml(XML).unwrap();
+        assert_eq!(entries.len(), 4);
+        assert!(
+            entries[0].entry.mask.is_some(),
+            "wildcard element keeps a mask"
+        );
+        assert!(entries[0].entry.creator.is_some());
+        assert!(entries[0].entry.retired);
+        assert_eq!(format!("{}", entries[3].entry), "(0010,0010) Patient Name");
+
+        let mut dict = Dictionary::with_generated().unwrap();
+        dict.merge_runtime(entries);
+        assert_eq!(dict.entry(&Tag::PATIENT_NAME).keyword, "PatientName");
+    }
+
+    #[test]
+    fn malformed_runtime_xml_is_a_typed_error() {
+        assert!(load_xml(
+            br#"<dictionary><tag keyword="X" vr="PN" vm="1">X</tag></dictionary>"#.as_slice()
+        )
+        .is_err());
+        assert!(load_xml(br#"<dictionary><tag group="0010" element="0010" vr="BOGUS" vm="1">X</tag></dictionary>"#.as_slice()).is_err());
+        assert!(load_xml(br#"<dictionary><tag group="0010" element="0010" vr="PN" vm="bogus">X</tag></dictionary>"#.as_slice()).is_err());
+        assert!(load_xml(br#"<dictionary><tag"#.as_slice()).is_err());
+    }
+
+    #[test]
+    fn keyword_lookup_covers_the_unknown_branch() {
+        let dict = Dictionary::with_generated().unwrap();
+        assert!(dict.tag_by_keyword("NotAKeywordAtAll").is_none());
+        assert!(dict.tag_by_keyword("PatientName").is_some());
+    }
+}

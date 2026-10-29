@@ -23,6 +23,13 @@ use std::sync::Arc;
 /// A `frames`-deep 512×512 16-bit MONOCHROME2 grayscale image with metadata.
 fn image_dataset(frames: u32) -> Dataset {
     let mut ds = Dataset::new();
+    // A file needs SOP Class/Instance UIDs to build its meta group.
+    ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+    ds.insert_str(
+        Tag::SOP_INSTANCE_UID,
+        Vr::Ui,
+        "1.2.826.0.1.3680043.10.1234.1",
+    );
     ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16); // SamplesPerPixel
     ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
     ds.insert_value(Tag::ROWS, 512u16); // Rows
@@ -163,6 +170,12 @@ fn main() {
 /// 800 small elements: the shape that exposes per-element parsing overhead.
 fn many_element_dataset(count: u16) -> Dataset {
     let mut ds = Dataset::new();
+    ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+    ds.insert_str(
+        Tag::SOP_INSTANCE_UID,
+        Vr::Ui,
+        "1.2.826.0.1.3680043.10.1234.5",
+    );
     for i in 0..count {
         // an even, unassigned group: 800 distinct tags with no private creator
         // bookkeeping in the way

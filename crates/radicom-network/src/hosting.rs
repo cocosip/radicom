@@ -27,6 +27,10 @@ use crate::store::StoreSink;
 /// Configuration for a hosted DICOM server (docs/01-architecture.md §11).
 #[derive(Debug, Clone)]
 pub struct HostedServerConfig {
+    /// Address to bind (default: all IPv4 interfaces). Set an IPv6 address to
+    /// serve IPv6 (`::` / `::1`), which the old hardcoded `0.0.0.0` made
+    /// impossible (NET-20).
+    pub bind_address: std::net::IpAddr,
     /// TCP port to listen on (0 = any free port).
     pub port: u16,
     /// This SCP's AE title; validated at start (16 chars max, no padding spaces).
@@ -44,6 +48,7 @@ pub struct HostedServerConfig {
 impl Default for HostedServerConfig {
     fn default() -> Self {
         HostedServerConfig {
+            bind_address: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
             port: 0,
             ae_title: "RADICOM_SCP".to_string(),
             max_clients: 0,
@@ -146,13 +151,23 @@ impl<P: ServiceProvider + 'static> HostedDicomServer<P> {
     /// Binds and starts serving. Idempotent: calling it while already running is
     /// a no-op. The accept loop runs on the current tokio runtime.
     pub async fn start(&self) -> Result<()> {
-        if self.listening.load(Ordering::SeqCst) {
+        // Claim the slot atomically: two concurrent starts must not both bind
+        // (the loser used to overwrite the winner's task and leak a listener).
+        if self.listening.swap(true, Ordering::SeqCst) {
             return Ok(()); // idempotent guard
         }
+        let result = self.start_inner().await;
+        if result.is_err() {
+            self.listening.store(false, Ordering::SeqCst);
+        }
+        result
+    }
+
+    async fn start_inner(&self) -> Result<()> {
         self.config.validate()?;
 
         let server = DicomServer::bind(
-            ("0.0.0.0", self.config.port),
+            (self.config.bind_address, self.config.port),
             self.provider.clone(),
             self.config.server_options(),
         )
@@ -468,5 +483,96 @@ mod tests {
         let health = server.health();
         assert!(!health.listening);
         assert!(health.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_configured_bind_address_is_honoured() {
+        // NET-20: the bind address used to be hardcoded to 0.0.0.0, so a host
+        // that only wants loopback (or IPv6) could not have it.
+        let server = HostedDicomServer::new(
+            HostedServerConfig {
+                bind_address: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                ..Default::default()
+            },
+            EchoOnly,
+        );
+        server.start().await.unwrap();
+        assert_eq!(
+            server.local_addr().unwrap().ip(),
+            std::net::Ipv4Addr::LOCALHOST
+        );
+        server.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_ipv6_loopback_can_be_selected() {
+        let server = HostedDicomServer::new(
+            HostedServerConfig {
+                bind_address: std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+                ..Default::default()
+            },
+            EchoOnly,
+        );
+        // IPv6 may be unavailable on the host running the tests
+        if server.start().await.is_ok() {
+            assert!(server.local_addr().unwrap().is_ipv6());
+            server.stop().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ae_title_with_padding_spaces_is_rejected() {
+        for ae_title in [" PADDED", "PADDED "] {
+            let server = HostedDicomServer::new(
+                HostedServerConfig {
+                    ae_title: ae_title.to_string(),
+                    ..Default::default()
+                },
+                EchoOnly,
+            );
+            let error = server
+                .start()
+                .await
+                .expect_err("padding is not an AE title");
+            assert!(
+                error.to_string().contains("leading/trailing spaces"),
+                "{error}"
+            );
+            assert!(!server.health().listening);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_non_printable_ae_title_is_rejected() {
+        let server = HostedDicomServer::new(
+            HostedServerConfig {
+                ae_title: "BAD\u{7f}AE".to_string(),
+                ..Default::default()
+            },
+            EchoOnly,
+        );
+        let error = server.start().await.expect_err("control chars are refused");
+        assert!(error.to_string().contains("printable ASCII"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_spool_directory_and_config_are_exposed() {
+        let dir = std::env::temp_dir().join("radicom-hosted-spool");
+        let _ = std::fs::create_dir_all(&dir);
+        let server = HostedDicomServer::new(
+            HostedServerConfig {
+                store_sink: Some(dir.clone()),
+                max_clients: 4,
+                ..Default::default()
+            },
+            EchoOnly,
+        );
+        assert_eq!(server.config().store_sink.as_ref(), Some(&dir));
+        assert_eq!(server.config().max_clients, 4);
+        server.start().await.unwrap();
+        assert!(server.health().listening);
+        // dropping a running server must shut the listener down
+        drop(server);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

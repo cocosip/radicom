@@ -890,4 +890,79 @@ mod tests {
             "stored value is the physical HU value"
         );
     }
+
+    #[test]
+    fn slice_accessors_report_their_geometry() {
+        let image = ImageData::from_dataset(&axial_slice(0.0, 42)).unwrap();
+        assert_eq!(image.geometry().width(), 4);
+        assert_eq!(image.geometry().height(), 4);
+        assert_eq!(image.frame_of_reference_uid(), "1.2.3.4");
+        assert_eq!(image.instance_number(), 1);
+        assert!(image.sorting_value().is_finite());
+
+        let volume = VolumeData::from_datasets(&[axial_slice(0.0, 1)]).unwrap();
+        assert_eq!(volume.len(), 1);
+        assert!(!volume.is_empty());
+    }
+
+    #[test]
+    fn a_volume_needs_usable_slices() {
+        let err = VolumeData::from_datasets(&[]).unwrap_err().to_string();
+        assert!(err.contains("no slices"), "{err}");
+    }
+
+    #[test]
+    fn eight_bit_and_signed_samples_are_read() {
+        let mut eight = axial_slice(0.0, 7);
+        eight.insert_value(Tag::BITS_ALLOCATED, 8u16);
+        eight.insert_value(Tag::BITS_STORED, 8u16);
+        eight.insert_value(Tag::HIGH_BIT, 7u16);
+        eight.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::PIXEL_DATA,
+                Vr::Ob,
+                Arc::new(crate::model::buffer::MemoryBuffer::from(vec![7u8; 16])),
+            ),
+        ));
+        let image = ImageData::from_dataset(&eight).unwrap();
+        assert_eq!(image.pixels[0], 7.0);
+
+        // signed 16-bit -1 sign-extends in the writer
+        let mut signed = axial_slice(0.0, 1);
+        signed.insert_value(Tag::PIXEL_REPRESENTATION, 1u16);
+        signed.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::PIXEL_DATA,
+                Vr::Ow,
+                Arc::new(crate::model::buffer::MemoryBuffer::from(vec![0xFFu8; 32])),
+            ),
+        ));
+        let image = ImageData::from_dataset(&signed).unwrap();
+        assert_eq!(image.pixels[0], -1.0);
+    }
+
+    #[test]
+    fn stack_cuts_coronal_and_sagittal_and_serialises_pixels() {
+        let slices = [
+            axial_slice(0.0, 10),
+            axial_slice(1.0, 20),
+            axial_slice(2.0, 30),
+        ];
+        let volume = VolumeData::from_datasets(&slices).unwrap();
+        for stack_type in [StackType::Coronal, StackType::Sagittal] {
+            let stack = Stack::new(&volume, stack_type, 1.0, 1.0);
+            assert!(!stack.slices().is_empty());
+            assert_eq!(stack.slice_distance(), 1.0);
+        }
+
+        let stack = Stack::new(&volume, StackType::Axial, 1.0, 1.0);
+        let slice = &stack.slices()[0];
+        let unsigned = slice.render_raw_data(2, false);
+        assert_eq!(unsigned.len(), slice.pixels().len() * 2);
+        let signed = slice.render_raw_data(2, true);
+        assert_eq!(signed.len(), unsigned.len());
+        let eight = slice.render_raw_data(1, false);
+        assert_eq!(eight.len(), slice.pixels().len());
+        assert!(slice.render_raw_data(3, false).is_empty());
+    }
 }

@@ -342,9 +342,11 @@ pub fn format_da(d: NaiveDate) -> String {
 /// trailing zeros trimmed.
 pub fn format_tm(t: NaiveTime) -> String {
     let mut s = format!("{:02}{:02}{:02}", t.hour(), t.minute(), t.second());
-    let nano = t.nanosecond();
-    if nano > 0 {
-        let frac = format!("{:06}", nano / 1_000);
+    // TM fractions are microseconds (PS3.5 §6.2); a sub-microsecond value has no
+    // printable fraction and must not leave a bare trailing '.' (review CORE-19).
+    let micros = t.nanosecond() / 1_000;
+    if micros > 0 {
+        let frac = format!("{micros:06}");
         s.push('.');
         s.push_str(frac.trim_end_matches('0'));
     }
@@ -419,6 +421,12 @@ mod tests {
         let r = parse_tm("080000-120000").unwrap();
         assert!(r.contains(&parse_tm("0900").unwrap().min));
         assert_eq!(format_tm(parse_tm("103015.5").unwrap().min), "103015.5");
+
+        // a sub-microsecond fraction has no DICOM representation: no bare '.'
+        let sub_micro = NaiveTime::from_hms_nano_opt(10, 30, 15, 999).unwrap();
+        assert_eq!(format_tm(sub_micro), "103015");
+        let one_micro = NaiveTime::from_hms_nano_opt(10, 30, 15, 1_000).unwrap();
+        assert_eq!(format_tm(one_micro), "103015.000001");
 
         assert!(parse_tm("24").is_err(), "hour 24");
         assert!(parse_tm("1060").is_err(), "minute 60");

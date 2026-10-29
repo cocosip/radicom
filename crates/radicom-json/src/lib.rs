@@ -494,15 +494,13 @@ pub fn value_to_dataset(value: &Value) -> Result<Dataset> {
             // unknown keys (keywords, private extensions) are skipped (§12.1)
             continue;
         };
-        let Some(item) = attribute_to_item(tag, attribute)? else {
-            continue;
-        };
+        let item = attribute_to_item(tag, attribute)?;
         dataset.insert(item)?;
     }
     Ok(dataset)
 }
 
-fn attribute_to_item(tag: Tag, attribute: &Value) -> Result<Option<DicomItem>> {
+fn attribute_to_item(tag: Tag, attribute: &Value) -> Result<DicomItem> {
     let Value::Object(object) = attribute else {
         return Err(JsonError::Malformed {
             tag: tag.to_json_string(),
@@ -523,11 +521,11 @@ fn attribute_to_item(tag: Tag, attribute: &Value) -> Result<Option<DicomItem>> {
     if let Some(uri) = object.get("BulkDataURI").and_then(Value::as_str) {
         // JSON-02: keep the reference as a BulkDataUri buffer; the resolver that
         // owns fetching is out of scope, so the bytes stay unloaded until asked.
-        return Ok(Some(DicomItem::Element(DicomElement::new_bytes(
+        return Ok(DicomItem::Element(DicomElement::new_bytes(
             tag,
             vr,
             Arc::new(radicom::model::buffer::BulkDataUri::new(uri)),
-        ))));
+        )));
     }
 
     if let Some(encoded) = object.get("InlineBinary").and_then(Value::as_str) {
@@ -537,11 +535,11 @@ fn attribute_to_item(tag: Tag, attribute: &Value) -> Result<Option<DicomItem>> {
                 tag: tag.to_json_string(),
                 reason: format!("bad base64: {e}"),
             })?;
-        return Ok(Some(DicomItem::Element(DicomElement::new_bytes(
+        return Ok(DicomItem::Element(DicomElement::new_bytes(
             tag,
             vr,
             Arc::new(MemoryBuffer::from(bytes)),
-        ))));
+        )));
     }
 
     let values: &[Value] = match object.get("Value") {
@@ -550,9 +548,9 @@ fn attribute_to_item(tag: Tag, attribute: &Value) -> Result<Option<DicomItem>> {
         // SQ, which is an empty sequence, not a length-0 element
         None | Some(Value::Null) => {
             if vr == Vr::Sq {
-                return Ok(Some(DicomItem::Sequence(DicomSequence::new(tag))));
+                return Ok(DicomItem::Sequence(DicomSequence::new(tag)));
             }
-            return Ok(Some(DicomItem::Element(DicomElement::new_empty(tag, vr))));
+            return Ok(DicomItem::Element(DicomElement::new_empty(tag, vr)));
         }
         Some(other) => {
             return Err(JsonError::Malformed {
@@ -567,13 +565,13 @@ fn attribute_to_item(tag: Tag, attribute: &Value) -> Result<Option<DicomItem>> {
         for item in values {
             sequence.push(value_to_dataset(item)?);
         }
-        return Ok(Some(DicomItem::Sequence(sequence)));
+        return Ok(DicomItem::Sequence(sequence));
     }
 
     check_value_vr(vr, &tag)?;
     let text = values_to_text(vr, values, &tag)?;
     let element = text_element(tag, vr, text)?;
-    Ok(Some(DicomItem::Element(element)))
+    Ok(DicomItem::Element(element))
 }
 
 /// Builds an element from its text form, matching how the VR stores values.
@@ -598,7 +596,7 @@ fn text_element(tag: Tag, vr: Vr, text: String) -> Result<DicomElement> {
         ));
     }
     if !vr.is_string() {
-        let bytes = encode_numeric_or_text(vr, &text)?;
+        let bytes = encode_numeric_or_text(vr, &text, &tag)?;
         return Ok(DicomElement::new_bytes(
             tag,
             vr,
@@ -609,14 +607,14 @@ fn text_element(tag: Tag, vr: Vr, text: String) -> Result<DicomElement> {
 }
 
 /// Encodes the text form of a binary numeric VR (or PN) back to bytes.
-fn encode_numeric_or_text(vr: Vr, text: &str) -> Result<Vec<u8>> {
+fn encode_numeric_or_text(vr: Vr, text: &str, tag: &Tag) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     for part in text.split('\\') {
         if part.is_empty() {
             continue;
         }
         let malformed = |kind: &str| JsonError::Malformed {
-            tag: String::new(),
+            tag: tag_key(tag),
             reason: format!("\"{part}\" is not a valid {kind}"),
         };
         match vr {
@@ -1363,5 +1361,293 @@ mod tests {
         };
         let json = datasets_to_json(&[sample()], &options).unwrap();
         assert!(json.contains('\n'));
+    }
+
+    #[test]
+    fn keyword_keys_fall_back_to_hex_for_unknown_tags() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::PATIENT_ID, Vr::Lo, "P1");
+        // a private dictionary tag whose keyword is empty must fall back to hex
+        let creator = Arc::new(radicom::model::private_creator::PrivateCreator::new(
+            "MED NM",
+        ));
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::private(0x0011, 0x1010, creator),
+            Vr::Un,
+            Arc::new(MemoryBuffer::from(b"no-keyword".to_vec())),
+        )));
+        let options = JsonOptions {
+            tags_as_keywords: true,
+            ..Default::default()
+        };
+        let value = dataset_to_value(&ds, &options).unwrap();
+        assert!(value.get("PatientID").is_some(), "{value}");
+        assert!(
+            value.get("00111010").is_some(),
+            "a tag with no keyword keeps its hex key: {value}"
+        );
+    }
+
+    #[test]
+    fn a_length_zero_sq_element_serializes_bare_and_reads_back_empty() {
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_empty(
+            Tag::REFERENCED_IMAGE_SEQUENCE,
+            Vr::Sq,
+        )));
+        let value = dataset_to_value(&ds, &JsonOptions::default()).unwrap();
+        assert_eq!(value["00081140"]["vr"], "SQ");
+        assert!(value["00081140"].get("Value").is_none());
+        let json = serde_json::to_string(&value).unwrap();
+        let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
+        assert_eq!(
+            back.try_get_sequence(Tag::REFERENCED_IMAGE_SEQUENCE)
+                .unwrap()
+                .items()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn an_empty_binary_element_has_no_inline_binary() {
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::PIXEL_DATA,
+            Vr::Ob,
+            Arc::new(MemoryBuffer::from(Vec::new())),
+        )));
+        let value = dataset_to_value(&ds, &JsonOptions::default()).unwrap();
+        assert_eq!(value["7FE00010"]["vr"], "OB");
+        assert!(value["7FE00010"].get("InlineBinary").is_none());
+    }
+
+    #[test]
+    fn at_values_are_upper_case_hex_and_round_trip() {
+        // reading a lower-case AT value normalizes it to the 8-hex form
+        let json = r#"{"00080052":{"vr":"AT","Value":["00100010","7fe00010"]}}"#;
+        let ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
+        let value = dataset_to_value(&ds, &JsonOptions::default()).unwrap();
+        assert_eq!(
+            value["00080052"]["Value"],
+            serde_json::json!(["00100010", "7FE00010"])
+        );
+        // and the bytes are the big-endian pair order of the tag
+        let element = ds.get_element(Tag::QUERY_RETRIEVE_LEVEL).unwrap();
+        assert_eq!(
+            element
+                .value()
+                .as_buffer()
+                .unwrap()
+                .data()
+                .unwrap()
+                .as_ref(),
+            &[0x10, 0x00, 0x10, 0x00, 0xE0, 0x7F, 0x10, 0x00]
+        );
+    }
+
+    #[test]
+    fn numeric_binary_vrs_round_trip_through_value() {
+        let json = r#"{
+            "00110001":{"vr":"US","Value":[65535]},
+            "00110002":{"vr":"SS","Value":[-2]},
+            "00110003":{"vr":"UL","Value":[4294967295]},
+            "00110004":{"vr":"SL","Value":[-70000]},
+            "00110005":{"vr":"SV","Value":[-5]},
+            "00110006":{"vr":"UV","Value":[9]},
+            "00110007":{"vr":"FL","Value":[1.5]},
+            "00110008":{"vr":"FD","Value":[2.25]}
+        }"#;
+        let ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
+        let out = dataset_to_value(&ds, &JsonOptions::default()).unwrap();
+        assert_eq!(out["00110001"]["Value"][0], serde_json::json!(65535));
+        assert_eq!(out["00110002"]["Value"][0], serde_json::json!(-2));
+        assert_eq!(
+            out["00110003"]["Value"][0],
+            serde_json::json!(4294967295u32)
+        );
+        assert_eq!(out["00110004"]["Value"][0], serde_json::json!(-70000));
+        assert_eq!(out["00110005"]["Value"][0], serde_json::json!(-5));
+        assert_eq!(out["00110006"]["Value"][0], serde_json::json!(9));
+        assert_eq!(out["00110007"]["Value"][0], serde_json::json!(1.5));
+        assert_eq!(out["00110008"]["Value"][0], serde_json::json!(2.25));
+    }
+
+    #[test]
+    fn number_modes_control_is_ds_rendering() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::INSTANCE_NUMBER, Vr::Is, "42");
+        ds.insert_str(Tag::SLICE_THICKNESS, Vr::Ds, "1.50");
+
+        let as_string = JsonOptions {
+            numbers: NumberMode::AsString,
+            ..Default::default()
+        };
+        let value = dataset_to_value(&ds, &as_string).unwrap();
+        assert_eq!(value["00200013"]["Value"][0], serde_json::json!("42"));
+
+        let as_number = JsonOptions {
+            numbers: NumberMode::AsNumber,
+            ..Default::default()
+        };
+        let value = dataset_to_value(&ds, &as_number).unwrap();
+        assert_eq!(value["00180050"]["Value"][0], serde_json::json!(1.5));
+
+        // the default keeps "1.50" as a string because a number would lose the zero
+        let value = dataset_to_value(&ds, &JsonOptions::default()).unwrap();
+        assert_eq!(value["00180050"]["Value"][0], serde_json::json!("1.50"));
+        assert_eq!(value["00200013"]["Value"][0], serde_json::json!(42));
+    }
+
+    #[test]
+    fn malformed_attributes_are_typed_errors() {
+        type Case = (&'static str, fn(&JsonError) -> bool);
+        let cases: [Case; 10] = [
+            (r#"{"00100020":"not an object"}"#, |e| {
+                matches!(e, JsonError::Malformed { .. })
+            }),
+            (r#"{"00100020":{"Value":["x"]}}"#, |e| {
+                matches!(e, JsonError::MissingVr { .. })
+            }),
+            (r#"{"00100020":{"vr":"ZZ","Value":["x"]}}"#, |e| {
+                matches!(e, JsonError::UnknownVr { .. })
+            }),
+            (r#"{"00100020":{"vr":"LO","Value":"x"}}"#, |e| {
+                matches!(e, JsonError::Malformed { .. })
+            }),
+            (r#"{"7FE00010":{"vr":"OB","InlineBinary":"!!"}}"#, |e| {
+                matches!(e, JsonError::Malformed { .. })
+            }),
+            (r#"{"7FE00010":{"vr":"OB","Value":["x"]}}"#, |e| {
+                matches!(e, JsonError::Malformed { .. })
+            }),
+            (r#"{"00080052":{"vr":"AT","Value":["nope"]}}"#, |e| {
+                matches!(e, JsonError::Malformed { .. })
+            }),
+            (
+                r#"{"00100010":{"vr":"LO","Value":[{"Alphabetic":"x"}]}}"#,
+                |e| matches!(e, JsonError::Malformed { .. }),
+            ),
+            (r#"{"00100020":{"vr":"LO","Value":[["x"]]}}"#, |e| {
+                matches!(e, JsonError::Malformed { .. })
+            }),
+            (
+                r#"{"00280010":{"vr":"US","Value":["abc"]}}"#,
+                |e| matches!(e, JsonError::Malformed { tag, .. } if !tag.is_empty()),
+            ),
+        ];
+        for (json, predicate) in cases {
+            let err = json_to_dataset(json, &JsonOptions::default()).expect_err(json);
+            assert!(predicate(&err), "{json} produced {err:?}");
+        }
+
+        // a boolean is not a DICOM value
+        assert!(matches!(
+            json_to_dataset(
+                r#"{"00100020":{"vr":"LO","Value":[true]}}"#,
+                &JsonOptions::default()
+            ),
+            Err(JsonError::Malformed { .. })
+        ));
+        // a JSON array alone is not a dataset
+        assert!(matches!(
+            value_to_dataset(&serde_json::json!([])),
+            Err(JsonError::Unsupported(_))
+        ));
+        assert!(matches!(
+            json_to_datasets("{}", &JsonOptions::default()),
+            Err(JsonError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn an_empty_value_array_reads_as_an_empty_element() {
+        let json = r#"{"00100020":{"vr":"LO","Value":[]}}"#;
+        let ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
+        assert!(ds.get_element(Tag::PATIENT_ID).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_phonetic_only_person_name_round_trips() {
+        let json = r#"{"00100010":{"vr":"PN","Value":[{"Phonetic":"Yamada"}]}}"#;
+        let ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
+        assert_eq!(ds.get_str(Tag::PATIENT_NAME).unwrap(), "==Yamada");
+        let value = dataset_to_value(&ds, &JsonOptions::default()).unwrap();
+        assert_eq!(value["00100010"]["Value"][0]["Phonetic"], "Yamada");
+    }
+
+    #[test]
+    fn a_non_array_value_carrier_names_the_offending_json_type() {
+        for (value, expected) in [
+            ("true", "a boolean"),
+            ("1", "a number"),
+            ("\"x\"", "a string"),
+            ("{}", "an object"),
+        ] {
+            let json = format!(r#"{{"00100020":{{"vr":"LO","Value":{value}}}}}"#);
+            let error = json_to_dataset(&json, &JsonOptions::default()).expect_err(&json);
+            match error {
+                JsonError::Malformed { reason, .. } => {
+                    assert!(
+                        reason.contains(expected),
+                        "{json}: expected {expected} in {reason}"
+                    );
+                }
+                other => panic!("{json} produced {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn numeric_text_helpers_keep_unparseable_values_as_strings() {
+        assert_eq!(parse_int_value("abc", Vr::Us), Value::String("abc".into()));
+        assert_eq!(parse_int_value("-3", Vr::Ss), serde_json::json!(-3));
+        assert_eq!(
+            parse_int_value("99999999999999999999999", Vr::Ul),
+            Value::String("99999999999999999999999".into())
+        );
+        assert_eq!(parse_float_value("1.5"), serde_json::json!(1.5));
+        assert_eq!(parse_float_value("x"), Value::String("x".into()));
+        assert_eq!(type_name(&Value::Null), "null");
+        assert_eq!(type_name(&Value::Bool(true)), "a boolean");
+        assert_eq!(type_name(&Value::Number(1.into())), "a number");
+        assert_eq!(type_name(&Value::String(String::new())), "a string");
+        assert_eq!(type_name(&Value::Array(Vec::new())), "an array");
+        assert_eq!(type_name(&Value::Object(Map::new())), "an object");
+    }
+
+    #[test]
+    fn binary_number_covers_float_and_unknown_vrs() {
+        assert_eq!(
+            binary_number(&1.0f32.to_le_bytes(), Vr::Fl),
+            Some(serde_json::json!(1.0))
+        );
+        assert_eq!(
+            binary_number(&1.5f64.to_le_bytes(), Vr::Fd),
+            Some(serde_json::json!(1.5))
+        );
+        assert_eq!(binary_number(&[1, 2], Vr::Un), None);
+        assert_eq!(binary_number(&[], Vr::Us), None);
+    }
+
+    #[test]
+    fn a_u64_sized_integer_is_rendered_exactly_in_as_number_mode() {
+        // `integer_aware_number` must take the u64 path for values above
+        // i64::MAX instead of rounding through f64.
+        let value = numeric_value("18446744073709551615", NumberMode::AsNumber);
+        assert_eq!(value, serde_json::json!(18446744073709551615u64));
+        // and it never fabricates a number for a non-finite or unparseable text
+        assert_eq!(
+            numeric_value("NaN", NumberMode::AsNumber),
+            Value::String("NaN".into())
+        );
+    }
+
+    #[test]
+    fn empty_numeric_components_are_skipped_when_decoding() {
+        let json = r#"{"00280010":{"vr":"US","Value":["","5"]}}"#;
+        let ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
+        let back = dataset_to_value(&ds, &JsonOptions::default()).unwrap();
+        assert_eq!(back["00280010"]["Value"], serde_json::json!([5]));
     }
 }

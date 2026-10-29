@@ -25,6 +25,13 @@ interop (environment), and a handful of single-consumer / no-outer-consumer shap
 deliberately were not created. Observability is implemented through `tracing` field conventions and
 introduces **no `opentelemetry` dependency**.
 
+A second, adversarial review on 2026-10-29 found real parity defects behind previously "DONE" claims
+(wrong functional-group tags, a missing FileMetaInformationVersion, dropped ISO 2022 designators, the
+Icon Image Sequence tag, multi-fragment single-frame data, an SR anonymization PHI leak, and several
+network wire mismatches). Those are fixed with regression tests; see
+[05-code-review-2026-10-29.md](05-code-review-2026-10-29.md). "DONE" below now means the behaviour is
+verified by a test that would have failed before that review.
+
 ## Done (with code evidence)
 
 | Module group | Features | Evidence (file / symbol) |
@@ -59,13 +66,16 @@ introduces **no `opentelemetry` dependency**.
 ```pwsh
 cargo test --workspace --all-features
 cargo clippy --workspace --all-features --all-targets
+cargo xtask coverage          # production line coverage, 95% floor
 ```
 
 ## Current Test Baseline
 
-14 test suites green: 1060 tests, 1 ignored, 0 failures; clippy clean. Breakdown: core lib 637, core binary
-0, cli_dump 1, corpus 6, fuzz 3, goldens 1, radicom-dict 5, radicom-json lib 48, JSON goldens 1,
-radicom-network lib 352, network fuzz 1, network goldens 3, interop 3 (2 run plus 1 ignored), xtask 0.
+14 test targets green: **1,313 tests, 1 ignored, 0 failures**; clippy and rustdoc clean; production
+line coverage **95.98%** (core 96.01%, json 97.12%, network 95.75%). Breakdown: core lib 778, dump
+binary 5, cli_dump 1, corpus 7, core fuzz 3, core goldens 1, radicom-dict 5, radicom-json lib 74, JSON
+goldens 1, radicom-network lib 428, network fuzz 2, network goldens 3, interop 2 run + 1 ignored,
+xtask 3.
 
 > Caveat: this audit checks feature presence and code paths. It is **not** an adversarial correctness
 > review against real-world data; use the corpus and interoperability suites for that.

@@ -63,3 +63,34 @@ pub mod uids {
 pub mod syntaxes {
     pub use crate::model::transfer_syntax::syntaxes::*;
 }
+
+#[cfg(test)]
+mod uid_literals {
+    /// FEAT-26 guard: production code must use the generated `crate::uids`
+    /// constants, not hard-coded `1.2.840.10008…` strings (which drift and are
+    /// invisible to UID-based tooling). Test modules are allowed to spell tags
+    /// and UIDs out.
+    #[test]
+    fn production_sources_do_not_hard_code_dicom_uids() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        for relative in [
+            "render/mod.rs",
+            "media/mod.rs",
+            "sr/structured_report.rs",
+        ] {
+            let path = src.join(relative);
+            let source = std::fs::read_to_string(&path).expect("read source");
+            let production = match source.find("#[cfg(test)]") {
+                Some(tests) => &source[..tests],
+                None => &source[..],
+            };
+            for (index, line) in production.lines().enumerate() {
+                assert!(
+                    !line.contains("\"1.2.840.10008"),
+                    "{relative}:{} hard-codes a DICOM UID; use crate::uids: {line}",
+                    index + 1
+                );
+            }
+        }
+    }
+}

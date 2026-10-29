@@ -420,4 +420,35 @@ mod tests {
         assert_eq!(cells[0].width, 0.0);
         assert_eq!(cells[0].height, 0.0);
     }
+
+    #[test]
+    fn aspect_guards_a_zero_height() {
+        assert_eq!(FilmSize::new(10.0, 0.0).aspect(), 1.0);
+        assert_eq!(FilmSize::new(20.0, 10.0).aspect(), 2.0);
+    }
+
+    #[test]
+    fn cell_count_covers_slide_and_custom_forms() {
+        assert_eq!(ImageDisplayFormat::SuperSlide.cell_count(), 1);
+        assert_eq!(ImageDisplayFormat::Custom(7).cell_count(), 0);
+    }
+
+    #[test]
+    fn superslide_and_custom_layouts_cover_the_whole_film_or_nothing() {
+        let film = FilmSize::new(200.0, 300.0);
+        let cells = ImageDisplayFormat::SuperSlide.layout(film, 5.0);
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].width, 190.0);
+        assert!(ImageDisplayFormat::Custom(3).layout(film, 5.0).is_empty());
+    }
+
+    #[test]
+    fn empty_rows_and_columns_are_skipped() {
+        let film = FilmSize::new(200.0, 200.0);
+        let cells = ImageDisplayFormat::Row(vec![0, 2]).layout(film, 0.0);
+        assert_eq!(cells.len(), 2, "the empty row contributes no cells");
+
+        let cells = ImageDisplayFormat::Col(vec![0, 2]).layout(film, 0.0);
+        assert_eq!(cells.len(), 2, "the empty column contributes no cells");
+    }
 }

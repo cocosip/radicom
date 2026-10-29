@@ -204,3 +204,24 @@ mod tests {
         assert!(Vm::ONE.matches(1));
     }
 }
+
+#[cfg(test)]
+mod extra_tests {
+    use super::*;
+
+    #[test]
+    fn display_covers_bounded_and_multiplicity_forms() {
+        let exact = Vm {
+            min: 2,
+            max: Some(4),
+            multiplicity: 4,
+        };
+        assert!(format!("{exact}").contains("2-4n"), "{exact}");
+        let wrong = Vm {
+            min: 2,
+            max: Some(4),
+            multiplicity: 2,
+        };
+        assert!(format!("{wrong}").contains("multiplicity 2"), "{wrong}");
+    }
+}

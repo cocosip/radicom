@@ -111,6 +111,12 @@ pub enum NetworkError {
     ClosedPrematurely { source: Option<Box<NetworkError>> },
     #[error("protocol violation: {0}")]
     Protocol(&'static str),
+    /// The peer broke DIMSE by sending a response where a request belongs.
+    ///
+    /// The layer that noticed has already sent A-ABORT (PS3.8 §9.3.8), so the
+    /// connection wrapper must not abort a second time (NET-26).
+    #[error("DIMSE violation: {0}")]
+    PeerViolation(&'static str),
     #[error("io error: {0}")]
     Io(#[from] io::Error),
     /// C-GET/C-MOVE sub-operation handlers must be registered up front.
@@ -187,6 +193,11 @@ mod tests {
         assert!(err.to_string().contains("request 7 timed out"), "got {err}");
         let err = NetworkError::protocol("bad PDU type");
         assert!(err.to_string().contains("bad PDU type"));
+        // a peer violation is a distinct variant: only `Protocol` makes the
+        // connection layer send its own A-ABORT (NET-26)
+        let err = NetworkError::PeerViolation("peer sent a response");
+        assert!(err.to_string().contains("peer sent a response"));
+        assert!(!matches!(err, NetworkError::Protocol(_)));
     }
 
     #[test]

@@ -259,12 +259,21 @@ macro_rules! pixel_read_methods {
             let Some(DicomItem::Fragments(f)) = self.dataset.item(&PIXEL_DATA) else {
                 return Err(pixel_err("dataset has no encapsulated pixel data"));
             };
-            let fragments = f.fragments();
-            // rule 1: a single fragment is the whole data
-            if fragments.len() == 1 {
-                return Ok(fragments[0].clone());
+            // GH-1586: a trailing empty fragment is a terminator, not frame data
+            let fragments = trimmed_fragments(f);
+            if fragments.is_empty() {
+                return Err(pixel_err("encapsulated pixel data holds no fragment bytes"));
             }
             let frames = self.number_of_frames();
+            // rule 1: a single-frame image is the concatenation of its fragments
+            // (fo-dicom `EncapsulatedPixelData.GetFrame`: one fragment returns
+            // directly, several are composited)
+            if frames == 1 {
+                if fragments.len() == 1 {
+                    return Ok(fragments[0].clone());
+                }
+                return Ok(Arc::new(CompositeBuffer::new(fragments.to_vec())));
+            }
             // rule 2: one fragment per frame
             if fragments.len() as u32 == frames {
                 let fragment = fragments.get(index as usize).ok_or_else(|| {
@@ -295,17 +304,12 @@ macro_rules! pixel_read_methods {
                     "offset table has no entry for frame {index} (of {frames})"
                 ))
             })? as u64;
+            let fragments = trimmed_fragments(f);
+            let stream_len: u64 = fragments.iter().map(|b| 8 + b.size() + b.size() % 2).sum();
             let end = table
                 .get(index as usize + 1)
                 .map(|v| *v as u64)
-                .unwrap_or_else(|| {
-                    // last frame runs to the end of the fragment stream
-                    f.fragments()
-                        .iter()
-                        .map(|b| b.size() + b.size() % 2)
-                        .sum::<u64>()
-                        + 8 * f.fragments().len() as u64
-                });
+                .unwrap_or(stream_len);
             if !start.is_multiple_of(2) {
                 return Err(pixel_err(format!("offset table entry {start} is not even")));
             }
@@ -314,19 +318,46 @@ macro_rules! pixel_read_methods {
                     "offset table is not monotonic at frame {index}"
                 )));
             }
+            // fo-dicom: "Fragment start position does not match offset table."
+            // A table entry must name a fragment item tag; anything else (in
+            // particular an entry < 8, which used to underflow the range maths
+            // below) is rejected instead of clamped.
+            let mut cursor = 0u64;
+            let mut start_is_boundary = false;
+            for fragment in fragments {
+                if cursor == start {
+                    start_is_boundary = true;
+                    break;
+                }
+                cursor += 8 + fragment.size() + fragment.size() % 2;
+            }
+            if !start_is_boundary {
+                return Err(pixel_err(format!(
+                    "offset table entry {start} does not match a fragment boundary"
+                )));
+            }
+            if end > stream_len {
+                return Err(pixel_err(format!(
+                    "offset table entry {end} is past the fragment stream ({stream_len} bytes)"
+                )));
+            }
 
             // Walk the fragments, collecting the byte ranges the frame spans.
             // Offsets are measured from the first fragment's item tag.
             let mut cursor = 0u64;
             let mut parts: Vec<SharedBuffer> = Vec::new();
-            for fragment in f.fragments() {
+            for fragment in fragments {
                 let item_start = cursor;
                 let padded = fragment.size() + fragment.size() % 2;
                 let item_end = item_start + 8 + padded;
                 if item_end > start && item_start < end {
                     let data_start = item_start + 8;
                     let local_start = start.saturating_sub(data_start);
-                    let local_end = (end.min(item_end) - data_start).min(fragment.size());
+                    let local_end = if end >= item_end {
+                        fragment.size()
+                    } else {
+                        end.saturating_sub(data_start).min(fragment.size())
+                    };
                     if local_end > local_start {
                         parts.push(Arc::new(RangeBuffer::new(
                             fragment.clone(),
@@ -543,8 +574,7 @@ impl<'a> PixelData<'a> {
                     Vr::Ow
                 };
                 let buffer: SharedBuffer = Arc::new(MemoryBuffer::from(bytes));
-                let frags = self.dataset.insert_fragments(PIXEL_DATA, vr);
-                frags.push_fragment(buffer);
+                self.append_encapsulated(buffer, vr)?;
                 self.bump_frame_count(index + 1);
                 Ok(index)
             }
@@ -629,8 +659,7 @@ impl<'a> PixelData<'a> {
                 } else {
                     Vr::Ow
                 };
-                let fragments = self.dataset.insert_fragments(PIXEL_DATA, vr);
-                fragments.push_fragment(frame);
+                self.append_encapsulated(frame, vr)?;
                 self.bump_frame_count(index + 1);
                 Ok(index)
             }
@@ -649,6 +678,33 @@ impl<'a> PixelData<'a> {
                     // an existing native element has to be extended by copying
                     self.add_frame(frame.data()?)
                 }
+            }
+        }
+    }
+
+    /// Appends one fragment to the encapsulated element, keeping the frames
+    /// already stored.
+    ///
+    /// Previously every append replaced the whole fragment sequence, so only the
+    /// last added frame survived (masked by the old single-fragment shortcut).
+    fn append_encapsulated(&mut self, frame: SharedBuffer, vr: Vr) -> Result<(), Error> {
+        match self.dataset.remove(PIXEL_DATA) {
+            Some(DicomItem::Fragments(mut fragments)) => {
+                fragments.push_fragment(frame);
+                self.dataset
+                    .insert_or_update(DicomItem::Fragments(fragments));
+                Ok(())
+            }
+            Some(other) => {
+                self.dataset.insert_or_update(other);
+                Err(pixel_err(
+                    "encapsulated pixel data element is not a fragment sequence",
+                ))
+            }
+            None => {
+                let fragments = self.dataset.insert_fragments(PIXEL_DATA, vr);
+                fragments.push_fragment(frame);
+                Ok(())
             }
         }
     }
@@ -761,9 +817,21 @@ pub fn ensure_pixel_element(ds: &mut Dataset, kind: PixelDataKind) -> Result<(),
     Ok(())
 }
 
+/// The fragment buffers without a trailing empty terminator (fo-dicom
+/// GH-1586: some encoders end the stream with a zero-length fragment).
+fn trimmed_fragments(f: &DicomFragmentSequence) -> &[SharedBuffer] {
+    let all = f.fragments();
+    let len = all
+        .iter()
+        .rposition(|b| b.size() > 0)
+        .map_or(0, |last| last + 1);
+    &all[..len]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::element::DicomElement;
     use crate::model::transfer_syntax::syntaxes;
 
     fn mono_dataset(width: u32, height: u32, bits: u16, frames: u32) -> Dataset {
@@ -1011,16 +1079,98 @@ mod tests {
 
     #[test]
     fn single_fragment_is_the_whole_data() {
-        let mut ds = mono_dataset(2, 2, 8, 3);
+        let mut ds = mono_dataset(2, 2, 8, 1);
         ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
         let frags = ds.insert_fragments(PIXEL_DATA, Vr::Ob);
         frags.push_fragment(Arc::new(MemoryBuffer::from(vec![9u8, 9, 9, 9])));
         let pd = PixelData::from_dataset(&mut ds).unwrap();
-        // rule 1 wins even though the fragment count does not match frames
         assert_eq!(
             pd.get_frame(0).unwrap().data().unwrap().as_ref(),
             &[9, 9, 9, 9]
         );
+    }
+
+    #[test]
+    fn a_single_frame_split_across_fragments_is_composited() {
+        let mut ds = mono_dataset(1, 1, 8, 1);
+        ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
+        let frags = ds.insert_fragments(PIXEL_DATA, Vr::Ob);
+        frags.push_fragment(Arc::new(MemoryBuffer::from(vec![1u8, 2])));
+        frags.push_fragment(Arc::new(MemoryBuffer::from(vec![3u8, 4])));
+        let pd = PixelData::from_dataset(&mut ds).unwrap();
+        assert_eq!(
+            pd.get_frame(0).unwrap().data().unwrap().as_ref(),
+            &[1, 2, 3, 4],
+            "all fragments of a single-frame image are concatenated"
+        );
+    }
+
+    #[test]
+    fn trailing_empty_fragments_are_ignored() {
+        // GH-1586: a zero-length trailing fragment is a terminator.
+        let mut ds = mono_dataset(1, 1, 8, 2);
+        ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
+        let frags = ds.insert_fragments(PIXEL_DATA, Vr::Ob);
+        frags.push_fragment(Arc::new(MemoryBuffer::from(vec![1u8, 1])));
+        frags.push_fragment(Arc::new(MemoryBuffer::from(vec![2u8, 2])));
+        frags.push_fragment(Arc::new(MemoryBuffer::from(Vec::new())));
+        let pd = PixelData::from_dataset(&mut ds).unwrap();
+        assert_eq!(pd.get_frame(0).unwrap().data().unwrap().as_ref(), &[1, 1]);
+        assert_eq!(pd.get_frame(1).unwrap().data().unwrap().as_ref(), &[2, 2]);
+    }
+
+    #[test]
+    fn trailing_empty_fragments_are_ignored_with_an_offset_table() {
+        let mut ds = mono_dataset(1, 1, 8, 2);
+        ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
+        let frags = ds.insert_fragments(PIXEL_DATA, Vr::Ob);
+        frags.push_fragment(Arc::new(MemoryBuffer::from(vec![1u8, 1])));
+        frags.push_fragment(Arc::new(MemoryBuffer::from(vec![2u8, 2])));
+        frags.push_fragment(Arc::new(MemoryBuffer::from(vec![5u8, 6])));
+        frags.push_fragment(Arc::new(MemoryBuffer::from(Vec::new())));
+        // three data fragments, two frames: the BOT locates them. Item tags sit
+        // at 0, 10 and 20; the trailing empty fragment is not part of the data.
+        frags.set_offset_table(vec![0, 10]);
+        let pd = PixelData::from_dataset(&mut ds).unwrap();
+        // frame 1 runs to the end of the *trimmed* stream (30)
+        assert_eq!(
+            pd.get_frame(1).unwrap().data().unwrap().as_ref(),
+            &[2, 2, 5, 6]
+        );
+        assert_eq!(pd.get_frame(0).unwrap().data().unwrap().as_ref(), &[1, 1]);
+    }
+
+    #[test]
+    fn an_offset_before_the_first_fragment_is_rejected_without_panicking() {
+        // FEAT-04: an entry < 8 (and one that is not a fragment boundary) must
+        // be a clean error, never a subtraction overflow.
+        let mut ds = mono_dataset(1, 1, 8, 2);
+        ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
+        let frags = ds.insert_fragments(PIXEL_DATA, Vr::Ob);
+        frags.push_fragment(Arc::new(MemoryBuffer::from(vec![1u8, 2])));
+        frags.push_fragment(Arc::new(MemoryBuffer::from(vec![3u8, 4])));
+        frags.push_fragment(Arc::new(MemoryBuffer::from(vec![5u8, 6])));
+        frags.set_offset_table(vec![2, 20]);
+        let pd = PixelData::from_dataset(&mut ds).unwrap();
+        assert!(pd.get_frame(0).is_err(), "offset 2 is not a fragment tag");
+        assert_eq!(
+            pd.get_frame(1).unwrap().data().unwrap().as_ref(),
+            &[5, 6],
+            "the later frame is still readable"
+        );
+    }
+
+    #[test]
+    fn an_offset_past_the_fragment_stream_is_rejected() {
+        let mut ds = mono_dataset(1, 1, 8, 2);
+        ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
+        let frags = ds.insert_fragments(PIXEL_DATA, Vr::Ob);
+        frags.push_fragment(Arc::new(MemoryBuffer::from(vec![1u8, 2])));
+        frags.push_fragment(Arc::new(MemoryBuffer::from(vec![3u8, 4])));
+        frags.push_fragment(Arc::new(MemoryBuffer::from(vec![5u8, 6])));
+        frags.set_offset_table(vec![0, 100]);
+        let pd = PixelData::from_dataset(&mut ds).unwrap();
+        assert!(pd.get_frame(0).is_err(), "frame ends past the stream");
     }
 
     #[test]
@@ -1450,5 +1600,310 @@ mod tests {
             256 * 256 * 2,
             "full 16-bit frame, not an empty window"
         );
+    }
+
+    fn native_with_pixels(
+        width: u32,
+        height: u32,
+        bits: u16,
+        frames: u32,
+        data: Vec<u8>,
+    ) -> Dataset {
+        let mut ds = mono_dataset(width, height, bits, frames);
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            PIXEL_DATA,
+            Vr::Ob,
+            Arc::new(MemoryBuffer::from(data)),
+        )));
+        ds
+    }
+
+    #[test]
+    fn native_frame_reports_absent_and_non_byte_pixel_data() {
+        let mut ds = native_with_pixels(1, 1, 8, 1, vec![1]);
+        let mut pd = PixelData::from_dataset(&mut ds).unwrap();
+        assert!(pd.get_frame(3).is_err(), "frame index out of range");
+        // the element disappears between construction and the read
+        pd.dataset_mut().remove(PIXEL_DATA);
+        let err = pd.get_frame(0).unwrap_err().to_string();
+        assert!(err.contains("no pixel data"), "{err}");
+
+        // a fragment sequence stored under a native kind
+        pd.dataset_mut().insert_fragments(PIXEL_DATA, Vr::Ob);
+        let err = pd.get_frame(0).unwrap_err().to_string();
+        assert!(err.contains("not a byte value"), "{err}");
+    }
+
+    #[test]
+    fn one_bit_frames_are_checked_against_the_buffer() {
+        let mut ds = native_with_pixels(8, 1, 1, 2, vec![0xFF]);
+        let pd = PixelData::from_dataset(&mut ds).unwrap();
+        assert!(pd.get_frame(0).is_ok());
+        let err = pd.get_frame(1).unwrap_err().to_string();
+        assert!(err.contains("needs bits"), "{err}");
+    }
+
+    fn encapsulated_with(fragments: &[&'static [u8]], frames: u32) -> Dataset {
+        let mut ds = mono_dataset(1, 1, 8, frames);
+        ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
+        let seq = ds.insert_fragments(PIXEL_DATA, Vr::Ob);
+        for f in fragments {
+            seq.push_fragment(Arc::new(MemoryBuffer::from(f.to_vec())));
+        }
+        ds
+    }
+
+    #[test]
+    fn encapsulated_frame_reports_absent_empty_and_out_of_range_data() {
+        // no fragment sequence at all
+        let mut ds = mono_dataset(1, 1, 8, 1);
+        ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
+        let pd = PixelData::from_dataset(&mut ds).unwrap();
+        let err = pd.get_frame(0).unwrap_err().to_string();
+        assert!(err.contains("no encapsulated"), "{err}");
+
+        // only a trailing empty terminator
+        let mut ds = encapsulated_with(&[&[]], 1);
+        let pd = PixelData::from_dataset(&mut ds).unwrap();
+        let err = pd.get_frame(0).unwrap_err().to_string();
+        assert!(err.contains("no fragment bytes"), "{err}");
+
+        // one fragment per frame, index out of range
+        let mut ds = encapsulated_with(&[&[1, 2], &[3, 4]], 2);
+        let pd = PixelData::from_dataset(&mut ds).unwrap();
+        let err = pd.get_frame(5).unwrap_err().to_string();
+        assert!(err.contains("out of range"), "{err}");
+    }
+
+    #[test]
+    fn offset_table_errors_are_reported_without_panicking() {
+        fn fragment_dataset(sizes: &[usize], table: Vec<u32>, frames: u32) -> Dataset {
+            let mut ds = mono_dataset(1, 1, 8, frames);
+            ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
+            let mut seq = DicomFragmentSequence::new(PIXEL_DATA, Vr::Ob);
+            for &size in sizes {
+                seq.push_fragment_raw(Arc::new(MemoryBuffer::from(vec![7u8; size])));
+            }
+            seq.set_offset_table(table);
+            ds.insert_or_update(DicomItem::Fragments(seq));
+            ds
+        }
+
+        // table shorter than the requested frame index
+        let mut ds = fragment_dataset(&[2, 2, 2], vec![0, 10, 20], 2);
+        let pd = PixelData::from_dataset(&mut ds).unwrap();
+        assert!(pd
+            .get_frame(5)
+            .unwrap_err()
+            .to_string()
+            .contains("no entry"));
+
+        // odd start offset
+        let mut ds = fragment_dataset(&[2, 2, 2], vec![1, 10, 20], 2);
+        let pd = PixelData::from_dataset(&mut ds).unwrap();
+        assert!(pd
+            .get_frame(0)
+            .unwrap_err()
+            .to_string()
+            .contains("not even"));
+
+        // non-monotonic table
+        let mut ds = fragment_dataset(&[2, 2, 2], vec![10, 0, 20], 2);
+        let pd = PixelData::from_dataset(&mut ds).unwrap();
+        let err = pd.get_frame(0).unwrap_err().to_string();
+        assert!(err.contains("not monotonic"), "{err}");
+
+        // an empty range spans no bytes
+        let mut ds = fragment_dataset(&[2, 2, 2], vec![0, 0, 30], 2);
+        let pd = PixelData::from_dataset(&mut ds).unwrap();
+        let err = pd.get_frame(0).unwrap_err().to_string();
+        assert!(err.contains("spans no fragment bytes"), "{err}");
+
+        // a frame ending inside a fragment is clipped to the fragment data
+        let mut ds = fragment_dataset(&[10, 10, 10], vec![0, 14, 28], 2);
+        let pd = PixelData::from_dataset(&mut ds).unwrap();
+        let frame = pd.get_frame(0).unwrap();
+        assert_eq!(frame.data().unwrap().as_ref().len(), 6);
+    }
+
+    #[test]
+    fn encapsulated_appends_pad_odd_frames_and_keep_prior_fragments() {
+        let mut ds = mono_dataset(1, 1, 16, 1);
+        ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
+        let mut pd = PixelData::from_dataset(&mut ds).unwrap();
+        // 16-bit encapsulated data stores OW fragments
+        assert_eq!(pd.add_frame([1u8, 2]).unwrap(), 0);
+        assert_eq!(pd.add_frame([3u8]).unwrap(), 1, "odd frame is padded");
+        let frags = match pd.dataset().item(&PIXEL_DATA) {
+            Some(DicomItem::Fragments(f)) => f.fragments().len(),
+            _ => 0,
+        };
+        assert_eq!(frags, 2, "both frames kept");
+        assert_eq!(pd.get_frame(1).unwrap().size(), 2);
+
+        // an Element under an encapsulated kind is not a fragment sequence
+        let mut ds = mono_dataset(1, 1, 8, 1);
+        ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
+        let mut pd = PixelData::from_dataset(&mut ds).unwrap();
+        pd.dataset_mut()
+            .insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+                PIXEL_DATA,
+                Vr::Ob,
+                Arc::new(MemoryBuffer::from(vec![1])),
+            )));
+        let err = pd.add_frame([7u8, 8]).unwrap_err().to_string();
+        assert!(err.contains("not a fragment sequence"), "{err}");
+    }
+
+    #[test]
+    fn add_frame_buffer_takes_owned_frames_for_word_and_copy_paths() {
+        // fresh native 16-bit element: inserted as OW without copying
+        let mut ds = mono_dataset(1, 1, 16, 1);
+        let mut pd = PixelData::from_dataset(&mut ds).unwrap();
+        let frame: SharedBuffer = Arc::new(MemoryBuffer::from(vec![1u8, 2]));
+        assert_eq!(pd.add_frame_buffer(frame).unwrap(), 0);
+        assert_eq!(pd.get_frame(0).unwrap().size(), 2);
+
+        // existing native element: appended by copy
+        let mut ds = native_with_pixels(2, 1, 8, 1, vec![1, 2, 3, 4]);
+        let mut pd = PixelData::from_dataset(&mut ds).unwrap();
+        assert_eq!(
+            pd.add_frame_buffer(Arc::new(MemoryBuffer::from(vec![5u8, 6])))
+                .unwrap(),
+            1
+        );
+        assert_eq!(pd.get_frame(1).unwrap().data().unwrap().as_ref(), &[5, 6]);
+
+        // an odd owned frame is delegated to add_frame for padding
+        assert_eq!(
+            pd.add_frame_buffer(Arc::new(MemoryBuffer::from(vec![7u8])))
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn clear_and_ensure_cover_every_storage_kind() {
+        // native byte and word kinds are replaced by an empty element of the kind
+        for (bits, vr) in [(8u16, Vr::Ob), (16u16, Vr::Ow)] {
+            let mut ds = mono_dataset(2, 2, bits, 2);
+            let mut pd = PixelData::from_dataset(&mut ds).unwrap();
+            pd.clear();
+            let element = ds.get_element(PIXEL_DATA).unwrap();
+            assert_eq!(element.vr(), vr);
+            assert!(element.is_empty());
+            assert!(!ds.contains(&NUMBER_OF_FRAMES));
+        }
+
+        // encapsulated clears by removing the element
+        let mut ds = mono_dataset(1, 1, 8, 1);
+        ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
+        let mut pd = PixelData::from_dataset(&mut ds).unwrap();
+        pd.dataset_mut().insert_fragments(PIXEL_DATA, Vr::Ob);
+        pd.clear();
+        assert!(!ds.contains(&PIXEL_DATA));
+
+        // ensure creates the element for each kind, and is a no-op when present
+        for kind in [
+            PixelDataKind::Encapsulated,
+            PixelDataKind::OtherByte,
+            PixelDataKind::OtherWord,
+        ] {
+            let mut ds = Dataset::new();
+            ensure_pixel_element(&mut ds, kind).unwrap();
+            assert!(ds.contains(&PIXEL_DATA));
+            guarantee_input_kind(&ds, kind);
+            ensure_pixel_element(&mut ds, kind).unwrap();
+        }
+    }
+
+    fn guarantee_input_kind(ds: &Dataset, kind: PixelDataKind) {
+        let element = ds.get_element(PIXEL_DATA).unwrap();
+        let expected = if kind == PixelDataKind::OtherWord {
+            Vr::Ow
+        } else {
+            Vr::Ob
+        };
+        assert_eq!(element.vr(), expected);
+    }
+
+    #[test]
+    fn kind_of_rejects_unsupported_element_kinds() {
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            PIXEL_DATA,
+            Vr::Un,
+            Arc::new(MemoryBuffer::from(vec![1u8])),
+        )));
+        assert!(PixelData::from_dataset(&mut ds).is_err());
+
+        let mut ds = Dataset::new();
+        ds.insert_sequence(PIXEL_DATA);
+        let err = match PixelData::from_dataset(&mut ds) {
+            Ok(_) => panic!("a pixel data sequence must be rejected"),
+            Err(error) => error.to_string(),
+        };
+        assert!(err.contains("sequence"), "{err}");
+
+        // no element: the bits-allocated width picks byte vs word
+        let mut ds = mono_dataset(1, 1, 16, 1);
+        assert_eq!(
+            PixelData::create_new(&mut ds).unwrap().kind(),
+            PixelDataKind::OtherWord
+        );
+        let mut ds = mono_dataset(1, 1, 8, 1);
+        assert_eq!(
+            PixelData::create_new(&mut ds).unwrap().kind(),
+            PixelDataKind::OtherByte
+        );
+    }
+
+    #[test]
+    fn palette_descriptor_errors_are_reported() {
+        // no descriptor: first mapped is absent
+        let ds = Dataset::new();
+        assert_eq!(
+            PixelDataRef::from_dataset(&ds)
+                .unwrap()
+                .palette_first_mapped(),
+            None
+        );
+
+        // a short descriptor counts as absent
+        let mut ds = Dataset::new();
+        ds.insert_str(PHOTOMETRIC_INTERPRETATION, Vr::Cs, "PALETTE COLOR");
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::RED_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR,
+            Vr::Us,
+            Arc::new(MemoryBuffer::from(vec![1u8, 2, 3, 4])),
+        )));
+        let pd = PixelDataRef::from_dataset(&ds).unwrap();
+        assert_eq!(pd.palette_first_mapped(), None);
+        assert!(pd.palette_color_lut_checked().is_err());
+
+        // a non-8/16 bits-per-entry descriptor is rejected
+        let mut ds = Dataset::new();
+        ds.insert_str(PHOTOMETRIC_INTERPRETATION, Vr::Cs, "PALETTE COLOR");
+        let mut desc = Vec::new();
+        desc.extend_from_slice(&2u16.to_le_bytes());
+        desc.extend_from_slice(&0u16.to_le_bytes());
+        desc.extend_from_slice(&12u16.to_le_bytes());
+        for tag in [
+            Tag::RED_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR,
+            Tag::GREEN_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR,
+            Tag::BLUE_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR,
+        ] {
+            ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+                tag,
+                Vr::Us,
+                Arc::new(MemoryBuffer::from(desc.clone())),
+            )));
+        }
+        let err = PixelDataRef::from_dataset(&ds)
+            .unwrap()
+            .palette_color_lut_checked()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("bits per entry"), "{err}");
     }
 }

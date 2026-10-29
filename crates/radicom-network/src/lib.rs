@@ -41,10 +41,7 @@ pub use dimse::{
     register_status_description, status_description, status_description_for_service_class, Command,
     CommandField, Priority, Status, StatusServiceClass, StatusState,
 };
-pub use engine::{
-    CircuitBreaker, ConnectionLifecycle, ConnectionState, EngineOptions, PendingRequest,
-    PendingTable,
-};
+pub use engine::{ConnectionState, PendingTable};
 pub use error::{AbortSource, NetworkError, RejectResult, RejectSource, Result};
 pub use expert::{
     send as send_expert, Connection, ConnectionEvent, ExpertRequest, ExpertResponse, ResponseStream,

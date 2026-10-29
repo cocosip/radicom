@@ -105,29 +105,38 @@ fn write_values(out: &mut String, element: &DicomElement, depth: usize) -> Resul
     }
     // byte-backed non-binary VRs (parsed US/AT/etc.) render through their text
     let text = text_form(element, vr)?;
-    let mut number = 1;
-    for part in text.split('\\') {
-        if part.is_empty() {
-            continue;
-        }
+    if text.is_empty() {
+        return Ok(());
+    }
+    for (index, part) in text.split('\\').enumerate() {
         indent(out, depth);
-        let _ = writeln!(out, "<Value number=\"{number}\">{}</Value>", escape(part));
-        number += 1;
+        // every component keeps its position, including empty ones: the
+        // `number` attribute is the value index (PS3.19 A.1), so dropping an
+        // empty component would renumber the following values (FEAT-18)
+        let _ = writeln!(
+            out,
+            "<Value number=\"{}\">{}</Value>",
+            index + 1,
+            escape(part)
+        );
     }
     Ok(())
 }
-
 /// The text of every value component, `\`-joined (§12.1).
 fn text_form(element: &DicomElement, vr: Vr) -> Result<String, Error> {
-    if let Some(raw) = element.value().as_buffer() {
+    match element.value().as_buffer() {
+        // A byte-backed string VR (e.g. an unloaded BulkDataURI) is text, not a
+        // sequence of one-byte units: decode it as a string.
+        Some(raw) if vr.is_string() => {
+            let bytes = raw.data()?;
+            Ok(String::from_utf8_lossy(bytes.as_ref())
+                .trim_end_matches(['\0', ' '])
+                .to_string())
+        }
         // parsed binary VRs: render each unit as text so XML stays readable
-        return if is_binary(vr) {
-            Ok(String::new())
-        } else {
-            raw_units_text(raw, vr)
-        };
+        Some(raw) => raw_units_text(raw, vr),
+        None => Ok(element.string_value().to_string()),
     }
-    Ok(element.string_value().to_string())
 }
 
 /// Text form of a byte-backed numeric VR (US/UL/SS/SL/FL/FD/AT).
@@ -264,10 +273,16 @@ fn write_fragments(
     indent(out, depth);
     write_attribute_open(out, tag, vr);
     out.push_str(">\n");
-    for fragment in fragments.fragments() {
+    for (index, fragment) in fragments.fragments().iter().enumerate() {
         let encoded = base64::engine::general_purpose::STANDARD.encode(fragment.data()?.as_ref());
+        // fo-dicom DicomXML wraps each fragment in <Fragment number="n">: the
+        // fragment index must survive the export (FEAT-17)
         indent(out, depth + 1);
+        let _ = writeln!(out, "<Fragment number=\"{}\">", index + 1);
+        indent(out, depth + 2);
         let _ = writeln!(out, "<InlineBinary>{encoded}</InlineBinary>");
+        indent(out, depth + 1);
+        out.push_str("</Fragment>\n");
     }
     indent(out, depth);
     out.push_str("</DicomAttribute>\n");
@@ -282,7 +297,9 @@ fn is_binary(vr: Vr) -> bool {
     )
 }
 
-/// Escapes the five XML metacharacters.
+/// Escapes the five XML metacharacters and drops characters XML 1.0 does not
+/// allow (C0 controls other than tab/LF/CR, and the non-characters FFFE/FFFF),
+/// so a leniently parsed value cannot make the document ill-formed (FEAT-18).
 fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -292,6 +309,11 @@ fn escape(text: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
+            // XML 1.0 Char production: #x9 | #xA | #xD | [#x20-#xD7FF] | ...
+            '\u{9}' | '\u{A}' | '\u{D}' => out.push(ch),
+            ch if (ch as u32) < 0x20 || ch == '\u{FFFE}' || ch == '\u{FFFF}' => {
+                out.push('\u{FFFD}')
+            }
             _ => out.push(ch),
         }
     }
@@ -511,5 +533,239 @@ mod tests {
             xml.contains("P&amp;&lt;1&gt;"),
             "value metacharacters are escaped: {xml}"
         );
+    }
+
+    #[test]
+    fn fragments_are_wrapped_and_numbered() {
+        // FEAT-17: fo-dicom wraps every fragment in <Fragment number="n">.
+        let mut ds = Dataset::new();
+        let fragments = ds.insert_fragments(Tag::PIXEL_DATA, Vr::Ob);
+        fragments.push_fragment(Arc::new(radicom::model::buffer::MemoryBuffer::from(vec![
+            1u8, 2,
+        ])));
+        fragments.push_fragment(Arc::new(radicom::model::buffer::MemoryBuffer::from(vec![
+            3u8,
+        ])));
+
+        let xml = dataset_to_xml(&ds).unwrap();
+        assert!(xml.contains("<Fragment number=\"1\">"), "{xml}");
+        assert!(xml.contains("<Fragment number=\"2\">"), "{xml}");
+        assert!(xml.contains("<InlineBinary>AQI=</InlineBinary>"), "{xml}");
+        assert!(xml.contains("<InlineBinary>Aw==</InlineBinary>"), "{xml}");
+        assert_eq!(xml.matches("</Fragment>").count(), 2, "{xml}");
+    }
+
+    #[test]
+    fn empty_value_components_keep_their_number() {
+        // FEAT-18: dropping the empty middle component would renumber the rest.
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::IMAGE_TYPE, Vr::Cs, "A\\\\C");
+        let xml = dataset_to_xml(&ds).unwrap();
+        assert!(xml.contains("<Value number=\"1\">A</Value>"), "{xml}");
+        assert!(xml.contains("<Value number=\"2\"></Value>"), "{xml}");
+        assert!(xml.contains("<Value number=\"3\">C</Value>"), "{xml}");
+    }
+
+    #[test]
+    fn xml_invalid_control_characters_are_replaced() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::INSTITUTION_ADDRESS, Vr::St, "a\u{1}b");
+        let xml = dataset_to_xml(&ds).unwrap();
+        assert!(!xml.contains('\u{1}'), "control char must not be emitted");
+        assert!(xml.contains("a\u{FFFD}b"), "{xml}");
+        // the document must stay well-formed
+        use quick_xml::events::Event;
+        use quick_xml::Reader;
+        let mut reader = Reader::from_str(&xml);
+        loop {
+            if matches!(reader.read_event().expect("well-formed XML"), Event::Eof) {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_binary_value_carries_no_inline_binary() {
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::PIXEL_DATA,
+            Vr::Ob,
+            Arc::new(radicom::model::buffer::MemoryBuffer::from(Vec::new())),
+        )));
+        let xml = dataset_to_xml(&ds).unwrap();
+        assert!(!xml.contains("<InlineBinary>"), "{xml}");
+        assert!(xml.contains("vr=\"OB\""), "{xml}");
+    }
+
+    #[test]
+    fn a_person_name_skips_empty_groups_and_keeps_phonetic() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John==Do^J");
+        let xml = dataset_to_xml(&ds).unwrap();
+        assert!(xml.contains("<Alphabetic>"), "{xml}");
+        assert!(!xml.contains("<Ideographic>"), "empty group omitted: {xml}");
+        assert!(xml.contains("<Phonetic>"), "{xml}");
+    }
+
+    #[test]
+    fn parsed_numeric_vrs_render_their_unit_text() {
+        // covers SS/SL/SV/UV/FL/FD/AT branches of raw_units_text
+        let cases: Vec<(Tag, Vr, Vec<u8>, &str)> = vec![
+            (
+                Tag::new(0x0011, 0x0001),
+                Vr::Ss,
+                (-2i16).to_le_bytes().to_vec(),
+                "-2",
+            ),
+            (
+                Tag::new(0x0011, 0x0002),
+                Vr::Sl,
+                (-70000i32).to_le_bytes().to_vec(),
+                "-70000",
+            ),
+            (
+                Tag::new(0x0011, 0x0003),
+                Vr::Sv,
+                (-5i64).to_le_bytes().to_vec(),
+                "-5",
+            ),
+            (
+                Tag::new(0x0011, 0x0004),
+                Vr::Uv,
+                (9u64).to_le_bytes().to_vec(),
+                "9",
+            ),
+            (
+                Tag::new(0x0011, 0x0005),
+                Vr::Fl,
+                (1.5f32).to_le_bytes().to_vec(),
+                "1.5",
+            ),
+            (
+                Tag::new(0x0011, 0x0006),
+                Vr::Fd,
+                (2.25f64).to_le_bytes().to_vec(),
+                "2.25",
+            ),
+            (
+                Tag::QUERY_RETRIEVE_LEVEL,
+                Vr::At,
+                {
+                    let mut b = Vec::new();
+                    b.extend_from_slice(&0x0010u16.to_le_bytes());
+                    b.extend_from_slice(&0x0010u16.to_le_bytes());
+                    b
+                },
+                "00100010",
+            ),
+        ];
+        for (tag, vr, bytes, expected) in cases {
+            let mut ds = Dataset::new();
+            ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+                tag,
+                vr,
+                Arc::new(radicom::model::buffer::MemoryBuffer::from(bytes)),
+            )));
+            let xml = dataset_to_xml(&ds).unwrap();
+            assert!(
+                xml.contains(expected),
+                "{vr:?} must render {expected:?}: {xml}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_private_tag_carries_its_creator_attribute() {
+        let creator = Arc::new(radicom::model::private_creator::PrivateCreator::new(
+            "ACME 1.2",
+        ));
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_str(
+            Tag::private(0x0029, 0x1001, creator),
+            Vr::Lo,
+            "widget",
+        )));
+        let xml = dataset_to_xml(&ds).unwrap();
+        assert!(
+            xml.contains("privateCreator=\"ACME 1.2\""),
+            "creator name is exported: {xml}"
+        );
+    }
+
+    #[test]
+    fn an_sq_element_without_items_writes_no_children() {
+        // an SQ stored as a length-0 element (not a DicomSequence)
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_empty(
+            Tag::REFERENCED_IMAGE_SEQUENCE,
+            Vr::Sq,
+        )));
+        let xml = dataset_to_xml(&ds).unwrap();
+        assert!(xml.contains("vr=\"SQ\""), "{xml}");
+        assert!(!xml.contains("<Item"), "{xml}");
+        assert!(!xml.contains("<Value"), "{xml}");
+    }
+
+    #[test]
+    fn a_short_byte_backed_value_keeps_whole_units_only() {
+        // 3 bytes of US: the trailing partial unit is dropped, never indexed
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::ROWS,
+            Vr::Us,
+            Arc::new(radicom::model::buffer::MemoryBuffer::from(vec![
+                0x01, 0x00, 0x02,
+            ])),
+        )));
+        let xml = dataset_to_xml(&ds).unwrap();
+        assert!(xml.contains("<Value number=\"1\">1</Value>"), "{xml}");
+        assert!(
+            !xml.contains("513"),
+            "the partial unit is not decoded: {xml}"
+        );
+    }
+
+    #[test]
+    fn a_byte_backed_string_vr_falls_back_to_lossy_text() {
+        // a byte-backed LO has unit size 1; raw_units_text uses the string branch
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::PATIENT_ID,
+            Vr::Lo,
+            Arc::new(radicom::model::buffer::MemoryBuffer::from(
+                b"PID-9".to_vec(),
+            )),
+        )));
+        let xml = dataset_to_xml(&ds).unwrap();
+        assert!(xml.contains("<Value number=\"1\">PID-9</Value>"), "{xml}");
+    }
+
+    #[test]
+    fn a_byte_backed_person_name_is_decoded_for_export() {
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::PATIENT_NAME,
+            Vr::Pn,
+            Arc::new(radicom::model::buffer::MemoryBuffer::from(
+                b"Doe^Jane".to_vec(),
+            )),
+        )));
+        let xml = dataset_to_xml(&ds).unwrap();
+        assert!(xml.contains("<FamilyName>Doe</FamilyName>"), "{xml}");
+        assert!(xml.contains("<GivenName>Jane</GivenName>"), "{xml}");
+    }
+
+    #[test]
+    fn quotes_apostrophes_and_whitespace_are_escaped_or_preserved() {
+        let mut ds = Dataset::new();
+        ds.insert_str(
+            Tag::INSTITUTION_ADDRESS,
+            Vr::St,
+            "he said \"hi\" & 'bye'\tend",
+        );
+        let xml = dataset_to_xml(&ds).unwrap();
+        assert!(xml.contains("&quot;hi&quot;"), "{xml}");
+        assert!(xml.contains("&apos;bye&apos;"), "{xml}");
+        assert!(xml.contains('\t'), "tab is valid XML text: {xml}");
     }
 }

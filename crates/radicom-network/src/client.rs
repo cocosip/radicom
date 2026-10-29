@@ -164,13 +164,38 @@ impl DicomClient {
     }
 
     async fn finish_request<T>(&mut self, result: Result<T>) -> Result<T> {
-        if let Err(NetworkError::RequestTimedOut { message_id }) = &result {
-            self.emit(ClientEvent::RequestTimedOut {
-                message_id: *message_id,
-            });
-            self.abort().await;
+        if let Err(error) = &result {
+            match error {
+                NetworkError::RequestTimedOut { message_id } => {
+                    self.emit(ClientEvent::RequestTimedOut {
+                        message_id: *message_id,
+                    });
+                    self.abort().await;
+                }
+                // A peer close/abort, IO or protocol error leaves the
+                // association unusable. Keep it and every later request fails
+                // on the same dead socket; drop it so the next request opens a
+                // fresh one (NET-19). Errors that describe the *operation*
+                // rather than the connection keep the association.
+                NetworkError::Reject { .. }
+                | NetworkError::SopClassNotSupported { .. }
+                | NetworkError::ScuRoleNotNegotiated { .. } => {}
+                _ => self.forget_association(),
+            }
         }
         result
+    }
+
+    /// Drops the cached association without any network IO, for failures where
+    /// the stream itself is gone or unusable.
+    fn forget_association(&mut self) {
+        if self.association.take().is_some() {
+            self.emit(ClientEvent::StateChanged {
+                state: ConnectionState::Closed,
+            });
+        }
+        self.sent_on_association = 0;
+        self.last_request = None;
     }
 
     /// True when the current association has reached its request quota (§11.4).
@@ -440,14 +465,16 @@ impl DicomClient {
         if self.reverse_store.is_none() {
             return Err(NetworkError::ReverseStoreHandlerMissing);
         }
-        let mut contexts = vec![PresentationContext::new(
-            1,
-            request.sop_class_uid.clone(),
-            vec![
-                "1.2.840.10008.1.2".to_string(),
-                "1.2.840.10008.1.2.1".to_string(),
-            ],
-        )];
+        // The retrieve context plus one per storage class: the builder hands
+        // out odd IDs through one allocator, so a peer asking for more than the
+        // 128 available contexts gets an error instead of a wrapped ID that
+        // collides with an existing context (NET-22).
+        let syntaxes = vec![
+            "1.2.840.10008.1.2".to_string(),
+            "1.2.840.10008.1.2.1".to_string(),
+        ];
+        let mut context_set = crate::association::ContextSetBuilder::new();
+        context_set.add(request.sop_class_uid.clone(), syntaxes.clone())?;
         // The instances come back as reverse C-STORE requests, so this side
         // must be granted the SCP role for every storage class it will
         // receive: a peer that honours role selection refuses to send them
@@ -463,18 +490,10 @@ impl DicomClient {
         roles.sort_by(|a, b| a.sop_class.cmp(&b.sop_class));
         roles.dedup_by(|a, b| a.sop_class == b.sop_class);
 
-        let mut next_id = 3u8;
         for sop_class in storage_sop_classes {
-            contexts.push(PresentationContext::new(
-                next_id,
-                sop_class.clone(),
-                vec![
-                    "1.2.840.10008.1.2".to_string(),
-                    "1.2.840.10008.1.2.1".to_string(),
-                ],
-            ));
-            next_id = next_id.wrapping_add(2);
+            context_set.add(sop_class.clone(), syntaxes.clone())?;
         }
+        let contexts = context_set.to_wire();
         let (context_id, result) = {
             let association = self.ensure_association_with_roles(contexts, roles).await?;
             let context_id = association
@@ -1298,5 +1317,176 @@ mod tests {
             "an ID this client never sent"
         );
         peer.await.unwrap();
+    }
+
+    async fn echo_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(crate::services::VerificationProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        (addr, handle)
+    }
+
+    #[tokio::test]
+    async fn the_reverse_store_handler_and_abort_shutdown_are_wired_up() {
+        let (addr, server) = echo_server().await;
+        let supplied = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = supplied.clone();
+        let handler: crate::server::ReverseStoreHandler =
+            Arc::new(move |request: &crate::services::CStoreRequest| {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(CStoreResponse::success(request))
+            });
+        let events: Arc<std::sync::Mutex<Vec<ClientEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
+            .with_reverse_store_handler(handler)
+            .with_event_handler(Arc::new(move |event| {
+                sink.lock().unwrap().push(event);
+            }));
+
+        client
+            .send_c_echo(crate::association::sop_class::VERIFICATION)
+            .await
+            .unwrap();
+        client
+            .shutdown(DicomClientCancellationMode::ImmediatelyAbortAssociation)
+            .await;
+        assert_eq!(supplied.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(events.lock().unwrap().contains(&ClientEvent::StateChanged {
+            state: ConnectionState::Closed
+        }));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_c_get_with_too_many_storage_classes_is_refused() {
+        // NET-22: the retrieve context plus one per storage class must come
+        // out of the odd-ID allocator; 128 is the whole available range
+        let mut client = DicomClient::new("SCU", "SCP", "127.0.0.1:1");
+        let request = crate::cget::CGetRequest::study("1.2.3", 1);
+        let classes: Vec<String> = (0..130)
+            .map(|n| format!("1.2.840.10008.5.1.4.1.1.{}", 200 + n))
+            .collect();
+        let error = client
+            .send_c_get(&request, &classes)
+            .await
+            .expect_err("129 contexts do not fit");
+        assert!(
+            error.to_string().contains("presentation context"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_spent_quota_retires_the_association() {
+        let (addr, server) = echo_server().await;
+        let options = DicomClientOptions {
+            max_requests_per_association: Some(1),
+            quota_cooldown: Duration::from_millis(0),
+            ..DicomClientOptions::default()
+        };
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string()).with_options(options);
+        for _ in 0..2 {
+            let response = client
+                .send_c_echo(crate::association::sop_class::VERIFICATION)
+                .await
+                .unwrap();
+            assert_eq!(response.status, crate::dimse::status::SUCCESS);
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_closes_mid_request_is_forgotten() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            crate::test_wire::accept_association(&mut stream).await;
+            // the peer leaves instead of answering the C-ECHO
+            drop(stream);
+        });
+
+        let events: Arc<std::sync::Mutex<Vec<ClientEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string()).with_event_handler(
+            Arc::new(move |event| {
+                sink.lock().unwrap().push(event);
+            }),
+        );
+        let error = client
+            .send_c_echo(crate::association::sop_class::VERIFICATION)
+            .await
+            .expect_err("the peer left");
+        assert!(matches!(
+            error,
+            NetworkError::ClosedPrematurely { .. } | NetworkError::Io(_)
+        ));
+        assert!(events.lock().unwrap().contains(&ClientEvent::StateChanged {
+            state: ConnectionState::Closed
+        }));
+        assert!(
+            client.association.is_none(),
+            "the dead association is dropped"
+        );
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn c_move_through_the_high_level_client() {
+        struct MoveProvider;
+        #[async_trait::async_trait]
+        impl ServiceProvider for MoveProvider {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![crate::association::sop_class::STUDY_ROOT_QR_MOVE.to_string()]
+            }
+            fn on_c_move<'a>(
+                &'a self,
+                request: &'a crate::cmove::CMoveRequest,
+            ) -> futures::stream::BoxStream<'a, Result<crate::cmove::CMoveResponse>> {
+                Box::pin(futures::stream::iter(vec![
+                    Ok(crate::cmove::CMoveResponse::pending(
+                        request,
+                        1,
+                        crate::cmove::SubOperationSummary::default(),
+                    )),
+                    Ok(crate::cmove::CMoveResponse::completed(
+                        request,
+                        crate::cmove::SubOperationSummary::default(),
+                    )),
+                ]))
+            }
+        }
+
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(MoveProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string());
+        let responses = client
+            .send_c_move(&crate::cmove::CMoveRequest::study("1.2.3", "DEST", 1))
+            .await
+            .unwrap();
+        assert_eq!(responses.len(), 2, "one pending and one terminal");
+        assert!(responses[0].is_pending());
+        assert!(!responses.last().unwrap().is_pending());
+        client.release().await;
+        handle.await.unwrap().unwrap();
     }
 }

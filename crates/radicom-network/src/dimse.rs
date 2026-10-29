@@ -176,6 +176,22 @@ impl CommandField {
     pub fn writes_message_id(self) -> bool {
         self.is_request() && self != CommandField::CCancelRq
     }
+
+    /// True when `(0000,0700) Priority` belongs in this command set.
+    ///
+    /// PS3.7 Table E.1-1 puts Priority on the four storage/query requests only
+    /// (C-STORE, C-FIND, C-MOVE, C-GET). Responses, C-ECHO and the N-services
+    /// have no such attribute, and sending one is a conformance defect that a
+    /// strict peer may reject (NET-21).
+    pub fn writes_priority(self) -> bool {
+        matches!(
+            self,
+            CommandField::CStoreRq
+                | CommandField::CFindRq
+                | CommandField::CMoveRq
+                | CommandField::CGetRq
+        )
+    }
 }
 
 /// A DIMSE command message: the typed view of a command dataset (§11.3).
@@ -253,7 +269,10 @@ impl Command {
         Some(out)
     }
 
-    /// Builds the command dataset, recomputing `(0000,0000)` (§11.1).
+    /// Builds the command dataset in wire order (§11.1).
+    ///
+    /// `(0000,0000)` is not stored here: the writer inserts it when the command
+    /// set is encoded, so it can never disagree with the encoded bytes.
     pub fn to_dataset(&self) -> Dataset {
         let mut ds = Dataset::new();
         // required ordering: group length first, then ascending tags
@@ -277,7 +296,10 @@ impl Command {
             // LO is limited to 64 bytes
             ds.insert_str(tag::ERROR_COMMENT, Vr::Lo, truncate_lo(comment));
         }
-        insert_us(&mut ds, tag::PRIORITY, self.priority.code());
+        // PS3.7 Table E.1-1: only the four storage/query requests carry it
+        if self.field.writes_priority() {
+            insert_us(&mut ds, tag::PRIORITY, self.priority.code());
+        }
         if self.no_dataset {
             insert_us(&mut ds, tag::COMMAND_DATA_SET_TYPE, NO_DATA_SET);
         } else {
@@ -330,23 +352,9 @@ impl Command {
             insert_us(&mut ds, tag::NUMBER_OF_WARNING_SUBOPERATIONS, n);
         }
 
-        // (0000,0000) is recomputed by the writer when it encodes the command
-        // set with `keep_group_lengths`; the placeholder keeps tag order right
-        // and makes the dataset self-describing for tests.
-        let mut with_len = ds.clone();
-        insert_ul(&mut with_len, tag::COMMAND_GROUP_LENGTH, 0);
-        let total = radicom::io::writer::DicomWriter::default()
-            .dataset_length(
-                &with_len,
-                &radicom::model::transfer_syntax::syntaxes::IMPLICIT_VR_LITTLE_ENDIAN,
-            )
-            .unwrap_or(0);
-        // the group length element itself is 12 bytes (tag + length + value)
-        insert_ul(
-            &mut ds,
-            tag::COMMAND_GROUP_LENGTH,
-            (total.saturating_sub(12)) as u32,
-        );
+        // The group length is not computed here: the writer recalculates it
+        // when the command set is encoded (NET-15). Encoding it twice per
+        // message was pure overhead.
         ds
     }
 
@@ -464,14 +472,6 @@ fn insert_us(ds: &mut Dataset, tag: Tag, value: u16) -> &mut Dataset {
     )))
 }
 
-/// Inserts a `u32` as a binary UL value.
-fn insert_ul(ds: &mut Dataset, tag: Tag, value: u32) -> &mut Dataset {
-    ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
-        tag,
-        Vr::Ul,
-        Arc::new(MemoryBuffer::from(value.to_le_bytes().to_vec())),
-    )))
-}
 /// Truncates an error comment to the LO length limit of 64 bytes (§11.4).
 pub fn truncate_lo(comment: &str) -> String {
     const LIMIT: usize = 64;
@@ -914,19 +914,46 @@ mod tests {
     fn group_length_counts_the_rest_of_the_group() {
         let mut request = Command::request(CommandField::CStoreRq, 7);
         request.affected_sop_class_uid = Some("1.2.840.10008.5.1.4.1.1.7".into());
-        let ds = request.to_dataset();
+        // the wire form is what matters: the writer computes (0000,0000) at
+        // encode time, and it must cover everything after itself (PS3.5 §7.2)
+        let bytes = crate::server::command_bytes(&request).unwrap();
+        let ds = crate::message::decode_command(&bytes).unwrap();
         let declared: u32 = ds.get(tag::COMMAND_GROUP_LENGTH).unwrap();
-        let total = radicom::io::writer::DicomWriter::default()
-            .dataset_length(
-                &ds,
-                &radicom::model::transfer_syntax::syntaxes::IMPLICIT_VR_LITTLE_ENDIAN,
-            )
-            .unwrap();
         assert_eq!(
-            declared as u64,
-            total - 12,
+            declared as usize,
+            bytes.len() - 12,
             "(0000,0000) covers everything after itself"
         );
+        // NET-15/NET-28: a zero group length is the defect this pins
+        assert!(declared > 0, "the group length is the real body size");
+    }
+
+    #[test]
+    fn priority_is_written_only_where_ps3_7_lists_it() {
+        // PS3.7 Table E.1-1: (0000,0700) belongs to the four storage/query
+        // requests, never to a response, C-ECHO or an N-service (NET-21)
+        let requests = [
+            (CommandField::CStoreRq, true),
+            (CommandField::CFindRq, true),
+            (CommandField::CMoveRq, true),
+            (CommandField::CGetRq, true),
+            (CommandField::CEchoRq, false),
+            (CommandField::CCancelRq, false),
+            (CommandField::CStoreRsp, false),
+            (CommandField::CFindRsp, false),
+            (CommandField::NActionRq, false),
+            (CommandField::NGetRq, false),
+        ];
+        for (field, expected) in requests {
+            let command = Command::request(field, 3);
+            let bytes = crate::server::command_bytes(&command).unwrap();
+            let ds = crate::message::decode_command(&bytes).unwrap();
+            assert_eq!(
+                ds.get::<u16>(tag::PRIORITY).is_ok(),
+                expected,
+                "Priority presence for {field:?}"
+            );
+        }
     }
 
     #[test]
@@ -1263,5 +1290,79 @@ mod tests {
         assert_eq!(back.requested_sop_instance_uid.as_deref(), Some("1.2.3"));
         assert_eq!(back.event_type_id, Some(2));
         assert_eq!(back.action_type_id, Some(1));
+    }
+
+    #[test]
+    fn every_documented_status_code_has_a_description() {
+        // PS3.7 Annex C and PS3.4 status families, as fo-dicom's DicomStatus
+        // table describes them.
+        let codes = [
+            0x0000u16, 0x0001, 0x0107, 0x0116, 0x0106, 0x0110, 0x0111, 0x0112, 0x0113, 0x0114,
+            0x0115, 0x0117, 0x0118, 0x0119, 0x0120, 0x0121, 0x0122, 0x0123, 0x0210, 0x0211, 0x0212,
+            0x0213, 0xFE00, 0xFF00, 0xFF01, 0xA700, 0xA701, 0xA702, 0xA7FF, 0xA801, 0xA9FF, 0xB123,
+            0xC456, 0x1234,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for code in codes {
+            let description = status_description(code);
+            assert!(!description.is_empty());
+            // the generic and the service-class-aware entry point agree unless
+            // the application overrode the wording
+            assert_eq!(
+                Status::new(code).description(),
+                description,
+                "code {code:04X} disagrees between entry points"
+            );
+            if code != 0x1234 {
+                seen.insert(description);
+            }
+        }
+        assert!(seen.len() > 20, "each exact code maps to its own wording");
+        assert_eq!(status_description(0x1234), "Unknown status");
+    }
+
+    #[test]
+    fn status_patterns_use_the_fo_dicom_wildcards() {
+        assert_eq!(status_pattern(0xB123), "Bxxx");
+        assert_eq!(status_pattern(0xC456), "Cxxx");
+        assert_eq!(status_pattern(0xA701), "A7xx");
+        assert_eq!(status_pattern(0xA900), "A9xx");
+        assert_eq!(status_pattern(0x0110), "0110");
+        assert_eq!(Status::new(0xA702).pattern(), "A7xx");
+    }
+
+    #[test]
+    fn an_attribute_identifier_list_that_is_not_an_element_is_rejected() {
+        let mut ds = Dataset::new();
+        insert_us(&mut ds, tag::COMMAND_FIELD, CommandField::NGetRq.code());
+        ds.insert_or_update(radicom::DicomItem::Sequence(radicom::DicomSequence::new(
+            tag::ATTRIBUTE_IDENTIFIER_LIST,
+        )));
+        let error = Command::from_dataset(&ds).expect_err("a sequence is not an AT list");
+        assert!(error.to_string().contains("not an element"), "{error}");
+    }
+
+    #[test]
+    fn an_attribute_identifier_list_that_is_not_binary_is_rejected() {
+        let mut ds = Dataset::new();
+        insert_us(&mut ds, tag::COMMAND_FIELD, CommandField::NGetRq.code());
+        ds.insert_str(tag::ATTRIBUTE_IDENTIFIER_LIST, Vr::Ui, "1.2.3");
+        let error = Command::from_dataset(&ds).expect_err("a text value is not an AT list");
+        assert!(error.to_string().contains("not binary"), "{error}");
+    }
+
+    #[test]
+    fn an_attribute_identifier_list_with_an_odd_length_is_rejected() {
+        let mut ds = Dataset::new();
+        insert_us(&mut ds, tag::COMMAND_FIELD, CommandField::NGetRq.code());
+        ds.insert_or_update(radicom::DicomItem::Element(
+            radicom::DicomElement::new_bytes(
+                tag::ATTRIBUTE_IDENTIFIER_LIST,
+                Vr::At,
+                std::sync::Arc::new(radicom::model::buffer::MemoryBuffer::from(vec![0u8; 3])),
+            ),
+        ));
+        let error = Command::from_dataset(&ds).expect_err("3 bytes is not a tag list");
+        assert!(error.to_string().contains("invalid length"), "{error}");
     }
 }

@@ -372,4 +372,34 @@ mod tests {
         assert_eq!(n, 256);
         assert_eq!(t.into_inner(), payload);
     }
+
+    #[test]
+    fn endian_word_accessors_and_chunked_copy() {
+        use std::io::Cursor;
+        let mut words =
+            ByteSourceReader::new(Cursor::new(vec![0u8, 0, 0, 0, 0, 0, 0, 42]), Endian::Big);
+        assert_eq!(words.read_u64().unwrap(), 42);
+        let mut float =
+            ByteSourceReader::new(Cursor::new(1.0f32.to_be_bytes().to_vec()), Endian::Big);
+        assert_eq!(float.read_f32().unwrap(), 1.0);
+        let inner = ByteSourceReader::new(Cursor::new(b"x".to_vec()), Endian::Little).into_inner();
+        assert_eq!(inner.get_ref().len(), 1);
+
+        let mut target = ByteTargetWriter::new(Vec::new(), Endian::Big);
+        target.write_u64(1).unwrap();
+        target.write_f64(2.5).unwrap();
+        assert_eq!(target.into_inner().len(), 16);
+
+        let payload: Vec<u8> = (0..10).collect();
+        let buf: SharedBuffer = Arc::new(MemoryBuffer::from(payload.clone()));
+        let mut chunked = ByteTargetWriter::new(Vec::new(), Endian::Little);
+        assert_eq!(
+            chunked.write_buffer_with_chunk(buf.as_ref(), 3).unwrap(),
+            10
+        );
+        assert_eq!(chunked.into_inner(), payload);
+        // a zero chunk size is treated as one byte, never an infinite loop
+        let mut zero = ByteTargetWriter::new(Vec::new(), Endian::Little);
+        assert_eq!(zero.write_buffer_with_chunk(buf.as_ref(), 0).unwrap(), 10);
+    }
 }

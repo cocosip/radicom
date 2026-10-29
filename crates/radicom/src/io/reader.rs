@@ -439,9 +439,11 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
     fn enter(&mut self) -> Result<(), Error> {
         self.depth += 1;
         if self.depth > self.options.max_depth {
+            // CORE-23: report where the overflow happened, not a placeholder
+            let position = self.position().unwrap_or(0);
             return Err(Error::Reader(ReaderError::TooDeep {
                 limit: self.options.max_depth,
-                position: 0,
+                position,
             }));
         }
         Ok(())
@@ -609,6 +611,20 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                     buffer,
                 });
             }
+            // CORE-20 / fo-dicom `DicomReader.ParseValue`: an unknown tag with
+            // an undefined length is a sequence. With implicit VR there is no
+            // VR on the wire, so an unresolved (UN) non-private tag cannot be
+            // a known binary VR - it is an anonymous SQ, not pixel data.
+            if vr == Vr::Un && !explicit {
+                return Ok(Step::Sequence {
+                    raw,
+                    tag,
+                    pos: value_start,
+                    defined: None,
+                    private_probe: false,
+                    cp246: false,
+                });
+            }
             return Ok(Step::Fragments {
                 raw,
                 tag,
@@ -616,6 +632,25 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                 pos: value_start,
             });
         };
+
+        // FILE-02 `SkipLargeTags`: like fo-dicom's FileByteSource, a skipped
+        // large value leaves *no* element in the dataset (an empty placeholder
+        // would be indistinguishable from a genuinely empty attribute).
+        if self.options.large_policy == LargeValuePolicy::Skip
+            && length as u64 >= self.options.large_object_size
+        {
+            if self.source.require(length as u64).is_err() {
+                if self.options.partial_on_eof {
+                    self.suspended = true;
+                    return Ok(Step::End(LevelEnd::Eof));
+                }
+                return Ok(Step::End(LevelEnd::Eof));
+            }
+            self.source
+                .skip(length as u64)
+                .map_err(|e| io_err(e, value_start))?;
+            return Ok(Step::Continue);
+        }
 
         // A truncated *value* is a real error (its declared length is
         // known); only truncated headers end a level gracefully (T8).
@@ -700,6 +735,20 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                         }));
                     }
                     let first = offset_table.is_none();
+                    if !first
+                        && self.options.large_policy == LargeValuePolicy::Skip
+                        && length as u64 >= self.options.large_object_size
+                    {
+                        // same policy as elements: a skipped fragment is not
+                        // stored at all (fo-dicom hands the observer no buffer)
+                        if self.source.require(length as u64).is_err() {
+                            break;
+                        }
+                        self.source
+                            .skip(length as u64)
+                            .map_err(|e| io_err(e, pos))?;
+                        continue;
+                    }
                     // Fragment 0 is the basic offset table: its entries are
                     // 32-bit values in transfer-syntax byte order, so read it
                     // without the pixel VR's word swap and decode it explicitly
@@ -1061,5 +1110,133 @@ mod tests {
             }
             other => panic!("expected ReaderError::Other(deflate), got {other:?}"),
         }
+    }
+
+    fn read_with(
+        bytes: &[u8],
+        options: DicomReader,
+    ) -> Result<crate::model::dataset::Dataset, Error> {
+        use crate::io::dataset_builder::DatasetBuilder;
+        let syntax = (*crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN).clone();
+        let mut source =
+            ByteSourceReader::new(std::io::Cursor::new(bytes.to_vec()), syntax.endian());
+        let mut builder = DatasetBuilder::with_transfer_syntax(syntax.clone());
+        options.read(&mut source, &syntax, &mut builder, None)?;
+        Ok(builder.into_dataset())
+    }
+
+    fn read_implicit(bytes: &[u8]) -> Result<crate::model::dataset::Dataset, Error> {
+        use crate::io::dataset_builder::DatasetBuilder;
+        let syntax = crate::model::transfer_syntax::syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone();
+        let mut source =
+            ByteSourceReader::new(std::io::Cursor::new(bytes.to_vec()), syntax.endian());
+        let mut builder = DatasetBuilder::with_transfer_syntax(syntax.clone());
+        DicomReader::default().read(&mut source, &syntax, &mut builder, None)?;
+        Ok(builder.into_dataset())
+    }
+
+    #[test]
+    fn implicit_unknown_undefined_length_tag_is_read_as_a_sequence() {
+        // CORE-20: implicit VR, unknown non-private tag (0022,0001) with
+        // undefined length, one empty item and a sequence delimiter.
+        let mut bytes = vec![0xF2, 0x00, 0x01, 0x00, 0xFF, 0xFF, 0xFF, 0xFF];
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 0, 0, 0, 0]);
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0xDD, 0xE0, 0, 0, 0, 0]);
+        // a trailing PN proves the stream stayed aligned after the sequence
+        bytes.extend_from_slice(&[0x10, 0x00, 0x10, 0x00, 0x02, 0x00, 0x00, 0x00, b'A', b'B']);
+        let ds = read_implicit(&bytes).unwrap();
+        match ds.item(&Tag::new(0x00F2, 0x0001)) {
+            Some(crate::model::item::DicomItem::Sequence(sequence)) => {
+                assert_eq!(sequence.items().len(), 1, "one empty item");
+            }
+            other => { let tags: Vec<String> = ds.items().map(|i| i.tag().to_string()).collect(); panic!("expected an anonymous sequence, got {other:?} in {tags:?}") }
+        }
+        assert_eq!(ds.get_str(Tag::PATIENT_NAME).unwrap().trim(), "AB");
+    }
+
+    #[test]
+    fn truncated_headers_end_the_level_cleanly() {
+        // tag + only part of the VR field
+        read_with(&[0x10, 0x00, 0x10, 0x00, b'P'], DicomReader::default()).unwrap();
+        // VR + reserved bytes, but the length field is short
+        read_with(
+            &[0x10, 0x00, 0x10, 0x00, b'P', b'N', 0x00, 0x00, 0x02],
+            DicomReader::default(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn undefined_length_fragment_and_unexpected_tag_are_errors() {
+        let mut bytes = vec![
+            0x44, 0x00, 0x01, 0x10, b'U', b'N', 0, 0, 0xFF, 0xFF, 0xFF, 0xFF,
+        ];
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 0xFF, 0xFF, 0xFF, 0xFF]);
+        assert!(read_with(&bytes, DicomReader::default()).is_err());
+
+        let mut bytes = vec![
+            0x44, 0x00, 0x01, 0x10, b'U', b'N', 0, 0, 0xFF, 0xFF, 0xFF, 0xFF,
+        ];
+        bytes.extend_from_slice(&[0x10, 0x00, 0x10, 0x00, b'P', b'N', 0x02, 0x00, b'X', b' ']);
+        assert!(read_with(&bytes, DicomReader::default()).is_err());
+    }
+
+    #[test]
+    fn empty_and_skipped_offset_tables_are_tolerated() {
+        // encapsulated value with no items: begin/end announced, no fragments
+        let mut bytes = vec![
+            0xE0, 0x7F, 0x10, 0x00, b'O', b'B', 0, 0, 0xFF, 0xFF, 0xFF, 0xFF,
+        ];
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0xDD, 0xE0, 0, 0, 0, 0]);
+        let ds = read_with(&bytes, DicomReader::default()).unwrap();
+        assert_eq!(ds.value_count(Tag::PIXEL_DATA).unwrap(), 0);
+
+        // a basic offset table above the skip threshold is skipped, not read
+        let mut bytes = vec![
+            0xE0, 0x7F, 0x10, 0x00, b'O', b'B', 0, 0, 0xFF, 0xFF, 0xFF, 0xFF,
+        ];
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 0x08, 0x00, 0x00, 0x00]);
+        bytes.extend_from_slice(&[0; 8]);
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0xDD, 0xE0, 0, 0, 0, 0]);
+        let options = DicomReader {
+            large_object_size: 4,
+            large_policy: LargeValuePolicy::Skip,
+            ..DicomReader::default()
+        };
+        assert!(read_with(&bytes, options).is_ok());
+    }
+
+    #[test]
+    fn truncated_fragment_value_keeps_the_readable_prefix() {
+        let mut bytes = vec![
+            0xE0, 0x7F, 0x10, 0x00, b'O', b'B', 0, 0, 0xFF, 0xFF, 0xFF, 0xFF,
+        ];
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 0x00, 0x00, 0x00, 0x00]);
+        // fragment claims 8 bytes but only 3 are present
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 0x08, 0x00, 0x00, 0x00]);
+        bytes.extend_from_slice(&[1, 2, 3]);
+        let options = DicomReader {
+            partial_on_eof: true,
+            ..DicomReader::default()
+        };
+        assert!(read_with(&bytes, options).is_ok());
+    }
+
+    #[test]
+    fn private_undefined_value_without_items_is_skipped_to_the_delimiter() {
+        let mut bytes = vec![
+            0x09, 0x00, 0x01, 0x10, b'U', b'N', 0, 0, 0xFF, 0xFF, 0xFF, 0xFF,
+        ];
+        bytes.extend_from_slice(b"junk");
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0xDD, 0xE0, 0, 0, 0, 0]);
+        bytes.extend_from_slice(&[0x10, 0x00, 0x10, 0x00, b'P', b'N', 0x02, 0x00, b'X', b' ']);
+        let ds = read_with(&bytes, DicomReader::default()).unwrap();
+        assert_eq!(ds.get_str(Tag::PATIENT_NAME).unwrap().trim(), "X");
+    }
+
+    #[test]
+    fn non_eof_io_errors_map_to_a_typed_reader_error() {
+        let mapped = io_err(std::io::Error::other("boom"), 7);
+        assert!(matches!(mapped, Error::Reader(ReaderError::Other(_))));
     }
 }

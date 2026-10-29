@@ -50,9 +50,10 @@ pub async fn read_pdu<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Pdu
         .map_err(NetworkError::Io)?;
 
     let length = u32::from_be_bytes([header[2], header[3], header[4], header[5]]);
-    if length > MAX_PDU_SIZE {
+    // the advertised maximum is the whole PDU: 6-byte header plus body
+    if length > MAX_PDU_SIZE - HEADER_LEN as u32 {
         return Err(NetworkError::protocol(
-            "PDU length exceeds the 262144-byte receive limit",
+            "PDU exceeds the 262144-byte receive limit",
         ));
     }
     // One allocation sized from the validated length field, then read the body
@@ -116,9 +117,9 @@ impl PduReader {
             return Ok(None);
         }
         let length = u32::from_be_bytes([self.buf[2], self.buf[3], self.buf[4], self.buf[5]]);
-        if length > MAX_PDU_SIZE {
+        if length > MAX_PDU_SIZE - HEADER_LEN as u32 {
             return Err(NetworkError::protocol(
-                "PDU length exceeds the 262144-byte receive limit",
+                "PDU exceeds the 262144-byte receive limit",
             ));
         }
         let total = HEADER_LEN + length as usize;
@@ -442,15 +443,16 @@ mod tests {
     #[tokio::test]
     async fn a_pdu_at_the_advertised_max_is_accepted() {
         // `encode_associate` never advertises more than MAX_PDU_SIZE, so a peer
-        // may legitimately send a P-DATA-TF of exactly that size: it must be
-        // read, not rejected.
+        // may legitimately send a whole PDU of exactly that size (header
+        // included): it must be read, not rejected.
         let (mut client, mut server) = duplex(2 * MAX_PDU_SIZE as usize);
+        let body_len = MAX_PDU_SIZE - HEADER_LEN as u32;
         let mut frame = vec![0x04, 0x00];
-        frame.extend_from_slice(&MAX_PDU_SIZE.to_be_bytes());
-        let pdv_len = MAX_PDU_SIZE - 4;
+        frame.extend_from_slice(&body_len.to_be_bytes());
+        let pdv_len = body_len - 4;
         frame.extend_from_slice(&pdv_len.to_be_bytes());
         frame.extend_from_slice(&[0x01, 0x03]); // context 1, command + last
-        frame.resize(HEADER_LEN + MAX_PDU_SIZE as usize, 0x00);
+        frame.resize(HEADER_LEN + body_len as usize, 0x00);
         client.write_all(&frame).await.unwrap();
 
         match read_pdu(&mut server)
@@ -463,6 +465,39 @@ mod tests {
             }
             other => panic!("expected PData, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_truncated_frame_at_eof_is_an_io_error() {
+        // A header claims 100 bytes but the peer sends 10 and closes: the
+        // framer must report an EOF inside a frame, not parse garbage.
+        let (mut client, mut server) = duplex(64);
+        let mut frame = vec![0x04, 0x00, 0x00, 0x00, 0x00, 100];
+        frame.extend_from_slice(&[0x00; 4]);
+        client.write_all(&frame).await.unwrap();
+        drop(client);
+
+        // the cancel-safe framer is what the associations use
+        match PduReader::new().read_pdu(&mut server).await {
+            Err(NetworkError::Io(error)) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof)
+            }
+            other => panic!("expected an early-EOF error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_dataset_that_cannot_be_decoded_is_an_io_error() {
+        // the deflated syntax inflates first: garbage fails there, and the
+        // decoder reports it as an IO error rather than a panic
+        let syntax =
+            radicom::model::transfer_syntax::syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let error = crate::message::decode_dataset(&[0xFF; 8], &syntax)
+            .expect_err("garbage is not a deflate stream");
+        assert!(matches!(error, NetworkError::Io(_)), "got {error:?}");
+
+        // a truncated implicit command set is tolerated by the lenient parser
+        let _ = crate::message::decode_command(&[0x08, 0x00, 0x00]);
     }
 
     #[tokio::test]

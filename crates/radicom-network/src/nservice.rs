@@ -193,7 +193,13 @@ impl NServiceResponse {
             affected_sop_instance_uid: command.affected_sop_instance_uid.clone(),
             event_type_id: command.event_type_id,
             action_type_id: command.action_type_id,
-            status: command.status.unwrap_or(crate::dimse::status::SUCCESS),
+            // PS3.7: Status is mandatory in a response. A peer that omits it
+            // must not be read as a success: every other service defaults a
+            // missing status to ProcessingFailure, and a fail-open answer here
+            // would report a malformed response as a completed operation (NET-08).
+            status: command
+                .status
+                .unwrap_or(crate::dimse::status::PROCESSING_FAILURE),
             dataset,
         }
     }

@@ -180,27 +180,33 @@ pub trait FromElement: Sized {
 
 /// Picks the requested `\`-separated part (or the joined whole when
 /// `index` is `None`).
+///
+/// An indexed read splits the value on demand instead of cloning it and
+/// collecting every part first (review CORE-12).
 fn select(e: &DicomElement, index: Option<usize>) -> Result<String, Error> {
-    let value = match &e.value {
-        ElementValue::Str(s) => s.clone(),
+    use std::borrow::Cow;
+    let value: Cow<'_, str> = match &e.value {
+        ElementValue::Str(s) => Cow::Borrowed(s.as_str()),
         ElementValue::Bytes(b) => {
             // lossy text view over binary data (documented lenient read)
-            String::from_utf8_lossy(&b.data()?).into_owned()
+            Cow::Owned(String::from_utf8_lossy(&b.data()?).into_owned())
         }
     };
     match index {
-        None => Ok(value),
+        None => Ok(value.into_owned()),
         Some(i) => {
-            let parts: Vec<&str> = if value.is_empty() {
-                Vec::new()
-            } else {
-                value.split('\\').collect()
-            };
-            parts.get(i).map(|s| s.to_string()).ok_or_else(|| {
+            if value.is_empty() {
+                return Err(Error::Data(DataError::IndexOutOfRange {
+                    tag: (&e.tag).into(),
+                    index: i,
+                    count: 0,
+                }));
+            }
+            value.split('\\').nth(i).map(str::to_string).ok_or_else(|| {
                 Error::Data(DataError::IndexOutOfRange {
                     tag: (&e.tag).into(),
                     index: i,
-                    count: parts.len(),
+                    count: value.split('\\').count(),
                 })
             })
         }
@@ -398,11 +404,27 @@ impl FromElement for DtPoint {
 
 impl<T: FromElement> FromElement for Vec<T> {
     fn from_element(e: &DicomElement, _index: Option<usize>) -> Result<Self, Error> {
-        let count = if e.vr().is_string() {
-            e.count()
-        } else {
-            e.count().max(1)
-        };
+        // Split a string value once and convert each part in place instead of
+        // re-splitting the whole value per element (review CORE-12).
+        if e.vr().is_string() {
+            if let ElementValue::Str(s) = e.value() {
+                if s.is_empty() {
+                    return Ok(Vec::new());
+                }
+                return s
+                    .split('\\')
+                    .map(|part| {
+                        let one = DicomElement {
+                            tag: e.tag.clone(),
+                            vr: e.vr(),
+                            value: ElementValue::Str(part.to_string()),
+                        };
+                        T::from_element(&one, None)
+                    })
+                    .collect();
+            }
+        }
+        let count = e.count().max(1);
         (0..count).map(|i| T::from_element(e, Some(i))).collect()
     }
 }
@@ -581,6 +603,192 @@ mod tests {
         // UI pads with NUL
         let ui_odd = el(Vr::Ui, "1.2");
         assert_eq!(&*ui_odd.encoded().data().unwrap(), b"1.2\x00");
+    }
+
+    #[test]
+    fn element_value_accessor_mismatches_are_none() {
+        assert!(el(Vr::Lo, "x").value().as_buffer().is_none());
+        let bytes = DicomElement::new_bytes(
+            Tag::ROWS,
+            Vr::Us,
+            Arc::new(MemoryBuffer::from(vec![1u8, 0])),
+        );
+        assert!(bytes.value().as_str().is_none());
+        assert!(!bytes.value().is_empty());
+        assert_eq!(bytes.string_parts(), Vec::<&str>::new());
+        assert!(el(Vr::Lo, "").string_parts().is_empty());
+        assert_ne!(
+            ElementValue::Str("a".into()),
+            ElementValue::Bytes(Arc::new(MemoryBuffer::from(b"a".to_vec())))
+        );
+    }
+
+    #[test]
+    fn indexed_read_of_an_empty_value_reports_zero_count() {
+        let err = el(Vr::Lo, "").get::<String>(Some(0)).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Data(DataError::IndexOutOfRange {
+                count: 0,
+                index: 0,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn integer_into_element_covers_every_vr_branch() {
+        let t = Tag::PATIENT_ID;
+        assert_eq!(
+            u16::into_element(42u16, t.clone(), Vr::Is).string_value(),
+            "42"
+        );
+        assert_eq!(
+            i8::into_element(-3i8, t.clone(), Vr::Ds).string_value(),
+            "-3"
+        );
+        let e = i32::into_element(300i32, t.clone(), Vr::Us);
+        assert_eq!(e.first::<u16>().unwrap(), 300);
+        let e = i16::into_element(-2i16, t.clone(), Vr::Ss);
+        assert_eq!(e.first::<i16>().unwrap(), -2);
+        let e = i64::into_element(70_000i64, t.clone(), Vr::Ul);
+        assert_eq!(e.first::<u32>().unwrap(), 70_000);
+        let e = i32::into_element(-5i32, t.clone(), Vr::Sl);
+        assert_eq!(e.first::<i32>().unwrap(), -5);
+        let e = u8::into_element(1u8, t.clone(), Vr::Sv);
+        assert_eq!(e.first::<i64>().unwrap(), 1);
+        let e = u8::into_element(1u8, t.clone(), Vr::Uv);
+        assert_eq!(e.first::<u64>().unwrap(), 1);
+        assert_eq!(u8::into_element(7u8, t, Vr::Lo).string_value(), "7");
+    }
+
+    #[test]
+    fn float_date_and_buffer_into_element() {
+        let t = Tag::PATIENT_ID;
+        let e = f32::into_element(1.5f32, t.clone(), Vr::Fl);
+        assert_eq!(e.first::<f32>().unwrap(), 1.5);
+        let e = f64::into_element(2.5f64, t.clone(), Vr::Fd);
+        assert_eq!(e.first::<f64>().unwrap(), 2.5);
+        assert_eq!(
+            f64::into_element(2.5f64, t.clone(), Vr::Ds).string_value(),
+            "2.5"
+        );
+
+        let d = NaiveDate::from_ymd_opt(2024, 3, 5).unwrap();
+        assert_eq!(d.into_element(t.clone(), Vr::Da).string_value(), "20240305");
+        assert!(d
+            .into_element(t.clone(), Vr::Dt)
+            .string_value()
+            .starts_with("20240305"));
+        assert_eq!(d.into_element(t.clone(), Vr::Lo).string_value(), "20240305");
+        let time = NaiveTime::from_hms_opt(10, 30, 15).unwrap();
+        assert_eq!(
+            time.into_element(t.clone(), Vr::Tm).string_value(),
+            "103015"
+        );
+        let point = DtPoint {
+            naive: d.and_hms_opt(10, 30, 15).unwrap(),
+            offset: None,
+        };
+        assert!(point
+            .into_element(t.clone(), Vr::Dt)
+            .string_value()
+            .starts_with("20240305103015"));
+
+        let bytes = vec![1u8, 2];
+        assert_eq!(
+            bytes
+                .into_element(t.clone(), Vr::Ob)
+                .value()
+                .as_buffer()
+                .unwrap()
+                .size(),
+            2
+        );
+        let shared: SharedBuffer = Arc::new(MemoryBuffer::from(b"ab".to_vec()));
+        assert_eq!(
+            shared
+                .into_element(t.clone(), Vr::Ob)
+                .value()
+                .as_buffer()
+                .unwrap()
+                .size(),
+            2
+        );
+        assert_eq!(
+            (*Uid::parse("1.2.3"))
+                .clone()
+                .into_element(t.clone(), Vr::Ui)
+                .string_value(),
+            "1.2.3"
+        );
+        let ts = Arc::clone(&crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN);
+        assert_eq!(
+            ts.into_element(t.clone(), Vr::Ui).string_value(),
+            "1.2.840.10008.1.2.1"
+        );
+        let pn = PersonName::default();
+        assert_eq!(pn.into_element(t.clone(), Vr::Pn).string_value(), "");
+        let parts = vec!["A".to_string(), "B".to_string()];
+        assert_eq!(parts.into_element(t, Vr::Lo).string_value(), "A\\B");
+    }
+
+    #[test]
+    fn f32_and_options_read_every_numeric_vr() {
+        let t = Tag::ROWS;
+        let mk = |vr: Vr, bytes: Vec<u8>| {
+            DicomElement::new_bytes(t.clone(), vr, Arc::new(MemoryBuffer::from(bytes)))
+        };
+        assert_eq!(
+            mk(Vr::Fl, 1.5f32.to_le_bytes().to_vec())
+                .first::<f32>()
+                .unwrap(),
+            1.5
+        );
+        assert_eq!(
+            mk(Vr::Fd, 2.5f64.to_le_bytes().to_vec())
+                .first::<f32>()
+                .unwrap(),
+            2.5
+        );
+        assert_eq!(
+            mk(Vr::Ul, 7u32.to_le_bytes().to_vec())
+                .first::<f32>()
+                .unwrap(),
+            7.0
+        );
+        assert_eq!(
+            mk(Vr::Sl, (-7i32).to_le_bytes().to_vec())
+                .first::<f32>()
+                .unwrap(),
+            -7.0
+        );
+        assert_eq!(
+            mk(Vr::Uv, 7u64.to_le_bytes().to_vec())
+                .first::<f32>()
+                .unwrap(),
+            7.0
+        );
+        assert_eq!(
+            mk(Vr::Sv, 7i64.to_le_bytes().to_vec())
+                .first::<f32>()
+                .unwrap(),
+            7.0
+        );
+        assert_eq!(
+            mk(Vr::Us, 7u16.to_le_bytes().to_vec())
+                .first::<f32>()
+                .unwrap(),
+            7.0
+        );
+        assert_eq!(el(Vr::Is, "12").first::<f32>().unwrap(), 12.0);
+        assert_eq!(el(Vr::Ds, "1.25").first::<f32>().unwrap(), 1.25);
+
+        let uid = el(Vr::Ui, "1.2.3");
+        let got: Option<Uid> = uid.first().unwrap();
+        assert_eq!(got.unwrap().value(), "1.2.3");
+        let none: Option<u32> = el(Vr::Ds, "x").first().unwrap();
+        assert!(none.is_none());
     }
 }
 
@@ -811,5 +1019,97 @@ impl IntoElement for SharedBuffer {
     }
     fn into_element(self, tag: Tag, vr: Vr) -> DicomElement {
         DicomElement::new_bytes(tag, vr, self)
+    }
+}
+
+#[cfg(test)]
+mod extra_tests {
+    use super::*;
+    use crate::model::person_name::PersonName;
+    use crate::model::transfer_syntax::syntaxes;
+    use crate::model::uid::Uid;
+    use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+
+    fn t(i: u16) -> Tag {
+        Tag::new(0x0009, i)
+    }
+
+    #[test]
+    fn every_into_element_impl_produces_an_element() {
+        assert_eq!(
+            "a".to_string().into_element(t(1), Vr::Lo).string_value(),
+            "a"
+        );
+        let multi = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(multi.into_element(t(2), Vr::Lo).string_value(), "a\\b");
+        assert_eq!(Uid::parse("1.2.3").preferred_vr(), Some(Vr::Ui));
+        assert!(Uid::parse("1.2.3")
+            .as_ref()
+            .clone()
+            .into_element(t(3), Vr::Ui)
+            .string_value()
+            .contains("1.2.3"));
+
+        let ts = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        assert_eq!(ts.clone().preferred_vr(), Some(Vr::Ui));
+        assert!(ts
+            .into_element(t(4), Vr::Ui)
+            .string_value()
+            .contains("1.2.840.10008.1.2.1"));
+
+        let person = PersonName::parse("Doe^John");
+        assert_eq!(person.preferred_vr(), Some(Vr::Pn));
+        assert!(person
+            .clone()
+            .into_element(t(5), Vr::Pn)
+            .string_value()
+            .contains("Doe"));
+
+        let date = NaiveDate::from_ymd_opt(2024, 3, 5).unwrap();
+        assert_eq!(date.preferred_vr(), Some(Vr::Da));
+        assert_eq!(date.into_element(t(6), Vr::Da).string_value(), "20240305");
+        assert!(date
+            .into_element(t(7), Vr::Dt)
+            .string_value()
+            .starts_with("20240305"));
+        let time = NaiveTime::from_hms_opt(10, 30, 15).unwrap();
+        assert_eq!(time.preferred_vr(), Some(Vr::Tm));
+        assert_eq!(time.into_element(t(8), Vr::Tm).string_value(), "103015");
+        let point = DtPoint {
+            naive: NaiveDateTime::new(date, time),
+            offset: None,
+        };
+        assert_eq!(point.preferred_vr(), Some(Vr::Dt));
+        assert!(point
+            .into_element(t(9), Vr::Dt)
+            .string_value()
+            .starts_with("20240305"));
+
+        assert_eq!(Vec::<u8>::new().preferred_vr(), Some(Vr::Ob));
+        assert_eq!(
+            vec![1u8, 2]
+                .into_element(t(10), Vr::Ob)
+                .value()
+                .as_buffer()
+                .unwrap()
+                .size(),
+            2
+        );
+        let shared: SharedBuffer = Arc::new(MemoryBuffer::from(vec![3u8]));
+        assert_eq!(shared.preferred_vr(), Some(Vr::Ob));
+        assert_eq!(
+            shared
+                .into_element(t(11), Vr::Ob)
+                .value()
+                .as_buffer()
+                .unwrap()
+                .size(),
+            1
+        );
+
+        // reading a UID back through FromElement
+        let element = DicomElement::new_str(t(12), Vr::Ui, "1.2.840.10008.1.2.1");
+        let uid = <Uid as FromElement>::from_element(&element, None).unwrap();
+        assert_eq!(uid.value(), "1.2.840.10008.1.2.1");
     }
 }
