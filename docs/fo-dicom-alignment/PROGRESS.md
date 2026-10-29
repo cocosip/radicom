@@ -67,6 +67,7 @@
 | 04 §3.6 `anonymize` 拉入 `regex` | 已修复 | `41fa333`；独立 `regex-rules` feature |
 | 01 §1.3 `CopyTo(dest, masked)` / tag 列表 | 已实现 | `34955d5`；`copy_to_masked`/`copy_tags` |
 | 04 §1 `DicomDirectory::validate` / 环保护 | 已实现 | `DicomDirectory::validate`；`walk` 去重防环；`a_parent_cycle_is_reported_and_walk_terminates` |
+| 03 §1.4 状态码描述可扩展注册 | 已实现 | `6a6a43b`；`register_status_description`（对齐 `AddKnownDicomStatuses`） |
 
 > 截至本轮，五份报告中**已没有“缺失”行**：每一条要么已实现，要么明确改为“有意不实现/设计边界”
 > （如完整 regex 子集、Socket 级超时、每服务独立 provider trait、命令/数据发送批处理、图像彩色 icon
@@ -121,3 +122,8 @@
 - `DicomDirectory::validate` + `walk` 去重防环（未提交编号，见该轮末尾提交）。
 - 文档状态校正：N-SET Modification List（走请求 Dataset）、FileSetID 校验、AutoValidate、
   ProgressFilesCount、三处 SCP/provider 与测试快照项。
+
+## 本轮（2026-10-29，第 5 轮）新增
+
+- `6a6a43b` `register_status_description`（可扩展状态描述，对齐 `AddKnownDicomStatuses`）。
+- 文档：状态码分类/常量/描述行更新；确认 DSC 同步。
