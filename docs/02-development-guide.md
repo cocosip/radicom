@@ -361,13 +361,15 @@ windows make it a different code path.
 
 | Stage | Trigger | Content |
 |---|---|---|
-| fmt / clippy | every push | `rustfmt` + clippy `-D warnings` |
-| test | every push | unit + integration, default and all-features |
-| msrv | every push | MSRV (1.89) build |
-| docs | every push | rustdoc build |
-| fuzz | nightly | both fuzz targets |
-| interop | nightly, self-hosted | DCMTK / fo-dicom matrix |
-| bench | nightly or tag | compare against baseline |
+| clippy | every push (CI) | clippy `-D warnings` |
+| test | every push (CI) | unit + integration, default and all-features |
+| msrv | every push (CI) | MSRV (1.89) build |
+| docs | every push (CI) | rustdoc build |
+| package | every push (CI) | `cargo package --list` metadata/license checks |
+| fuzz | local/manual | both fuzz targets |
+| interop | local / self-hosted | DCMTK / fo-dicom matrix |
+| bench | local/manual | `cargo bench` against a baseline |
+| coverage | local/manual | `cargo llvm-cov` with `llvm-tools-preview`; current production line coverage **90.03%** (core 90.19%, network 91.30%, json 76.76%) |
 
 ### 5.10 Conventions
 
