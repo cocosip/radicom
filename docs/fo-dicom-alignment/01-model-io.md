@@ -78,7 +78,7 @@
 | `Add` / `AddOrUpdate` / `AddOrUpdate(VR, tag, values)` | 🟡 | `insert` / `insert_or_update` / `insert_value` | `dataset.rs:215`、`:237`、`:246`；缺 fo-dicom 那个"显式指定 VR 覆盖字典"的重载 |
 | `AddOrUpdate` 对私有 tag 的 creator 校验 | 🟡 | `resolve_private_write`（`dataset.rs:464`） | 字典式私有 tag 会自动分配 creator block，并把元素/序列/片段重绑定到具体 block；creator block 耗尽时仍受 `insert_or_update` 无错误返回值的 API 限制 |
 | `GetPrivateTag(tag, create)` | ✅ | `dataset.rs:316` | |
-| `GetCodeItem` / `GetMeasuredValue` / `GetReferencedSOP`（SR 辅助） | ❌ | — | Radicom 的 SR 在 `sr/` 模块（不在本次范围），`Dataset` 无这些便捷方法 |
+| `GetCodeItem` / `GetMeasuredValue` / `GetReferencedSOP`（SR 辅助） | ⛔（有意分层） | `sr/code_item.rs` `CodeItem::read_from`、`sr/content_item.rs` `MeasuredValue::read_from`/`ReferencedSop::read_from` | 读取逻辑都在 `sr/` 模块；不在 `Dataset` 上加重导出，避免 `model` 反向依赖 `sr` |
 | `FunctionalGroupValues(frame)` | ✅ | `dataset.rs:775` `functional_groups` | 返回临时 Dataset，语义一致 |
 | `CopyTo(dest, masked)` | ✅ | `dataset.rs` `copy_to_masked` / `copy_tags` | 支持按 `MaskedTag` 过滤与按 tag 列表复制（顶层，fo-dicom 语义） |
 | `Remove(Func<DicomItem,bool>)` | ✅ | `dataset.rs:280` `retain` | 语义等价（谓词签名不同） |
