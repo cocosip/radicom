@@ -195,6 +195,8 @@
 - **网络 / 状态码表**：`status_description` 覆盖 PS3.7 Annex C 通用码与 `A7xx`/`A9xx`/`Bxxx`/`Cxxx` 家族；
   新增 `status_pattern` 与 `Status::pattern`（fo-dicom 通配串）；补齐 `status` 常量。修正 `classify`
   把 `0x0106` 等 DIMSE-N 失败码误判为 Pending 的缺陷（仅 `FF00`/`FF01` 为 Pending）。
+- **网络 / 发送攒批**：新增 `transport::write_pdus` 与 `server::write_pdata_batch`，把一条消息的分片
+  P-DATA 编码进一个缓冲后单次 `write_all`（按消息攒批、减少 syscall）；CEcho/CStore/CFind/CMove/CGet 请求路径已接入。
 - .NET 专属抽象，Rust 不适用（按能力已覆盖）→ `INetworkManager`、`DicomTimeout`、`NetworkStreamCreationOptions`、
   `IImage`/`IImageManager`、`IPixelData` 接口、每服务独立 provider 接口、`DirectoryRecord` 指针、`CacheType`、`ArrayPool`。
 

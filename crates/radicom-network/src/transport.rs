@@ -70,6 +70,21 @@ pub async fn write_pdu<W: AsyncWrite + Unpin>(writer: &mut W, pdu: &Pdu) -> Resu
     Ok(())
 }
 
+/// Writes several PDU frames in a single `write_all` (§3.2).
+///
+/// The split P-DATA PDUs of one DIMSE message are encoded back-to-back into one
+/// buffer and flushed once, so a message costs one write instead of one per
+/// fragment. `write_pdu` stays for single-PDU control messages.
+pub async fn write_pdus<W: AsyncWrite + Unpin>(writer: &mut W, pdus: &[Pdu]) -> Result<()> {
+    let mut buffer = Vec::with_capacity(64);
+    for pdu in pdus {
+        buffer.extend_from_slice(&pdu::encode(pdu)?);
+    }
+    writer.write_all(&buffer).await.map_err(NetworkError::Io)?;
+    writer.flush().await.map_err(NetworkError::Io)?;
+    Ok(())
+}
+
 /// Applies [`TcpOptions`] to a connected stream.
 ///
 /// Socket buffer sizing is advisory — the kernel may round the value up or cap
@@ -131,6 +146,20 @@ mod tests {
         });
         write_pdu(&mut client, &pdata).await.unwrap();
         assert_eq!(read_pdu(&mut server).await.unwrap().unwrap(), pdata);
+    }
+
+    #[tokio::test]
+    async fn write_pdus_batches_several_frames_into_one_write() {
+        let (mut client, mut server) = duplex(4096);
+        let first = Pdu::PData(PData {
+            pdvs: vec![Pdv { context_id: 1, is_command: true, is_last: false, data: vec![1, 2, 3, 4].into() }],
+        });
+        let second = Pdu::PData(PData {
+            pdvs: vec![Pdv { context_id: 1, is_command: false, is_last: true, data: vec![5, 6].into() }],
+        });
+        write_pdus(&mut client, &[first.clone(), second.clone()]).await.unwrap();
+        assert_eq!(read_pdu(&mut server).await.unwrap().unwrap(), first);
+        assert_eq!(read_pdu(&mut server).await.unwrap().unwrap(), second);
     }
 
     #[tokio::test]

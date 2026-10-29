@@ -14,7 +14,7 @@ use crate::pdu::{
     Abort, Associate, AssociateRj, Pdu, PresentationContext, APPLICATION_CONTEXT,
 };
 use crate::services::{CEchoRequest, CEchoResponse, CStoreResponse, ServiceProvider};
-use crate::transport::{read_pdu, write_pdu, TcpOptions};
+use crate::transport::{read_pdu, write_pdu, write_pdus, TcpOptions};
 use radicom::model::dataset::Dataset;
 use radicom::model::tag::Tag;
 use radicom::model::transfer_syntax::syntaxes;
@@ -462,6 +462,15 @@ where
 fn transfer_syntax_of(uid: &str) -> Arc<radicom::model::transfer_syntax::TransferSyntax> {
     radicom::model::transfer_syntax::parse(uid)
         .unwrap_or_else(|_| syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone())
+}
+
+/// Writes one DIMSE message's P-DATA PDUs in a single `write_all` (§3.2).
+async fn write_pdata_batch<S>(stream: &mut S, pdus: Vec<crate::pdu::PData>) -> Result<()>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    let pdus: Vec<Pdu> = pdus.into_iter().map(Pdu::PData).collect();
+    write_pdus(stream, &pdus).await
 }
 
 /// Dispatches a command that carries no dataset (§5.1).
@@ -1566,9 +1575,8 @@ impl Association {
 
         let command = request.to_command();
         let bytes = bytes::Bytes::from(command_bytes(&command)?);
-        for pdata in self.splitter.split_bytes(context_id, true, bytes)? {
-            write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
-        }
+        let pdus = self.splitter.split_bytes(context_id, true, bytes)?;
+        write_pdata_batch(&mut self.stream, pdus).await?;
 
         self.pending
             .insert(crate::engine::PendingRequest::new(command, std::time::Instant::now()));
@@ -1638,9 +1646,8 @@ impl Association {
 
         let command = bytes::Bytes::from(crate::message::encode_command(&request.to_dataset())?);
         let payload = bytes::Bytes::from(payload);
-        for pdata in self.splitter.split_message_bytes(context_id, command, Some(payload))? {
-            write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
-        }
+        let pdus = self.splitter.split_message_bytes(context_id, command, Some(payload))?;
+        write_pdata_batch(&mut self.stream, pdus).await?;
 
         self.pending
             .insert(crate::engine::PendingRequest::new(request.clone(), std::time::Instant::now()));
@@ -1688,9 +1695,8 @@ impl Association {
 
             let command = bytes::Bytes::from(command_bytes(&request.to_command())?);
             let identifier = bytes::Bytes::from(crate::message::encode_dataset(&request.identifier, &syntax)?);
-            for pdata in self.splitter.split_message_bytes(context_id, command, Some(identifier))? {
-                write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
-            }
+            let pdus = self.splitter.split_message_bytes(context_id, command, Some(identifier))?;
+            write_pdata_batch(&mut self.stream, pdus).await?;
 
             // the Identifier of a Pending response follows its command
             let mut awaiting_command: Option<Command> = None;
@@ -1781,9 +1787,8 @@ impl Association {
 
             let command = bytes::Bytes::from(command_bytes(&request.to_command())?);
             let identifier = bytes::Bytes::from(crate::message::encode_dataset(&request.identifier, &syntax)?);
-            for pdata in self.splitter.split_message_bytes(context_id, command, Some(identifier))? {
-                write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
-            }
+            let pdus = self.splitter.split_message_bytes(context_id, command, Some(identifier))?;
+            write_pdata_batch(&mut self.stream, pdus).await?;
 
             loop {
                 let Some(pdu) = self.read_request_pdu(message_id).await? else {
@@ -1856,9 +1861,8 @@ impl Association {
 
             let command = bytes::Bytes::from(command_bytes(&request.to_command())?);
             let identifier = bytes::Bytes::from(crate::message::encode_dataset(&request.identifier, &syntax)?);
-            for pdata in self.splitter.split_message_bytes(context_id, command, Some(identifier))? {
-                write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
-            }
+            let pdus = self.splitter.split_message_bytes(context_id, command, Some(identifier))?;
+            write_pdata_batch(&mut self.stream, pdus).await?;
 
             // a reverse C-STORE request awaiting its dataset
             let mut awaiting_store: Option<Command> = None;
