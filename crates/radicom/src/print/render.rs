@@ -109,7 +109,13 @@ impl FilmBox {
             if image_box.polarity() {
                 invert(&mut patch);
             }
-            canvas.blit_scaled(cell, &patch, scale.pixels_per_mm, image_box.magnification_type().as_deref());
+            canvas.blit_scaled(
+                cell,
+                &patch,
+                scale.pixels_per_mm,
+                image_box.magnification_type().as_deref(),
+                image_box.requested_image_size(),
+            );
         }
 
         Ok(canvas.into_raw_image())
@@ -175,7 +181,14 @@ impl Canvas {
         }
     }
 
-    fn blit_scaled(&mut self, cell: &LayoutCell, patch: &RawImage, px_per_mm: f64, magnification: Option<&str>) {
+    fn blit_scaled(
+        &mut self,
+        cell: &LayoutCell,
+        patch: &RawImage,
+        px_per_mm: f64,
+        magnification: Option<&str>,
+        requested_width_mm: Option<f64>,
+    ) {
         let cell_x = (cell.x * px_per_mm).round() as i64;
         let cell_y = (cell.y * px_per_mm).round() as i64;
         let cell_w = (cell.width * px_per_mm).round() as i64;
@@ -183,8 +196,15 @@ impl Canvas {
         if cell_w <= 0 || cell_h <= 0 || patch.width() == 0 || patch.height() == 0 {
             return;
         }
-        // fit preserving aspect ratio
-        let scale = (cell_w as f64 / patch.width() as f64).min(cell_h as f64 / patch.height() as f64);
+        // Fit preserving aspect ratio. RequestedImageSize is the desired image
+        // width in millimetres; cap it when the requested aspect ratio exceeds
+        // the image box so the patch remains inside its cell.
+        let fit_scale =
+            (cell_w as f64 / patch.width() as f64).min(cell_h as f64 / patch.height() as f64);
+        let scale = requested_width_mm
+            .filter(|width| width.is_finite() && *width > 0.0)
+            .map(|width| (width * px_per_mm / patch.width() as f64).min(fit_scale))
+            .unwrap_or(fit_scale);
         let dst_w = ((patch.width() as f64 * scale).round() as i64).max(1);
         let dst_h = ((patch.height() as f64 * scale).round() as i64).max(1);
 
@@ -474,7 +494,7 @@ mod tests {
         let (cw, ch, ppm) = (30u32, 25u32, 3.0f64);
         let bg = crate::pixel::Color32::new(5, 6, 7);
         let mut actual = Canvas::filled(cw, ch, bg);
-        actual.blit_scaled(&cell, &patch, ppm, None);
+        actual.blit_scaled(&cell, &patch, ppm, None, None);
 
         // reference implementation: the previous RGB round-trip + per-pixel set
         let mut expected = Canvas::filled(cw, ch, bg);
@@ -517,12 +537,39 @@ mod tests {
         );
         let cell = LayoutCell { x: 0.0, y: 0.0, width: 4.0, height: 2.0 };
         let mut canvas = Canvas::filled(4, 2, crate::pixel::Color32::new(0, 0, 0));
-        canvas.blit_scaled(&cell, &patch, 1.0, Some("REPLICATE"));
+        canvas.blit_scaled(&cell, &patch, 1.0, Some("REPLICATE"), None);
 
         let row = &canvas.bytes[..16];
         assert_eq!(&row[0..4], &[0, 0, 0, 255]);
         assert_eq!(&row[4..8], &[0, 0, 0, 255]);
         assert_eq!(&row[8..12], &[255, 255, 255, 255]);
         assert_eq!(&row[12..16], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn requested_image_size_controls_width_inside_the_cell() {
+        let patch = RawImage::new(
+            2,
+            1,
+            vec![
+                0, 0, 0, 255, // black
+                255, 255, 255, 255, // white
+            ],
+        );
+        let cell = LayoutCell { x: 0.0, y: 0.0, width: 8.0, height: 4.0 };
+        let mut canvas = Canvas::filled(8, 4, crate::pixel::Color32::new(7, 7, 7));
+        canvas.blit_scaled(&cell, &patch, 1.0, None, Some(2.0));
+
+        // RequestedImageSize is 2 mm at 1 px/mm, so the 2:1 patch occupies
+        // exactly 2x1 pixels and is centred in the 8x4 image box.
+        let lit_pixels = canvas
+            .bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|pixel| pixel[0] == 255)
+            .count();
+        assert_eq!(lit_pixels, 1, "requested width must shrink the rendered patch");
+        assert_eq!(&canvas.bytes[(1 * 8 + 4) * 4..(1 * 8 + 5) * 4], &[255, 255, 255, 255]);
     }
 }
