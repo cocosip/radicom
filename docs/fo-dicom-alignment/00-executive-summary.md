@@ -1,5 +1,9 @@
 # radicom 代码走查总报告（对照 fo-dicom）
 
+> 状态提示：本文件是**走查当时的快照**，其中列出的多数“高危缺陷/缺失”此后已修复。逐条当前处置与证据
+> 见 [`PROGRESS.md`](PROGRESS.md) 与源码/测试；本文正文保留原始结论用于追溯。
+
+
 本文件是五份分模块详细评审的**汇总**，回答三个问题：与 fo-dicom 相比功能是否缺失、代码是否正确/有无性能问题、测试是否正确。
 
 - 审查对象：`D:\Code\rust-code\radicom`（git `9347548`，`master`）
@@ -56,16 +60,16 @@
 | `Suspended` / `IsPartial` | `DicomFile.cs:250` | `ReadOutcome` 只有 Success/Stopped；`is_partial` 硬编码 `false`（`file.rs:187`、`:234`） | 截断文件整体失败而非部分成功（GH179B） |
 | CP-246（UN 定义的 SQ 在 BE 下按 LE 读） | `DicomReader.cs:608-623` 条件为 `UN && !IsPrivate` | `reader.rs:576` 条件**恰好相反**（仅私有） | GH177 读错长度 |
 | `LongCodeValue` / `URNCodeValue` | `DicomTagGenerated.cs:513` `(0008,0119)` UC、`:?` `(0008,0120)` UR | **完全未实现**，长值与 URN 都写进 `(0008,0100)` SH | 写出的 SR 不符合 PS3.3 |
-| `DicomCodeItem::FromUrn` | `DicomCodeItem.cs:50` | 缺失 | 无 URN → CodeItem 入口 |
+| `DicomCodeItem::FromUrn` | `DicomCodeItem.cs:50` | 已实现（原为缺失） | `sr/code_item.rs` `from_urn`（`2ec3a5d`） |
 | N-GET/N-SET/N-ACTION/N-DELETE 的 Requested* 字段 | PS3.7 表 E.1-1 | 用 `Affected*` 代替（`nservice.rs:33-34,57-58,124-125`） | **DIMSE-N 全系列不可用** |
 | `DicomSummary` / 结构化富结果等便捷层 | 多处 | 部分缺失 | 见各分报告 |
 
-### 1.2 明确缺失（grep 确认无对应符号）
+### 1.2 明确缺失（走查快照；以下四项现已实现）
 
-- 写入侧 `LargeObjectSize` 可配置阈值（写死 1 MiB，`byte_source.rs:152`）
-- `DicomDatasetComparer` 的可配置语义（现为单一深度相等）
-- `DicomTag.ToString("G"/"X"/"g")` 变体（只有 JSON 形式）
-- `JsonOptions::validate_on_read`（`radicom-json/src/lib.rs:72` 声明、`:81` 默认 `false`、**无任何地方读取**；读取入口 `json_to_dataset` 把参数命名为 `_options` 整体忽略）
+- 写入侧 `LargeObjectSize` 可配置阈值 —— 已实现（`WriteOptions::large_object_size`）
+- `DicomDatasetComparer` 的可配置语义 —— 已实现（`Dataset::content_equals`，`2ff0e69`）
+- `DicomTag.ToString("G"/"X"/"g")` 变体 —— 已实现（`0e51b55`）
+- `JsonOptions::validate_on_read` —— 已实现（`4710dde`）
 
 ### 1.3 有意的架构分歧（非缺陷）
 

@@ -52,14 +52,14 @@
 | 能力 | fo-dicom 参照 | 状态 | radicom 符号（file:line） | 说明 |
 | --- | --- | --- | --- | --- |
 | 读记录树 + offset 拼接 | `DicomDirectory.cs`、`DicomDirectoryReaderObserver.cs:44` | 部分实现 | `media/mod.rs:583` `stitch`、`media/mod.rs:673` `item_offsets` | 用"扫描字节找 `FFFE,E000`"代替观察者的 `(uint)Position-8` 键；容忍度靠 `roots.is_empty()` 兜底，而非 `ParseDirectoryRecordNotExact` 的最近 offset |
-| 写两遍 offset | `DicomDirectory.cs:399` `CalculateOffsets`/`SetOffsets` | 部分实现 | `media/mod.rs:438` `rebuild`、`media/mod.rs:460` `write_layout` | **带 icon 时 first/last root offset 写错**，见 §2.1 |
+| 写两遍 offset | `DicomDirectory.cs:399` `CalculateOffsets`/`SetOffsets` | 已实现 | `media/mod.rs` `rebuild`、`write_layout` | 带 icon 时 first/last root offset 的正确性已随 §2.1 修复（`55ab7b6`） |
 | `AddFile` 四层去重链 | `DicomDirectory.cs:474` `AddFile` / `CreateImageRecord` | 已实现 | `media/mod.rs:324` `add_file`、`:389` `find_or_create_child` | Patient→Study→Series→Instance，按 UID 复用层级记录 |
 | `DicomDirectoryEntry`（四层记录打包返回） | `DicomDirectory.cs:474`（返回 `DicomDirectoryEntry`） | 已实现 | `media/mod.rs` `DicomDirectoryEntry`；`add_file_entry` | 返回本次新建/复用的四条记录索引 |
 | `RootDirectoryRecordCollection` / 每级遍历集合 | `DicomDirectory.cs`（`RootDirectoryRecordCollection` 等） | 部分实现 | `media/mod.rs:283` `walk`、`:276` `children` | 只给出 `(index, depth)` 与索引，没有强类型的层集合/迭代器 |
 | `DirectoryRecord` 作为对象（`NextDirectoryRecord` / `LowerLevelDirectoryRecord` / `Key`） | `DicomDirectory.cs:62` `DicomDirectoryRecord` | 部分实现 | `media/mod.rs:158` `DirectoryRecord{dataset,parent}` | 用 `parent: Option<usize>` + 索引重建树，没有 `next`/`lower` 指针字段，也没有 `Key` |
 | `DicomDirectoryRecord::ToString()` | `DicomDirectory.cs` | 已实现 | `Display for DirectoryRecord`（`b41359f`） | 渲染记录 dataset 的 dump |
-| `FileSetID` 空值校验 | `DicomDirectory.cs`（`FileSetID` setter 校验空串） | 缺失 | `media/mod.rs:224` `new` | `DicomDirectory::new("")` 被接受，写出 `(0004,1130)` 空值 |
-| `AutoValidate` | `DicomDirectory.cs:44` | 已实现 | `model/dataset.rs` `set_validation`、`validation::ValidationScopeGuard` | radicom 用 Dataset 级校验开关（全局/作用域）表达，无需 DicomDirectory 再持一个布尔 |
+| `FileSetID` 空值校验 | `DicomDirectory.cs`（`FileSetID` setter 校验空串） | 已实现 | `media/mod.rs` `try_new` | `new("")` 现在 panic 并给出明确信息，`try_new("")` 返回错误（`5f3ca60`；`empty_file_set_id_is_rejected`） |
+| `AutoValidate` | `DicomDirectory.cs:44` | 已实现 | `DicomDirectory::validate`、`model/dataset.rs` `set_validation`、`validation::ValidationScopeGuard` | 可直接校验 DICOMDIR 记录树（FileSetID、父/根索引、环、可达性），也可用 Dataset 级校验开关；`walk` 对环已做去重保护 |
 | 图标生成（`IconImageSequence`） | `Media/DicomIconImageSequenceBuilder.cs:28` | 部分实现 | `media/icon.rs:44` `build_icon`、`:292` `attach_icon` | 只支持 8-bit MONOCHROME2 灰度、无 colour（`:285` 测试显式断言"彩色图不产生 icon"）；`MAX_ICON_SIZE=128` 一致 |
 | 图标失败的静默容忍 | `DicomDirectory.cs`（`AddIconSequence` 内 `catch { }`） | 已实现 | `media/mod.rs:377-382` | 走 `generator.generate(...)?`，**错误会上抛**，比 fo-dicom 更严格；行为差异见 §2.8 |
 | `IIconGenerator(frameIndex)` 显式帧号参数 | `Media/IIconGenerator.cs` | 已实现 | `media/icon.rs` `generate_frame`（`c9091b4`） | trait 提供显式帧号；`explicit_frame_index_selects_the_requested_frame` 覆盖 |
@@ -87,7 +87,7 @@
 | `CodeItem` 三段自动分派（short/long/URN） | `StructuredReport/DicomCodeItem.cs:24`（`CodeValue`/`LongCodeValue`/`URNCodeValue` 三选一） | **实现错误** | `sr/code_item.rs:23` `SHORT`、`:31` `LONG`、`:114` `needs_long` | 见 §2.2：模块的"短/长 tag 族"前提本身不成立；`SHORT` 整族非法，`LONG` 的 version tag 错，`LongCodeValue`/`URNCodeValue` 从未实现 |
 | `DicomCodeItem::FromUrn` | `DicomCodeItem.cs:50` | 已实现 | `sr/code_item.rs` `from_urn`（`2ec3a5d`） | URN → CodeItem 入口 |
 | `DicomCodeItem` 相等语义（Value+Scheme+Version） | `DicomCodeItem.cs:110` `Equals` | 已实现 | `sr/code_item.rs:39` `#[derive(PartialEq, Eq)]` | 字段含 `value`/`scheme`/`meaning`/`scheme_version`；`meaning` 也参与相等，比 fo-dicom 更严（fo-dicom 不比 meaning） |
-| `DicomMeasuredValue`（decimal + units） | `StructuredReport/DicomMeasuredValue.cs` | 部分实现 | `sr/content_item.rs:200` `MeasuredValue` | 有无单位 code 支持；精度见 §2.6 |
+| `DicomMeasuredValue`（decimal + units） | `StructuredReport/DicomMeasuredValue.cs` | 已实现 | `sr/content_item.rs` `MeasuredValue` | 数值按 DS 规则格式化并在超长/非有限时报错，支持单位 code sequence（§2.6） |
 | `DicomReferencedSOP` | `StructuredReport/DicomReferencedSOP.cs` | 已实现 | `sr/content_item.rs:236` `ReferencedSop` | — |
 
 ### 1.4 匿名化（`anonymizer/`）
@@ -97,9 +97,9 @@
 | PS3.15 全表（生成、内嵌） | `DicomAnonymizerGenerated.cs` | 已实现 | `anonymizer/profile.rs:227` `basic`、`ps3.15.csv`（655 行） | 行数与 fo-dicom 一致 |
 | 11 选项 × 6 动作矩阵 | `DicomAnonymizer.cs:29` `SecurityProfile` | **实现错误** | `anonymizer/profile.rs:259` `action_for` | "首行匹配即止"vs fo-dicom"每选项一张表"，见 §2.4 |
 | 动作 D/Z/X/K/C/U | `DicomAnonymizer.cs:38` `SecurityProfileActions` | 已实现 | `anonymizer/profile.rs:60` `Action` | — |
-| 正则 tag 匹配（私有组/曲线/覆盖层通配） | `DicomAnonymizer.cs:150`（`Dictionary<Regex,...>`） | 部分实现 | `anonymizer/profile.rs:12-16`（自写极小正则子集） | 只支持字面量、`[类]`、`{n}`；不依赖 `regex`，但**`regex` 依赖只在 `rules/` 的 `anonymize` feature 下用到**（见 §3.6 死依赖） |
+| 正则 tag 匹配（私有组/曲线/覆盖层通配） | `DicomAnonymizer.cs:150`（`Dictionary<Regex,...>`） | 有意不实现（自写子集） | `anonymizer/profile.rs` 自写极小正则子集 | 只支持字面量、`[类]`、`{n}`；这是**有意**的轻依赖选择，PS3.15 全表用该子集即可精确匹配。`regex` 仅由 `rules/` 的独立 `regex-rules` feature 使用（§3.6 已解耦） |
 | SQ 递归 | `DicomAnonymizer.cs:250` | 已实现 | `anonymizer/mod.rs:98` `walk`、`:111-114` | X 删整条、K 保留、其余递归 |
-| UID 一致替换 | `DicomAnonymizer.cs:74` `ReplacedUIDs` | 部分实现 | `anonymizer/mod.rs:174` `replace_uid`、`:64` `anonymize_in_place` | **每次调用都新建 map**，跨调用/跨文件不一致，见 §2.5 |
+| UID 一致替换 | `DicomAnonymizer.cs:74` `ReplacedUIDs` | 已实现 | `anonymizer/mod.rs` `replace_uid`、`anonymize_in_place`、`replaced_uids` | 替换表在 `Anonymizer` 实例上（`Arc<Mutex<..>>`），跨调用/跨文件一致（§2.5 已修复） |
 | 类型感知 blanking | `DicomAnonymizer.cs:290` | 已实现 | `anonymizer/mod.rs:195` `blank` | 按 VR 写空串/空字节 |
 | PatientName/ID 替换值 | `DicomAnonymizer.cs:60` | 已实现 | `anonymizer/mod.rs:57` `with_patient` | — |
 | 文件级 meta 同步 | `DicomAnonymizer.cs:170` | 已实现 | `anonymizer/mod.rs:70` `anonymize_file_in_place` | — |

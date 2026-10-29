@@ -101,7 +101,7 @@
 | N-CREATE / N-EVENT-REPORT 用 Affected* | `DicomMessage.cs:74-76`、`DicomNCreateRequest.cs:45` | 已实现 | `nservice.rs:57-58` | — |
 | N-GET / N-SET / N-ACTION / N-DELETE 用 Requested* | `DicomMessage.cs:64-68`、`DicomNGetRequest.cs:45`、`DicomNSetRequest.cs:24`、`DicomNActionRequest.cs:51`、`DicomNDeleteRequest.cs:24` | **已实现** | `nservice.rs:31` `uses_requested_uids`、`:73-84` | 请求按 field 写入 `(0000,0003)/(0000,1001)`；N-CREATE/N-EVENT-REPORT 仍用 Affected* |
 | N-GET 的 Attribute Identifier List (0000,1005) | `DicomNGetRequest.cs` + `DicomTag.AttributeIdentifierList` | **已实现** | `nservice.rs:54-56`、`dimse.rs:34` | 请求支持 AT 列表，编码/解析和标准 tag 有回归测试 |
-| N-SET 的 Modification List | PS3.7 §10.1.2 | **缺失** | — | grep 确认无实现（注意：ModificationList 实际走 Dataset，不强制） |
+| N-SET 的 Modification List | PS3.7 §10.1.2 | 已实现 | `nservice.rs` `NServiceRequest::dataset` | N-SET 的修改列表就是请求携带的 Dataset：`NServiceRequest` 已有 `dataset: Option<Dataset>` 并参与编解码与 `no_dataset` 标志，无需独立 tag |
 | N 响应回显 Affected SOP Instance UID | `DicomNGetResponse.cs` 等 | 已实现 | `nservice.rs:110-111`、`nservice.rs:124-125` | — |
 | N 响应回显 Event/Action Type ID | `DicomNEventReportResponse.cs`、`DicomNActionResponse.cs` | 已实现 | `nservice.rs:112-113`、`nservice.rs:126-127` | — |
 | N-CREATE-RSP 返回新建实例 UID | `DicomNCreateResponse.cs` | **已实现** | `nservice.rs` `NServiceResponse::success_with_new_instance` | 可携带 SCP 分配的新实例 UID；普通响应仍回显请求值 |
@@ -118,7 +118,7 @@
 | 证书校验开关 | `DefaultTlsInitiator.IgnoreSslPolicyErrors` | 已实现 | `tls.rs:71-79` `accept_any` | 语义等价，注释已标明 "testing only" |
 | SNI / 证书名指定 | `TargetHost` | **已实现** | `tls.rs:146-168` | 显式 `server_name` 优先；未配置时使用已连接 peer IP，不再硬编码 `localhost` |
 | 证书格式支持 | PKCS#12 + 密码 / Windows 证书库 | 部分实现 | `tls.rs:114` `load_certs`、`tls.rs:125` `load_key` | 仅 PEM（PKCS#8 / PKCS#1）；PKCS#12 与系统证书库缺失 |
-| 三类超时（ACSE / DIMSE / Socket） | `DicomTimeout.cs` | **缺失** | `error.rs:102-105` | 只有 `AssociationRequestTimedOut` / `RequestTimedOut` 两种错误变体，无 Socket 级超时概念，无 `DicomTimeout` 三态枚举 |
+| 三类超时（ACSE / DIMSE / Socket） | `DicomTimeout.cs` | 部分实现（设计边界） | `ClientOptions::{association_timeout,request_timeout,release_timeout}` | ACSE 用 `association_timeout`、DIMSE 用 `request_timeout`+`release_timeout` 已建模并有错误类型；Socket 级空闲超时未单独建模，交由 OS/TCP 与调用方（属有意取舍，避免在每个读点上再叠一层超时） |
 | 平台抽象层 `INetworkManager` | `NetworkManager.cs`（Listener/Stream/IsSocketException/MachineName/TryGetNetworkIdentifier） | 部分实现 | `transport.rs`、`print_sop.rs` | 机器标识已统一为 MAC 形式（见下一行）；仍无统一的 `INetworkManager` 抽象（Listener/Stream 直接散落在 `transport`/`server` 中） |
 | 机器标识 | `NetworkManager.TryGetNetworkIdentifier`（MAC 追加到实现类 UID） | 已实现 | `print_sop.rs` `try_get_network_identifier`；`transport.rs` `network_identifier` | 两者现已统一：`transport::network_identifier()` 委托给 MAC 版本，不再有 `2.25.{fnv}` 的第二套语义 |
 | 命令/数据缓冲上限 | `DicomServiceOptions.MaxCommandBuffer` / `MaxDataBuffer` | 部分实现 | `assembler.rs:108` `PduSplitter::new` | 只有单一 `max_pdu` + `max_pdvs_per_pdu`，未区分命令与数据缓冲 |

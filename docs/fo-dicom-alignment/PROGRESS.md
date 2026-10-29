@@ -66,6 +66,7 @@
 | 04 §1 自定义 profile 增删行 | 已实现 | `36bdac0`；`SecurityProfile::with_row` |
 | 04 §3.6 `anonymize` 拉入 `regex` | 已修复 | `41fa333`；独立 `regex-rules` feature |
 | 01 §1.3 `CopyTo(dest, masked)` / tag 列表 | 已实现 | `34955d5`；`copy_to_masked`/`copy_tags` |
+| 04 §1 `DicomDirectory::validate` / 环保护 | 已实现 | `DicomDirectory::validate`；`walk` 去重防环；`a_parent_cycle_is_reported_and_walk_terminates` |
 
 ## 待办（按价值排序）
 
@@ -110,3 +111,9 @@
 - `36bdac0` `SecurityProfile::with_row`（向现有 profile 追加单行）。
 - `34955d5` `Dataset::copy_to_masked` / `copy_tags`（fo-dicom CopyTo 重载）。
 - `41fa333` 拆分 `regex-rules` feature，`anonymize` 不再拉入 `regex`。
+
+## 本轮（2026-10-29，第 4 轮）新增
+
+- `DicomDirectory::validate` + `walk` 去重防环（未提交编号，见该轮末尾提交）。
+- 文档状态校正：N-SET Modification List（走请求 Dataset）、FileSetID 校验、AutoValidate、
+  ProgressFilesCount、三处 SCP/provider 与测试快照项。
