@@ -214,7 +214,7 @@ impl Dataset {
     /// Inserts an item; duplicate tags error (DS-03, fo-dicom Add semantics).
     pub fn insert(&mut self, item: impl Into<DicomItem>) -> Result<&mut Self, Error> {
         let item: DicomItem = item.into();
-        let tag = self.resolve_private_write(item.tag().clone(), false);
+        let tag = self.resolve_private_write(item.tag(), false);
         match tag {
             Some(t) => {
                 if self.items.contains_key(&t) {
@@ -236,7 +236,7 @@ impl Dataset {
     /// A dictionary-style private tag allocates its creator block on demand.
     pub fn insert_or_update(&mut self, item: impl Into<DicomItem>) -> &mut Self {
         let item: DicomItem = item.into();
-        if let Some(t) = self.resolve_private_write(item.tag().clone(), true) {
+        if let Some(t) = self.resolve_private_write(item.tag(), true) {
             self.items.insert(t.clone(), item.with_tag(t));
         }
         self
@@ -247,14 +247,14 @@ impl Dataset {
     /// instead of being silently dropped.
     pub fn try_insert_or_update(&mut self, item: impl Into<DicomItem>) -> Result<&mut Self, Error> {
         let item: DicomItem = item.into();
-        let original = item.tag().clone();
-        match self.resolve_private_write(original.clone(), true) {
+        let (group, element) = (item.tag().group(), item.tag().element());
+        match self.resolve_private_write(item.tag(), true) {
             Some(t) => {
                 self.items.insert(t.clone(), item.with_tag(t));
                 Ok(self)
             }
             None => Err(Error::Data(DataError::PrivateTagResolution {
-                tag: TagRef(original.group(), original.element()),
+                tag: TagRef(group, element),
             })),
         }
     }
@@ -370,12 +370,19 @@ impl Dataset {
     /// `create`, a missing creator allocates the first free block and
     /// writes the PrivateCreator element; a full group returns `None`.
     pub fn get_private_tag(&mut self, tag: Tag, create: bool) -> Option<Tag> {
+        self.get_private_tag_ref(&tag, create)
+    }
+
+    /// Borrowing form of [`Self::get_private_tag`]: a public tag is only
+    /// cloned when a concrete private block tag is returned, so the insert
+    /// paths do not clone every element's tag up front.
+    fn get_private_tag_ref(&mut self, tag: &Tag, create: bool) -> Option<Tag> {
         if !tag.is_private() || tag.element() > 0x00FF {
-            return Some(tag);
+            return Some(tag.clone());
         }
         let creator_arc = match tag.private_creator() {
             Some(c) => Arc::new(c.clone()),
-            None => return Some(tag),
+            None => return Some(tag.clone()),
         };
         let creator = creator_arc.as_str();
         let group = tag.group();
@@ -504,8 +511,8 @@ impl Dataset {
     /// Write-side normalization: dictionary-style private tags (element
     /// ≤ 0x00FF with a creator) resolve to their concrete block tags; when
     /// resolution fails with `create = true` the creator block is claimed.
-    fn resolve_private_write(&mut self, tag: Tag, create: bool) -> Option<Tag> {
-        self.get_private_tag(tag, create)
+    fn resolve_private_write(&mut self, tag: &Tag, create: bool) -> Option<Tag> {
+        self.get_private_tag_ref(tag, create)
     }
 }
 
