@@ -14,7 +14,7 @@ use crate::model::dataset::Dataset;
 use crate::model::tag::Tag;
 use crate::model::uid::Uid;
 use crate::model::vr::Vr;
-use crate::pixel::PixelData;
+use crate::pixel::{PixelData, PixelDataRef};
 use crate::render::geometry::FrameGeometry;
 use crate::render::math::{Point2, Point3, Vector3};
 
@@ -332,8 +332,7 @@ impl Slice {
 
 /// Reads native MONOCHROME samples, rescaled by RescaleSlope/Intercept (0028,1053/1052).
 fn read_grayscale(dataset: &Dataset) -> Result<Vec<f64>, Error> {
-    let mut owned = dataset.clone();
-    let pixel = PixelData::from_dataset(&mut owned)?;
+    let pixel = PixelDataRef::from_dataset(dataset)?;
     let slots = (pixel.width() * pixel.height() * pixel.samples_per_pixel() as u32) as usize;
     let frame = pixel.get_frame(0)?;
     let bytes = frame.data();
@@ -723,8 +722,7 @@ mod tests {
             assert!(ds.get::<u16>(Tag::COLUMNS).is_ok(), "Columns set");
             assert_eq!(ds.get::<i32>(Tag::INSTANCE_NUMBER).unwrap(), (i + 1) as i32);
             // the pixel data decodes back through the facade
-            let mut owned = ds.clone();
-            let pixel = PixelData::from_dataset(&mut owned).unwrap();
+            let pixel = PixelDataRef::from_dataset(ds).unwrap();
             assert!(pixel.get_frame(0).is_ok(), "pixel data written");
         }
     }
