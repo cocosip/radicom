@@ -1279,6 +1279,30 @@ fn unsupported(message: &str) -> Error {
     Error::Data(DataError::Other { message: message.to_string() })
 }
 
+/// Converts one full-range YCbCr sample (Cb/Cr centred on 128) to 8-bit RGB
+/// (PS3.3 C.7.6.3.1.2; fo-dicom `YbrFullToRgb`).
+pub fn ybr_full_to_rgb(y: f64, cb: f64, cr: f64) -> (u8, u8, u8) {
+    ycbcr_to_rgb(y, cb - 128.0, cr - 128.0)
+}
+
+/// Converts one studio-range (partial) YCbCr sample to 8-bit RGB, expanding the
+/// Y 16–235 / C 16–240 ranges to full scale (fo-dicom `YbrPartial422ToRgb`).
+///
+/// ponytail: partial-range expansion assumes 8-bit samples; PS3.3 only defines
+/// YBR_PARTIAL at 8 bits, and 16-bit partial would need its own scale.
+pub fn ybr_partial_to_rgb(y: f64, cb: f64, cr: f64) -> (u8, u8, u8) {
+    let y = ((y - 16.0) * (255.0 / 219.0)).clamp(0.0, 255.0);
+    let cb = ((cb - 128.0) * (255.0 / 224.0)).clamp(-128.0, 127.0);
+    let cr = ((cr - 128.0) * (255.0 / 224.0)).clamp(-128.0, 127.0);
+    ycbcr_to_rgb(y, cb, cr)
+}
+
+/// The shared YCbCr→RGB matrix for already-centred chroma (ITU-R BT.601).
+fn ycbcr_to_rgb(y: f64, cb: f64, cr: f64) -> (u8, u8, u8) {
+    let cl = |v: f64| v.round().clamp(0.0, 255.0) as u8;
+    (cl(y + 1.402 * cr), cl(y - 0.344_136 * cb - 0.714_136 * cr), cl(y + 1.772 * cb))
+}
+
 /// Renders one frame, choosing the pipeline by photometric interpretation
 /// (REND-02, docs §2): MONOCHROME → grayscale window; RGB → colour assembly;
 /// PALETTE COLOR → palette index lookup; YBR_FULL / YBR_FULL_422 /
@@ -1721,22 +1745,11 @@ fn render_ybr_frame(
     // Convert one (Y, Cb, Cr) triple to clamped RGB. Cb/Cr are centred on 128
     // (full range) or on the studio midpoint 128 after range expansion (partial).
     let to_rgb = |y: f64, cb: f64, cr: f64| -> (u8, u8, u8) {
-        // ponytail: partial-range expansion assumes 8-bit samples (PS3.3 only
-        // defines YBR_PARTIAL at 8 bits); 16-bit partial would need its own scale.
-        let (y, cb, cr) = if partial {
-            // studio-range 8-bit: Y in [16,235], C in [16,240] → expand to full
-            let y = ((y - 16.0) * (255.0 / 219.0)).clamp(0.0, 255.0);
-            let cb = ((cb - 128.0) * (255.0 / 224.0)).clamp(-128.0, 127.0);
-            let cr = ((cr - 128.0) * (255.0 / 224.0)).clamp(-128.0, 127.0);
-            (y, cb, cr)
+        if partial {
+            ybr_partial_to_rgb(y, cb, cr)
         } else {
-            (y, cb - 128.0, cr - 128.0)
-        };
-        let r = y + 1.402 * cr;
-        let g = y - 0.344_136 * cb - 0.714_136 * cr;
-        let b = y + 1.772 * cb;
-        let cl = |v: f64| v.round().clamp(0.0, 255.0) as u8;
-        (cl(r), cl(g), cl(b))
+            ybr_full_to_rgb(y, cb, cr)
+        }
     };
 
     let mut bytes = Vec::with_capacity(count * 4);
@@ -2558,6 +2571,19 @@ mod tests {
         let image = render_frame(&ds, 0).unwrap();
         let b = image.as_bytes();
         assert!(b[2] > 240 && b[1] < 16 && b[0] < 16, "red-ish BGRA: {:?}", &b[0..4]);
+    }
+
+    #[test]
+    fn the_ycbcr_helpers_convert_neutral_and_extreme_samples() {
+        assert_eq!(ybr_full_to_rgb(128.0, 128.0, 128.0), (128, 128, 128));
+        assert_eq!(ybr_full_to_rgb(0.0, 128.0, 128.0), (0, 0, 0));
+        assert_eq!(ybr_full_to_rgb(255.0, 128.0, 128.0), (255, 255, 255));
+
+        // partial range: Y=16 is black, Y=235 is white, neutral chroma
+        assert_eq!(ybr_partial_to_rgb(16.0, 128.0, 128.0), (0, 0, 0));
+        assert_eq!(ybr_partial_to_rgb(235.0, 128.0, 128.0), (255, 255, 255));
+        let (r, g, b) = ybr_partial_to_rgb(126.0, 128.0, 128.0);
+        assert!(r == g && g == b, "neutral partial chroma stays grey: {r},{g},{b}");
     }
 
     /// Builds a `width`×`height` 8-bit YBR_FULL frame with explicit stored order.

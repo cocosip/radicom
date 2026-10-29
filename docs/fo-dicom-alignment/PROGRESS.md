@@ -188,6 +188,8 @@
   `PrivateTagResolution` 错误而非静默丢弃；`insert_or_update` 保持宽容（已知上限）。含耗尽场景测试。
 - **打印/像素文档复核**：`OutputLUT` 仅用于灰度路径、`CUSTOM` 布局与 fo-dicom 一致为空、
   ImageBox 的 smoothing/density 属 SCP 参数（Core 不渲染）——均为能力等价，行状态已更正。
+- **像素 / YCbCr 结构**：把内联的 YCbCr→RGB 公式抽为纯函数 `ybr_full_to_rgb` / `ybr_partial_to_rgb`，
+  共享 `ycbcr_to_rgb` 矩阵，可独立单测；`render_ybr_frame` 保留布局解包。
 - .NET 专属抽象，Rust 不适用（按能力已覆盖）→ `INetworkManager`、`DicomTimeout`、`NetworkStreamCreationOptions`、
   `IImage`/`IImageManager`、`IPixelData` 接口、每服务独立 provider 接口、`DirectoryRecord` 指针、`CacheType`、`ArrayPool`。
 

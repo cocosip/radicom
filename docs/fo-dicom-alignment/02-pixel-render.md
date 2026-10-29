@@ -60,7 +60,7 @@
 | fo-dicom 能力 | 状态 | radicom 对应符号 | 证据/行为差异 |
 |---|---|---|---|
 | PI 枚举与 color space 属性 | ✅ | `pixel/photometric.rs:12-26`、`ColorSpace`（:44-48） | 12 个变体 + `Other` |
-| `YbrFullToRgb` / `YbrFull422ToRgb` / `YbrPartial422ToRgb` | 🟡 | 无独立符号，逻辑内联于 `render/mod.rs:1285-1380` | 功能等价但不可单独复用/测试 |
+| `YbrFullToRgb` / `YbrFull422ToRgb` / `YbrPartial422ToRgb` | ✅ | `ybr_full_to_rgb` / `ybr_partial_to_rgb`（`render/mod.rs`） | YCbCr→RGB 已抽为可复用的纯函数并单独单测；4:2:2 布局解包仍内联于 `render_ybr_frame` |
 | 位序 / planar 转换 | `ReverseBits` / `InterleavedToPlanar24` / `PlanarToInterleaved24` | ✅（按功能） | `render/pixel_converter.rs` `reverse_bits`；planar↔interleaved 在 `render/mod.rs` 内联 | `reverse_bits` 用于单比特/MONOCHROME1 通路；planar 交错转换在 YBR/RGB 渲染路径内联完成，无需独立 .NET 式 helper |
 | YBR_FULL 的 planar configuration 1 | ✅ | `render/mod.rs:1674-1776` | 4:4:4 planar 先按三平面重组再转 YBR；仅下采样 YBR 要求交织（标准限制） |
 | HSV / ARGB / CMYK / YBR_ICT / YBR_RCT 渲染 | ⛔ | `render/mod.rs:954` `_ =>` 报错 | 解析支持，渲染不支持 |
