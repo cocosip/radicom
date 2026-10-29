@@ -63,8 +63,9 @@ cargo clippy --workspace --all-features --all-targets
 
 ## Current Test Baseline
 
-17 test suites green: 808 tests total (core 498, network 248, json 34, dict 4, corpus 5, plus the
-integration suites), 0 failures; clippy clean.
+14 test suites green: 1060 tests, 1 ignored, 0 failures; clippy clean. Breakdown: core lib 637, core binary
+0, cli_dump 1, corpus 6, fuzz 3, goldens 1, radicom-dict 5, radicom-json lib 48, JSON goldens 1,
+radicom-network lib 352, network fuzz 1, network goldens 3, interop 3 (2 run plus 1 ignored), xtask 0.
 
 > Caveat: this audit checks feature presence and code paths. It is **not** an adversarial correctness
 > review against real-world data; use the corpus and interoperability suites for that.

@@ -3,10 +3,10 @@
 How to verify radicom against a **real DICOM peer** — a fo-dicom C-STORE SCP or Q/R SCP, DCMTK,
 dcm4che, or a production PACS.
 
-> The repository already ships comprehensive SCU↔SCP loopback self-tests (`radicom-network` has ~250
-> tests covering C-ECHO/STORE/FIND/MOVE/GET, extended negotiation, user identity, small-PDU
-> fragmentation and C-CANCEL), so **an external peer is not required for self-testing**. The tools below
-> are for additional cross-implementation acceptance.
+> The repository already ships comprehensive SCU↔SCP loopback self-tests (`radicom-network` has 352
+> tests in its library suite plus 7 integration tests covering C-ECHO/STORE/FIND/MOVE/GET, extended
+> negotiation, user identity, small-PDU fragmentation and C-CANCEL), so **an external peer is not required
+> for self-testing**. The tools below are for additional cross-implementation acceptance.
 
 ## 0. Offline self-test (runs by default)
 
@@ -122,7 +122,7 @@ strict peer** exposed them. All are fixed per PS3.8 with regression tests:
 ## 6. Offline consistency with fo-dicom's corpus
 
 `tests-data/` is a corpus imported from fo-dicom's MS-PL test data. `crates/radicom/tests/corpus.rs`
-round-trips 13 samples through **parse → write → parse** with semantic equality; `goldens.rs` compares
+round-trips 23 samples through **parse → write → parse** with semantic equality; `goldens.rs` compares
 dumps, JSON and association/P-DATA PDU hex byte for byte or structurally. To expand it, drop
 fo-dicom-generated `.dcm` files into the matching `tests-data/<category>/` directory and register them in
 the `CORPUS` table in `corpus.rs`.

@@ -29,15 +29,15 @@ docs/
 a document disagrees with the implementation, check which is correct against PS3.3/PS3.5/PS3.7/PS3.8 and
 fo-dicom's behaviour, then fix the one that is wrong — including the document.
 
-[01-architecture.md](01-architecture.md) §15 lists places where the implementation does not match the
-intended design. Those are defects, not contracts.
+[01-architecture.md](01-architecture.md) §15 records deviations from the intended design; there are none
+at present. Anything listed there is a defect, not a contract.
 
 ### Open items at a glance
 
 | What | Where |
 |---|---|
-| Known deviations from the intended design | [01-architecture.md](01-architecture.md) §15 |
-| **Deferred-I/O buffers can panic on a read failure** — the only still-open finding of the 2026-10-29 code review | [01-architecture.md](01-architecture.md) §15.1, and the outstanding-work table in [02-development-guide.md](02-development-guide.md) §3 |
+| Known deviations from the intended design (currently none) | [01-architecture.md](01-architecture.md) §15 |
+| Outstanding work, environment- or scope-limited | [02-development-guide.md](02-development-guide.md) §3 |
 
 ---
 
@@ -77,7 +77,7 @@ Newtonsoft JSON backend, the WPF GUI, four imaging backends) — see divergences
 |---|---|
 | Reference implementation | fo-dicom (Fellow Oak DICOM), v5.2.x stable / 6.0.0-alpha dev source tree |
 | DICOM standard edition tracked | 2025d (per the fo-dicom ChangeLog) |
-| Bundled dictionary version | 2026b (~5347 public tags; ~4678 private tags across 235 creators) |
+| Bundled dictionary version | 2026b (5347 public tags, 4679 private tags across 232 creators) |
 | Primary standard parts | PS3.3 (information model), PS3.5 (data structures/encoding), PS3.6 (data dictionary), PS3.7 (message exchange), PS3.8 (network communication), PS3.10 (media storage), PS3.15 (security profiles), PS3.18 (web services / JSON) |
 
 Feature IDs (`TAG-01`, `RD-03`, `NET-06`, ...) and tolerance rule IDs (`T1`–`T10`) are stable identifiers

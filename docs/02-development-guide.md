@@ -51,7 +51,7 @@ architecture document.
 |---|---|---|
 | TAG-01 | Tag structure `(group, element)`; `is_private`; u32 conversion; Display/Parse formats | P0 |
 | TAG-02 | Private tag semantics: equality/ordering/hash by group + low 8 bits + creator; block normalisation | P0 |
-| TAG-03 | ~5347 generated `Tag` constants from the fo-dicom dictionary XML | P0 |
+| TAG-03 | 5259 generated `Tag` constants plus 88 masked rows from the fo-dicom dictionary XML | P0 |
 | TAG-04 | Tag interning index (u32 → Tag) so the parser and AT elements reuse instances | P1 |
 | TAG-05 | `MaskedTag` (card + mask, `xx` wildcard) with Parse/Display/IsMatch | P1 |
 | VR-01 | The 34 VRs with encoding metadata (length-field width, padding, unit size, string flags) | P0 |
@@ -217,7 +217,7 @@ architecture document.
 | INF-06 | Test data corpus and round-trip baselines | P0 |
 | INF-07 | `radicom-dump` CLI | P2 |
 
-**Totals**: 132 items, 73 at P0.
+**Totals**: 127 items (126 live + 1 dropped), 65 at P0, 32 at P1, 29 at P2.
 
 ---
 
@@ -247,7 +247,6 @@ Outstanding work is environment- or scope-limited, not missing implementation:
 | `image` crate backend | Optional | Not a dependency; PNG/BMP export is covered by the hand-written encoders |
 | Single-consumer trait abstractions from fo-dicom | Form | Rust side has concrete equivalents; empty trait shells are deliberately not created |
 | C-MOVE against a real peer | Environment | The peer did not map the destination AE to this host; loopback covers the function |
-| Deferred-I/O buffers panic on read failure | Cross-module redesign | `ByteBuffer::data` cannot carry an I/O error; ~120 call sites to migrate. **The only open item from the 2026-10-29 code review** — see [01-architecture.md](01-architecture.md) §15.1 for the detail and the intended fix |
 
 ### 3.1 Definition of done (per feature group)
 
@@ -304,12 +303,12 @@ Naming: `<area>_<behavior>__<case>`, with the rule ID suffix for tolerance tests
 
 ### 5.3 Test data
 
-A 13-file subset of fo-dicom's test data lives in `tests-data/` under the fo-dicom **MS-PL** license with
-a provenance note. Categories covered: syntax matrix (explicit/implicit LE, explicit BE, deflated),
-encapsulated (RLE plus a JPEG baseline), malformed corpus (one per T1–T10 row, synthesized where no
-fixture exists), multi-frame, charsets (CJK ISO 2022, GBK, GB18030, UTF-8), structures (nested SQ,
-fragments, private tags), media (DICOMDIR), SR, meta variants (no preamble / no meta / ACR-NEMA), and
-golden PDU byte captures.
+A 23-sample corpus (22 `.dcm` files plus a `DICOMDIR`) from fo-dicom's test data lives in `tests-data/`
+under the fo-dicom **MS-PL** license with a provenance note. Categories covered: syntax matrix
+(explicit/implicit LE, explicit BE, deflated), encapsulated (RLE plus a JPEG baseline), malformed corpus
+(one per T1–T10 row, synthesized where no fixture exists), multi-frame, charsets (CJK ISO 2022, GBK,
+GB18030, UTF-8), structures (nested SQ, fragments, private tags), media (DICOMDIR), SR, meta variants (no
+preamble / no meta / ACR-NEMA), and golden PDU byte captures.
 
 ### 5.4 Round-trip and goldens
 
@@ -329,12 +328,13 @@ golden PDU byte captures.
 
 ### 5.6 Codec testing
 
-Two registry configurations, same suite:
+Only one configuration exists today: the empty registry plus the test-only mock codecs in
+`pixel/codec.rs` and `pixel/transcoder.rs`, which validate the facade, the transcoder decision table, the
+missing-codec error paths and the boundary contract itself.
 
-1. **empty registry + test-only mock codec** — validates the facade, the transcoder decision table, the
-   missing-codec error paths and the boundary contract itself.
-2. **real codecs** — a dev-dependency on `radicom-codecs` for end-to-end transcoding (skipped gracefully
-   when the crate is absent, so this repository never hard-depends on it).
+A second configuration — end-to-end transcoding against the real `radicom-codecs` codecs — is added as an
+optional dev-dependency once that project exists. Nothing in this workspace references it today, so this
+repository never hard-depends on it.
 
 ### 5.7 Fuzzing
 
@@ -362,11 +362,11 @@ windows make it a different code path.
 
 | Stage | Trigger | Content |
 |---|---|---|
-| clippy | every push (CI) | clippy `-D warnings` |
-| test | every push (CI) | unit + integration, default and all-features |
-| msrv | every push (CI) | MSRV (1.89) build |
-| docs | every push (CI) | rustdoc build |
-| package | every push (CI) | `cargo package --list` metadata/license checks |
+| clippy | push to `master`/`main`, pull request, `workflow_dispatch` | clippy `-D warnings` |
+| test | push to `master`/`main`, pull request, `workflow_dispatch` | unit + integration, default and all-features |
+| msrv | push to `master`/`main`, pull request, `workflow_dispatch` | MSRV (1.89) build |
+| docs | push to `master`/`main`, pull request, `workflow_dispatch` | rustdoc build |
+| package | push to `master`/`main`, pull request, `workflow_dispatch` | `cargo package --list` metadata/license checks |
 | fuzz | local/manual | both fuzz targets |
 | interop | local / self-hosted | DCMTK / fo-dicom matrix |
 | bench | local/manual | `cargo bench` against a baseline |

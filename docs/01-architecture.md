@@ -151,7 +151,8 @@ so they cannot drift from it.
 - A `SpecificCharacterSet` list with an empty leading term resolves to its first non-empty term
   (`\ISO 2022 IR 58` → GBK, `\ISO 2022 IR 87` → ISO-2022-JP).
 - **Single-byte `ISO_IR nnn` terms must map to the corresponding ISO-8859-x**, never to a Windows code
-  page. Mapping them to Windows-125x is a known defect (§15).
+  page: `ISO_IR 109/110/126/127/138/144/148` map to `iso-8859-3/4/7/6/8/5/9`. The exception is
+  `ISO_IR 166`, which maps to `windows-874` — the WHATWG alias of TIS-620, and a superset of it.
 
 ---
 
@@ -169,8 +170,16 @@ so they cannot drift from it.
 
 - The `ByteBuffer` trait separates `size()` from `data()`: `size()` must be cheap and must not
   materialise, `data()` may.
+- **Reads are fallible.** `data()` returns `io::Result<Cow<'_, [u8]>>` and
+  `get_byte_range(offset, buf)` returns `io::Result<()>`; an out-of-bounds range is
+  `ErrorKind::InvalidInput`, not an assertion. Callers on the parse, write and pixel paths must propagate
+  the error. The fallible form is the only form.
+- `as_slice()` is the zero-copy fast path for a value that is already contiguous in memory, and returns
+  `None` otherwise. `copy_to()` keeps its signature and streams a value out without materialising it.
 - **`FileWindow` is a region on disk, not loaded content.** Any path that promises not to read large
-  values must not call `data()`.
+  values must not call `data()`. A failed read from a `FileWindow` or a `StreamWindow` (the temp-file
+  spill) returns a real `io::Error` instead of panicking; the `StreamWindow` spill error is sticky,
+  because the source is consumed and cannot be retried.
 - Byte sources and targets are generic over `Read + Seek` / `Write`, so memory and files share one
   parser implementation.
 - Async code must not perform blocking file IO on a runtime worker thread; use `spawn_blocking`.
@@ -332,7 +341,7 @@ client/server. One tokio task per association. Locks must not be held across `.a
 - A value lives in exactly one of `Value` (array), `InlineBinary` (base64) or `BulkDataURI`.
 - PN uses the three groups (Alphabetic / Ideographic / Phonetic).
 - Numeric mode is configurable (AsNumber / AsString / PreferablyAsNumber); DS keeps trailing zeros.
-- **Group length elements `(gggg,0000)` must be stripped.** Emitting them is a known defect (§15).
+- **Group length elements `(gggg,0000)` must be stripped at every level of the tree.**
 - The reader tolerates attribute order and unknown attributes.
 
 ### 12.2 Media (DICOMDIR, MEDIA-01..03)
@@ -357,8 +366,8 @@ client/server. One tokio task per association. Locks must not be held across `.a
 - Film Session / Film Box / Image Box / Presentation LUT are dataset-backed models.
 - Layout rendering reuses the render pipeline (EmptyImageDensity background, Trim border, per-cell
   aspect-fit, Polarity REVERSE).
-- Verify every tag against PS3.3 before use: `(2010,0120)` is MinDensity, and `(2010,0500)` is
-  ReferencedFilmSessionSequence (`(2010,0510` is ReferencedImageBoxSequence).
+- Verify every tag against PS3.3 before use: `(2010,0120)` is MinDensity, `(2010,0500)` is
+  ReferencedFilmSessionSequence, and `(2010,0510)` is ReferencedImageBoxSequence.
 
 ### 12.5 Anonymization (ANON-01)
 
@@ -376,7 +385,9 @@ client/server. One tokio task per association. Locks must not be held across `.a
 
 - Every public API returns `Result<T, Error>`; `Error` is an enum (`Data`, `Reader`, `File`, `Codec`,
   `Validation`, `Imaging`, `Network`).
-- **Never panic** on any input, including peer-controlled network data.
+- **Never panic** on any input, including peer-controlled network data. For buffer reads this is
+  structurally enforced: `ByteBuffer::data()` and `get_byte_range()` return `io::Result`, so a failed read
+  of a deferred value is a typed error rather than a panic.
 - Parse errors must carry position information (`ReaderError::Eof { position, needed }`) so malformed
   files can be located.
 - Write path errors and read path errors stay distinguishable, because only the read path is tolerant.
@@ -396,47 +407,29 @@ client/server. One tokio task per association. Locks must not be held across `.a
 
 ## 15. Known Deviations (do not copy these; fix them when you touch the area)
 
-These were design intent but the implementation does not match. Do not treat them as current contracts.
+There are no known deviations right now: the implementation matches the intended design recorded in this
+document. The section stays so that a deviation found later is written down here — as a defect, not a
+contract — instead of being mistaken for current behaviour to copy.
 
-- **JSON does not strip group lengths** — `(gggg,0000)` keys are still emitted.
-- **`ISO_IR 109/110/126/127/138/144/148/166` map to Windows code pages** instead of ISO-8859-x / TIS-620.
-  A `charset.rs` unit test asserts the wrong mapping and must be corrected with the fix.
-- **Private-tag VRs are always `UN`** — `dictionary_vr` never consults the private dictionary.
-- **CP-246 condition is inverted** — it switches to little endian only for private tags; the standard
-  requires non-private.
-- **The fragment-sequence `FFFE,E0DD` branch does not consume its length field**, desynchronising the
-  rest of the stream.
-- **`Suspended` / `IsPartial` are not implemented**, so a truncated file can only fail wholesale.
-- **Private-sequence probing (`IsPrivateSequence` / `IsPrivateSequenceBad`) is not implemented.**
-- **`LongCodeValue` / `URNCodeValue` are not implemented** — long and URN values are written into
-  `CodeValue`.
-- **`store.rs` defaults to `SpoolToTemp` and leaks temp files**; the default should not leave files
-  behind.
+### 15.1 Buffer reads are fallible (adopted design)
 
-### 15.1 Deferred: buffer reads can panic (open item)
+`ByteBuffer` reads are fallible. This is the adopted design, not a deferred fix:
 
-This is the one interface issue from the 2026-10-29 code review
-(`target/2026-10-29-code-review.md`) that is still open. The other two issues it raised were resolved:
-`DicomImage`'s geometry accessors now return `u32` / `bool` instead of a `Result` that could never be
-`Err`, and `PixelDataConverter` is now the module function `render::reverse_bits`.
+```rust
+fn data(&self) -> std::io::Result<std::borrow::Cow<'_, [u8]>>;
+fn as_slice(&self) -> Option<&[u8]>;
+fn get_byte_range(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()>;
+fn copy_to(&self, w: &mut dyn std::io::Write) -> std::io::Result<u64>;
+```
 
-**Deferred-I/O buffers panic instead of reporting an error**
-(`crates/radicom/src/model/buffer.rs`): `FileWindow` (in `data` / `get_byte_range`, around line 608/613)
-and `StreamWindow` (in `ensure`, around line 716) call `expect(...)` when the underlying file read or
-temp-file spill fails. `ByteBuffer::data` returns `Cow<'_, [u8]>` and therefore cannot carry an I/O
-error, so a failure on a lazily-loaded value becomes a panic instead of a typed error.
+`FileWindow` and `StreamWindow` return real `io::Error`s instead of panicking over a failed file read or a
+failed temp-file spill. An out-of-bounds `get_byte_range` is `ErrorKind::InvalidInput`. The `StreamWindow`
+spill error is sticky: the source is consumed, so the read cannot be retried.
 
-Why it was not fixed with the rest: making the read path fallible means changing `ByteBuffer::data`
-(and `get_byte_range`, `copy_to`) to return a `Result`, then updating every caller — roughly 120
-`.data()` call sites across the reader, writer, JSON, render, pixel, print and DIMSE modules. That is a
-cross-module API redesign, not a local fix, and it is the reason the no-panic guarantee in
-[02-development-guide.md](02-development-guide.md) §5.1 does not hold for deferred buffers today.
+An infallible shadow accessor (`try_data` beside an infallible `data`) was rejected. Panic safety cannot be
+type-checked through `dyn ByteBuffer`: a caller that keeps the infallible form still panics on a deferred
+buffer, and no signature distinguishes the two kinds of caller. `as_slice()` already covers the zero-copy
+memory fast path, so one fallible form is both sufficient and checkable.
 
-Until it is fixed, treat `ByteBuffer::data()` as safe only for values already materialised in memory
-(`MemoryBuffer`, `SharedBuffer`, `CompositeBuffer` and any cached window). For a `FileWindow` or
-`StreamWindow` on a file that may be truncated or unreadable, the call can panic.
-
-Sketch of the intended fix: add `fn try_data(&self) -> io::Result<Cow<'_, [u8]>>` to `ByteBuffer`,
-implement it for the window types, keep `data()` as a thin `expect` wrapper for the in-memory types,
-and migrate the read paths that must not panic (parser, writer, pixel access) first. Sites that operate
-on already-loaded memory can keep using `data()`.
+Invariant for implementors: `size()` stays cheap and non-materialising, `data()` may fail, `as_slice()`
+returns `None` when the value is not contiguous in memory.
