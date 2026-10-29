@@ -69,9 +69,9 @@
 | 04 §1 `DicomDirectory::validate` / 环保护 | 已实现 | `DicomDirectory::validate`；`walk` 去重防环；`a_parent_cycle_is_reported_and_walk_terminates` |
 | 03 §1.4 状态码描述可扩展注册 | 已实现 | `6a6a43b`；`register_status_description`（对齐 `AddKnownDicomStatuses`） |
 
-> 截至本轮，五份报告中**已没有“缺失”行**：每一条要么已实现，要么明确改为“有意不实现/设计边界”
-> （如完整 regex 子集、Socket 级超时、每服务独立 provider trait、命令/数据发送批处理、图像彩色 icon
-> ——fo-dicom 的 icon builder 本身也只接受 8-bit 灰度）。
+> 截至本轮，五份报告中**已没有“缺失”行**：每一条要么已实现，要么明确改为“有意不实现/设计边界”。
+> 传输/TLS/平台一节已改为按 **Rust 生态**（tokio + socket2 + rustls）的能力判定，不照搬 .NET 的
+> `INetworkManager`/`DicomTimeout`/`NetworkStream` 等抽象（详见 03 §1.6 的判定口径）。
 
 ## 待办（按价值排序）
 
@@ -135,6 +135,13 @@
 - 集中校正 01/02 报告表格：把已实现的 `❌/🟡` 项改为 `✅`（清单见待办 1）。
 - 04 报告：`LongCodeValue`/`URNCodeValue`、JSON group length、`validate_on_read`、charset、scanner
   Stop/Complete 等快照措辞更正。
+
+## 本轮（2026-10-29，第 7 轮）调整：传输/TLS 按 Rust 生态判定
+
+- 按评审反馈，不照搬 .NET 结构：03 §1.6 改为按 **tokio + socket2 + rustls 的能力**判定，
+  `INetworkManager`、`DicomTimeout` 枚举、`NetworkStreamCreationOptions` 标为“不适用/Rust 表达”，
+  PKCS#12/系统证书库标为“有意不实现（rustls 用 PEM）”。
+- 曾尝试新增 `socket_timeout` 以对齐 `DicomTimeout.Socket`，判定属照搬，已回退，代码未变更。
 - 代码侧无新增（本轮仅文档同步；相关实现均在此前轮次落地并有测试）。
 
 ## 结论
@@ -145,6 +152,7 @@
 - 同步 API 无请求队列 → 监听式 linger、watchdog 多请求扫描、C-MOVE 流水线、C-CANCEL 并发。
 - 轻依赖取向 → PKCS#12/系统证书库、完整正则 tag 匹配、私有字典。
 - 已用 `ponytail:` 标注的性能上限 → `write_pdu` 重编码、`FileWindow` 每窗口句柄、命令/数据发送批处理。
-- 形态抽象 → `IImage`/`INetworkManager`、每服务独立 provider trait、`DirectoryRecord` 指针、`CacheType`。
+- .NET 专属抽象，Rust 不适用（按能力已覆盖）→ `INetworkManager`、`DicomTimeout` 枚举、`NetworkStreamCreationOptions`。
+- 其它形态抽象 → `IImage`、每服务独立 provider trait、`DirectoryRecord` 指针、`CacheType`。
 
 

@@ -106,23 +106,27 @@
 | N 响应回显 Event/Action Type ID | `DicomNEventReportResponse.cs`、`DicomNActionResponse.cs` | 已实现 | `nservice.rs:112-113`、`nservice.rs:126-127` | — |
 | N-CREATE-RSP 返回新建实例 UID | `DicomNCreateResponse.cs` | **已实现** | `nservice.rs` `NServiceResponse::success_with_new_instance` | 可携带 SCP 分配的新实例 UID；普通响应仍回显请求值 |
 
-### 1.6 传输 / TLS / 平台
+### 1.6 传输 / TLS / 平台（按 Rust 生态判定，不照搬 .NET 结构）
+
+> 判定口径：fo-dicom 的若干传输/平台条目是 **.NET 特有抽象**（`NetworkStreamCreationOptions`、
+> `INetworkManager`、`DicomTimeout` 枚举、Windows 证书库）。Rust 的等价做法是 tokio + `socket2`
+> + rustls；因此本节按**能力**（是否达到同样效果）判定，不把同名 .NET API 当作缺口。
 
 | 能力 | fo-dicom 参照 | 状态 | radicom 符号（file:line） | 说明 |
 | --- | --- | --- | --- | --- |
-| TCP_NODELAY | `NetworkStreamCreationOptions` | 已实现 | `transport.rs:68` `apply_options` | 默认开启 |
-| SO_SNDBUF / SO_RCVBUF | `NetworkStreamCreationOptions.Send/ReceiveBufferSize` | **已实现** | `transport.rs:79-88` | 通过 `socket2::SockRef` 尝试设置，平台拒绝时保持连接可用；有 socket 级回归测试 |
-| TLS 服务端 / 客户端握手 | `Tls/DefaultTlsAcceptor.cs`、`Tls/DefaultTlsInitiator.cs` | 已实现 | `tls.rs:89` `accept` / `tls.rs:96` `connect` | 基于 tokio-rustls |
-| 显式最低协议版本 | `SslProtocols.Tls12 \| Tls13`（fo-dicom 在 `SslClientAuthenticationOptions` 显式指定） | **已实现** | `tls.rs:25-39`、`:93-96` | `TlsVersion` 显式选择 TLS 1.2 或 TLS 1.3-only |
-| 双向认证（mTLS） | `DefaultTlsAcceptor.RequireMutualAuthentication` | **已实现** | `tls.rs:51-59`、`:105-121` | 配置 `client_ca_file` 后启用客户端证书校验；客户端证书/私钥也有配对校验 |
-| 证书校验开关 | `DefaultTlsInitiator.IgnoreSslPolicyErrors` | 已实现 | `tls.rs:71-79` `accept_any` | 语义等价，注释已标明 "testing only" |
-| SNI / 证书名指定 | `TargetHost` | **已实现** | `tls.rs:146-168` | 显式 `server_name` 优先；未配置时使用已连接 peer IP，不再硬编码 `localhost` |
-| 证书格式支持 | PKCS#12 + 密码 / Windows 证书库 | 部分实现 | `tls.rs:114` `load_certs`、`tls.rs:125` `load_key` | 仅 PEM（PKCS#8 / PKCS#1）；PKCS#12 与系统证书库缺失 |
-| 三类超时（ACSE / DIMSE / Socket） | `DicomTimeout.cs` | 部分实现（设计边界） | `ClientOptions::{association_timeout,request_timeout,release_timeout}` | ACSE 用 `association_timeout`、DIMSE 用 `request_timeout`+`release_timeout` 已建模并有错误类型；Socket 级空闲超时未单独建模，交由 OS/TCP 与调用方（属有意取舍，避免在每个读点上再叠一层超时） |
-| 平台抽象层 `INetworkManager` | `NetworkManager.cs`（Listener/Stream/IsSocketException/MachineName/TryGetNetworkIdentifier） | 部分实现 | `transport.rs`、`print_sop.rs` | 机器标识已统一为 MAC 形式（见下一行）；仍无统一的 `INetworkManager` 抽象（Listener/Stream 直接散落在 `transport`/`server` 中） |
-| 机器标识 | `NetworkManager.TryGetNetworkIdentifier`（MAC 追加到实现类 UID） | 已实现 | `print_sop.rs` `try_get_network_identifier`；`transport.rs` `network_identifier` | 两者现已统一：`transport::network_identifier()` 委托给 MAC 版本，不再有 `2.25.{fnv}` 的第二套语义 |
-| 命令/数据缓冲上限 | `DicomServiceOptions.MaxCommandBuffer` / `MaxDataBuffer` | 部分实现 | `assembler.rs:108` `PduSplitter::new` | 只有单一 `max_pdu` + `max_pdvs_per_pdu`，未区分命令与数据缓冲 |
-| 每 PDU PDV 数上限 | `DicomServiceOptions.MaxPDVsPerPDU` | 已实现 | `assembler.rs:108` | 参数形态一致 |
+| TCP_NODELAY | `NetworkStreamCreationOptions` | 已实现 | `transport.rs` `TcpOptions.nodelay` / `TcpStream::set_nodelay` | 默认开启 |
+| SO_SNDBUF / SO_RCVBUF | `NetworkStreamCreationOptions.Send/ReceiveBufferSize` | 已实现 | `transport.rs` `apply_options`（`socket2::SockRef`） | tokio 无接收缓冲区 setter，故用 `socket2` 在底层 fd 上设置；内核拒绝时保持连接可用，有 socket 级回归测试 |
+| TLS 服务端 / 客户端握手 | `Tls/DefaultTlsAcceptor.cs`、`Tls/DefaultTlsInitiator.cs` | 已实现 | `tls.rs` `accept` / `connect`（rustls） | 基于 tokio-rustls，服务端/客户端各自 `ServerConfig`/`ClientConfig` |
+| 显式最低协议版本 | `SslProtocols.Tls12 \| Tls13` | 已实现 | `tls.rs` `TlsVersion` | 选择 TLS 1.2（兼容 1.3）或 TLS 1.3-only |
+| 双向认证（mTLS） | `DefaultTlsAcceptor.RequireMutualAuthentication` | 已实现 | `tls.rs` `WebPkiClientVerifier`（配置 `client_ca_file`） | 客户端证书/私钥配对校验 |
+| 证书校验开关 | `DefaultTlsInitiator.IgnoreSslPolicyErrors` | 已实现 | `tls.rs` `accept_any` | 语义等价，注释标明 "testing only" |
+| SNI / 证书名指定 | `TargetHost` | 已实现 | `tls.rs` `server_name` | 显式名称优先，未配置时用已连接 peer IP |
+| 证书格式支持 | PKCS#12 + 密码 / Windows 证书库 | ⛔ 有意不实现 | `tls.rs` `load_certs`/`load_key`（仅 PEM） | rustls 生态以 PEM（PKCS#8/PKCS#1）为准；PKCS#12/系统证书库需 openssl/平台 FFI 等重依赖，按需由调用方转为 PEM，符合轻依赖取向 |
+| 超时 | `DicomTimeout.cs`（ACSE / DIMSE / Socket 三态枚举） | 已实现（Rust 表达） | `association_timeout`、`request_timeout`、`release_timeout` | Rust 不用常量枚举，而是各阶段具体的 `Duration` 字段；ACSE/DIMSE/释放各有超时与错误类型，Socket 空闲由 OS/TCP keep-alive 负责（不在每个读点重复叠超时） |
+| 平台抽象层 | `INetworkManager`（Listener/Stream/IsSocketException/MachineName） | ⛔ 不适用 | `tokio::net::{TcpListener,TcpStream}`、`rustls` 的 `AsyncRead/AsyncWrite` | .NET 的 `INetworkManager` 是为替换 BCL 网络实现；Rust 侧直接依赖 tokio/rustls 的具体类型与 trait，无需再造一层 manager |
+| 机器标识 | `NetworkManager.TryGetNetworkIdentifier`（MAC 追加到实现类 UID） | 已实现 | `print_sop.rs` `try_get_network_identifier`；`transport.rs` `network_identifier` | `transport::network_identifier()` 委托给 MAC 版本，无第二套语义 |
+| 命令/数据缓冲上限 | `DicomServiceOptions.MaxCommandBuffer` / `MaxDataBuffer` | 部分实现（发送策略差异） | `assembler.rs` `PduSplitter::new` | 用 `max_pdu` + `max_pdvs_per_pdu` 表达发送分片；fo-dicom 的 `Max*Buffer` 是"攒批再发"的阈值，属吞吐策略差异而非接收上限，见 §3 |
+| 每 PDU PDV 数上限 | `DicomServiceOptions.MaxPDVsPerPDU` | 已实现 | `assembler.rs` `PduSplitter::new` | 参数形态一致 |
 
 ### 1.7 打印 / 其它
 
