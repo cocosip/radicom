@@ -8,7 +8,7 @@ use crate::error::{DataError, Error};
 use encoding_rs::Encoding;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::RwLock;
 
 /// The built-in term → encoding table (spec 04 §8.1). ISO 2022 extended
 /// terms decode their base encoding; escape switching is handled by
@@ -49,14 +49,14 @@ static BUILTINS: &[(&str, &str)] = &[
     ("ISO 2022 GBK", "GBK"),
 ];
 
-static REGISTRY: Lazy<Mutex<HashMap<String, &'static Encoding>>> = Lazy::new(|| {
+static REGISTRY: Lazy<RwLock<HashMap<String, &'static Encoding>>> = Lazy::new(|| {
     let mut m = HashMap::new();
     for (term, enc) in BUILTINS {
         if let Some(e) = Encoding::for_label(enc.as_bytes()) {
             m.insert(normalize_term(term), e);
         }
     }
-    Mutex::new(m)
+    RwLock::new(m)
 });
 
 /// Term matching is case/space/punctuation tolerant: `iso-ir 192`,
@@ -73,7 +73,7 @@ pub fn register_charset(term: &str, encoding_name: &str) -> Result<(), Error> {
     // leak the name once: registry values must be 'static
     let leaked: &'static str = Box::leak(encoding_name.to_string().into_boxed_str());
     let enc = Encoding::for_label(leaked.as_bytes()).unwrap_or(enc);
-    REGISTRY.lock().expect("registry lock").insert(normalize_term(term), enc);
+    REGISTRY.write().expect("registry lock").insert(normalize_term(term), enc);
     Ok(())
 }
 
@@ -88,7 +88,7 @@ pub fn register_charset(term: &str, encoding_name: &str) -> Result<(), Error> {
 pub fn charset_encoding(term: &str) -> &'static Encoding {
     ensure_registry();
     let normalized = normalize_term(term);
-    if let Some(e) = REGISTRY.lock().expect("registry lock").get(&normalized) {
+    if let Some(e) = REGISTRY.read().expect("registry lock").get(&normalized) {
         return e;
     }
     encoding_rs::WINDOWS_1252
@@ -97,7 +97,7 @@ pub fn charset_encoding(term: &str) -> &'static Encoding {
 /// True when the term is a known charset (used to decide whether to warn).
 pub fn is_known_charset(term: &str) -> bool {
     ensure_registry();
-    REGISTRY.lock().expect("registry lock").contains_key(&normalize_term(term))
+    REGISTRY.read().expect("registry lock").contains_key(&normalize_term(term))
 }
 
 fn ensure_registry() {
