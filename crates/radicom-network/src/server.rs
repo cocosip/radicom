@@ -1694,80 +1694,78 @@ impl Association {
     }
 
     /// Runs a C-FIND, handing each response to `on_response` as it arrives.
-    pub fn send_c_find_stream<'a, F>(
-        &'a mut self,
-        request: &'a crate::cfind::CFindRequest,
+    pub async fn send_c_find_stream<F>(
+        &mut self,
+        request: &crate::cfind::CFindRequest,
         mut on_response: F,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>>
+    ) -> Result<()>
     where
-        F: FnMut(crate::cfind::CFindResponse) -> std::io::Result<()> + 'a,
+        F: FnMut(crate::cfind::CFindResponse) -> std::io::Result<()>,
     {
-        Box::pin(async move {
-            let context = self.contexts.pick(&request.sop_class_uid, "")?;
-            let context_id = context.id;
-            let syntax = transfer_syntax_of(&context.transfer_syntax);
-            let message_id = request.message_id;
+        let context = self.contexts.pick(&request.sop_class_uid, "")?;
+        let context_id = context.id;
+        let syntax = transfer_syntax_of(&context.transfer_syntax);
+        let message_id = request.message_id;
 
-            let command = bytes::Bytes::from(command_bytes(&request.to_command())?);
-            let identifier = bytes::Bytes::from(crate::message::encode_dataset(&request.identifier, &syntax)?);
-            let pdus = self.splitter.split_message_bytes(context_id, command, Some(identifier))?;
-            write_pdata_batch(&mut self.stream, pdus).await?;
+        let command = bytes::Bytes::from(command_bytes(&request.to_command())?);
+        let identifier = bytes::Bytes::from(crate::message::encode_dataset(&request.identifier, &syntax)?);
+        let pdus = self.splitter.split_message_bytes(context_id, command, Some(identifier))?;
+        write_pdata_batch(&mut self.stream, pdus).await?;
 
-            // the Identifier of a Pending response follows its command
-            let mut awaiting_command: Option<Command> = None;
-            loop {
-                let Some(pdu) = self.read_request_pdu(message_id).await? else {
-                    return Err(NetworkError::ClosedPrematurely { source: None });
-                };
-                match pdu {
-                    Pdu::PData(pdata) => {
-                        for unit in self.assembler.push_pdata(&pdata)? {
-                            match unit.stream {
-                                Stream::Command => {
-                                    let command = command_from_bytes(&unit.bytes)?;
-                                    if command.field != CommandField::CFindRsp
-                                        || command.message_id_being_responded_to != Some(message_id)
-                                    {
-                                        continue;
-                                    }
-                                    if command.no_dataset {
-                                        let response = crate::cfind::CFindResponse::from_command(&command, None)?;
-                                        let terminal = !response.is_pending();
-                                        on_response(response)?;
-                                        if terminal {
-                                            return Ok(());
-                                        }
-                                    } else {
-                                        // the match dataset follows
-                                        awaiting_command = Some(command);
-                                    }
+        // the Identifier of a Pending response follows its command
+        let mut awaiting_command: Option<Command> = None;
+        loop {
+            let Some(pdu) = self.read_request_pdu(message_id).await? else {
+                return Err(NetworkError::ClosedPrematurely { source: None });
+            };
+            match pdu {
+                Pdu::PData(pdata) => {
+                    for unit in self.assembler.push_pdata(&pdata)? {
+                        match unit.stream {
+                            Stream::Command => {
+                                let command = command_from_bytes(&unit.bytes)?;
+                                if command.field != CommandField::CFindRsp
+                                    || command.message_id_being_responded_to != Some(message_id)
+                                {
+                                    continue;
                                 }
-                                Stream::Data => {
-                                    let Some(command) = awaiting_command.take() else {
-                                        continue;
-                                    };
-                                    let identifier = crate::message::decode_dataset(&unit.bytes, &syntax)?;
-                                    let response = crate::cfind::CFindResponse::from_command(&command, Some(identifier))?;
+                                if command.no_dataset {
+                                    let response = crate::cfind::CFindResponse::from_command(&command, None)?;
                                     let terminal = !response.is_pending();
                                     on_response(response)?;
                                     if terminal {
                                         return Ok(());
                                     }
+                                } else {
+                                    // the match dataset follows
+                                    awaiting_command = Some(command);
+                                }
+                            }
+                            Stream::Data => {
+                                let Some(command) = awaiting_command.take() else {
+                                    continue;
+                                };
+                                let identifier = crate::message::decode_dataset(&unit.bytes, &syntax)?;
+                                let response = crate::cfind::CFindResponse::from_command(&command, Some(identifier))?;
+                                let terminal = !response.is_pending();
+                                on_response(response)?;
+                                if terminal {
+                                    return Ok(());
                                 }
                             }
                         }
                     }
-                    Pdu::Abort(abort) => {
-                        return Err(NetworkError::Abort { source_code: abort.source.code(), reason: abort.reason })
-                    }
-                    Pdu::ReleaseRq => {
-                        write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
-                        return Err(NetworkError::ClosedPrematurely { source: None });
-                    }
-                    _ => {}
                 }
+                Pdu::Abort(abort) => {
+                    return Err(NetworkError::Abort { source_code: abort.source.code(), reason: abort.reason })
+                }
+                Pdu::ReleaseRq => {
+                    write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
+                    return Err(NetworkError::ClosedPrematurely { source: None });
+                }
+                _ => {}
             }
-        })
+        }
     }
 
     /// Runs a C-MOVE and collects every progress plus the terminal response
@@ -1786,60 +1784,58 @@ impl Association {
     ///
     /// A C-MOVE response never carries a dataset: the instances travel on the
     /// SCP's own outbound association (§7.5).
-    pub fn send_c_move_stream<'a, F>(
-        &'a mut self,
-        request: &'a crate::cmove::CMoveRequest,
+    pub async fn send_c_move_stream<F>(
+        &mut self,
+        request: &crate::cmove::CMoveRequest,
         mut on_response: F,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>>
+    ) -> Result<()>
     where
-        F: FnMut(crate::cmove::CMoveResponse) -> std::io::Result<()> + 'a,
+        F: FnMut(crate::cmove::CMoveResponse) -> std::io::Result<()>,
     {
-        Box::pin(async move {
-            let context = self.contexts.pick(&request.sop_class_uid, "")?;
-            let context_id = context.id;
-            let syntax = transfer_syntax_of(&context.transfer_syntax);
-            let message_id = request.message_id;
+        let context = self.contexts.pick(&request.sop_class_uid, "")?;
+        let context_id = context.id;
+        let syntax = transfer_syntax_of(&context.transfer_syntax);
+        let message_id = request.message_id;
 
-            let command = bytes::Bytes::from(command_bytes(&request.to_command())?);
-            let identifier = bytes::Bytes::from(crate::message::encode_dataset(&request.identifier, &syntax)?);
-            let pdus = self.splitter.split_message_bytes(context_id, command, Some(identifier))?;
-            write_pdata_batch(&mut self.stream, pdus).await?;
+        let command = bytes::Bytes::from(command_bytes(&request.to_command())?);
+        let identifier = bytes::Bytes::from(crate::message::encode_dataset(&request.identifier, &syntax)?);
+        let pdus = self.splitter.split_message_bytes(context_id, command, Some(identifier))?;
+        write_pdata_batch(&mut self.stream, pdus).await?;
 
-            loop {
-                let Some(pdu) = self.read_request_pdu(message_id).await? else {
-                    return Err(NetworkError::ClosedPrematurely { source: None });
-                };
-                match pdu {
-                    Pdu::PData(pdata) => {
-                        for unit in self.assembler.push_pdata(&pdata)? {
-                            if unit.stream != Stream::Command {
-                                continue;
-                            }
-                            let command = command_from_bytes(&unit.bytes)?;
-                            if command.field != CommandField::CMoveRsp
-                                || command.message_id_being_responded_to != Some(message_id)
-                            {
-                                continue;
-                            }
-                            let response = crate::cmove::CMoveResponse::from_command(&command)?;
-                            let terminal = !response.is_pending();
-                            on_response(response)?;
-                            if terminal {
-                                return Ok(());
-                            }
+        loop {
+            let Some(pdu) = self.read_request_pdu(message_id).await? else {
+                return Err(NetworkError::ClosedPrematurely { source: None });
+            };
+            match pdu {
+                Pdu::PData(pdata) => {
+                    for unit in self.assembler.push_pdata(&pdata)? {
+                        if unit.stream != Stream::Command {
+                            continue;
+                        }
+                        let command = command_from_bytes(&unit.bytes)?;
+                        if command.field != CommandField::CMoveRsp
+                            || command.message_id_being_responded_to != Some(message_id)
+                        {
+                            continue;
+                        }
+                        let response = crate::cmove::CMoveResponse::from_command(&command)?;
+                        let terminal = !response.is_pending();
+                        on_response(response)?;
+                        if terminal {
+                            return Ok(());
                         }
                     }
-                    Pdu::Abort(abort) => {
-                        return Err(NetworkError::Abort { source_code: abort.source.code(), reason: abort.reason })
-                    }
-                    Pdu::ReleaseRq => {
-                        write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
-                        return Err(NetworkError::ClosedPrematurely { source: None });
-                    }
-                    _ => {}
                 }
+                Pdu::Abort(abort) => {
+                    return Err(NetworkError::Abort { source_code: abort.source.code(), reason: abort.reason })
+                }
+                Pdu::ReleaseRq => {
+                    write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
+                    return Err(NetworkError::ClosedPrematurely { source: None });
+                }
+                _ => {}
             }
-        })
+        }
     }
 
     /// Runs a C-GET, collecting every response (§7.4).
@@ -1857,110 +1853,108 @@ impl Association {
     }
 
     /// Runs a C-GET, handing each response to `on_response` as it arrives.
-    pub fn send_c_get_stream<'a, F>(
-        &'a mut self,
-        request: &'a crate::cget::CGetRequest,
+    pub async fn send_c_get_stream<F>(
+        &mut self,
+        request: &crate::cget::CGetRequest,
         mut on_response: F,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>>
+    ) -> Result<()>
     where
-        F: FnMut(crate::cget::CGetResponse) -> std::io::Result<()> + 'a,
+        F: FnMut(crate::cget::CGetResponse) -> std::io::Result<()>,
     {
-        Box::pin(async move {
-            let Some(handler) = self.reverse_store.clone() else {
-                return Err(NetworkError::ReverseStoreHandlerMissing);
+        let Some(handler) = self.reverse_store.clone() else {
+            return Err(NetworkError::ReverseStoreHandlerMissing);
+        };
+        let context = self.contexts.pick(&request.sop_class_uid, "")?;
+        let context_id = context.id;
+        let syntax = transfer_syntax_of(&context.transfer_syntax);
+        let message_id = request.message_id;
+
+        let command = bytes::Bytes::from(command_bytes(&request.to_command())?);
+        let identifier = bytes::Bytes::from(crate::message::encode_dataset(&request.identifier, &syntax)?);
+        let pdus = self.splitter.split_message_bytes(context_id, command, Some(identifier))?;
+        write_pdata_batch(&mut self.stream, pdus).await?;
+
+        // a reverse C-STORE request awaiting its dataset
+        let mut awaiting_store: Option<Command> = None;
+        loop {
+            let Some(pdu) = self.read_request_pdu(message_id).await? else {
+                return Err(NetworkError::ClosedPrematurely { source: None });
             };
-            let context = self.contexts.pick(&request.sop_class_uid, "")?;
-            let context_id = context.id;
-            let syntax = transfer_syntax_of(&context.transfer_syntax);
-            let message_id = request.message_id;
-
-            let command = bytes::Bytes::from(command_bytes(&request.to_command())?);
-            let identifier = bytes::Bytes::from(crate::message::encode_dataset(&request.identifier, &syntax)?);
-            let pdus = self.splitter.split_message_bytes(context_id, command, Some(identifier))?;
-            write_pdata_batch(&mut self.stream, pdus).await?;
-
-            // a reverse C-STORE request awaiting its dataset
-            let mut awaiting_store: Option<Command> = None;
-            loop {
-                let Some(pdu) = self.read_request_pdu(message_id).await? else {
-                    return Err(NetworkError::ClosedPrematurely { source: None });
-                };
-                match pdu {
-                    Pdu::PData(pdata) => {
-                        for unit in self.assembler.push_pdata(&pdata)? {
-                            match unit.stream {
-                                Stream::Command => {
-                                    let command = command_from_bytes(&unit.bytes)?;
-                                    match command.field {
-                                        CommandField::CStoreRq => {
-                                            if command.no_dataset {
-                                                // an instance without a dataset is unusable
-                                                let Some(response) = Command::response(
-                                                    &command,
-                                                    crate::dimse::status::PROCESSING_FAILURE,
-                                                ) else {
-                                                    continue;
-                                                };
-                                                for pdata in self.splitter.split_bytes(
-                                                    unit.context_id,
-                                                    true,
-                                                    bytes::Bytes::from(command_bytes(&response)?),
-                                                )? {
-                                                    write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
-                                                }
-                                            } else {
-                                                awaiting_store = Some(command);
-                                            }
-                                        }
-                                        CommandField::CGetRsp => {
-                                            if command.message_id_being_responded_to != Some(message_id) {
+            match pdu {
+                Pdu::PData(pdata) => {
+                    for unit in self.assembler.push_pdata(&pdata)? {
+                        match unit.stream {
+                            Stream::Command => {
+                                let command = command_from_bytes(&unit.bytes)?;
+                                match command.field {
+                                    CommandField::CStoreRq => {
+                                        if command.no_dataset {
+                                            // an instance without a dataset is unusable
+                                            let Some(response) = Command::response(
+                                                &command,
+                                                crate::dimse::status::PROCESSING_FAILURE,
+                                            ) else {
                                                 continue;
+                                            };
+                                            for pdata in self.splitter.split_bytes(
+                                                unit.context_id,
+                                                true,
+                                                bytes::Bytes::from(command_bytes(&response)?),
+                                            )? {
+                                                write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
                                             }
-                                            let response = crate::cget::CGetResponse::from_command(&command)?;
-                                            let terminal = !response.is_pending();
-                                            on_response(response)?;
-                                            if terminal {
-                                                return Ok(());
-                                            }
+                                        } else {
+                                            awaiting_store = Some(command);
                                         }
-                                        _ => {}
                                     }
+                                    CommandField::CGetRsp => {
+                                        if command.message_id_being_responded_to != Some(message_id) {
+                                            continue;
+                                        }
+                                        let response = crate::cget::CGetResponse::from_command(&command)?;
+                                        let terminal = !response.is_pending();
+                                        on_response(response)?;
+                                        if terminal {
+                                            return Ok(());
+                                        }
+                                    }
+                                    _ => {}
                                 }
-                                Stream::Data => {
-                                    let Some(store) = awaiting_store.take() else {
-                                        continue;
-                                    };
-                                    let dataset = crate::message::decode_dataset(&unit.bytes, &syntax)?;
-                                    let mut file = radicom::io::file::DicomFile::from_dataset(dataset);
-                                    file.dataset.set_transfer_syntax(syntax.clone());
-                                    let request = crate::store::c_store_request_from_message(
-                                        &store,
-                                        crate::store::ReceivedInstance::from_file(file),
-                                    )?;
-                                    // the handler's verdict goes straight back
-                                    let response = match handler(&request) {
-                                        Ok(response) => response,
-                                        Err(error) => crate::store::failure_response(&request, &error),
-                                    };
-                                    let bytes = bytes::Bytes::from(command_bytes(&response.to_command())?);
-                                    for pdata in self.splitter.split_bytes(unit.context_id, true, bytes)? {
-                                        write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
-                                    }
+                            }
+                            Stream::Data => {
+                                let Some(store) = awaiting_store.take() else {
+                                    continue;
+                                };
+                                let dataset = crate::message::decode_dataset(&unit.bytes, &syntax)?;
+                                let mut file = radicom::io::file::DicomFile::from_dataset(dataset);
+                                file.dataset.set_transfer_syntax(syntax.clone());
+                                let request = crate::store::c_store_request_from_message(
+                                    &store,
+                                    crate::store::ReceivedInstance::from_file(file),
+                                )?;
+                                // the handler's verdict goes straight back
+                                let response = match handler(&request) {
+                                    Ok(response) => response,
+                                    Err(error) => crate::store::failure_response(&request, &error),
+                                };
+                                let bytes = bytes::Bytes::from(command_bytes(&response.to_command())?);
+                                for pdata in self.splitter.split_bytes(unit.context_id, true, bytes)? {
+                                    write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
                                 }
                             }
                         }
                     }
-                    Pdu::Abort(abort) => {
-                        return Err(NetworkError::Abort { source_code: abort.source.code(), reason: abort.reason })
-                    }
-                    Pdu::ReleaseRq => {
-                        write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
-                        return Err(NetworkError::ClosedPrematurely { source: None });
-                    }
-                    _ => {}
                 }
+                Pdu::Abort(abort) => {
+                    return Err(NetworkError::Abort { source_code: abort.source.code(), reason: abort.reason })
+                }
+                Pdu::ReleaseRq => {
+                    write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
+                    return Err(NetworkError::ClosedPrematurely { source: None });
+                }
+                _ => {}
             }
-        })
+        }
     }
 
     /// Reads PDUs until the response for `message_id` arrives (§5.2).
