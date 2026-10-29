@@ -219,3 +219,7 @@
 
 - **模型 / 编码器**：删除未使用的 `DirectTranscoder` 钩子与 `CodecRegistry::get_direct_transcoder`（无任何实现，封装→封装恒走解码+编码），`transcode_dataset` 行 5 简化。
 
+
+- **网络 / C-STORE 接收**：`handle_command_with_dataset`/`handle_c_store` 直接传递 `bytes::Bytes`，去掉 `dataset_bytes.to_vec()` 的全量拷贝（`Bytes` 克隆仅引用计数）。
+- **IO / PathFile**：删除单实现 `FileRef` trait，方法降为 `PathFile` inherent（去掉 C# 式单实现接口）。
+- **文档**：五份对齐报告 §0/§1 增加"历史快照"状态提示，避免正文旧口吻误读。
