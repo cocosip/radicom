@@ -16,7 +16,7 @@ use crate::error::Error;
 use crate::model::dataset::Dataset;
 use crate::model::tag::Tag;
 use crate::model::vr::Vr;
-use crate::pixel::PixelData;
+use crate::pixel::PixelDataRef;
 
 /// The largest icon dimension DICOM allows (§3.4, PS3.3 C.7.6.1.1.6).
 pub const MAX_ICON_SIZE: u32 = 128;
@@ -24,13 +24,13 @@ pub const MAX_ICON_SIZE: u32 = 128;
 /// Builds an icon dataset for a source image, or `None` when unsupported.
 pub trait IconGenerator {
     /// The `IconImageSequence` item for `dataset`, if one can be built.
-    fn generate(&self, dataset: &mut Dataset) -> Result<Option<Dataset>, Error>;
+    fn generate(&self, dataset: &Dataset) -> Result<Option<Dataset>, Error>;
 
     /// The icon for an explicit zero-based source frame.
     ///
     /// Implementors that do not support frame selection retain their existing
     /// behaviour through the default method.
-    fn generate_frame(&self, dataset: &mut Dataset, _frame_index: u32) -> Result<Option<Dataset>, Error> {
+    fn generate_frame(&self, dataset: &Dataset, _frame_index: u32) -> Result<Option<Dataset>, Error> {
         self.generate(dataset)
     }
 }
@@ -40,14 +40,14 @@ pub trait IconGenerator {
 pub struct BasicIconGenerator;
 
 impl IconGenerator for BasicIconGenerator {
-    fn generate(&self, dataset: &mut Dataset) -> Result<Option<Dataset>, Error> {
+    fn generate(&self, dataset: &Dataset) -> Result<Option<Dataset>, Error> {
         let Some(icon) = build_icon(dataset, None)? else {
             return Ok(None);
         };
         Ok(Some(icon))
     }
 
-    fn generate_frame(&self, dataset: &mut Dataset, frame_index: u32) -> Result<Option<Dataset>, Error> {
+    fn generate_frame(&self, dataset: &Dataset, frame_index: u32) -> Result<Option<Dataset>, Error> {
         let Some(icon) = build_icon(dataset, Some(frame_index))? else {
             return Ok(None);
         };
@@ -56,8 +56,8 @@ impl IconGenerator for BasicIconGenerator {
 }
 
 /// Extracts and downsamples one frame into a MONOCHROME2 icon dataset.
-fn build_icon(dataset: &mut Dataset, requested_frame: Option<u32>) -> Result<Option<Dataset>, Error> {
-    let pixel = PixelData::from_dataset(dataset)?;
+fn build_icon(dataset: &Dataset, requested_frame: Option<u32>) -> Result<Option<Dataset>, Error> {
+    let pixel = PixelDataRef::from_dataset(dataset)?;
 
     // only uncompressed single-sample grayscale is supported here
     if pixel.transfer_syntax().is_encapsulated() || pixel.samples_per_pixel() != 1 {
@@ -239,8 +239,8 @@ mod tests {
 
     #[test]
     fn a_small_image_becomes_an_eight_bit_icon() {
-        let mut ds = source(64, 32, 1, 8, |x, _| (x * 4) as u16);
-        let icon = BasicIconGenerator.generate(&mut ds).unwrap().unwrap();
+        let ds = source(64, 32, 1, 8, |x, _| (x * 4) as u16);
+        let icon = BasicIconGenerator.generate(&ds).unwrap().unwrap();
         assert_eq!(icon.try_get_str(Tag::PHOTOMETRIC_INTERPRETATION).as_deref(), Some("MONOCHROME2"));
         assert_eq!(icon.try_get::<u16>(Tag::COLUMNS), Some(64), "columns");
         assert_eq!(icon.try_get::<u16>(Tag::ROWS), Some(32), "rows");
@@ -255,8 +255,8 @@ mod tests {
 
     #[test]
     fn a_large_image_is_scaled_to_at_most_128() {
-        let mut ds = source(300, 200, 1, 8, |_, _| 7);
-        let icon = BasicIconGenerator.generate(&mut ds).unwrap().unwrap();
+        let ds = source(300, 200, 1, 8, |_, _| 7);
+        let icon = BasicIconGenerator.generate(&ds).unwrap().unwrap();
         let columns: u32 = icon.try_get::<u16>(Tag::COLUMNS).unwrap() as u32;
         let rows: u32 = icon.try_get::<u16>(Tag::ROWS).unwrap() as u32;
         assert!(columns <= 128 && rows <= 128, "icon is at most 128x128, got {columns}x{rows}");
@@ -266,8 +266,8 @@ mod tests {
 
     #[test]
     fn a_sixteen_bit_source_is_downconverted_to_eight_bit() {
-        let mut ds = source(16, 16, 1, 16, |_, _| 1000);
-        let icon = BasicIconGenerator.generate(&mut ds).unwrap().unwrap();
+        let ds = source(16, 16, 1, 16, |_, _| 1000);
+        let icon = BasicIconGenerator.generate(&ds).unwrap().unwrap();
         assert_eq!(icon.try_get::<u16>(Tag::BITS_ALLOCATED), Some(8));
         let element = icon.get_element(Tag::PIXEL_DATA).unwrap();
         assert_eq!(element.value().as_buffer().unwrap().size(), 16 * 16);
@@ -281,7 +281,7 @@ mod tests {
         // 16-bit storage, 12 significant bits left-aligned: stored 0x8000 == 2048.
         let mut ds = source(8, 8, 1, 16, |_, _| 0x8000);
         ds.insert_value(Tag::BITS_STORED, 12u16); // BitsStored; HighBit stays 15
-        let icon = BasicIconGenerator.generate(&mut ds).unwrap().unwrap();
+        let icon = BasicIconGenerator.generate(&ds).unwrap().unwrap();
         let bytes = icon.get_element(Tag::PIXEL_DATA).unwrap().value().as_buffer().unwrap().data();
         assert_eq!(bytes[0], 128, "2048 of 4095 → ~128, not clipped");
     }
@@ -291,7 +291,7 @@ mod tests {
         // frame 0 all 10, frame 1 all 20; representative frame 2 (1-based) → 20
         let mut ds = source(4, 4, 2, 8, |_, y| if y < 4 { 10 } else { 20 });
         ds.insert_value(Tag::REPRESENTATIVE_FRAME_NUMBER, 2u16);
-        let icon = BasicIconGenerator.generate(&mut ds).unwrap().unwrap();
+        let icon = BasicIconGenerator.generate(&ds).unwrap().unwrap();
         let element = icon.get_element(Tag::PIXEL_DATA).unwrap();
         let bytes = element.value().as_buffer().unwrap().data();
         assert_eq!(bytes[0], 20, "the representative frame's value is used");
@@ -299,8 +299,8 @@ mod tests {
 
     #[test]
     fn explicit_frame_index_selects_the_requested_frame() {
-        let mut ds = source(4, 4, 2, 8, |_, y| if y < 4 { 10 } else { 20 });
-        let icon = BasicIconGenerator.generate_frame(&mut ds, 1).unwrap().unwrap();
+        let ds = source(4, 4, 2, 8, |_, y| if y < 4 { 10 } else { 20 });
+        let icon = BasicIconGenerator.generate_frame(&ds, 1).unwrap().unwrap();
         let bytes = icon.get_element(Tag::PIXEL_DATA).unwrap().value().as_buffer().unwrap().data();
         assert_eq!(bytes[0], 20, "frame index is zero-based and selects frame 1");
     }
@@ -309,14 +309,14 @@ mod tests {
     fn a_colour_image_yields_no_icon() {
         let mut ds = source(8, 8, 1, 8, |_, _| 1);
         ds.insert_value(Tag::SAMPLES_PER_PIXEL, 3u16); // RGB
-        assert!(BasicIconGenerator.generate(&mut ds).unwrap().is_none());
+        assert!(BasicIconGenerator.generate(&ds).unwrap().is_none());
     }
 
     #[test]
     fn an_icon_attaches_as_a_sequence() {
         let mut record = Dataset::new();
-        let mut ds = source(8, 8, 1, 8, |_, _| 5);
-        let icon = BasicIconGenerator.generate(&mut ds).unwrap().unwrap();
+        let ds = source(8, 8, 1, 8, |_, _| 5);
+        let icon = BasicIconGenerator.generate(&ds).unwrap().unwrap();
         attach_icon(&mut record, icon);
         let sequence = record.try_get_sequence(Tag::ICON_IMAGE_SEQUENCE).unwrap();
         assert_eq!(sequence.items().len(), 1);
@@ -326,6 +326,6 @@ mod tests {
     fn empty_geometry_yields_no_icon() {
         let mut ds = source(8, 8, 1, 8, |_, _| 5);
         ds.insert_value(Tag::COLUMNS, 0u16); // Columns = 0
-        assert!(BasicIconGenerator.generate(&mut ds).unwrap().is_none());
+        assert!(BasicIconGenerator.generate(&ds).unwrap().is_none());
     }
 }

@@ -258,3 +258,5 @@
 - **像素 / 只读视图（02 §3.4 修复）**：新增 `PixelDataRef<'a>` 只读门，与 `PixelData` 共享 `pixel_read_methods!` 宏；`render` 全部只读路径与 `transcoder::read_frame/read_frames/decode_frame` 改用 `PixelDataRef::from_dataset(&Dataset)`，去掉每次渲染/读帧的 `Dataset` clone（仅保留必须产出新数据集的克隆）。02 §3.4 由【已定性，保留】改为【已修复】。
 
 - **像素 / 转码（续）**：`Codec::encode`/`decode` 的源参数由 `&PixelData` 改为 `&PixelDataRef`（读写分离），`encode_frames` 因此去掉源数据集 clone；`decode_frame`/`decode_frames` 的只读源也改用 `PixelDataRef`。转码只读路径不再复制 `Dataset`。
+
+- **媒体 / 图标**：`IconGenerator::generate`/`generate_frame` 改为接收 `&Dataset`（内部用 `PixelDataRef`），`add_file_inner` 不再为生成预览克隆整个数据集；图标生成路径只读、零数据集复制。

@@ -483,8 +483,7 @@ impl DicomDirectory {
         // AddIconSequence swallows every exception, because a missing icon must
         // never abort a directory build.
         if let Some(generator) = generator {
-            let mut source = dataset.clone();
-            if let Ok(Some(icon)) = generator.generate(&mut source) {
+            if let Ok(Some(icon)) = generator.generate(dataset) {
                 attach_icon(&mut record, icon);
             }
         }
@@ -1190,7 +1189,7 @@ mod tests {
         // without a preview rather than failing the whole directory
         struct Failing;
         impl IconGenerator for Failing {
-            fn generate(&self, _dataset: &mut Dataset) -> Result<Option<Dataset>, Error> {
+            fn generate(&self, _dataset: &Dataset) -> Result<Option<Dataset>, Error> {
                 Err(record_error("the icon could not be built"))
             }
         }
