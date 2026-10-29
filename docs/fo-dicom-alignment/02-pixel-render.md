@@ -400,27 +400,27 @@ grep `rayon|par_iter|into_par_iter|scope(` 于 `crates/radicom/src/**/*.rs` → 
 
 按行切分即可并行（`Output` 各通道独立），无需改算法。这是最省力的一档收益。
 
-### 3.2 【明显】没有 `PrecalculatedLUT`，窗口公式每像素重算
+### 3.2 【已修复】没有 `PrecalculatedLUT`，窗口公式每像素重算
 
 fo-dicom 把整条 LUT 链包进 `PrecalculatedLUT(_lut, BitDepth.MinimumValue, BitDepth.MaximumValue)`（`GenericGrayscalePipeline.cs:168`），一次算好 0..65535 的表，之后每像素只做整数查表。radicom 每像素走 `GrayscaleRenderOptions::map`（`render/mod.rs:437-475`）：分支 + f64 乘除 + `round()` + `clamp()`，且 `VoiFunction` 的 `match` 在热循环内。
 
-### 3.3 【已测量】LUT 每次渲染都重建
+### 3.3 【已修复】LUT 每次渲染都重建
 
 `from_dataset_frame`（:209-212）每次都解析 `(0028,3010)` 序列并 `Vec::with_capacity(count)` 复制整张表。实测：**1×1 帧 + 65536 项 VOI LUT → 0.066 ms/次渲染**，同一帧无 LUT 时 0.002 ms/次。即一次渲染的 97% 时间花在重建一张与上一帧完全相同的表上。`DicomImage` 也无任何缓存（§1.1 `CacheType` 缺失）。
 
-### 3.4 【明显】每次渲染 clone 整个 `Dataset`
+### 3.4 【已知上限，保留】每次渲染 clone 整个 `Dataset`
 
 `render/mod.rs:887`、`:1016`、`:1037`、`:1202`、`:1252`、`:1291`、`:547` 均为 `dataset.clone()`（注释说明是为绕过 `PixelData` 的可变借用）。`Dataset` 是 `BTreeMap`（`model/dataset.rs:32`）+ `Arc<dyn Buffer>`，元素本身不深拷贝，但**每次渲染重建一遍 BTreeMap**。2048² 帧本身 25 ms，可忽略；1×1 帧时就是全部开销。
 
-### 3.5 【已测量】`DicomImage` 的几何访问器每次 clone 数据集
+### 3.5 【已修复】`DicomImage` 的几何访问器每次 clone 数据集
 
 `pixel_info()`（:1036-1041）clone + `PixelData::from_dataset`，然后 `width()`/`height()`/`number_of_frames()`/`is_grayscale()` 各调一次（:1043-1057）。实测连续调 `width()+height()+number_of_frames()` 于 2048² 数据集：**2.12 µs/组**。UI 每帧刷几何信息时是纯浪费。
 
-### 3.6 【明显】`scaled()` 做两次全图格式转换
+### 3.6 【已修复】`scaled()` 做两次全图格式转换
 
 `render/mod.rs:625-650`：先 `BGRA → RGB` 建一个 `Vec`（:634-637），双线性重采样（:638-644），再 `RGB → BGRA` 建第二个 `Vec`（:645-648）。两次全图分配 + 两次全图遍历，中间格式与 `bilinear_color24` 的入参耦合。改成直接按 4 通道采样可省一半。
 
-### 3.7 【明显】打印路径的三层全图拷贝
+### 3.7 【已修复】打印路径的三层全图拷贝
 
 `print/render.rs:97-103` `Canvas::filled` 逐像素 `extend_from_slice(&[b,g,r,0xFF])`（可用 `resize`/`chunks_exact_mut` 一次填）；`:141-142` 每个单元格 `to_rgb24` 再 `bilinear_color24`（两次全图分配）；`:146-152` 逐像素调 `Canvas::set`，每次都做四次 `i64` 边界比较（:105-113）。一张 A4@300dpi 是 2480×3508 ≈ 8.7 Mpx，这些常数不可忽略。
 
@@ -428,7 +428,7 @@ fo-dicom 把整条 LUT 链包进 `PrecalculatedLUT(_lut, BitDepth.MinimumValue, 
 
 `pixel/transcoder.rs:149-158` `read_frames`：`ds.clone()` + 循环内 `pd.get_frame(i)?.data().to_vec()`——**把零拷贝帧窗口立刻物化成独立 `Vec`**，一次性把所有帧读进内存（多帧 cine 时峰值 = 整份像素数据 ×2）。`read_frame`（:161-164）与 `decode_frame`（:119-144，两次 `ds.clone()`）同理。`decode_frames`（:167-187）再 clone 一次源与解码结果。
 
-### 3.9 【可疑，未测量】`frame_stored_values` 把整帧变成 `Vec<f64>`
+### 3.9 【已修复】`frame_stored_values` 把整帧变成 `Vec<f64>`
 
 `render/mod.rs:546-569`：16-bit 512² 帧 → 262144 个 `f64` = 2 MB 中间数组，只为算 min/max 和直方图。可直接在 `u16` 上滚动求极值。
 
