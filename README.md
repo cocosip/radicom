@@ -42,6 +42,30 @@ The concrete image codec implementations (JPEG, JPEG-LS, JPEG 2000, HTJ2K, RLE n
 
 Concrete codec implementations are **not** in this repository. `radicom` ships the codec **registry, traits and transcoder** only — a frozen boundary that [`radicom-codecs`](https://github.com/cocosip/radicom-codecs) implements. Mirroring `FO-DICOM.Core` ↔ `fo-dicom.Codecs`.
 
+## Support Matrix
+
+| Area | Capability | Status | Where |
+|---|---|---|---|
+| Data model | Tags, VRs, UIDs, VM, dictionaries, private creator block, masked tags, walkers, copy/compare | ✅ | `radicom::model` |
+| File I/O | Part 10 read/write, explicit/implicit VR, little/big endian, sequences, fragments, deflate | ✅ | `radicom::io` |
+| Large values | `ReadLargeOnDemand` file windows, `SkipLargeTags`, `ReadAll`, chunked writer | ✅ | `radicom::io`, `model::buffer` |
+| Character sets | ISO 2022, UTF-8, Latin/CJK/Greek/Arabic/Hebrew/Cyrillic/Thai | ✅ | `radicom::encoding` |
+| Validation | Per-VR validators, VM checks, dataset-level and scoped switches | ✅ | `radicom::validation` |
+| Pixel data | Frame access, photometric conversion, Modality/VOI/Palette LUTs, overlays, MPR geometry | ✅ | `radicom::pixel`, `radicom::render` |
+| Rendering | Frame rendering, windowing, scaling, PNG/BMP output | ✅ (feature `render`) | `radicom::render` |
+| Printing | Film Session / Film Box / Image Box / Presentation LUT and layout rendering | ✅ | `radicom::print` |
+| Media | DICOMDIR read/stitch/write, icons, file scanner | ✅ | `radicom::media` |
+| Structured Reports | Content tree, 15 ValueTypes / 7 relationships, code items, measured values, referenced SOPs | ✅ | `radicom::sr` |
+| Anonymization | PS3.15 profiles, date shifting, UID remapping, recursive sequence handling, custom profiles | ✅ (feature `anonymize`) | `radicom::anonymizer` |
+| JSON / XML | DICOM JSON Model (PS3.18), Native XML export | ✅ | `radicom-json` |
+| DIMSE | C-ECHO/STORE/FIND/MOVE/GET, N-EVENT-REPORT/GET/SET/ACTION/CREATE/DELETE | ✅ | `radicom-network` |
+| Network transports | tokio TCP, rustls TLS (PEM), max-PDU negotiation, role selection, user identity | ✅ (feature `tls`) | `radicom-network` |
+| Observability | Structured tracing events and metrics hooks | ✅ | `radicom-network` |
+| Image codecs | JPEG / JPEG-LS / JPEG 2000 / HTJ2K / RLE **implementations** | ⛔ out of scope | separate [`radicom-codecs`](https://github.com/cocosip/radicom-codecs) project |
+
+Legend: ✅ implemented and tested in this workspace; ⛔ deliberately out of scope. The codec **interfaces** (`Codec`, `CodecRegistry`, `CodecParams`, transcoder) are implemented here; only the concrete codec implementations live in `radicom-codecs`.
+
+
 ## Installation
 
 ```toml
@@ -61,6 +85,40 @@ Optional features of `radicom`:
 ```toml
 radicom = { version = "0.1", features = ["render", "anonymize"] }
 ```
+
+Other workspace features:
+
+| Crate | Feature | Enables |
+|---|---|---|
+| `radicom` | `render` | Rendering pipeline, image output helpers |
+| `radicom` | `anonymize` | PS3.15 anonymization profiles |
+| `radicom` | `regex-rules` | Regex variants of match/transform rules (brings `regex`) |
+| `radicom-network` | `tls` | rustls TLS transport (PEM certificates/keys) |
+| `radicom-network` | `otel` | OpenTelemetry-style `tracing` metric convention helpers |
+
+## Building from Source
+
+Requires Rust **1.89+** (workspace MSRV):
+
+```bash
+git clone https://github.com/cocosip/radicom
+cd radicom
+cargo build --workspace --all-features
+cargo test --workspace --all-features
+```
+
+## Logging
+
+All library logging goes through the Rust [`tracing`](https://docs.rs/tracing) facade. The library does **not** install a global subscriber, so the application chooses the backend:
+
+```rust
+// Example: console logging in a binary crate.
+tracing_subscriber::fmt()
+    .with_env_filter("radicom::io=debug,radicom::network=info")
+    .init();
+```
+
+`radicom` uses category targets (`radicom::io`, `radicom::network`, `radicom::codec`, `radicom::encoding`, `radicom::print`); any `tracing` subscriber or layer works, including `tracing-appender`, `tracing-opentelemetry` and `console-subscriber`. For applications built on `log`/`log4rs`, bridge via `tracing-log` rather than adding a second logging path inside the library.
 
 ## Quick Start
 
@@ -442,15 +500,35 @@ let item = ContentItem::text("Finding", "No abnormality detected")
 
 `radicom::print` provides dataset-backed Film Session, Film Box, Image Box and Presentation LUT models plus layout rendering (`render_to_image`), driven by the same render pipeline.
 
-## Performance
+## Benchmarks
 
-Benchmarks live in `crates/radicom/benches/` (dependency-free, `std` harness). Run them with:
+The workspace ships three dependency-free benchmark binaries (`harness = false`, `std::time::Instant`) so they run offline without `criterion`:
+
+| Binary | Measures | Command |
+|---|---|---|
+| `crates/radicom/benches/core.rs` | `parse_dataset`, `write_dataset`, `get_frame`, `render_frame`, `open_800_elements`, `from_bytes_800` | `cargo bench -p radicom --all-features` |
+| `crates/radicom-json/benches/json.rs` | `dataset_to_json`, `json_to_dataset`, JSON round-trip | `cargo bench -p radicom-json` |
+| `crates/radicom-network/benches/throughput.rs` | loopback C-STORE throughput (`Memory` and `SpoolToTemp` sinks) | `cargo bench -p radicom-network` |
+
+Compile-check all targets without running them:
 
 ```bash
-cargo bench -p radicom --all-features
+cargo bench --workspace --no-run
 ```
 
-Release-mode expectations on a typical developer machine are printed by the bench binary; numbers vary by CPU and workload. Large values are designed to stay off-heap: `ReadLargeOnDemand` keeps them as file-backed windows and the writer streams in chunks, so parsing metadata for a large file does not require loading its pixel data.
+Example output from `cargo bench -p radicom --all-features` on a developer machine (absolute numbers are CPU- and file-dependent):
+
+| Benchmark | Result |
+|---|---:|
+| `parse_dataset` | 89,901 ns/op |
+| `write_dataset` | 33,194 ns/op |
+| `get_frame` | 851 ns/op |
+| `render_frame` | 1,766,926 ns/op |
+| `open_800_elements` | 283,438 ns/op |
+| `from_bytes_800` | 221,211 ns/op |
+
+Large values are designed to stay off-heap: `ReadLargeOnDemand` keeps them as file-backed windows and the writer streams in chunks, so parsing metadata for a large file does not require loading its pixel data.
+
 
 ## Testing
 
@@ -478,6 +556,19 @@ cargo test -p radicom-network --test interop --all-features
 ```
 
 See [docs/02-development-guide.md](docs/02-development-guide.md) for the full test strategy, data inventory and tolerance corpus.
+
+### Coverage
+
+Current measured production-source line coverage is **90.03%** (14,554 / 16,165 lines), using `rustc -C instrument-coverage` + `llvm-cov`, excluding third-party crates, generated dictionary tables, `xtask`, integration-test sources and `#[cfg(test)]` modules. The breakdown is approximately: core 90.19%, network 91.30%, JSON 76.76%.
+
+Run coverage locally with `llvm-tools-preview` and `cargo-llvm-cov`:
+
+```bash
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov --locked
+cargo llvm-cov --workspace --all-features
+```
+
 
 ## Regenerating the Dictionaries
 
