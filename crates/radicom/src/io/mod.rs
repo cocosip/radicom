@@ -8,4 +8,4 @@ pub mod reader;
 pub mod trace;
 pub mod writer;
 
-pub use file_ref::{DirectoryRef, FileRef, PathFile, TempFileProvider};
+pub use file_ref::{DirectoryRef, PathFile, TempFileProvider};

@@ -1,9 +1,8 @@
 //! File and directory references, and temporary files (IO-01; docs/01-architecture.md §7).
 //!
-//! A [`FileRef`] abstracts "a file that can be opened, created, moved, deleted and
-//! range-read", with [`PathFile`] as the default path-backed implementation. A
-//! [`DirectoryRef`] enumerates a directory's entries with an optional glob filter
-//! (reusing the same `Glob` as the media scanner).
+//! A [`PathFile`] is a file that can be opened, created, moved, deleted and
+//! range-read. A [`DirectoryRef`] enumerates a directory's entries with an
+//! optional glob filter (reusing the same `Glob` as the media scanner).
 //! [`TempFileProvider`] hands out UUID-named temporary files whose deletions are
 //! deferred and retried on Windows' "still locked" semantics, with a final sweep
 //! at process exit.
@@ -16,58 +15,12 @@ use std::sync::Mutex;
 use crate::error::Error;
 use crate::media::scanner::Glob;
 
-/// A reference to a file: open, create, delete, move and range-read (IO-01).
+/// A path-backed file reference: open, create, delete, move and range-read
+/// (IO-01).
 ///
-/// The factory in the spec is "a plain function pointer/type-state (no DI)"; here
-/// that is simply the trait's associated construction via [`PathFile::new`].
-pub trait FileRef {
-    /// The file's path, when this reference is path-backed.
-    fn path(&self) -> &Path;
-    /// The file's current length in bytes.
-    fn len(&self) -> Result<u64, Error> {
-        Ok(fs::metadata(self.path())?.len())
-    }
-    /// True when the file exists and has zero length.
-    fn is_empty(&self) -> Result<bool, Error> {
-        Ok(self.len()? == 0)
-    }
-    /// True when the underlying file exists.
-    fn exists(&self) -> bool {
-        self.path().exists()
-    }
-    /// Opens the file for reading.
-    fn open_read(&self) -> Result<fs::File, Error> {
-        Ok(fs::File::open(self.path())?)
-    }
-    /// Opens (creating or truncating) the file for writing.
-    fn open_create(&self) -> Result<fs::File, Error> {
-        Ok(fs::File::create(self.path())?)
-    }
-    /// Reads `len` bytes starting at `offset`.
-    fn read_range(&self, offset: u64, len: usize) -> Result<Vec<u8>, Error> {
-        let mut f = self.open_read()?;
-        f.seek(SeekFrom::Start(offset))?;
-        let mut buf = vec![0u8; len];
-        f.read_exact(&mut buf)?;
-        Ok(buf)
-    }
-    /// Moves (renames) this file to `to`. Fails if `to` already exists on
-    /// platforms where rename does not replace (Windows).
-    fn move_to(&self, to: &Path) -> Result<(), Error> {
-        fs::rename(self.path(), to)?;
-        Ok(())
-    }
-    /// Deletes the file; missing is not an error.
-    fn delete(&self) -> Result<(), Error> {
-        match fs::remove_file(self.path()) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.into()),
-        }
-    }
-}
-
-/// The default path-backed [`FileRef`].
+/// Deliberately a plain struct, not a trait: the only file abstraction in the
+/// crate is a path, so an interface with a single implementation would add
+/// indirection without polymorphism.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathFile {
     path: PathBuf,
@@ -77,11 +30,60 @@ impl PathFile {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         PathFile { path: path.into() }
     }
-}
 
-impl FileRef for PathFile {
-    fn path(&self) -> &Path {
+    /// The file's path.
+    pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The file's current length in bytes.
+    pub fn len(&self) -> Result<u64, Error> {
+        Ok(fs::metadata(self.path())?.len())
+    }
+
+    /// True when the file exists and has zero length.
+    pub fn is_empty(&self) -> Result<bool, Error> {
+        Ok(self.len()? == 0)
+    }
+
+    /// True when the underlying file exists.
+    pub fn exists(&self) -> bool {
+        self.path().exists()
+    }
+
+    /// Opens the file for reading.
+    pub fn open_read(&self) -> Result<fs::File, Error> {
+        Ok(fs::File::open(self.path())?)
+    }
+
+    /// Opens (creating or truncating) the file for writing.
+    pub fn open_create(&self) -> Result<fs::File, Error> {
+        Ok(fs::File::create(self.path())?)
+    }
+
+    /// Reads `len` bytes starting at `offset`.
+    pub fn read_range(&self, offset: u64, len: usize) -> Result<Vec<u8>, Error> {
+        let mut f = self.open_read()?;
+        f.seek(SeekFrom::Start(offset))?;
+        let mut buf = vec![0u8; len];
+        f.read_exact(&mut buf)?;
+        Ok(buf)
+    }
+
+    /// Moves (renames) this file to `to`. Fails if `to` already exists on
+    /// platforms where rename does not replace (Windows).
+    pub fn move_to(&self, to: &Path) -> Result<(), Error> {
+        fs::rename(self.path(), to)?;
+        Ok(())
+    }
+
+    /// Deletes the file; missing is not an error.
+    pub fn delete(&self) -> Result<(), Error> {
+        match fs::remove_file(self.path()) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
