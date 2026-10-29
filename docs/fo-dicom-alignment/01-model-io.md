@@ -70,7 +70,7 @@
 | `ExplicitLengthSequences` / `ExplicitLengthSequenceItems` | ✅ | `writer.rs:20-28` `WriteOptions` | 私有 SQ 恒用显式长度（`writer.rs:158-171`），与 fo-dicom 一致 |
 | `KeepGroupLengths` | ✅ | `writer.rs:20-28` | 重算并注入组长度（`writer.rs:107-124`） |
 | `LargeObjectSize`（写入侧大对象分块阈值） | ✅ | `WriteOptions::large_object_size` | 默认 1 MiB，可配置，镜像 fo-dicom 写侧阈值 |
-| `DicomWriteOptions` 作为独立可传递对象 | 🟡 | `WriteOptions` | 结构等价，但 `to_bytes`/`save` 每次都要调用方显式传 `&WriteOptions`，无 `Save(string, options)` 重载族 |
+| `DicomWriteOptions` 作为独立可传递对象 | ✅ | `WriteOptions`；`save_with(path, &options)` | `save()` 用默认选项，`save_with` 接受显式选项（fo-dicom `Save(path, options)`）；`to_bytes(&options)` 保留 |
 | 写出时按目标语法做数值换序 | ✅ | `writer.rs:476-497` | 按 `unit` 分块换序，跨块对齐正确 |
 | ACR-NEMA 拒绝保存 | ✅ | `file.rs:40` `is_saveable` | `file.rs:274` 拒绝 |
 | File Meta 重新生成 | ✅ | `file.rs:309-334` | 含 `IMPLEMENTATION_CLASS_UID`、`IMPLEMENTATION_VERSION_NAME` |
@@ -79,7 +79,7 @@
 
 | fo-dicom 能力 | 状态 | radicom 对应 | 证据 |
 |---|---|---|---|
-| `Add` / `AddOrUpdate` / `AddOrUpdate(VR, tag, values)` | 🟡 | `insert` / `insert_or_update` / `insert_value` | `dataset.rs:215`、`:237`、`:246`；缺 fo-dicom 那个"显式指定 VR 覆盖字典"的重载 |
+| `Add` / `AddOrUpdate` / `AddOrUpdate(VR, tag, values)` | ✅ | `insert` / `insert_or_update` / `insert_value` / `insert_value_with_vr` | 新增 `insert_value_with_vr(tag, vr, value)` 显式指定 VR 覆盖字典；多值经 `IntoElement` 表达 |
 | `AddOrUpdate` 对私有 tag 的 creator 校验 | 🟡 | `resolve_private_write`（`dataset.rs:464`） | 字典式私有 tag 会自动分配 creator block，并把元素/序列/片段重绑定到具体 block；creator block 耗尽时仍受 `insert_or_update` 无错误返回值的 API 限制 |
 | `GetPrivateTag(tag, create)` | ✅ | `dataset.rs:316` | |
 | `GetCodeItem` / `GetMeasuredValue` / `GetReferencedSOP`（SR 辅助） | ⛔（有意分层） | `sr/code_item.rs` `CodeItem::read_from`、`sr/content_item.rs` `MeasuredValue::read_from`/`ReferencedSop::read_from` | 读取逻辑都在 `sr/` 模块；不在 `Dataset` 上加重导出，避免 `model` 反向依赖 `sr` |

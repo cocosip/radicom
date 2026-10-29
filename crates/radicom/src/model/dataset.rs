@@ -248,6 +248,12 @@ impl Dataset {
         self.insert_or_update(value.into_element(tag, vr))
     }
 
+    /// Typed insert that forces `vr`, bypassing dictionary resolution
+    /// (fo-dicom `AddOrUpdate(VR, tag, values)`).
+    pub fn insert_value_with_vr<V: IntoElement>(&mut self, tag: Tag, vr: Vr, value: V) -> &mut Self {
+        self.insert_or_update(value.into_element(tag, vr))
+    }
+
     /// Typed insert erroring on duplicate tags (Add semantics).
     pub fn insert_new<V: IntoElement>(&mut self, tag: Tag, value: V) -> Result<&mut Self, Error> {
         let vr = self.resolve_vr(&tag, value.preferred_vr());
@@ -621,6 +627,15 @@ mod tests {
         assert_eq!(th, 2.5);
         let pixels: SharedBuffer = ds.get(Tag::PIXEL_DATA).unwrap();
         assert_eq!(&*pixels.data(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn insert_value_with_vr_forces_the_vr() {
+        let mut ds = Dataset::new();
+        // PATIENT_NAME is PN in the dictionary; the explicit LO must win.
+        ds.insert_value_with_vr(PATIENT_NAME, Vr::Lo, "Doe^John");
+        assert_eq!(ds.get_element(PATIENT_NAME).unwrap().vr(), Vr::Lo);
+        assert_eq!(ds.get_str(PATIENT_NAME).unwrap(), "Doe^John");
     }
 
     /// The dictionary VR must win over a numeric value hint. Writing a `u16` to

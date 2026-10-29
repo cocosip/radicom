@@ -274,8 +274,14 @@ impl DicomFile {
 
     /// Writes the file to disk (FILE-05).
     pub fn save(&self, path: impl AsRef<Path>) -> Result<(), Error> {
+        self.save_with(path, &WriteOptions::default())
+    }
+
+    /// Writes the file to disk using the given write options
+    /// (fo-dicom `Save(string, DicomWriteOptions)`).
+    pub fn save_with(&self, path: impl AsRef<Path>, options: &WriteOptions) -> Result<(), Error> {
         let path = path.as_ref();
-        let bytes = self.to_bytes(&WriteOptions::default())?;
+        let bytes = self.to_bytes(options)?;
         std::fs::write(path, bytes).map_err(|e| file_err(path, "write", e))
     }
 
@@ -675,6 +681,33 @@ mod tests {
         assert_eq!(back.format, FileFormat::Dicom3);
         assert_eq!(back.get_str(Tag::PATIENT_NAME), "Doe^John");
         assert_eq!(back.get_str(Tag::PATIENT_ID), "PID-1");
+    }
+
+    #[test]
+    fn save_with_honours_explicit_length_sequence_options() {
+        let mut file = sample_file();
+        let mut item = Dataset::new();
+        item.insert_str(Tag::STUDY_DATE, Vr::Da, "20240101");
+        file.dataset.insert_sequence(Tag::REFERENCED_STUDY_SEQUENCE).push(item);
+
+        let implicit = temp_file("save-implicit");
+        file.save_with(&implicit, &WriteOptions::default()).unwrap();
+        let explicit = temp_file("save-explicit");
+        let options = WriteOptions {
+            explicit_length_sequences: true,
+            explicit_length_sequence_items: true,
+            ..Default::default()
+        };
+        file.save_with(&explicit, &options).unwrap();
+
+        let a = std::fs::read(&implicit).unwrap();
+        let b = std::fs::read(&explicit).unwrap();
+        assert_ne!(a, b, "explicit-length options reach the encoded file, not just to_bytes");
+        let reopened = DicomFile::open(&explicit).unwrap();
+        assert_eq!(reopened.dataset.try_get_sequence(Tag::REFERENCED_STUDY_SEQUENCE).unwrap().items().len(), 1);
+
+        std::fs::remove_file(&implicit).ok();
+        std::fs::remove_file(&explicit).ok();
     }
 
     #[test]
