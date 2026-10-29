@@ -61,7 +61,7 @@
 | --- | --- | --- | --- | --- |
 | 0x51 Max-PDU-Length | `PDU.cs:596-600` | 已实现（有界） | `pdu.rs` 解码 / 编码 | 通告值钳到 `MAX_PDU_SIZE=262144`（256 KiB）；`0`（unlimited）也落到该上限，见 §2.5 |
 | 0x52 Implementation Class UID | `PDU.cs:602-607` | 已实现 | `pdu.rs:401` / `pdu.rs:649` | — |
-| 0x53 Asynchronous Operations Window | `PDU.cs:609-617`（仅在非 (1,1) 时发送） | 部分实现 | `pdu.rs:407` / `pdu.rs:655-662` | 编解码正确、默认省略也正确；但**协商结果从不被引擎使用**，无并发窗口控制 |
+| 0x53 Asynchronous Operations Window | `PDU.cs:609-617`（仅在非 (1,1) 时发送） | ⛔ 有意不实现（每关联串行） | `pdu.rs` 编解码 | 编解码正确、默认省略正确；radicom 的关联 API 为 `&mut self` 串行操作、服务端按序处理单个请求，恒协商 (1,1)（ACK 省略 0x53），因此不声明并发窗口，属有意设计而非缺陷 |
 | 0x54 SCP/SCU Role Selection | `PDU.cs:619-634` | **已实现** | `pdu.rs:445-466` 解码 / `pdu.rs:732-744` 编码 | `[uid_len][uid][scu][scp]` 线格和手工字节测试均正确 |
 | 0x55 Implementation Version Name | `PDU.cs:636-641` | 已实现 | `pdu.rs:404` / `pdu.rs:652` | — |
 | 0x56 SOP Class Extended Negotiation | `PDU.cs:643-654` | **已实现** | `pdu.rs:480-538` / `pdu.rs:752-762` | application information 使用扁平字段数组，RQ/AC 方向有回归覆盖 |

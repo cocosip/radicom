@@ -166,6 +166,10 @@ impl AsyncOperations {
     pub fn is_default(&self) -> bool {
         self.invoked == 1 && self.performed == 1
     }
+
+    // The engine is deliberately serial (one association operation at a time),
+    // so it always negotiates (1,1) and never advertises a window it would not
+    // honour. The type exists to decode and round-trip a peer's item.
 }
 
 /// User identity negotiation (§4.3).

@@ -200,6 +200,8 @@
 - **模型 / StorageCategory**：按 fo-dicom `DicomUID.StorageCategory` 真实算法重写 `storage_category`
   （非标准根→Private、非 SOPClass→None、须含 "Storage" 且排除 "Storage Commitment"、Encapsulated PDF/CDA→Document）；
   补充对应测试。文档将私有字典、`Tag::parse` 定性为有意取舍/有意宽容。
+- **网络 / 异步操作窗口（0x53）**：定性为 ⛔ 有意不实现——关联 API 串行（`&mut self`），服务端按序处理，
+  恒协商 (1,1)、ACK 省略 0x53；`AsyncOperations` 仅用于对端 item 的解码/回写。同步修正 05 文档中过期的「部分实现」措辞。
 - .NET 专属抽象，Rust 不适用（按能力已覆盖）→ `INetworkManager`、`DicomTimeout`、`NetworkStreamCreationOptions`、
   `IImage`/`IImageManager`、`IPixelData` 接口、每服务独立 provider 接口、`DirectoryRecord` 指针、`CacheType`、`ArrayPool`。
 
