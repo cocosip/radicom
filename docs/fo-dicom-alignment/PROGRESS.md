@@ -206,3 +206,10 @@
   `IImage`/`IImageManager`、`IPixelData` 接口、每服务独立 provider 接口、`DirectoryRecord` 指针、`CacheType`、`ArrayPool`。
 
 
+
+## 结构/性能收尾（第二目标）
+
+- **网络 / C-GET**：Serving.transcoder_cache 按 (source, target) 复用 Transcoder，消除每实例重建；含复用测试。
+- **文档 / 05 §3 定性**：§3.1/3.2/3.3/3.4/3.7 经复核已在代码修复、§3.6 本轮修复、§3.8 归为串行窗口的协议约束、§3.9 归为测试便利；小节标题改为【已修复】/【设计边界】/【已定性】。
+- **待续**：write_pdu 单条控制消息的缓冲复用；全仓更多 C# 风格结构 / 性能项。
+

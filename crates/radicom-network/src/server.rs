@@ -375,6 +375,7 @@ where
         pending_units: VecDeque::new(),
         accepted: &accepted,
         reverse_message_id: 1,
+        transcoder_cache: std::collections::HashMap::new(),
     };
 
     // -- message loop ----------------------------------------------------
@@ -471,6 +472,19 @@ where
 {
     let pdus: Vec<Pdu> = pdus.into_iter().map(Pdu::PData).collect();
     write_pdus(stream, &pdus).await
+}
+
+/// Returns the cached transcoder for a (source, target) syntax pair, building
+/// it once. A C-GET may transcode hundreds of instances with the same pair.
+fn transcoder_for<'a>(
+    cache: &'a mut std::collections::HashMap<(String, String), radicom::pixel::transcoder::Transcoder>,
+    source: &Arc<radicom::model::transfer_syntax::TransferSyntax>,
+    target: &Arc<radicom::model::transfer_syntax::TransferSyntax>,
+) -> &'a radicom::pixel::transcoder::Transcoder {
+    let key = (source.uid().to_string(), target.uid().to_string());
+    cache
+        .entry(key)
+        .or_insert_with(|| radicom::pixel::transcoder::Transcoder::new(source.clone(), target.clone(), None, None))
 }
 
 /// Dispatches a command that carries no dataset (§5.1).
@@ -1053,6 +1067,9 @@ struct Serving<'a, P: ServiceProvider, S> {
     accepted: &'a AcceptedContexts,
     /// The next message ID for reverse sub-operations (§7.4).
     reverse_message_id: u16,
+    /// Transcoder per (source, target) syntax pair, reused across the many
+    /// sub-operations of one C-GET instead of rebuilt per instance.
+    transcoder_cache: std::collections::HashMap<(String, String), radicom::pixel::transcoder::Transcoder>,
 }
 
 impl<P: ServiceProvider, S> Serving<'_, P, S>
@@ -1186,8 +1203,7 @@ where
         let payload = if source_syntax.uid() == target.uid() {
             crate::message::encode_dataset(dataset, &target)?
         } else {
-            let transcoder =
-                radicom::pixel::transcoder::Transcoder::new(source_syntax, target.clone(), None, None);
+            let transcoder = transcoder_for(&mut self.transcoder_cache, &source_syntax, &target);
             let transcoded = transcoder.transcode_dataset(dataset).map_err(|e| {
                 NetworkError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
             })?;
@@ -4861,5 +4877,21 @@ mod tests {
         assert!(duplicate.is_err(), "the registry and OS both reject a duplicate bind");
         drop(server);
         assert!(crate::registry::DicomServerRegistry::is_available(address));
+    }
+
+    #[test]
+    fn transcoder_for_reuses_the_same_instance_per_syntax_pair() {
+        let mut cache = std::collections::HashMap::new();
+        let source = radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let target = radicom::model::transfer_syntax::syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone();
+        let first = transcoder_for(&mut cache, &source, &target) as *const _;
+        let second = transcoder_for(&mut cache, &source, &target) as *const _;
+        assert_eq!(first, second, "the same syntax pair returns the cached transcoder");
+        assert_eq!(cache.len(), 1);
+
+        let other = radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_BIG_ENDIAN.clone();
+        let third = transcoder_for(&mut cache, &source, &other) as *const _;
+        assert_ne!(first, third, "a different target gets its own transcoder");
+        assert_eq!(cache.len(), 2);
     }
 }

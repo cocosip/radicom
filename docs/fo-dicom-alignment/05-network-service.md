@@ -329,7 +329,9 @@ grep 全 crate 确认：`build_user_information` 只出现两次——定义和�
 
 测量环境：release 构建，22 逻辑核，Windows，`Instant` 计时，探针在 `%TEMP%\netperf`（未入库）。所有数字为本轮实测，非引用。
 
-### 3.1 【高】默认 C-STORE 落盘路径：约 4 倍吞吐损失 + 双份内存
+### 3.1 【已修复】默认 C-STORE 落盘路径
+
+**现状**：`StoreSink` 默认已是 `Memory`，直接解析已缓冲的字节；`SpoolToTemp`/`SpoolToDir` 仅为需要落盘的调用方保留，不再"写完再读回"。以下为首次走查的实测记录。
 
 位置：`store.rs:60-77` + `radicom/src/io/file.rs:200-237`。
 
@@ -353,13 +355,17 @@ grep 全 crate 确认：`build_user_information` 只出现两次——定义和�
 
 即**默认配置比可选配置慢 4 倍**；文件生命周期泄漏已由 §2.2 的 `TempSpool` 修复。性能上的最小修法仍是让 `SpoolToTemp` 直接走 `Memory` 的解析路径，把落盘只留给真正需要持久化的 `SpoolToDir`。
 
-### 3.2 【高】同步文件 IO 直接在 async 任务里执行，无 `spawn_blocking`
+### 3.2 【已修复】同步文件 IO 移出 async worker
+
+**现状**：`materialize` 在 `tokio::task::spawn_blocking` 中执行（`server.rs`），文件创建/写入/解析不再占用 tokio worker 线程。
 
 位置：`store.rs:51`、`store.rs:61-63`。
 
 `std::fs::create_dir_all`、`std::fs::File::create`、`write_all`、`flush` 都是阻塞调用，直接跑在 tokio worker 线程上（`server.rs:687` 调用 `materialize`）。全仓 grep `spawn_blocking`/`block_in_place` **零命中**。大实例 C-STORE 期间 worker 线程被文件 IO 占住，同 runtime 上其它连接的 PDU 读取被推迟。这是"一个连接一个 task"模型下最容易被忽略的一类退化。
 
-### 3.3 【高】解析器全局锁导致服务端并发完全不随核数扩展
+### 3.3 【已修复】解析器全局锁争用
+
+**现状**：`tag_index::INDEX` 改为 `Lazy<HashMap>`（只读、免锁），`default_dictionary()`/`dictionary()` 改为 `OnceLock`（免锁、免分配），解析热路径不再争用单条 cache line。
 
 这一项的病根在 `radicom` 解析器，但**服务层是暴露点**：每连接一个 task 是并发模型，却被解析串行化吃掉。
 
@@ -400,7 +406,9 @@ grep 全 crate 确认：`build_user_information` 只出现两次——定义和�
 
 **对 DICOM 服务器的直接后果（本层最重要的一条性能事实）**：`DicomServer` 服务并发关联时**用不上多核做解码**。加客户端只会让每个客户端的解析延迟一起变差，而不是提高总吞吐；22 核机器上 8 并发在 2.2 倍处饱和。这不是微优化——它决定了这台 SCP 的容量上限，且服务层自身无法绕过（不可能把解析从接收路径上摘掉）。修法在 `radicom` 数据模型侧（只读表用免锁的 `OnceCell`/`&'static [T]`，或分片 map），服务层无需改动。
 
-### 3.4 【高】文件式解析比内存式慢一个数量级，根因是每元素 3 次 seek
+### 3.4 【已修复】文件式解析的逐元素 seek
+
+**现状**：`ByteSourceReader` 自行维护 `pos`/`len`（构造时测一次长度），`require`/`position` 不再 `stream_position`/`seek`；`file.rs` 解析路径再套 `BufReader`。逐元素 syscall 已消除。
 
 位置：`crates/radicom/src/io/byte_source.rs:66-77`、`crates/radicom/src/io/file.rs:112-170`。
 
@@ -457,7 +465,9 @@ if end - pos < n { ... }
 
 C-FIND、C-MOVE 与 C-GET 现在都逐条消费 provider stream，首个 Pending 响应可在 provider 产生终端响应前到达 SCU。三条处理路径都会同时读取入站 P-DATA，在同一 presentation context 和 message ID 收到 C-CANCEL 时回送 `CANCEL` 终止响应并丢弃 provider stream；C-GET 在反向 C-STORE 已发出时会先消费对应的 C-STORE-RSP，再结束原检索操作。`loopback_c_find_c_cancel_stops_an_in_flight_provider`、`loopback_c_move_c_cancel_stops_an_in_flight_provider`、`loopback_c_get_c_cancel_stops_an_in_flight_provider` 和 `loopback_c_get_c_cancel_during_reverse_store_preserves_progress` 覆盖这些路径。
 
-### 3.6 【中】C-GET 每实例重新构造 `Transcoder` 并整体转码
+### 3.6 【已修复】C-GET 复用 `Transcoder`
+
+**现状**：`Serving.transcoder_cache` 按 `(source, target)` 语法对缓存 `Transcoder`，同一 study 的 500 个实例只构造一次。逐实例整体转码是编解码的固有工作，保留。
 
 位置：`server.rs:823-832`。
 
@@ -473,7 +483,9 @@ let payload = if source_syntax.uid() == target.uid() {
 
 同质实例（同一 SOP class、同一语法）会重复构造 `Transcoder`、重复 resolve 编解码器。一个 500 张的 study 就是 500 次。最小修法：把 `Transcoder` 按 `(source, target)` 缓存在 `Serving` 里（`serving` 生命周期正好覆盖整次 C-GET）。
 
-### 3.7 【中】`PdvAssembler` 逐 PDV `extend_from_slice`，无零拷贝
+### 3.7 【已修复】`PdvAssembler` 接收侧拷贝
+
+**现状**：`Pdv.data` 与 `MessageUnit.bytes` 均为 `bytes::Bytes`；单 PDV 消息直接共享 PDV 缓冲（零拷贝），多 PDV 消息累积到 `BytesMut` 后 `freeze()`（一次拷贝）。
 
 位置：`assembler.rs:70`。
 
@@ -483,7 +495,9 @@ buffer.extend_from_slice(&pdv.data);
 
 `pdv.data` 本身就是 `Vec<u8>`（`pdu.rs:243`），`decode_pdata` 已经把它从帧里拷出来了，这里再拷一遍进累积缓冲。1 MiB 实例 = 完整两次内存复制（帧 → PDV → 消息）。`bytes::Bytes` 已是依赖（`Cargo.toml`），改成 `Vec<Bytes>` 收集再一次性 `copy_from_slice` 到紧凑缓冲，可把中间累积的扩容拷贝消掉。
 
-### 3.8 【中】C-MOVE 逐实例串行 C-STORE，无流水线
+### 3.8 【设计边界】C-MOVE 逐实例串行 C-STORE
+
+**现状**：本库关联为串行窗口（恒协商 (1,1)，见 03 §1.2），协议上不允许超过 1 个在途请求，因此逐实例串行是**协议约束下的正确行为**，不是待修缺陷；若将来实现窗口提升，可在此加流水线。
 
 位置：`cmove.rs:314-317`。
 
@@ -496,7 +510,9 @@ for file in files {
 
 一次 study 的 N 个实例一个一个发，每个都等响应。RTT 100 ms 的网段上，100 张图 = 10 秒纯等待。关联已经建好（`cmove.rs:309`），完全可以在协商窗口内并发（PS3.7 §9.3 允许 N 个在途请求，受异步操作窗口限制；本库默认 (1,1) 窗口，但至少可以把窗口提上去）。
 
-### 3.9 【低】`collect_reverse_stores` / 事件 sink 用 `DicomFile::clone` + `std::sync::Mutex`
+### 3.9 【已定性】接收集合的 `DicomFile::clone` + `Mutex`
+
+**现状**：该接收集合服务于测试便利，生产交付路径不经过它；保留现状，不作为生产热点优化。
 
 位置：`server.rs:1166-1171`（`request.file.clone()`）、`client.rs:108-114`（`request.file.clone()`）。
 
