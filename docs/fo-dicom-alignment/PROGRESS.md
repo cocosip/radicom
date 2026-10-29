@@ -236,3 +236,5 @@
 - **IO / 大值窗口**：删除 `WindowSource` trait 与 `PathWindow`，`ByteSourceReader` 改为直接持 `Option<Arc<File>>` 并 `with_shared_file`；用 `FileWindow::from_shared` 建惰性窗口，行为不变。
 
 - **IO / 写入**：`write_leaf`/`write_header`/`leaf_len`/`header_len` 改收 `&Tag`，逐元素不再 clone `Tag`（私有 creator 的 Arc 计数），写侧热路径零额外分配。
+
+- **模型 / 插入**：新增 `Dataset::get_private_tag_ref(&Tag)`，`insert`/`insert_or_update`/`try_insert_or_update` 不再预克隆 tag；仅私有 block 解析路径才克隆。
