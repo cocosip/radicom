@@ -321,6 +321,22 @@ impl DicomFile {
         Ok(out)
     }
 
+    /// Length of the 128-byte preamble, `DICM` magic and encoded file meta
+    /// group, without serializing the dataset. Used to place record offsets
+    /// while writing a media storage directory (FILE-05).
+    pub(crate) fn encoded_prefix_len(&self, options: &WriteOptions) -> Result<u64, Error> {
+        if !self.format.is_saveable() {
+            return Err(Error::File(FileError::FormatNotSaveable(format!("{:?}", self.format))));
+        }
+        let meta = self.refreshed_meta()?;
+        let meta_options = WriteOptions { keep_group_lengths: true, ..options.clone() };
+        let meta_len = DicomWriter::new(meta_options).dataset_length(
+            &meta,
+            &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN,
+        )?;
+        Ok(132 + meta_len)
+    }
+
     /// Writes to an arbitrary writer.
     pub fn write<W: Write>(&self, out: &mut W, options: &WriteOptions) -> Result<(), Error> {
         let bytes = self.to_bytes(options)?;

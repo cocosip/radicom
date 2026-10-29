@@ -626,13 +626,9 @@ impl DicomDirectory {
                 ahead.insert_or_update(item.clone());
             }
         }
-        // preamble (128) + "DICM" (4) + file meta, i.e. everything that is not
-        // dataset bytes
-        let file_len = self.file.to_bytes(&options)?.len() as u64;
-        let dataset_len = writer.dataset_length(&self.file.dataset, &syntax)?;
-        let before_sequence = file_len
-            .checked_sub(dataset_len)
-            .ok_or_else(|| record_error("the record sequence layout could not be measured"))?;
+        // preamble (128) + "DICM" (4) + file meta, computed without serializing
+        // the whole dataset (which would copy every record and icon)
+        let before_sequence = self.file.encoded_prefix_len(&options)?;
         // an SQ header is tag(4) + VR(2) + reserved(2) + length(4) when explicit
         let sequence_header = if syntax.is_explicit_vr() { 12 } else { 8 };
         let mut cursor = before_sequence + writer.dataset_length(&ahead, &syntax)? + sequence_header;
