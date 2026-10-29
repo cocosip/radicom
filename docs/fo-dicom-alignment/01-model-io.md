@@ -80,7 +80,7 @@
 | `GetPrivateTag(tag, create)` | ✅ | `dataset.rs:316` | |
 | `GetCodeItem` / `GetMeasuredValue` / `GetReferencedSOP`（SR 辅助） | ❌ | — | Radicom 的 SR 在 `sr/` 模块（不在本次范围），`Dataset` 无这些便捷方法 |
 | `FunctionalGroupValues(frame)` | ✅ | `dataset.rs:775` `functional_groups` | 返回临时 Dataset，语义一致 |
-| `CopyTo(dest, masked)` | 🟡 | `dataset.rs:289` | 只有全量 `copy_to`，无 masked-tag 过滤重载 |
+| `CopyTo(dest, masked)` | ✅ | `dataset.rs` `copy_to_masked` / `copy_tags` | 支持按 `MaskedTag` 过滤与按 tag 列表复制（顶层，fo-dicom 语义） |
 | `Remove(Func<DicomItem,bool>)` | ✅ | `dataset.rs:280` `retain` | 语义等价（谓词签名不同） |
 | `DicomDatasetComparer`（可切换 `CompareInstancesByContent`、跳过 BulkDataUri） | 🟡 | `dataset.rs:751` `PartialEq` | 单一深度相等，无可配置开关；`ElementValue::Bytes` 比较走 `a.data() == b.data()`（`element.rs:467`），会**强制物化** `FileWindow`/`BulkDataUri`，与 fo-dicom 的可跳过行为相反 |
 | 私有 tag 排序契约 | 🟡 | `tag.rs` `Ord` | radicom 对私有 tag 按 `element & 0xFF` 再按 creator 排序（`tag.rs:159` 附近有注释承认这是混合公/私排序的折衷）；fo-dicom `CompareTo` 先全 `Element` 后 creator |

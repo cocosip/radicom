@@ -305,6 +305,26 @@ impl Dataset {
         }
     }
 
+    /// Copies only the top-level items whose tag matches `mask` (fo-dicom
+    /// `CopyTo(dest, DicomMaskedTag)`), e.g. a repeating-group wildcard.
+    pub fn copy_to_masked(&self, dest: &mut Dataset, mask: &MaskedTag) {
+        for (tag, item) in &self.items {
+            if mask.matches(tag.group(), tag.element()) {
+                dest.items.insert(tag.clone(), item.clone());
+            }
+        }
+    }
+
+    /// Copies the named top-level tags into `dest` (fo-dicom
+    /// `CopyTo(dest, params DicomTag[])`); missing tags are skipped.
+    pub fn copy_tags(&self, dest: &mut Dataset, tags: &[Tag]) {
+        for tag in tags {
+            if let Some(item) = self.items.get(tag) {
+                dest.items.insert(tag.clone(), item.clone());
+            }
+        }
+    }
+
     // -- private tags (DS-04) --------------------------------------------------
 
     /// Scans the group's creator slots for `creator` and returns the block
@@ -840,6 +860,25 @@ mod tests {
         assert_eq!(ds.len(), 1);
         ds.clear();
         assert!(ds.is_empty());
+    }
+
+    #[test]
+    fn copy_to_masked_and_copy_tags_filter_the_source() {
+        let mut ds = Dataset::new();
+        ds.insert_str(PATIENT_ID, Vr::Lo, "X");
+        ds.insert_str(PATIENT_NAME, Vr::Pn, "Doe^John");
+        ds.insert_str(Tag::new(0x0008, 0x0060), Vr::Cs, "CT");
+
+        let mut masked = Dataset::new();
+        ds.copy_to_masked(&mut masked, &MaskedTag::parse("(0010,xxxx)").unwrap());
+        assert!(masked.item(&PATIENT_ID).is_some());
+        assert!(masked.item(&PATIENT_NAME).is_some());
+        assert!(masked.item(&Tag::new(0x0008, 0x0060)).is_none(), "other groups are skipped");
+
+        let mut named = Dataset::new();
+        ds.copy_tags(&mut named, &[Tag::new(0x0008, 0x0060), Tag::new(0x9999, 0x9999)]);
+        assert_eq!(named.len(), 1, "missing tags are skipped");
+        assert_eq!(named.get_str(Tag::new(0x0008, 0x0060)).unwrap(), "CT");
     }
 
     #[test]
