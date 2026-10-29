@@ -205,6 +205,13 @@ impl DirectoryRecord {
     }
 }
 
+impl std::fmt::Display for DirectoryRecord {
+    /// fo-dicom `DicomDirectoryRecord.ToString()`: the record dataset dump.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.dataset.to_dump_string())
+    }
+}
+
 fn trimmed(dataset: &Dataset, tag: Tag) -> Option<String> {
     dataset.try_get_str(tag).map(|s| s.trim().to_string())
 }
@@ -1301,6 +1308,15 @@ mod tests {
         }
         let unknown = RecordType::parse("PRIVATE");
         assert_eq!(unknown.as_str(), "PRIVATE", "unknown types are kept verbatim");
+    }
+
+    #[test]
+    fn a_record_renders_as_its_dataset_dump() {
+        let mut dataset = Dataset::new();
+        dataset.insert_str(tags::PATIENT_ID, Vr::Lo, "PAT-1");
+        let record = DirectoryRecord { dataset, parent: None };
+        let text = record.to_string();
+        assert!(text.contains("PAT-1"), "Display renders the record dataset: {text}");
     }
 
     #[test]
