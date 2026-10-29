@@ -310,22 +310,76 @@ impl DicomDirectory {
     }
 
     /// Every record in depth-first order with its depth (§3.2).
+    ///
+    /// A corrupt directory whose offset links form a cycle is walked safely
+    /// (each record is emitted at most once) instead of recursing forever.
     pub fn walk(&self) -> Vec<(usize, usize)> {
         let mut out = Vec::new();
+        let mut visited = vec![false; self.records.len()];
         for root in &self.roots {
-            self.walk_from(*root, 0, &mut out);
+            self.walk_from(*root, 0, &mut out, &mut visited);
         }
         out
     }
 
-    fn walk_from(&self, index: usize, depth: usize, out: &mut Vec<(usize, usize)>) {
-        if index >= self.records.len() {
+    fn walk_from(&self, index: usize, depth: usize, out: &mut Vec<(usize, usize)>, visited: &mut [bool]) {
+        if index >= self.records.len() || visited[index] {
             return;
         }
+        visited[index] = true;
         out.push((index, depth));
         for child in self.children(index) {
-            self.walk_from(child, depth + 1, out);
+            self.walk_from(child, depth + 1, out, visited);
         }
+    }
+
+    /// Validates the record tree (§3.2): a non-empty FileSetID, every
+    /// parent/root index in range, roots without a parent, no cycles, and no
+    /// record unreachable from a root. A DICOMDIR parsed from untrusted bytes
+    /// can violate any of these.
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.file_set_id().is_none_or(|id| id.trim().is_empty()) {
+            return Err(record_error("DICOMDIR FileSetID must not be empty"));
+        }
+        let count = self.records.len();
+        for (index, record) in self.records.iter().enumerate() {
+            if let Some(parent) = record.parent {
+                if parent == index || parent >= count {
+                    return Err(record_error(format!("record {index} has an invalid parent {parent}")));
+                }
+            }
+        }
+        for &root in &self.roots {
+            if root >= count {
+                return Err(record_error(format!("root offset {root} is out of range")));
+            }
+            if self.records[root].parent.is_some() {
+                return Err(record_error(format!("root record {root} has a parent")));
+            }
+        }
+        // 0 = unvisited, 1 = on the current path, 2 = finished
+        let mut state = vec![0u8; count];
+        for &root in &self.roots {
+            self.validate_visit(root, &mut state)?;
+        }
+        if state.contains(&0) {
+            return Err(record_error("a record is not reachable from any root"));
+        }
+        Ok(())
+    }
+
+    fn validate_visit(&self, index: usize, state: &mut [u8]) -> Result<(), Error> {
+        match state[index] {
+            1 => return Err(record_error("DICOMDIR record tree contains a cycle")),
+            2 => return Ok(()),
+            _ => {}
+        }
+        state[index] = 1;
+        for child in self.children(index) {
+            self.validate_visit(child, state)?;
+        }
+        state[index] = 2;
+        Ok(())
     }
 
     /// The first record matching `kind` and `key`, searching level records.
@@ -657,7 +711,7 @@ fn required(dataset: &Dataset, tag: Tag, what: &str) -> Result<String, Error> {
         .try_get_str(tag)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| record_error(&format!("{what} is required for a directory record")))
+        .ok_or_else(|| record_error(format!("{what} is required for a directory record")))
 }
 
 /// `\`-separated file ID from a path (§3.4).
@@ -665,8 +719,8 @@ fn path_to_file_id(path: &Path) -> String {
     path.iter().filter_map(|part| part.to_str()).collect::<Vec<_>>().join("\\")
 }
 
-fn record_error(message: &str) -> Error {
-    Error::File(FileError::Other(message.to_string()))
+fn record_error(message: impl Into<String>) -> Error {
+    Error::File(FileError::Other(message.into()))
 }
 
 /// Rebuilds the hierarchy from the record offsets (§3.2).
@@ -1317,6 +1371,40 @@ mod tests {
         let record = DirectoryRecord { dataset, parent: None };
         let text = record.to_string();
         assert!(text.contains("PAT-1"), "Display renders the record dataset: {text}");
+    }
+
+    #[test]
+    fn an_empty_directory_validates() {
+        let dir = DicomDirectory::new("MYFS");
+        dir.validate().unwrap();
+    }
+
+    #[test]
+    fn a_built_directory_validates() {
+        let mut dir = DicomDirectory::new("MYFS");
+        dir.add_file(&instance("P1", "1.2.3", "1.2.3.4", CT, "1.2.3.4.5"), "A").unwrap();
+        dir.validate().unwrap();
+    }
+
+    #[test]
+    fn a_parent_cycle_is_reported_and_walk_terminates() {
+        let mut dir = DicomDirectory::new("MYFS");
+        dir.add_file(&instance("P1", "1.2.3", "1.2.3.4", CT, "1.2.3.4.5"), "A").unwrap();
+        // records 2 (series) and 3 (image) link to each other, forming a cycle
+        dir.records[2].parent = Some(3);
+        dir.records[3].parent = Some(2);
+        let error = dir.validate().unwrap_err();
+        assert!(format!("{error:?}").contains("not reachable"), "a cycle leaves records unreachable: {error:?}");
+        assert!(dir.walk().len() <= dir.records.len(), "walk must not recurse forever");
+    }
+
+    #[test]
+    fn an_out_of_range_parent_is_reported() {
+        let mut dir = DicomDirectory::new("MYFS");
+        dir.add_file(&instance("P1", "1.2.3", "1.2.3.4", CT, "1.2.3.4.5"), "A").unwrap();
+        dir.records[1].parent = Some(99);
+        let error = dir.validate().unwrap_err();
+        assert!(format!("{error:?}").contains("invalid parent"), "got {error:?}");
     }
 
     #[test]
