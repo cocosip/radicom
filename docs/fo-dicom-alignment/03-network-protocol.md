@@ -131,7 +131,7 @@
 | 超时 | `DicomTimeout.cs`（ACSE / DIMSE / Socket 三态枚举） | 已实现（Rust 表达） | `association_timeout`、`request_timeout`、`release_timeout` | Rust 不用常量枚举，而是各阶段具体的 `Duration` 字段；ACSE/DIMSE/释放各有超时与错误类型，Socket 空闲由 OS/TCP keep-alive 负责（不在每个读点重复叠超时） |
 | 平台抽象层 | `INetworkManager`（Listener/Stream/IsSocketException/MachineName） | ⛔ 不适用 | `tokio::net::{TcpListener,TcpStream}`、`rustls` 的 `AsyncRead/AsyncWrite` | .NET 的 `INetworkManager` 是为替换 BCL 网络实现；Rust 侧直接依赖 tokio/rustls 的具体类型与 trait，无需再造一层 manager |
 | 机器标识 | `NetworkManager.TryGetNetworkIdentifier`（MAC 追加到实现类 UID） | 已实现 | `print_sop.rs` `try_get_network_identifier`；`transport.rs` `network_identifier` | `transport::network_identifier()` 委托给 MAC 版本，无第二套语义 |
-| 命令/数据缓冲上限 | `DicomServiceOptions.MaxCommandBuffer` / `MaxDataBuffer` | 已实现（等价） | `assembler.rs` `PduSplitter`；`transport.rs` `write_pdus`；`server.rs` `write_pdata_batch` | 分片仍按 `max_pdu`；一条 DIMSE 消息的分片 P-DATA 合并为**单次 `write_all`**（按消息攒批，减少 syscall），对齐 fo-dicom 的攒批意图 |
+| 命令/数据缓冲上限 | `DicomServiceOptions.MaxCommandBuffer` / `MaxDataBuffer` | 已实现（等价） | `assembler.rs` `PduSplitter`；`transport.rs` `write_pdus`；`server.rs` `write_pdata_batch` | 分片仍按 `max_pdu`；一条 DIMSE 消息的分片 P-DATA 直接以 `write_vectored` 写出（P-DATA 的切片来自原始 `Bytes`，不再整包复制），对齐 fo-dicom 的攒批意图 |
 | 每 PDU PDV 数上限 | `DicomServiceOptions.MaxPDVsPerPDU` | 已实现 | `assembler.rs` `PduSplitter::new` | 参数形态一致 |
 
 ### 1.7 打印 / 其它
@@ -299,7 +299,7 @@ reader.read_exact(&mut frame[HEADER_LEN..]).await?;
 
 ### 3.2 【已修复】`write_pdu` 每 PDU 重新编码整帧
 
-**现状**：`pdu::encode_into` 把 P-DATA 直接写入目标帧缓冲（不再先构造 body `Vec` 再拷贝）；一条消息的多个分片经 `write_pdus` 共用一个缓冲、一次 `write_all`。逐条控制 PDU 仍需一次输出分配（签名收 `&Pdu`），属必要开销。
+**现状**：`pdu::encode_into` 把 P-DATA 直接写入目标帧缓冲（不再先构造 body `Vec` 再拷贝）；一条消息的多个分片经 `write_pdus` **直接以 `write_vectored` 写出**（P-DATA 的 PDV 切片来自原始 `Bytes`，无整包复制），仅控制 PDU 走一次 `encode_into` 分配。逐条控制 PDU 的小分配属必要开销。
 
 **位置**：`transport.rs:59-64`
 

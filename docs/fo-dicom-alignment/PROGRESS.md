@@ -82,8 +82,8 @@
    （1-bit、32-bit、width/height、palette 校验、YBR planar、预计算 LUT、histogram padding、
    NominalScanned/per-frame 几何、私有序列探测、CP-246、offset table、LargeObjectSize、ToString、
    UID、dataset 比较、io_err）均已改为 `✅`。仍保留 `🟡/❌` 的是真实形态/范围取舍项（见下）。
-2. **03 §3.2 `write_pdu` 每 PDU 重编码**：代码已用注释标注为已知上限（无调用方可传入复用缓冲）；
-   若要消除需把编码缓冲穿过 engine，属较大改动。
+2. **03 §3.2 `write_pdu` 控制消息重编码**：P-DATA 批量路径（`write_pdus`）已对原始 `Bytes` 直接
+   `write_vectored`，不再整包复制；仅逐条控制 PDU 仍需一次小分配（签名收 `&Pdu`），属必要开销。
 3. **03/05 命令/数据缓冲上限**：fo-dicom 的 `MaxCommandBuffer`/`MaxDataBuffer` 是**发送侧批处理**
    阈值（攒够多少字节再发一个 P-DATA），而 radicom 是"一条消息一个 P-DATA 序列"，
    `PduSplitter` 只有 `max_pdu`/`max_pdvs`。这是吞吐形态差异，不是接收上限缺失；如要做需在
@@ -268,3 +268,5 @@
 - **渲染 / MPR**：`reconstruction::read_grayscale` 改用 `PixelDataRef`，去除读取源数据集时的 clone；测试同样改为借用视图。
 
 - **字符串读取 / 媒体与 IO**：`DirectoryRecord::record_type`/`referenced_file_id`、`render/icon` 的 PhotometricInterpretation、`io/file` 的 ACR-NEMA recognition code 改用 `try_get_str_ref`，避免只比较/解析时的 `String` 分配。PROGRESS 状态表补齐 01 §3.10、02 §3.4、04 §3.5 的已修复行。
+
+- **网络 / P-DATA 发送零拷贝**：`write_pdus` 不再把整条消息编码进大 `Vec`；P-DATA 直接用 `write_vectored` 从原始 `Bytes` 切片写出（含奇数补位、按 IOV 上限分块），控制 PDU 仍走 `encode_into`。新增字节级等价测试 `write_pdus_matches_the_encoded_bytes_with_odd_padding`；03 §3.2 与待办同步更新。

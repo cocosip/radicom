@@ -71,18 +71,80 @@ pub async fn write_pdu<W: AsyncWrite + Unpin>(writer: &mut W, pdu: &Pdu) -> Resu
     Ok(())
 }
 
-/// Writes several PDU frames in a single `write_all` (§3.2).
+/// Writes several PDU frames, flushing once (§3.2).
 ///
-/// The split P-DATA PDUs of one DIMSE message are encoded back-to-back into one
-/// buffer and flushed once, so a message costs one write instead of one per
-/// fragment. `write_pdu` stays for single-PDU control messages.
+/// P-DATA frames are written straight from their `Bytes` slices with vectored
+/// writes, so a C-STORE message does not copy its whole dataset into an encode
+/// buffer first. Control PDUs still go through `encode_into`.
 pub async fn write_pdus<W: AsyncWrite + Unpin>(writer: &mut W, pdus: &[Pdu]) -> Result<()> {
-    let mut buffer = Vec::with_capacity(64);
     for pdu in pdus {
-        pdu::encode_into(pdu, &mut buffer)?;
+        match pdu {
+            Pdu::PData(pdata) => write_pdata_direct(writer, pdata).await?,
+            _ => {
+                let mut buffer = Vec::new();
+                pdu::encode_into(pdu, &mut buffer)?;
+                writer.write_all(&buffer).await.map_err(NetworkError::Io)?;
+            }
+        }
     }
-    writer.write_all(&buffer).await.map_err(NetworkError::Io)?;
     writer.flush().await.map_err(NetworkError::Io)?;
+    Ok(())
+}
+
+/// Encodes one P-DATA-TF PDU into slices (header + each PDV's `Bytes`) and
+/// writes it without a full-body copy.
+async fn write_pdata_direct<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    pdata: &crate::pdu::PData,
+) -> Result<()> {
+    let mut body_len = 0usize;
+    for pdv in &pdata.pdvs {
+        let pad = pdv.data.len() % 2;
+        body_len += 6 + pdv.data.len() + pad;
+    }
+    let mut pdu_header = [0u8; 6];
+    pdu_header[0] = 0x04;
+    pdu_header[2..6].copy_from_slice(&(body_len as u32).to_be_bytes());
+
+    let mut headers = Vec::with_capacity(pdata.pdvs.len());
+    for pdv in &pdata.pdvs {
+        let pad = pdv.data.len() % 2;
+        let mut header = [0u8; 6];
+        header[0..4].copy_from_slice(&((pdv.data.len() + pad + 2) as u32).to_be_bytes());
+        header[4] = pdv.context_id;
+        header[5] = (if pdv.is_command { 0x01 } else { 0 })
+            | (if pdv.is_last { 0x02 } else { 0 });
+        headers.push(header);
+    }
+
+    const PAD: [u8; 1] = [0];
+    let mut slices: Vec<std::io::IoSlice<'_>> = Vec::with_capacity(1 + headers.len() * 3);
+    slices.push(std::io::IoSlice::new(&pdu_header));
+    for (index, pdv) in pdata.pdvs.iter().enumerate() {
+        slices.push(std::io::IoSlice::new(&headers[index]));
+        slices.push(std::io::IoSlice::new(pdv.data.as_ref()));
+        if pdv.data.len() % 2 == 1 {
+            slices.push(std::io::IoSlice::new(&PAD));
+        }
+    }
+    write_all_vectored(writer, &mut slices).await
+}
+
+/// `write_vectored` loop that advances across partial writes, keeping each
+/// call under the platform IOV limit.
+async fn write_all_vectored<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    slices: &mut [std::io::IoSlice<'_>],
+) -> Result<()> {
+    let mut remaining: &mut [std::io::IoSlice<'_>] = slices;
+    while !remaining.is_empty() {
+        let take = remaining.len().min(1024);
+        let written = writer.write_vectored(&remaining[..take]).await.map_err(NetworkError::Io)?;
+        if written == 0 {
+            return Err(NetworkError::Io(std::io::ErrorKind::WriteZero.into()));
+        }
+        std::io::IoSlice::advance_slices(&mut remaining, written);
+    }
     Ok(())
 }
 
@@ -161,6 +223,27 @@ mod tests {
         write_pdus(&mut client, &[first.clone(), second.clone()]).await.unwrap();
         assert_eq!(read_pdu(&mut server).await.unwrap().unwrap(), first);
         assert_eq!(read_pdu(&mut server).await.unwrap().unwrap(), second);
+    }
+
+    #[tokio::test]
+    async fn write_pdus_matches_the_encoded_bytes_with_odd_padding() {
+        let pdata = Pdu::PData(PData {
+            pdvs: vec![
+                Pdv { context_id: 1, is_command: true, is_last: false, data: vec![1, 2, 3].into() },
+                Pdv { context_id: 2, is_command: false, is_last: true, data: vec![4, 5, 6, 7].into() },
+            ],
+        });
+        let pdus = vec![pdata, Pdu::ReleaseRq];
+        let mut expected = Vec::new();
+        for pdu in &pdus {
+            pdu::encode_into(pdu, &mut expected).unwrap();
+        }
+
+        let (mut client, mut server) = duplex(4096);
+        write_pdus(&mut client, &pdus).await.unwrap();
+        let mut got = vec![0u8; expected.len()];
+        server.read_exact(&mut got).await.unwrap();
+        assert_eq!(got, expected, "vectored P-DATA is byte-identical to encode_into");
     }
 
     #[tokio::test]
