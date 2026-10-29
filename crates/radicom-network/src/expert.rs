@@ -17,7 +17,6 @@ use crate::dimse::CommandField;
 use crate::error::{NetworkError, Result};
 use crate::pdu::PresentationContext;
 use crate::server::{Association as WireAssociation, ClientOptions};
-use std::time::Duration;
 
 /// One connection-level event for the expert API (§9.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,9 +227,6 @@ pub fn expected_response_field(kind: &ExpertRequest) -> CommandField {
         ExpertRequest::CGet(_) => CommandField::CGetRsp,
     }
 }
-
-/// The association release timeout the expert layer applies (§9.1).
-pub const RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[cfg(test)]
 mod tests {
