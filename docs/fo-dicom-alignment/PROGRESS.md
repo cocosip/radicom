@@ -63,6 +63,9 @@
 | 02 §2.12 嵌入式 overlay 多帧/Origin | 已修复 | `af20450`；`embedded_overlay_extracts_the_plane_from_the_requested_frame` |
 | 04 §1 `StructuredReport` Stream 重载 | 已实现 | `15e36b5`；`open_reader`/`write_to` |
 | 03 §1/§3.7 网络标识两套语义 | 已统一 | `3e085f1`；`transport::network_identifier` 委托 MAC 形式 |
+| 04 §1 自定义 profile 增删行 | 已实现 | `36bdac0`；`SecurityProfile::with_row` |
+| 04 §3.6 `anonymize` 拉入 `regex` | 已修复 | `41fa333`；独立 `regex-rules` feature |
+| 01 §1.3 `CopyTo(dest, masked)` / tag 列表 | 已实现 | `34955d5`；`copy_to_masked`/`copy_tags` |
 
 ## 待办（按价值排序）
 
@@ -74,14 +77,15 @@
    阈值（攒够多少字节再发一个 P-DATA），而 radicom 是"一条消息一个 P-DATA 序列"，
    `PduSplitter` 只有 `max_pdu`/`max_pdvs`。这是吞吐形态差异，不是接收上限缺失；如要做需在
    engine 跨消息批量发送，属较大改动。
-4. **04 §1 其余形态项**：`DicomDirectory::AutoValidate`（现仅有构造期 FileSetID 校验）、
-   `ProgressFilesCount`（扫描前预统计总数）、自定义 profile 增删单行（现只能整体替换 CSV）、
-   `rules` 的 Regex 在默认 feature 下可用、图标彩色支持（fo-dicom 也只做灰度，可视为设计取舍）、
-   `DirectoryRecord` 的 `next`/`lower`/`Key` 强类型指针（现用 parent 索引重建）。
+4. **04 §1 其余形态项**：图标彩色支持（fo-dicom 也只做灰度，可视为设计取舍）、`DirectoryRecord`
+   的 `next`/`lower`/`Key` 强类型指针（现用 parent 索引重建）。`AutoValidate` 已由 Dataset 级
+   校验开关覆盖、`ProgressFilesCount` 因每文件一次 Progress 而不再是缺口、自定义 profile 增删行
+   已提供 `with_row`、Regex 已改为独立 `regex-rules` feature。
 5. **05 其余**：监听式 linger（同步 API 无队列，属设计偏差，已在代码注释说明）、多请求
    watchdog 扫描、Expert 层真正流式、C-MOVE 逐实例串行流水线、C-GET 每实例重建 Transcoder。
-6. **01 其余低项**：`CopyTo` masked 重载、`ReadLargeOnDemand` 每元素一个 fd、`io_err` 保留
-   `needed`、读侧 `EvenLengthBuffer`、`BufferPool` 无消费者（形态项）、`Tag::parse` 宽容度。
+6. **01 其余低项**：`ReadLargeOnDemand` 每元素一个 fd、读侧 `EvenLengthBuffer`、`BufferPool`
+   无消费者（形态项）、`Tag::parse` 宽容度。`CopyTo` masked/tag 列表重载与 `io_err` 的
+   `needed` 已补齐。
 7. **P3 测试体系**：fo-dicom 全量语料已大量引入（`tests-data/` 34 个文件含失败样本与字符集），
    golden 仍多由自身生成；可继续把关键 golden 换成外部 oracle 并补齐标准字节用例。
 
@@ -100,3 +104,9 @@
 - `af20450` 嵌入式 overlay 按渲染帧切取位平面（`load_frame`/`composite_overlay_at_frame`）。
 - `15e36b5` `StructuredReport::open_reader`/`write_to` 流重载。
 - `3e085f1` `transport::network_identifier` 统一为 MAC 形式。
+
+## 本轮（2026-10-29，第 3 轮）新增
+
+- `36bdac0` `SecurityProfile::with_row`（向现有 profile 追加单行）。
+- `34955d5` `Dataset::copy_to_masked` / `copy_tags`（fo-dicom CopyTo 重载）。
+- `41fa333` 拆分 `regex-rules` feature，`anonymize` 不再拉入 `regex`。
