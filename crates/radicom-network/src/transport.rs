@@ -94,26 +94,18 @@ pub fn apply_options(stream: &tokio::net::TcpStream, options: &TcpOptions) -> Re
 /// Machine identity, mirroring fo-dicom `TryGetNetworkIdentifier`. Purely a
 /// utility: nothing in the engine depends on it.
 pub fn network_identifier() -> Option<String> {
-    // Read the environment / hash once: the value is constant for the process,
+    // Read the environment / MAC once: the value is constant for the process,
     // so callers do not pay the lookup on every call (§3.7).
     static IDENTIFIER: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    IDENTIFIER.get_or_init(compute_network_identifier).clone()
-}
-
-fn compute_network_identifier() -> Option<String> {
-    // `mac_address` is not a dependency; derive from the hostname instead so
-    // the value is stable per machine without extra crates.
-    let host = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).ok()?;
-    if host.is_empty() {
-        return None;
-    }
-    // fold the name into a 2.25 UUID-shaped UID
-    let mut hash: u128 = 0xcbf2_9ce4_8422_2325;
-    for byte in host.as_bytes() {
-        hash ^= *byte as u128;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    Some(format!("2.25.{hash}"))
+    IDENTIFIER
+        .get_or_init(|| {
+            // One identity source for the whole crate: append the host MAC to
+            // the implementation class UID, as fo-dicom's
+            // NetworkManager.TryGetNetworkIdentifier does. (The old hostname
+            // hash here disagreed with print_sop's MAC form, §1/§3.7.)
+            crate::print_sop::try_get_network_identifier(crate::server::IMPLEMENTATION_CLASS_UID)
+        })
+        .clone()
 }
 
 #[cfg(test)]
@@ -273,7 +265,10 @@ mod tests {
     fn network_identifier_is_a_valid_uid_shape() {
         // depends on the environment; only the shape is asserted
         if let Some(uid) = network_identifier() {
-            assert!(uid.starts_with("2.25."), "got {uid}");
+            assert!(
+                uid.starts_with(crate::server::IMPLEMENTATION_CLASS_UID),
+                "the identifier appends the MAC to the implementation class UID, got {uid}"
+            );
             assert!(uid.len() <= 64, "UIDs are at most 64 characters");
             assert!(!uid.contains(".."), "no empty components");
         }

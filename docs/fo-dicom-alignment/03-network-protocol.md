@@ -119,8 +119,8 @@
 | SNI / 证书名指定 | `TargetHost` | **已实现** | `tls.rs:146-168` | 显式 `server_name` 优先；未配置时使用已连接 peer IP，不再硬编码 `localhost` |
 | 证书格式支持 | PKCS#12 + 密码 / Windows 证书库 | 部分实现 | `tls.rs:114` `load_certs`、`tls.rs:125` `load_key` | 仅 PEM（PKCS#8 / PKCS#1）；PKCS#12 与系统证书库缺失 |
 | 三类超时（ACSE / DIMSE / Socket） | `DicomTimeout.cs` | **缺失** | `error.rs:102-105` | 只有 `AssociationRequestTimedOut` / `RequestTimedOut` 两种错误变体，无 Socket 级超时概念，无 `DicomTimeout` 三态枚举 |
-| 平台抽象层 `INetworkManager` | `NetworkManager.cs`（Listener/Stream/IsSocketException/MachineName/TryGetNetworkIdentifier） | **缺失** | `transport.rs:79`、`print_sop.rs:91` | 无统一抽象；机器标识在两处各写了一份（`transport.rs:79` 按主机名 FNV 哈希，`print_sop.rs:76` 按 MAC 拼接），语义互相矛盾 |
-| 机器标识 | `NetworkManager.TryGetNetworkIdentifier`（MAC 追加到实现类 UID） | 部分实现 | `print_sop.rs:76` `network_identifier_from_mac` | 该实现与 fo-dicom 对齐；`transport.rs:79` 的 `2.25.{fnv}` 是另一套语义 |
+| 平台抽象层 `INetworkManager` | `NetworkManager.cs`（Listener/Stream/IsSocketException/MachineName/TryGetNetworkIdentifier） | 部分实现 | `transport.rs`、`print_sop.rs` | 机器标识已统一为 MAC 形式（见下一行）；仍无统一的 `INetworkManager` 抽象（Listener/Stream 直接散落在 `transport`/`server` 中） |
+| 机器标识 | `NetworkManager.TryGetNetworkIdentifier`（MAC 追加到实现类 UID） | 已实现 | `print_sop.rs` `try_get_network_identifier`；`transport.rs` `network_identifier` | 两者现已统一：`transport::network_identifier()` 委托给 MAC 版本，不再有 `2.25.{fnv}` 的第二套语义 |
 | 命令/数据缓冲上限 | `DicomServiceOptions.MaxCommandBuffer` / `MaxDataBuffer` | 部分实现 | `assembler.rs:108` `PduSplitter::new` | 只有单一 `max_pdu` + `max_pdvs_per_pdu`，未区分命令与数据缓冲 |
 | 每 PDU PDV 数上限 | `DicomServiceOptions.MaxPDVsPerPDU` | 已实现 | `assembler.rs:108` | 参数形态一致 |
 
@@ -341,9 +341,12 @@ pub fn sub_sop_classes(meta: &str) -> Option<Vec<&'static str>> {
 
 `instances()` 每次调用都构造新的嵌套 `Vec`，`sub_sop_classes` / `meta_sop_classes_for`（`print_sop.rs:57-68`）每次都重建整张表。应改为 `const` 数组或 `OnceLock`。
 
-### 3.7 【低】`transport.rs:79` `network_identifier` 每次调用都读环境变量并做 u128 哈希
+### 3.7 【已修复】`transport.rs` 的 `network_identifier` 与 print 侧语义统一
 
-非热点路径（"nothing in the engine depends on it"，`transport.rs:77-78` 注释），但既然要保留，用 `OnceLock` 缓存即可，以免被误用在每连接初始化路径。
+`transport::network_identifier()` 现在委托给 `print_sop::try_get_network_identifier(IMPLEMENTATION_CLASS_UID)`，
+即 fo-dicom `NetworkManager.TryGetNetworkIdentifier` 的"实现类 UID + MAC（十进制）"形式，
+不再使用与 `print_sop` 矛盾的"主机名 FNV 哈希 → `2.25.x`"。结果仍用 `OnceLock` 缓存，
+每进程只计算一次。
 
 ---
 
