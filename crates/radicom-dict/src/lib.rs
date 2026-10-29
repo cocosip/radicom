@@ -7,8 +7,9 @@
 
 pub mod generated;
 
-/// The bundled dictionary data version (from the fo-dicom dictionary XML).
-pub const DICTIONARY_VERSION: &str = "2026b";
+/// The bundled dictionary data version, generated from the XML root `version`
+/// by `cargo xtask gen-dict`.
+pub use generated::dict::DICTIONARY_VERSION;
 
 #[cfg(test)]
 mod tests {

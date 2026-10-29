@@ -244,6 +244,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_instance_table_is_exposed_as_owned_rows() {
+        let rows = MetaSopClasses::instances();
+        assert!(!rows.is_empty());
+        assert!(rows
+            .iter()
+            .all(|(meta, subs)| !meta.is_empty() && !subs.is_empty()));
+        assert_eq!(rows.len(), MetaSopClasses::instances().len());
+    }
+
+    #[test]
     fn grayscale_meta_maps_to_its_sub_classes() {
         let subs =
             MetaSopClasses::sub_sop_classes(uids::BASIC_GRAYSCALE_PRINT_MANAGEMENT_META).unwrap();

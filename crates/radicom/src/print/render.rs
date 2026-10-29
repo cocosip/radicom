@@ -54,13 +54,18 @@ impl EmptyDensity {
 
 impl FilmBox {
     /// Renders the film to an 8-bit [`RawImage`] (PRINT-02).
+    ///
+    /// `FilmOrientation` LANDSCAPE swaps the canvas and the cell grid (PS3.3
+    /// C.13.3.1), and each image box's `[MinDensity, MaxDensity]` window maps the
+    /// rendered greys (C.13.3.2). `SmoothingType` and `BorderDensity` are not
+    /// applied (see `docs/06-backlog.md`).
     pub fn render_to_image(
         &self,
         margins: f64,
         scale: RenderScale,
         empty_density: EmptyDensity,
     ) -> Result<RawImage, Error> {
-        let film = self.film_size().ok_or_else(|| {
+        let film = self.effective_film_size().ok_or_else(|| {
             Error::Data(DataError::Other {
                 message: "no FilmSizeID to render".into(),
             })
@@ -113,6 +118,7 @@ impl FilmBox {
             if image_box.polarity() {
                 invert(&mut patch);
             }
+            apply_density_range(&mut patch, image_box.min_density(), image_box.max_density());
             canvas.blit_scaled(
                 cell,
                 &patch,
@@ -134,6 +140,25 @@ fn apply_lut(image: &mut RawImage, table: &PresentationLutTable) {
         px[0] = out;
         px[1] = out;
         px[2] = out;
+    }
+}
+
+/// Maps the rendered greys into the image box's density window (PS3.3
+/// C.13.3.2). Densities are hundredths of optical density, so `[0, 500]` spans
+/// the 8-bit output range: the defaults are an identity mapping. An explicit
+/// window compresses the greys into `[min, max]`, e.g. `[0, 250]` halves every
+/// byte.
+fn apply_density_range(image: &mut RawImage, min: Option<u16>, max: Option<u16>) {
+    let min = min.unwrap_or(0) as f64;
+    let max = max.unwrap_or(500) as f64;
+    if max <= min {
+        return;
+    }
+    for px in image.as_bytes_mut().as_chunks_mut::<4>().0 {
+        for channel in &mut px[..3] {
+            let density = min + (*channel as f64 / 255.0) * (max - min);
+            *channel = (density * 255.0 / 500.0).round().clamp(0.0, 255.0) as u8;
+        }
     }
 }
 
@@ -388,6 +413,77 @@ mod tests {
             grey_at(&image, 105, 148),
             128,
             "the cell content is actually blitted"
+        );
+    }
+
+    /// A film box with one image box carrying explicit density bounds.
+    fn film_with_densities(min: u16, max: u16) -> FilmBox {
+        let film = film_with_one_box("", 128);
+        let mut dataset = film.into_dataset();
+        let sequence = dataset
+            .sequence_mut(Tag::new(0x2010, 0x0510))
+            .expect("image box sequence");
+        let boxed = &mut sequence.items_mut()[0];
+        boxed.insert_value(Tag::new(0x2010, 0x0120), min); // MinDensity
+        boxed.insert_value(Tag::new(0x2010, 0x0130), max); // MaxDensity
+        FilmBox::from_dataset(dataset)
+    }
+
+    #[test]
+    fn landscape_rotates_the_canvas_and_the_cell_grid() {
+        let film = film_with_one_box("", 128);
+        let portrait = film
+            .render_to_image(
+                10.0,
+                RenderScale { pixels_per_mm: 1.0 },
+                EmptyDensity::Black,
+            )
+            .unwrap();
+        assert_eq!((portrait.width(), portrait.height()), (210, 297));
+
+        let mut dataset = film.into_dataset();
+        dataset.insert_str(Tag::new(0x2010, 0x0040), Vr::Cs, "LANDSCAPE");
+        let landscape = FilmBox::from_dataset(dataset)
+            .render_to_image(
+                10.0,
+                RenderScale { pixels_per_mm: 1.0 },
+                EmptyDensity::Black,
+            )
+            .unwrap();
+        assert_eq!(
+            (landscape.width(), landscape.height()),
+            (297, 210),
+            "LANDSCAPE swaps the film dimensions"
+        );
+        // the single cell now covers the rotated grid, so its centre still
+        // carries the source grey (not the background)
+        assert_eq!(grey_at(&landscape, 148, 105), 128);
+    }
+
+    #[test]
+    fn min_and_max_density_map_the_rendered_greys() {
+        // identity when absent: 0..500 spans the 8-bit output
+        let plain = film_with_one_box("", 128)
+            .render_to_image(
+                10.0,
+                RenderScale { pixels_per_mm: 1.0 },
+                EmptyDensity::Black,
+            )
+            .unwrap();
+        assert_eq!(grey_at(&plain, 105, 148), 128);
+
+        // [0, 250] compresses: 128/255 * 250 = 125.5 hundredths → 64/255 byte
+        let compressed = film_with_densities(0, 250)
+            .render_to_image(
+                10.0,
+                RenderScale { pixels_per_mm: 1.0 },
+                EmptyDensity::Black,
+            )
+            .unwrap();
+        assert_eq!(
+            grey_at(&compressed, 105, 148),
+            64,
+            "the density window changes the output values"
         );
     }
 
@@ -719,5 +815,145 @@ mod tests {
             &canvas.bytes[(8 + 4) * 4..(8 + 5) * 4],
             &[255, 255, 255, 255]
         );
+    }
+
+    #[test]
+    fn optical_empty_density_maps_density_to_grey() {
+        assert_eq!(EmptyDensity::Optical(0.0).background().r, 255);
+        assert_eq!(EmptyDensity::Optical(1.0).background().r, 127);
+        assert_eq!(
+            EmptyDensity::Optical(99.0).background().r,
+            0,
+            "clamped to maximum density"
+        );
+    }
+
+    #[test]
+    fn a_box_without_a_position_falls_back_to_list_order() {
+        // position 1 is absent; the first listed box is used instead. The second
+        // box has no image and is skipped.
+        let image_display_format = Tag::new(0x2010, 0x0010);
+        let film_size_id = Tag::new(0x2010, 0x0050);
+        let referenced_image_box_sequence = Tag::new(0x2010, 0x0510);
+        let image_box_position = Tag::new(0x2020, 0x0010);
+
+        let mut first = Dataset::new();
+        first.insert_value(image_box_position, 2u16);
+        first
+            .insert_sequence(Tag::BASIC_GRAYSCALE_IMAGE_SEQUENCE)
+            .push(grayscale_image(200));
+        let empty = Dataset::new();
+
+        let mut film = Dataset::new();
+        film.insert_str(image_display_format, Vr::Cs, "STANDARD\\1,1");
+        film.insert_str(film_size_id, Vr::Cs, "A5");
+        let seq = film.insert_sequence(referenced_image_box_sequence);
+        seq.push(first);
+        seq.push(empty);
+        let film = FilmBox::from_dataset(film);
+        let image = film
+            .render_to_image(5.0, RenderScale { pixels_per_mm: 1.0 }, EmptyDensity::White)
+            .unwrap();
+        let lit = image
+            .as_bytes()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|pixel| pixel[0] != 255)
+            .count();
+        assert!(lit > 0, "the fallback box is rendered");
+    }
+
+    #[test]
+    fn an_unrenderable_cell_stays_background() {
+        // HSV is not a supported render photometric: the cell is skipped, not fatal
+        let mut broken = grayscale_image(255);
+        broken.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "HSV");
+        let image_display_format = Tag::new(0x2010, 0x0010);
+        let film_size_id = Tag::new(0x2010, 0x0050);
+        let referenced_image_box_sequence = Tag::new(0x2010, 0x0510);
+        let image_box_position = Tag::new(0x2020, 0x0010);
+
+        let mut boxed = Dataset::new();
+        boxed.insert_value(image_box_position, 1u16);
+        boxed
+            .insert_sequence(Tag::BASIC_GRAYSCALE_IMAGE_SEQUENCE)
+            .push(broken);
+        let mut film = Dataset::new();
+        film.insert_str(image_display_format, Vr::Cs, "STANDARD\\1,1");
+        film.insert_str(film_size_id, Vr::Cs, "A5");
+        film.insert_sequence(referenced_image_box_sequence)
+            .push(boxed);
+        let image = FilmBox::from_dataset(film)
+            .render_to_image(0.0, RenderScale { pixels_per_mm: 0.1 }, EmptyDensity::White)
+            .unwrap();
+        assert!(image.as_bytes().chunks(4).all(|pixel| pixel[0] == 255));
+    }
+
+    #[test]
+    fn a_presentation_lut_sequence_maps_the_cell() {
+        // a 256-entry 8-bit table that maps every grey to 200
+        let mut item = Dataset::new();
+        let mut desc = Vec::new();
+        desc.extend_from_slice(&256u16.to_le_bytes());
+        desc.extend_from_slice(&0u16.to_le_bytes());
+        desc.extend_from_slice(&8u16.to_le_bytes());
+        item.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::LUT_DESCRIPTOR,
+                Vr::Us,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(desc)),
+            ),
+        ));
+        item.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::LUT_DATA,
+                Vr::Ow,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![200u8; 256])),
+            ),
+        ));
+        let mut film = film_with_one_box("", 128);
+        let mut dataset = film.clone().into_dataset();
+        dataset
+            .insert_sequence(Tag::PRESENTATION_LUT_SEQUENCE)
+            .push(item);
+        film = FilmBox::from_dataset(dataset);
+        let image = film
+            .render_to_image(0.0, RenderScale { pixels_per_mm: 0.2 }, EmptyDensity::White)
+            .unwrap();
+        let mapped = image
+            .as_bytes()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|pixel| pixel[0] == 200)
+            .count();
+        assert!(mapped > 0, "the cell is mapped through the LUT");
+    }
+
+    #[test]
+    fn trim_draws_a_border_and_tiny_canvases_do_not_panic() {
+        let mut film = film_with_one_box("", 255);
+        film.set_trim(true);
+        let image = film
+            .render_to_image(
+                0.0,
+                RenderScale {
+                    pixels_per_mm: 0.05,
+                },
+                EmptyDensity::Black,
+            )
+            .unwrap();
+        assert_eq!(&image.as_bytes()[0..3], &[0, 0, 0], "border is black");
+
+        let mut canvas = Canvas::filled(2, 2, Color32::new(9, 9, 9));
+        canvas.draw_border(Color32::new(1, 2, 3), 5);
+        assert_eq!(canvas.into_raw_image().as_bytes().len(), 16);
+    }
+
+    #[test]
+    fn nearest_neighbour_handles_a_one_pixel_output() {
+        let out = nearest_bgra32(&[1, 2, 3, 4], 1, 1, 1, 1);
+        assert_eq!(out, vec![1, 2, 3, 4]);
     }
 }

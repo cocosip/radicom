@@ -116,8 +116,18 @@ impl CStoreRequest {
     }
 
     /// The instance UID, falling back to the dataset when the command lacks it.
+    ///
+    /// A request built by a peer normally carries `(0000,1000)`, so the fallback
+    /// only serves callers that assembled a request from a dataset alone (NET-27).
     pub fn instance_uid(&self) -> &str {
-        &self.affected_sop_instance_uid
+        if !self.affected_sop_instance_uid.is_empty() {
+            return &self.affected_sop_instance_uid;
+        }
+        self.file
+            .dataset
+            .try_get_str_ref(radicom::model::tag::Tag::SOP_INSTANCE_UID)
+            .map(str::trim)
+            .unwrap_or("")
     }
 }
 
@@ -563,5 +573,96 @@ mod tests {
             1,
             "no duplicates"
         );
+    }
+
+    /// A provider that implements only the required method: every optional
+    /// service falls back to its refusing default.
+    struct RefusingProvider;
+
+    #[async_trait::async_trait]
+    impl ServiceProvider for RefusingProvider {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn the_default_provider_methods_refuse_cleanly() {
+        use futures::StreamExt;
+        let provider = RefusingProvider;
+
+        let echo = CEchoRequest {
+            message_id: 1,
+            affected_sop_class_uid: "1.2.840.10008.1.1".to_string(),
+        };
+        assert!(provider.on_c_echo(&echo).await.is_err());
+
+        let mut dataset = Dataset::new();
+        dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4");
+        dataset.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        let store = CStoreRequest {
+            message_id: 1,
+            affected_sop_class_uid: "1.2.840.10008.5.1.4.1.1.7".to_string(),
+            affected_sop_instance_uid: "1.2.3.4".to_string(),
+            priority: crate::dimse::Priority::Medium,
+            file: radicom::io::file::DicomFile::from_dataset(dataset),
+            move_originator_ae_title: None,
+            move_originator_message_id: None,
+        };
+        assert_eq!(store.instance_uid(), "1.2.3.4");
+        // NET-27: a request built without the command UID falls back to the
+        // dataset, and an empty one stays empty
+        let mut without_uid = store.clone();
+        without_uid.affected_sop_instance_uid = String::new();
+        assert_eq!(without_uid.instance_uid(), "1.2.3.4");
+        let mut empty = without_uid.clone();
+        empty.file.dataset.remove(Tag::SOP_INSTANCE_UID);
+        assert_eq!(empty.instance_uid(), "");
+        assert!(provider.on_c_store(&store).await.is_err());
+
+        let find = crate::cfind::CFindRequest::study_query(1);
+        assert!(provider
+            .on_c_find(&find)
+            .next()
+            .await
+            .expect("one refusing item")
+            .is_err());
+
+        let c_move = crate::cmove::CMoveRequest::study("1.2.3", "DEST", 1);
+        assert!(provider
+            .on_c_move(&c_move)
+            .next()
+            .await
+            .expect("one refusing item")
+            .is_err());
+
+        let get = crate::cget::CGetRequest::study("1.2.3", 1);
+        assert!(provider
+            .on_c_get(&get)
+            .next()
+            .await
+            .expect("one refusing item")
+            .is_err());
+
+        for field in [
+            CommandField::NEventReportRq,
+            CommandField::NGetRq,
+            CommandField::NSetRq,
+            CommandField::NActionRq,
+            CommandField::NCreateRq,
+            CommandField::NDeleteRq,
+        ] {
+            let request = crate::nservice::NServiceRequest::new(field, 1);
+            let response = match field {
+                CommandField::NEventReportRq => provider.on_n_event_report(&request).await,
+                CommandField::NGetRq => provider.on_n_get(&request).await,
+                CommandField::NSetRq => provider.on_n_set(&request).await,
+                CommandField::NActionRq => provider.on_n_action(&request).await,
+                CommandField::NCreateRq => provider.on_n_create(&request).await,
+                _ => provider.on_n_delete(&request).await,
+            };
+            assert!(response.is_err(), "{field:?} must be refused");
+        }
     }
 }

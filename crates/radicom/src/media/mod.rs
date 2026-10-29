@@ -76,7 +76,7 @@ pub mod tags {
 }
 
 /// The SOP class of a media storage directory (§12.2).
-pub const MEDIA_STORAGE_DIRECTORY_SOP_CLASS: &str = "1.2.840.10008.1.3.10";
+pub const MEDIA_STORAGE_DIRECTORY_SOP_CLASS: &str = crate::uids::MEDIA_STORAGE_DIRECTORY_STORAGE;
 
 /// Directory record types recognised at the leaf level (§12.2, PS3.3 F.5.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,22 +127,51 @@ pub enum StorageCategory {
 
 impl StorageCategory {
     /// Maps a file's SOP class to the record type that indexes it (§12.2).
+    ///
+    /// The SR document and presentation-state classes come from the generated
+    /// UID table so every registered class is classified, not just the ones a
+    /// hand-written list happened to name (FEAT-13).
     pub fn of_sop_class(sop_class: &str) -> StorageCategory {
+        use crate::uids;
         match sop_class.trim() {
-            // Basic/Enhanced/Comprehensive SR, Comprehensive 3D SR, Mammography CAD SR,
-            // Key Object Selection
-            "1.2.840.10008.5.1.4.1.1.88.11"
-            | "1.2.840.10008.5.1.4.1.1.88.22"
-            | "1.2.840.10008.5.1.4.1.1.88.33"
-            | "1.2.840.10008.5.1.4.1.1.88.34"
-            | "1.2.840.10008.5.1.4.1.1.88.50"
-            | "1.2.840.10008.5.1.4.1.1.88.59" => StorageCategory::SrDocument,
-            // Grayscale/Color/Pseudo-Color/Blending/XA softcopy presentation states
-            "1.2.840.10008.5.1.4.1.1.11.1"
-            | "1.2.840.10008.5.1.4.1.1.11.2"
-            | "1.2.840.10008.5.1.4.1.1.11.3"
-            | "1.2.840.10008.5.1.4.1.1.11.4"
-            | "1.2.840.10008.5.1.4.1.1.11.5" => StorageCategory::Presentation,
+            // Basic/Enhanced/Comprehensive/Extensible SR, Comprehensive 3D SR,
+            // Mammography/Chest/Colon CAD SR, Key Object Selection, radiation
+            // dose SRs, procedure log, acquisition context, and the newer SR
+            // document classes
+            uids::BASIC_TEXT_SR_STORAGE
+            | uids::ENHANCED_SR_STORAGE
+            | uids::COMPREHENSIVE_SR_STORAGE
+            | uids::COMPREHENSIVE3_DSR_STORAGE
+            | uids::EXTENSIBLE_SR_STORAGE
+            | uids::KEY_OBJECT_SELECTION_DOCUMENT_STORAGE
+            | uids::MAMMOGRAPHY_CADSR_STORAGE
+            | uids::CHEST_CADSR_STORAGE
+            | uids::X_RAY_RADIATION_DOSE_SR_STORAGE
+            | uids::RADIOPHARMACEUTICAL_RADIATION_DOSE_SR_STORAGE
+            | uids::COLON_CADSR_STORAGE
+            | uids::IMPLANTATION_PLAN_SR_STORAGE
+            | uids::ACQUISITION_CONTEXT_SR_STORAGE
+            | uids::SIMPLIFIED_ADULT_ECHO_SR_STORAGE
+            | uids::PATIENT_RADIATION_DOSE_SR_STORAGE
+            | uids::PLANNED_IMAGING_AGENT_ADMINISTRATION_SR_STORAGE
+            | uids::PERFORMED_IMAGING_AGENT_ADMINISTRATION_SR_STORAGE
+            | uids::ENHANCED_X_RAY_RADIATION_DOSE_SR_STORAGE
+            | uids::WAVEFORM_ANNOTATION_SR_STORAGE => StorageCategory::SrDocument,
+            // Softcopy presentation states, including the volumetric/MPR ones
+            uids::GRAYSCALE_SOFTCOPY_PRESENTATION_STATE_STORAGE
+            | uids::COLOR_SOFTCOPY_PRESENTATION_STATE_STORAGE
+            | uids::PSEUDO_COLOR_SOFTCOPY_PRESENTATION_STATE_STORAGE
+            | uids::BLENDING_SOFTCOPY_PRESENTATION_STATE_STORAGE
+            | uids::XAXRF_GRAYSCALE_SOFTCOPY_PRESENTATION_STATE_STORAGE
+            | uids::GRAYSCALE_PLANAR_MPR_VOLUMETRIC_PRESENTATION_STATE_STORAGE
+            | uids::COMPOSITING_PLANAR_MPR_VOLUMETRIC_PRESENTATION_STATE_STORAGE
+            | uids::ADVANCED_BLENDING_PRESENTATION_STATE_STORAGE
+            | uids::VOLUME_RENDERING_VOLUMETRIC_PRESENTATION_STATE_STORAGE
+            | uids::SEGMENTED_VOLUME_RENDERING_VOLUMETRIC_PRESENTATION_STATE_STORAGE
+            | uids::MULTIPLE_VOLUME_RENDERING_VOLUMETRIC_PRESENTATION_STATE_STORAGE
+            | uids::VARIABLE_MODALITY_LUT_SOFTCOPY_PRESENTATION_STATE_STORAGE => {
+                StorageCategory::Presentation
+            }
             _ => StorageCategory::Image,
         }
     }
@@ -501,14 +530,20 @@ impl DicomDirectory {
         let study = self.find_or_create_child(patient, RecordType::Study, &study_uid, dataset);
         let series = self.find_or_create_child(study, RecordType::Series, &series_uid, dataset);
 
+        // fo-dicom `CreateImageRecord`: an existing record for this SOP instance
+        // is returned instead of appending a second one (FEAT-14).
+        let category = StorageCategory::of_sop_class(&sop_class);
+        if let Some(instance) = self.find_leaf(series, category.record_type(), &sop_instance) {
+            return Ok(DicomDirectoryEntry {
+                patient,
+                study,
+                series,
+                instance,
+            });
+        }
+
         let mut record = Dataset::new();
-        record.insert_str(
-            tags::RECORD_TYPE,
-            Vr::Cs,
-            StorageCategory::of_sop_class(&sop_class)
-                .record_type()
-                .as_str(),
-        );
+        record.insert_str(tags::RECORD_TYPE, Vr::Cs, category.record_type().as_str());
         record.insert_value(tags::RECORD_IN_USE_FLAG, 0xFFFFu16);
         record.insert_str(tags::REFERENCED_SOP_CLASS, Vr::Ui, sop_class);
         record.insert_str(tags::REFERENCED_SOP_INSTANCE, Vr::Ui, sop_instance);
@@ -522,6 +557,22 @@ impl DicomDirectory {
             Vr::Cs,
             path_to_file_id(referenced_file_id),
         );
+
+        // Identifying attributes of the leaf record, matching fo-dicom's
+        // `DicomDirectoryRecordType` tag sets (FEAT-15).
+        for (tag, vr) in leaf_attributes(category) {
+            if let Some(text) = dataset.try_get_str(tag) {
+                record.insert_str(tag.clone(), *vr, text);
+            }
+        }
+        for tag in leaf_sequences(category) {
+            if let Some(sequence) = dataset.try_get_sequence(tag) {
+                let target = record.insert_sequence(tag.clone());
+                for item in sequence.items() {
+                    target.push(item.clone());
+                }
+            }
+        }
 
         // optional preview (§3.4): built from a clone so the source is untouched.
         // A generator failure only costs the preview — fo-dicom's
@@ -543,6 +594,18 @@ impl DicomDirectory {
             study,
             series,
             instance,
+        })
+    }
+
+    /// An existing leaf record under `series` for `sop_instance` (FEAT-14).
+    ///
+    /// fo-dicom `CreateImageRecord` walks the current image records and returns
+    /// the matching one instead of creating a duplicate.
+    fn find_leaf(&self, series: usize, kind: RecordType, sop_instance: &str) -> Option<usize> {
+        self.children(series).into_iter().find(|index| {
+            let record = &self.records[*index];
+            record.record_type() == kind
+                && record.sop_instance_uid().as_deref() == Some(sop_instance)
         })
     }
 
@@ -812,7 +875,11 @@ fn level_record(kind: RecordType, source: &Dataset) -> DirectoryRecord {
 
 /// Attributes copied from the file into a level record (§12.2).
 fn identifying_attributes(kind: &RecordType) -> &'static [(Tag, Vr)] {
-    const PATIENT: &[(Tag, Vr)] = &[(tags::PATIENT_NAME, Vr::Pn)];
+    const PATIENT: &[(Tag, Vr)] = &[
+        (tags::PATIENT_NAME, Vr::Pn),
+        (Tag::PATIENT_BIRTH_DATE, Vr::Da),
+        (Tag::PATIENT_SEX, Vr::Cs),
+    ];
     const STUDY: &[(Tag, Vr)] = &[
         (Tag::STUDY_DATE, Vr::Da),        // Study Date
         (Tag::STUDY_TIME, Vr::Tm),        // Study Time
@@ -821,14 +888,52 @@ fn identifying_attributes(kind: &RecordType) -> &'static [(Tag, Vr)] {
         (Tag::STUDY_ID, Vr::Sh),          // Study ID
     ];
     const SERIES: &[(Tag, Vr)] = &[
-        (Tag::MODALITY, Vr::Cs),      // Modality
-        (Tag::SERIES_NUMBER, Vr::Is), // Series Number
+        (Tag::MODALITY, Vr::Cs),           // Modality
+        (Tag::SERIES_DATE, Vr::Da),        // Series Date
+        (Tag::SERIES_TIME, Vr::Tm),        // Series Time
+        (Tag::SERIES_NUMBER, Vr::Is),      // Series Number
+        (Tag::SERIES_DESCRIPTION, Vr::Lo), // Series Description
     ];
     match kind {
         RecordType::Patient => PATIENT,
         RecordType::Study => STUDY,
         RecordType::Series => SERIES,
         _ => &[],
+    }
+}
+
+/// Scalar identifying attributes of a leaf record, per fo-dicom
+/// `DicomDirectoryRecordType` (PS3.3 F.5, FEAT-15).
+fn leaf_attributes(category: StorageCategory) -> &'static [(Tag, Vr)] {
+    const IMAGE: &[(Tag, Vr)] = &[(Tag::INSTANCE_NUMBER, Vr::Is)];
+    const SR: &[(Tag, Vr)] = &[
+        (Tag::INSTANCE_NUMBER, Vr::Is),
+        (Tag::COMPLETION_FLAG, Vr::Cs),
+        (Tag::VERIFICATION_FLAG, Vr::Cs),
+        (Tag::CONTENT_DATE, Vr::Da),
+        (Tag::CONTENT_TIME, Vr::Tm),
+        (Tag::VERIFICATION_DATE_TIME, Vr::Dt),
+    ];
+    const PRESENTATION: &[(Tag, Vr)] = &[
+        (Tag::INSTANCE_NUMBER, Vr::Is),
+        (Tag::PRESENTATION_CREATION_DATE, Vr::Da),
+        (Tag::PRESENTATION_CREATION_TIME, Vr::Tm),
+    ];
+    match category {
+        StorageCategory::Image => IMAGE,
+        StorageCategory::SrDocument => SR,
+        StorageCategory::Presentation => PRESENTATION,
+    }
+}
+
+/// Sequence-valued identifying attributes of a leaf record (FEAT-15).
+fn leaf_sequences(category: StorageCategory) -> &'static [Tag] {
+    const SR: &[Tag] = &[Tag::CONCEPT_NAME_CODE_SEQUENCE];
+    const PRESENTATION: &[Tag] = &[Tag::REFERENCED_SERIES_SEQUENCE];
+    match category {
+        StorageCategory::SrDocument => SR,
+        StorageCategory::Presentation => PRESENTATION,
+        StorageCategory::Image => &[],
     }
 }
 
@@ -1225,6 +1330,152 @@ mod tests {
     }
 
     #[test]
+    fn adding_the_same_instance_twice_does_not_duplicate_the_leaf() {
+        // FEAT-14: fo-dicom CreateImageRecord returns the existing record.
+        let mut dir = DicomDirectory::new("MYFS");
+        let entry = dir
+            .add_file_entry(
+                &instance("P1", "1.2.3", "1.2.3.4", CT, "1.2.3.4.5"),
+                "IMG0001",
+            )
+            .unwrap();
+        let before = dir.records().len();
+        let again = dir
+            .add_file_entry(
+                &instance("P1", "1.2.3", "1.2.3.4", CT, "1.2.3.4.5"),
+                "IMG0001",
+            )
+            .unwrap();
+        assert_eq!(dir.records().len(), before, "no second IMAGE record");
+        assert_eq!(again.instance, entry.instance, "the same leaf is returned");
+        assert_eq!(dir.children(entry.series).len(), 1);
+    }
+
+    #[test]
+    fn sr_and_presentation_states_map_to_their_record_types() {
+        // FEAT-13: classes beyond the original six hard-coded SR UIDs.
+        use crate::uids;
+        for uid in [
+            uids::BASIC_TEXT_SR_STORAGE,
+            uids::X_RAY_RADIATION_DOSE_SR_STORAGE,
+            uids::CHEST_CADSR_STORAGE,
+            uids::COLON_CADSR_STORAGE,
+            uids::ACQUISITION_CONTEXT_SR_STORAGE,
+            uids::PATIENT_RADIATION_DOSE_SR_STORAGE,
+        ] {
+            assert_eq!(
+                StorageCategory::of_sop_class(uid),
+                StorageCategory::SrDocument,
+                "{uid}"
+            );
+        }
+        for uid in [
+            uids::GRAYSCALE_SOFTCOPY_PRESENTATION_STATE_STORAGE,
+            uids::VOLUME_RENDERING_VOLUMETRIC_PRESENTATION_STATE_STORAGE,
+            uids::VARIABLE_MODALITY_LUT_SOFTCOPY_PRESENTATION_STATE_STORAGE,
+        ] {
+            assert_eq!(
+                StorageCategory::of_sop_class(uid),
+                StorageCategory::Presentation,
+                "{uid}"
+            );
+        }
+        // surrounding whitespace is tolerated, CT stays an image
+        assert_eq!(
+            StorageCategory::of_sop_class(" 1.2.840.10008.5.1.4.1.1.88.67 "),
+            StorageCategory::SrDocument
+        );
+        assert_eq!(StorageCategory::of_sop_class(CT), StorageCategory::Image);
+    }
+
+    #[test]
+    fn leaf_and_level_records_copy_the_identifying_attributes() {
+        // FEAT-15: fo-dicom DicomDirectoryRecordType attribute sets.
+        let mut file = instance(
+            "P1",
+            "1.2.3",
+            "1.2.3.4",
+            crate::uids::COMPREHENSIVE_SR_STORAGE,
+            "1.2.3.4.5",
+        );
+        let ds = &mut file.dataset;
+        ds.insert_str(Tag::INSTANCE_NUMBER, Vr::Is, "7");
+        ds.insert_str(Tag::COMPLETION_FLAG, Vr::Cs, "COMPLETE");
+        ds.insert_str(Tag::VERIFICATION_FLAG, Vr::Cs, "UNVERIFIED");
+        ds.insert_str(Tag::CONTENT_DATE, Vr::Da, "20260101");
+        ds.insert_str(Tag::CONTENT_TIME, Vr::Tm, "120000");
+        ds.insert_str(Tag::PATIENT_BIRTH_DATE, Vr::Da, "19700101");
+        ds.insert_str(Tag::PATIENT_SEX, Vr::Cs, "M");
+        ds.insert_str(Tag::SERIES_DATE, Vr::Da, "20260101");
+        ds.insert_str(Tag::SERIES_TIME, Vr::Tm, "120000");
+        ds.insert_str(Tag::SERIES_DESCRIPTION, Vr::Lo, "Report series");
+        let mut concept = Dataset::new();
+        concept.insert_str(Tag::CODE_VALUE, Vr::Sh, "12345");
+        ds.insert_sequence(Tag::CONCEPT_NAME_CODE_SEQUENCE)
+            .push(concept);
+
+        let mut dir = DicomDirectory::new("MYFS");
+        dir.add_file(&file, "SR0001").unwrap();
+
+        let patient = &dir.records()[0];
+        assert_eq!(
+            patient
+                .dataset
+                .try_get_str(Tag::PATIENT_BIRTH_DATE)
+                .as_deref(),
+            Some("19700101")
+        );
+        assert_eq!(
+            patient.dataset.try_get_str(Tag::PATIENT_SEX).as_deref(),
+            Some("M")
+        );
+
+        let series = &dir.records()[2];
+        assert_eq!(
+            series.dataset.try_get_str(Tag::SERIES_DATE).as_deref(),
+            Some("20260101")
+        );
+        assert_eq!(
+            series.dataset.try_get_str(Tag::SERIES_TIME).as_deref(),
+            Some("120000")
+        );
+        assert_eq!(
+            series
+                .dataset
+                .try_get_str(Tag::SERIES_DESCRIPTION)
+                .as_deref(),
+            Some("Report series")
+        );
+
+        let leaf = dir.records().last().unwrap();
+        assert_eq!(leaf.record_type(), RecordType::SrDocument);
+        assert_eq!(
+            leaf.dataset.try_get_str(Tag::INSTANCE_NUMBER).as_deref(),
+            Some("7")
+        );
+        assert_eq!(
+            leaf.dataset.try_get_str(Tag::COMPLETION_FLAG).as_deref(),
+            Some("COMPLETE")
+        );
+        assert_eq!(
+            leaf.dataset.try_get_str(Tag::VERIFICATION_FLAG).as_deref(),
+            Some("UNVERIFIED")
+        );
+        assert_eq!(
+            leaf.dataset.try_get_str(Tag::CONTENT_DATE).as_deref(),
+            Some("20260101")
+        );
+        let concept = leaf
+            .dataset
+            .try_get_sequence(Tag::CONCEPT_NAME_CODE_SEQUENCE)
+            .expect("concept name sequence copied");
+        assert_eq!(
+            concept.items()[0].try_get_str(Tag::CODE_VALUE).as_deref(),
+            Some("12345")
+        );
+    }
+
+    #[test]
     fn a_new_study_shares_the_patient() {
         let mut dir = DicomDirectory::new("MYFS");
         dir.add_file(&instance("P1", "1.2.3", "1.2.3.4", CT, "1.2.3.4.5"), "A")
@@ -1443,6 +1694,14 @@ mod tests {
         struct Failing;
         impl IconGenerator for Failing {
             fn generate(&self, _dataset: &Dataset) -> Result<Option<Dataset>, Error> {
+                Err(record_error("the icon could not be built"))
+            }
+
+            fn generate_frame(
+                &self,
+                _dataset: &Dataset,
+                _frame: u32,
+            ) -> Result<Option<Dataset>, Error> {
                 Err(record_error("the icon could not be built"))
             }
         }
@@ -1868,5 +2127,104 @@ mod tests {
     #[test]
     fn malformed_bytes_are_a_typed_error() {
         assert!(DicomDirectory::from_bytes(&[0u8; 4]).is_err());
+    }
+
+    #[test]
+    fn entries_expose_the_referenced_ids_and_sop_uids() {
+        let mut dir = DicomDirectory::new("FS");
+        let file = instance("P1", "1.2.3", "1.2.4", CT, "1.2.5");
+        let entry = dir
+            .add_file_entry(&file, "SUB\\IMG001")
+            .expect("entry added");
+        let leaf = &dir.records()[entry.instance];
+        assert_eq!(
+            leaf.referenced_file_id(),
+            Some(PathBuf::from("SUB").join("IMG001"))
+        );
+        assert_eq!(leaf.sop_class_uid().as_deref(), Some(CT));
+        assert_eq!(leaf.sop_instance_uid().as_deref(), Some("1.2.5"));
+        assert_eq!(
+            leaf.transfer_syntax_uid().as_deref(),
+            Some("1.2.840.10008.1.2.1")
+        );
+    }
+
+    #[test]
+    fn add_file_with_icon_attaches_an_icon() {
+        let mut dir = DicomDirectory::new("FS");
+        let file = image_instance("P1", "1.2.3", "1.2.4", "1.2.5");
+        dir.add_file_with_icon(&file, "IMG001", &BasicIconGenerator)
+            .expect("icon file added");
+        let leaf = dir
+            .records()
+            .iter()
+            .find(|record| record.record_type() == RecordType::Image)
+            .expect("image leaf");
+        assert!(
+            leaf.dataset
+                .try_get_sequence(Tag::ICON_IMAGE_SEQUENCE)
+                .is_some(),
+            "the icon sequence is attached"
+        );
+
+        let mut dir = DicomDirectory::new("FS");
+        let entry = dir
+            .add_file_entry_with_icon(&file, "IMG002", &BasicIconGenerator)
+            .expect("icon entry added");
+        assert_eq!(
+            dir.records()[entry.instance].record_type(),
+            RecordType::Image
+        );
+    }
+
+    #[test]
+    fn a_directory_without_records_writes_and_reopens_empty() {
+        let mut dir = DicomDirectory::new("EMPTY");
+        let bytes = dir.to_bytes().expect("empty directory writes");
+        let reopened = DicomDirectory::from_bytes(&bytes).expect("empty directory opens");
+        assert!(reopened.records().is_empty());
+        assert!(reopened.roots().is_empty());
+        assert_eq!(reopened.file_set_id().as_deref(), Some("EMPTY"));
+    }
+
+    #[test]
+    fn validate_rejects_broken_record_trees() {
+        // an out-of-range parent
+        let mut dir = DicomDirectory::new("FS");
+        dir.records.push(DirectoryRecord {
+            dataset: Dataset::new(),
+            parent: Some(9),
+        });
+        let err = dir.validate().unwrap_err().to_string();
+        assert!(err.contains("invalid parent"), "{err}");
+
+        // a root with a parent
+        let mut dir = DicomDirectory::new("FS");
+        dir.records.push(DirectoryRecord {
+            dataset: Dataset::new(),
+            parent: None,
+        });
+        dir.records.push(DirectoryRecord {
+            dataset: Dataset::new(),
+            parent: Some(0),
+        });
+        dir.roots.push(1);
+        let err = dir.validate().unwrap_err().to_string();
+        assert!(err.contains("has a parent"), "{err}");
+
+        // a root offset past the record list
+        let mut dir = DicomDirectory::new("FS");
+        dir.roots.push(4);
+        let err = dir.validate().unwrap_err().to_string();
+        assert!(err.contains("out of range"), "{err}");
+
+        // a record no root can reach
+        let mut dir = DicomDirectory::new("FS");
+        dir.records.push(DirectoryRecord {
+            dataset: Dataset::new(),
+            parent: None,
+        });
+        let err = dir.validate().unwrap_err().to_string();
+        assert!(err.contains("not reachable"), "{err}");
     }
 }

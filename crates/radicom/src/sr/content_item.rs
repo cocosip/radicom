@@ -493,19 +493,18 @@ impl ContentItem {
 
     /// Appends a child item to a container's ContentSequence (§12.3).
     ///
-    /// `insert_sequence` replaces, so the existing items are moved into the
-    /// new sequence first.
+    /// Pushes into the existing sequence item in place (O(1)); reusing the
+    /// stored sequence keeps the earlier children. The old code cloned every
+    /// child into a fresh sequence on each append (O(N²)).
     pub fn add_child(&mut self, child: ContentItem) -> &mut Self {
-        let mut items: Vec<Dataset> = self
-            .dataset
-            .try_get_sequence(tags::CONTENT_SEQUENCE)
-            .map(|sequence| sequence.items().to_vec())
-            .unwrap_or_default();
-        items.push(child.dataset);
-        *self
-            .dataset
-            .insert_sequence(tags::CONTENT_SEQUENCE)
-            .items_mut() = items;
+        match self.dataset.sequence_mut(tags::CONTENT_SEQUENCE) {
+            Some(sequence) => sequence.push(child.dataset),
+            None => {
+                self.dataset
+                    .insert_sequence(tags::CONTENT_SEQUENCE)
+                    .push(child.dataset);
+            }
+        }
         self
     }
 
@@ -729,5 +728,98 @@ mod tests {
     #[test]
     fn building_from_a_dataset_without_a_value_type_errors() {
         assert!(content_item_from_dataset(Dataset::new()).is_err());
+    }
+
+    #[test]
+    fn relationship_parse_rejects_unknown_phrases() {
+        assert_eq!(
+            Relationship::parse("CONTAINS"),
+            Some(Relationship::Contains)
+        );
+        assert_eq!(
+            Relationship::parse(" HAS CONCEPT MOD "),
+            Some(Relationship::HasConceptMod)
+        );
+        assert_eq!(Relationship::parse("BOGUS"), None);
+    }
+
+    #[test]
+    fn measured_value_read_reports_missing_or_bad_parts() {
+        // no NumericValue at all
+        assert!(MeasuredValue::read_from(&Dataset::new()).is_err());
+
+        // NumericValue that is not a number
+        let mut ds = Dataset::new();
+        ds.insert_str(tags::NUMERIC_VALUE, Vr::Ds, "abc");
+        assert!(MeasuredValue::read_from(&ds).is_err());
+
+        // a number without units
+        let mut ds = Dataset::new();
+        ds.insert_str(tags::NUMERIC_VALUE, Vr::Ds, "12.5");
+        assert!(MeasuredValue::read_from(&ds).is_err());
+    }
+
+    #[test]
+    fn referenced_sop_read_reports_missing_uids() {
+        assert!(ReferencedSop::read_from(&Dataset::new()).is_err());
+
+        let mut ds = Dataset::new();
+        ds.insert_str(tags::REFERENCED_SOP_CLASS_UID, Vr::Ui, "1.2.3");
+        assert!(
+            ReferencedSop::read_from(&ds).is_err(),
+            "instance UID missing"
+        );
+
+        ds.insert_str(tags::REFERENCED_SOP_INSTANCE_UID, Vr::Ui, " 1.2.4 ");
+        let sop = ReferencedSop::read_from(&ds).unwrap();
+        assert_eq!(sop.class_uid, "1.2.3");
+        assert_eq!(sop.instance_uid, "1.2.4", "surrounding space is trimmed");
+    }
+
+    #[test]
+    fn typed_value_builders_set_the_matching_vr() {
+        let concept = concept();
+        let person = ContentItem::person_name(concept.clone(), Relationship::Contains, "Doe^J");
+        assert_eq!(person.value_type(), Some(ValueType::PersonName));
+        assert_eq!(
+            person.dataset().try_get_str(tags::PERSON_NAME).as_deref(),
+            Some("Doe^J")
+        );
+
+        let date_time =
+            ContentItem::date_time(concept.clone(), Relationship::Contains, "20200101120000");
+        assert_eq!(date_time.value_type(), Some(ValueType::DateTime));
+        assert_eq!(
+            date_time.dataset().try_get_str(tags::DATE_TIME).as_deref(),
+            Some("20200101120000")
+        );
+
+        let date = ContentItem::date(concept.clone(), Relationship::Contains, "20200101");
+        assert_eq!(date.value_type(), Some(ValueType::Date));
+        assert_eq!(
+            date.dataset().try_get_str(tags::DATE).as_deref(),
+            Some("20200101")
+        );
+
+        let time = ContentItem::time(concept.clone(), Relationship::Contains, "120000");
+        assert_eq!(time.value_type(), Some(ValueType::Time));
+        assert_eq!(
+            time.dataset().try_get_str(tags::TIME).as_deref(),
+            Some("120000")
+        );
+
+        let uid = ContentItem::uid_ref(concept, Relationship::Contains, "1.2.3");
+        assert_eq!(uid.value_type(), Some(ValueType::UidRef));
+        assert_eq!(
+            uid.dataset().try_get_str(tags::UID).as_deref(),
+            Some("1.2.3")
+        );
+    }
+
+    #[test]
+    fn a_valid_dataset_becomes_a_content_item() {
+        let item = ContentItem::text(concept(), Relationship::Contains, "Mass");
+        let rebuilt = content_item_from_dataset(item.dataset().clone()).unwrap();
+        assert_eq!(rebuilt.value_type(), Some(ValueType::Text));
     }
 }

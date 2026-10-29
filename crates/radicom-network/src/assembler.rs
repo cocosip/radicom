@@ -21,10 +21,24 @@ pub enum Stream {
 /// (an asynchronous operation window above 1 is negotiable, and a C-GET SCP
 /// talks on two contexts at once), so one command and one dataset buffer per
 /// connection would splice unrelated messages together.
-#[derive(Debug, Clone, Default)]
+///
+/// A message that never completes is capped (NET-05): without a limit a peer
+/// can make the receiver buffer forever.
+#[derive(Debug, Clone)]
 pub struct PdvAssembler {
     /// Half-assembled message per `(context id, stream)`.
     buffers: std::collections::HashMap<(u8, Stream), bytes::BytesMut>,
+    /// Largest single message this assembler accepts, over all streams.
+    max_message_length: usize,
+}
+
+impl Default for PdvAssembler {
+    fn default() -> Self {
+        PdvAssembler {
+            buffers: std::collections::HashMap::new(),
+            max_message_length: Self::DEFAULT_MAX_MESSAGE_LENGTH,
+        }
+    }
 }
 
 /// A completed message unit.
@@ -38,8 +52,24 @@ pub struct MessageUnit {
 }
 
 impl PdvAssembler {
+    /// Largest message a default assembler will buffer (1 GiB).
+    ///
+    /// A message is buffered whole before it is dispatched, so this is also the
+    /// ceiling on one C-STORE dataset: an instance above it is refused with a
+    /// protocol error rather than streamed to the sink. Receiving multi-GB
+    /// instances needs a streaming sink (docs/06-backlog.md §1, NET-13).
+    pub const DEFAULT_MAX_MESSAGE_LENGTH: usize = 1 << 30;
+
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An assembler that rejects messages larger than `max_message_length`.
+    pub fn with_max_message_length(max_message_length: usize) -> Self {
+        PdvAssembler {
+            max_message_length,
+            ..Self::default()
+        }
     }
 
     /// Feeds one P-DATA-TF, returning every unit it completed.
@@ -61,6 +91,11 @@ impl PdvAssembler {
             Stream::Data
         };
         let key = (pdv.context_id, stream);
+        if pdv.data.len() > self.max_message_length {
+            return Err(NetworkError::protocol(
+                "DIMSE message exceeds the maximum size",
+            ));
+        }
         // Fast path: a complete message arriving in one PDV is shared, not copied.
         if pdv.is_last && !self.buffers.contains_key(&key) {
             return Ok(Some(MessageUnit {
@@ -68,6 +103,14 @@ impl PdvAssembler {
                 stream,
                 bytes: pdv.data.clone(),
             }));
+        }
+        let buffered = self.buffers.get(&key).map_or(0, bytes::BytesMut::len);
+        if buffered + pdv.data.len() > self.max_message_length {
+            // drop the partial message: continuing would only buffer more
+            self.buffers.remove(&key);
+            return Err(NetworkError::protocol(
+                "DIMSE message exceeds the maximum size",
+            ));
         }
         let buffer = self.buffers.entry(key).or_default();
         buffer.extend_from_slice(&pdv.data);
@@ -121,14 +164,15 @@ impl PduSplitter {
         }
     }
 
-    /// The largest PDV value that fits in one PDU, accounting for the 6-byte
-    /// PDU header and the 6-byte PDV header (length, context, message header).
+    /// The largest PDV value that fits in one PDU.
+    ///
+    /// The negotiated maximum counts the whole PDU including its 6-byte header
+    /// (as fo-dicom's `CurrentPduSize`, `DicomService.cs:1869-1881`), and each
+    /// PDV costs another 6 header bytes. PDV values are even-padded on the
+    /// wire, so the usable size is even too: an odd maximum must not become an
+    /// odd fragment plus a pad byte (review #17).
     pub fn max_pdv_value(&self) -> usize {
-        // a whole PDU must stay within max_pdu, which counts the body only.
-        // PDV values are even-padded on the wire, so the usable size is even
-        // too: an odd maximum must not become an odd fragment plus a pad byte
-        // (review #17).
-        ((self.max_pdu as usize).saturating_sub(6)) & !1
+        ((self.max_pdu as usize).saturating_sub(12)) & !1
     }
 
     /// Splits one message stream into PDUs (§11.1).
@@ -141,14 +185,18 @@ impl PduSplitter {
 
     /// Splits an owned message into PDUs without copying its bytes: every PDV
     /// is a `Bytes::slice` of `data` (§11.2).
+    ///
+    /// The negotiated maximum covers the whole PDU: 6 bytes of PDU header plus
+    /// the body (fo-dicom `DicomService.cs:1813-1881`, PS3.8 §9.3.2).
     pub fn split_bytes(
         &self,
         context_id: u8,
         is_command: bool,
         data: bytes::Bytes,
     ) -> Result<Vec<PData>> {
-        let body_limit = self.max_pdu as usize;
-        if body_limit <= 6 {
+        let body_limit = (self.max_pdu as usize).saturating_sub(6);
+        // 6 bytes for the PDV header plus a non-empty even-padded value
+        if body_limit < 12 {
             return Err(NetworkError::protocol(
                 "maximum PDU length leaves no room for a PDV",
             ));
@@ -180,13 +228,10 @@ impl PduSplitter {
                 used = 0;
                 continue;
             }
-            let mut room = available - 6;
-            room &= !1;
-            if room == 0 {
-                pdus.push(std::mem::take(&mut current));
-                used = 0;
-                continue;
-            }
+            // `available` is either the full body or a leftover of at most one
+            // byte after a flush, so this slice is never empty: no zero-length
+            // PDV can be emitted.
+            let room = (available - 6) & !1;
             let end = (offset + room).min(data.len());
             let is_last = end == data.len();
             let len = end - offset;
@@ -465,18 +510,18 @@ mod tests {
 
     #[test]
     fn splitter_fragments_large_messages() {
-        // max PDU 24 leaves 18 bytes of PDV value, which fills the PDU, so
-        // every PDV gets its own PDU: 40 bytes need 18 + 18 + 4
+        // max PDU 24 is the whole frame: 6 header bytes leave 18 of body, and
+        // the PDV header takes 6 more, so each fragment carries 12 bytes.
         let splitter = PduSplitter::new(24, 16);
-        assert_eq!(splitter.max_pdv_value(), 18);
+        assert_eq!(splitter.max_pdv_value(), 12);
         let data = vec![0xAB; 40];
         let pdus = splitter.split(1, true, &data).unwrap();
-        assert_eq!(pdus.len(), 3, "each PDV fills its PDU");
+        assert_eq!(pdus.len(), 4, "each PDV fills its PDU");
         assert_eq!(
             pdus.iter()
                 .map(|p| p.pdvs[0].data.len())
                 .collect::<Vec<_>>(),
-            vec![18, 18, 4]
+            vec![12, 12, 12, 4]
         );
         let total: usize = pdus
             .iter()
@@ -488,7 +533,40 @@ mod tests {
             .iter()
             .flat_map(|p| p.pdvs.iter().map(|d| d.is_last))
             .collect();
-        assert_eq!(last_flags, vec![false, false, true]);
+        assert_eq!(last_flags, vec![false, false, false, true]);
+    }
+
+    #[test]
+    fn a_pdu_never_exceeds_the_negotiated_maximum() {
+        // NET-03: the negotiated maximum counts the whole PDU, 6-byte header
+        // included (fo-dicom `CurrentPduSize`, DicomService.cs:1869-1881).
+        let splitter = PduSplitter::new(16384, 16);
+        let input: Vec<u8> = (0..(1 << 20)).map(|i| (i % 251) as u8).collect();
+        let pdus = splitter.split(1, false, &input).unwrap();
+        assert!(pdus.len() > 1, "the message is fragmented");
+        let mut largest = 0;
+        let mut joined = Vec::new();
+        for pdu in pdus {
+            let wire = crate::pdu::encode(&crate::pdu::Pdu::PData(pdu)).unwrap();
+            assert!(
+                wire.len() <= 16384,
+                "a {} byte PDU exceeds the negotiated 16384 bytes",
+                wire.len()
+            );
+            largest = largest.max(wire.len());
+            let decoded = crate::pdu::decode(&wire).unwrap();
+            let crate::pdu::Pdu::PData(back) = decoded else {
+                panic!("expected a P-DATA-TF");
+            };
+            for pdv in back.pdvs {
+                joined.extend_from_slice(&pdv.data);
+            }
+        }
+        assert_eq!(joined, input, "no bytes are lost or duplicated");
+        assert!(
+            largest > 16370,
+            "full frames use the whole maximum, got {largest}"
+        );
     }
 
     #[test]
@@ -521,7 +599,7 @@ mod tests {
         let splitter = PduSplitter::new(24, 1);
         let data = vec![0xCD; 40];
         let pdus = splitter.split(1, false, &data).unwrap();
-        assert_eq!(pdus.len(), 3, "one PDV per PDU");
+        assert_eq!(pdus.len(), 4, "one 12-byte PDV per PDU");
         assert!(
             pdus.iter().all(|p| p.pdvs.len() == 1),
             "one PDV per PDU mode"
@@ -589,9 +667,9 @@ mod tests {
         for pdu in pdus {
             let wire = crate::pdu::encode(&crate::pdu::Pdu::PData(pdu)).unwrap();
             assert!(
-                wire.len() - 6 <= 16385,
-                "a PDU body of {} exceeds the negotiated 16385 bytes",
-                wire.len() - 6
+                wire.len() <= 16385,
+                "a {} byte PDU exceeds the negotiated 16385 bytes",
+                wire.len()
             );
             let decoded = crate::pdu::decode(&wire).unwrap();
             let crate::pdu::Pdu::PData(back) = decoded else {
@@ -627,6 +705,44 @@ mod tests {
     }
 
     #[test]
+    fn a_message_at_the_limit_is_accepted() {
+        let mut assembler = PdvAssembler::with_max_message_length(4);
+        let unit = assembler
+            .push_pdv(&pdv(1, true, true, &[1, 2, 3, 4]))
+            .unwrap()
+            .expect("exactly at the limit");
+        assert_eq!(unit.bytes, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn a_fragmented_message_that_exceeds_the_limit_is_rejected() {
+        // NET-05: a peer that keeps sending non-last PDVs must be stopped
+        // instead of growing the buffer until the process runs out of memory.
+        let mut assembler = PdvAssembler::with_max_message_length(8);
+        assert!(assembler
+            .push_pdv(&pdv(1, false, false, &[0; 6]))
+            .unwrap()
+            .is_none());
+        let error = assembler
+            .push_pdv(&pdv(1, false, false, &[0; 6]))
+            .expect_err("the second fragment crosses the limit");
+        assert!(
+            error.to_string().contains("maximum size"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            assembler.is_idle(),
+            "the partial message is dropped, not kept for later"
+        );
+    }
+
+    #[test]
+    fn a_single_oversized_pdv_is_rejected() {
+        let mut assembler = PdvAssembler::with_max_message_length(4);
+        assert!(assembler.push_pdv(&pdv(1, true, true, &[0; 5])).is_err());
+    }
+
+    #[test]
     fn round_trip_preserves_the_command_dataset_boundary() {
         let splitter = PduSplitter::new(64, 2);
         let command = vec![0x11; 30];
@@ -642,5 +758,23 @@ mod tests {
         assert_eq!(units[0].bytes, command);
         assert_eq!(units[1].stream, Stream::Data);
         assert_eq!(units[1].bytes, dataset);
+    }
+
+    #[test]
+    fn an_odd_body_limit_flushes_without_an_empty_pdv() {
+        // 19 > 25-6 = 19 is odd: after the first slice only one byte is left,
+        // which must start a new PDU, never a zero-length PDV (review #17).
+        let splitter = PduSplitter::new(25, 16);
+        let data = vec![0x5A; 60];
+        let pdus = splitter.split(1, false, &data).unwrap();
+        assert!(pdus
+            .iter()
+            .all(|pdu| pdu.pdvs.iter().all(|pdv| !pdv.data.is_empty())));
+        let total: usize = pdus
+            .iter()
+            .flat_map(|pdu| pdu.pdvs.iter())
+            .map(|pdv| pdv.data.len())
+            .sum();
+        assert_eq!(total, data.len());
     }
 }

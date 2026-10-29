@@ -28,15 +28,11 @@ pub trait IconGenerator {
 
     /// The icon for an explicit zero-based source frame.
     ///
-    /// Implementors that do not support frame selection retain their existing
-    /// behaviour through the default method.
-    fn generate_frame(
-        &self,
-        dataset: &Dataset,
-        _frame_index: u32,
-    ) -> Result<Option<Dataset>, Error> {
-        self.generate(dataset)
-    }
+    /// Implementors must decide their own frame selection: there is no silent
+    /// fallback to `generate` (a caller asking for frame 3 must not silently get
+    /// frame 0), so this method is required.
+    fn generate_frame(&self, dataset: &Dataset, frame_index: u32)
+        -> Result<Option<Dataset>, Error>;
 }
 
 /// The built-in generator: ≤128×128, 8-bit MONOCHROME2 (§12.2).

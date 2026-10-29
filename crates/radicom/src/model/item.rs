@@ -263,3 +263,27 @@ mod tests {
         assert!(empty.is_empty_value());
     }
 }
+
+#[cfg(test)]
+mod extra_tests {
+    use super::*;
+
+    #[test]
+    fn sequence_and_fragment_helpers() {
+        let empty = DicomSequence::with_items(Tag::PLANE_POSITION_SEQUENCE, Vec::new());
+        assert!(empty.is_empty());
+        assert!(DicomItem::Sequence(empty).is_empty_value());
+
+        let mut fragments = DicomFragmentSequence::new(Tag::PIXEL_DATA, Vr::Ob);
+        fragments.set_offset_table(Vec::new());
+        fragments.push_fragment(std::sync::Arc::new(
+            crate::model::buffer::MemoryBuffer::from(Vec::new()),
+        ));
+        // only zero-sized fragments count as empty
+        assert!(DicomItem::Fragments(fragments.clone()).is_empty_value());
+        fragments.push_fragment(std::sync::Arc::new(
+            crate::model::buffer::MemoryBuffer::from(vec![1u8]),
+        ));
+        assert!(!DicomItem::Fragments(fragments).is_empty_value());
+    }
+}

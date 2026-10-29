@@ -610,3 +610,19 @@ mod tests {
         assert!(parse("not-a-uid").is_err());
     }
 }
+
+#[cfg(test)]
+mod extra_tests {
+    use super::*;
+    use crate::model::uid::Uid;
+
+    #[test]
+    fn syntax_metadata_equality_and_display() {
+        let ts = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        assert!(!ts.name().is_empty());
+        assert_eq!(ts.uid_type(), UidType::TransferSyntax);
+        let shown = format!("{ts}");
+        assert!(shown.contains("1.2.840.10008.1.2.1"), "{shown}");
+        assert!(lookup(&Uid::parse("1.2.840.10008.1.2.1")).is_ok());
+    }
+}

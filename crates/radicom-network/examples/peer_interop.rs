@@ -88,7 +88,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match echo_client.send_c_echo(sop_class::VERIFICATION).await {
             Ok(echo) => {
                 println!("C-ECHO status=0x{:04X} {}", echo.status, ok(echo.status));
-                failed |= echo.status != 0;
+                // verification answers 0x0122 on many PACSs; that is not a
+                // reason to fail a run whose real work still succeeds (NET-25)
+                failed |= echo_is_fatal(echo.status, has_real_op);
             }
             Err(e) if has_real_op => println!("C-ECHO unsupported by peer (ignored): {e}"),
             Err(e) => return Err(e.into()),
@@ -210,10 +212,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// True when a C-ECHO status must fail the process (NET-25).
+///
+/// A peer that refuses Verification is only fatal when Verification was the
+/// whole point of the run.
+fn echo_is_fatal(status: u16, has_real_op: bool) -> bool {
+    status != 0 && !has_real_op
+}
+
 fn ok(status: u16) -> &'static str {
     if status == 0x0000 {
         "OK"
     } else {
         "FAIL"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::echo_is_fatal;
+
+    #[test]
+    fn a_refused_echo_only_fails_a_verification_only_run() {
+        assert!(!echo_is_fatal(0x0000, false), "success never fails the run");
+        assert!(echo_is_fatal(0x0122, false), "a lone refused echo is fatal");
+        assert!(
+            !echo_is_fatal(0x0122, true),
+            "a real operation still gets its chance"
+        );
     }
 }

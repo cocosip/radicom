@@ -926,6 +926,174 @@ fn encode_pdata_into(p: &PData, out: &mut Vec<u8>) {
 mod tests {
     use super::*;
 
+    /// An item header plus body, as it appears inside a user-information item.
+    fn user_item(item_type: u8, body: &[u8]) -> Vec<u8> {
+        let mut out = vec![item_type, 0x00];
+        out.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        out.extend_from_slice(body);
+        out
+    }
+
+    #[test]
+    fn a_truncated_presentation_context_is_rejected() {
+        let error = decode_presentation_context(&[0x01, 0x00, 0x00])
+            .expect_err("three bytes is not a context header");
+        assert!(error.to_string().contains("truncated"), "{error}");
+
+        // an unknown sub-item is skipped by its length, not fatal
+        let mut value = vec![0x01, 0x00, 0x00, 0x00];
+        value.extend_from_slice(&[0x99, 0x00, 0x00, 0x02, 0xAA, 0xBB]);
+        let context = decode_presentation_context(&value).unwrap();
+        assert_eq!(context.id, 1);
+        assert!(context.abstract_syntax.is_empty());
+    }
+
+    #[test]
+    fn malformed_user_information_items_are_rejected() {
+        // role selection: a UID length that runs past the item
+        let item = user_item(item::ROLE_SELECTION, &[0x00, 0x09, b'x', 0, 0]);
+        assert!(decode_user_information(&item, true)
+            .unwrap_err()
+            .to_string()
+            .contains("runs past"));
+        // role selection: no SCU byte
+        let item = user_item(item::ROLE_SELECTION, &[0x00, 0x02, b'a', b'b']);
+        assert!(decode_user_information(&item, true)
+            .unwrap_err()
+            .to_string()
+            .contains("no SCU role"));
+        // role selection: no SCP byte
+        let item = user_item(item::ROLE_SELECTION, &[0x00, 0x02, b'a', b'b', 1]);
+        assert!(decode_user_information(&item, true)
+            .unwrap_err()
+            .to_string()
+            .contains("no SCP role"));
+
+        // extended negotiation: truncated and UID-past-item
+        let item = user_item(item::SOP_CLASS_EXTENDED_NEGOTIATION, &[0x00]);
+        assert!(decode_user_information(&item, true)
+            .unwrap_err()
+            .to_string()
+            .contains("truncated"));
+        let item = user_item(item::SOP_CLASS_EXTENDED_NEGOTIATION, &[0x00, 0x05, b'a']);
+        assert!(decode_user_information(&item, true)
+            .unwrap_err()
+            .to_string()
+            .contains("runs past"));
+
+        // common extended negotiation: truncated
+        let item = user_item(item::SOP_CLASS_COMMON_EXTENDED, &[0x00]);
+        assert!(decode_user_information(&item, true)
+            .unwrap_err()
+            .to_string()
+            .contains("common extended negotiation is truncated"));
+
+        // user identity: primary and secondary fields past the item
+        let item = user_item(item::USER_IDENTITY_RQ, &[1, 1, 0x00, 0x09, b'a']);
+        assert!(decode_user_information(&item, true)
+            .unwrap_err()
+            .to_string()
+            .contains("primary field runs past"));
+        let item = user_item(
+            item::USER_IDENTITY_RQ,
+            &[1, 1, 0x00, 0x01, b'a', 0x00, 0x09],
+        );
+        assert!(decode_user_information(&item, true)
+            .unwrap_err()
+            .to_string()
+            .contains("secondary field runs past"));
+
+        // user identity answer: a length that runs past the item
+        let item = user_item(item::USER_IDENTITY_AC, &[0xFF, 0xFF]);
+        assert!(decode_user_information(&item, false)
+            .unwrap_err()
+            .to_string()
+            .contains("runs past"));
+
+        // an unknown item is skipped
+        let item = user_item(0x7F, &[0xAA, 0xBB]);
+        assert!(decode_user_information(&item, true).is_ok());
+    }
+
+    #[test]
+    fn identity_and_extended_items_round_trip_through_encoding() {
+        let mut association = Associate::new("CALLED", "CALLING");
+        association.user_information.user_identity = Some(UserIdentity {
+            identity_type: 1,
+            positive_response_requested: true,
+            primary: b"user".to_vec(),
+            secondary: b"pass".to_vec(),
+        });
+        association.user_information.common_extended = Some(CommonExtended {
+            service_class_uid: "1.2.3".to_string(),
+            related_general_sop_classes: vec!["1.2.840.10008.5.1.4.1.1.7".to_string()],
+        });
+        association.user_information.extended_negotiations = vec![ExtendedNegotiation {
+            sop_class: "1.2.840.10008.5.1.4.1.1.7".to_string(),
+            requested: vec![1, 0],
+            accepted: vec![1, 0],
+        }];
+        let wire = super::encode(&Pdu::AssociateRq(association)).unwrap();
+        let decoded = decode_bytes(wire.into()).unwrap();
+        let Pdu::AssociateRq(back) = decoded else {
+            panic!("expected an RQ")
+        };
+        assert_eq!(
+            back.user_information.user_identity,
+            Some(UserIdentity {
+                identity_type: 1,
+                positive_response_requested: true,
+                primary: b"user".to_vec(),
+                secondary: b"pass".to_vec(),
+            })
+        );
+        assert_eq!(
+            back.user_information
+                .common_extended
+                .unwrap()
+                .service_class_uid,
+            "1.2.3"
+        );
+        assert_eq!(back.user_information.extended_negotiations.len(), 1);
+
+        // an A-ASSOCIATE-AC carries the answer, and an oversized one is refused
+        let mut accept = Associate::new("CALLED", "CALLING");
+        accept.user_information.user_identity_response = Some(vec![0u8; 70_000]);
+        let error =
+            super::encode(&Pdu::AssociateAc(accept)).expect_err("too long for the u16 length");
+        assert!(error.to_string().contains("65535"), "{error}");
+        let mut accept = Associate::new("CALLED", "CALLING");
+        accept.user_information.user_identity_response = Some(vec![7, 8, 9]);
+        let wire = super::encode(&Pdu::AssociateAc(accept)).unwrap();
+        let Pdu::AssociateAc(back) = decode_bytes(wire.into()).unwrap() else {
+            panic!("expected an AC")
+        };
+        assert_eq!(
+            back.user_information.user_identity_response,
+            Some(vec![7, 8, 9])
+        );
+    }
+
+    #[test]
+    fn every_pdu_reports_its_wire_type() {
+        assert_eq!(Pdu::PData(PData::default()).pdu_type(), PduType::PDataTf);
+        assert_eq!(Pdu::ReleaseRq.pdu_type(), PduType::ReleaseRq);
+        assert_eq!(Pdu::ReleaseRp.pdu_type(), PduType::ReleaseRp);
+        assert_eq!(
+            Pdu::Abort(Abort {
+                source: AbortSource::User,
+                reason: 0
+            })
+            .pdu_type(),
+            PduType::Abort
+        );
+        assert_eq!(
+            encode(&Pdu::ReleaseRq).len(),
+            10,
+            "A-RELEASE-RQ is a fixed 10-byte frame"
+        );
+    }
+
     /// The encoder, for the tests that expect a well-formed PDU.
     fn encode(pdu: &Pdu) -> Vec<u8> {
         super::encode(pdu).expect("encode")

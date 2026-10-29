@@ -168,8 +168,24 @@ impl<R: Read + Seek> ByteSourceReader<R> {
     /// (`File`/`Stream` buffers, ReadLargeOnDemand) arrive with the
     /// file-level reader; the parser routes through this hook.
     pub fn read_buffer(&mut self, n: u64) -> io::Result<SharedBuffer> {
+        // CORE-22: validate the declared length before allocating. `require`
+        // rejects a value larger than the source (so a corrupt 32-bit length
+        // never becomes a multi-terabyte allocation), and `try_from` refuses
+        // to truncate a 64-bit length on a 32-bit target.
+        if self.require(n).is_err() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("value length {n} exceeds the remaining source bytes"),
+            ));
+        }
+        let len = usize::try_from(n).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("value length {n} exceeds the platform address space"),
+            )
+        })?;
         Ok(std::sync::Arc::new(MemoryBuffer::from(
-            self.read_bytes(n as usize)?,
+            self.read_bytes(len)?,
         )))
     }
 }
@@ -371,5 +387,52 @@ mod tests {
         let n = t.write_buffer(&buf).unwrap();
         assert_eq!(n, 256);
         assert_eq!(t.into_inner(), payload);
+    }
+
+    #[test]
+    fn endian_word_accessors_and_chunked_copy() {
+        use std::io::Cursor;
+        let mut words =
+            ByteSourceReader::new(Cursor::new(vec![0u8, 0, 0, 0, 0, 0, 0, 42]), Endian::Big);
+        assert_eq!(words.read_u64().unwrap(), 42);
+        let mut float =
+            ByteSourceReader::new(Cursor::new(1.0f32.to_be_bytes().to_vec()), Endian::Big);
+        assert_eq!(float.read_f32().unwrap(), 1.0);
+        let inner = ByteSourceReader::new(Cursor::new(b"x".to_vec()), Endian::Little).into_inner();
+        assert_eq!(inner.get_ref().len(), 1);
+
+        let mut target = ByteTargetWriter::new(Vec::new(), Endian::Big);
+        target.write_u64(1).unwrap();
+        target.write_f64(2.5).unwrap();
+        assert_eq!(target.into_inner().len(), 16);
+
+        let payload: Vec<u8> = (0..10).collect();
+        let buf: SharedBuffer = Arc::new(MemoryBuffer::from(payload.clone()));
+        let mut chunked = ByteTargetWriter::new(Vec::new(), Endian::Little);
+        assert_eq!(
+            chunked.write_buffer_with_chunk(buf.as_ref(), 3).unwrap(),
+            10
+        );
+        assert_eq!(chunked.into_inner(), payload);
+        // a zero chunk size is treated as one byte, never an infinite loop
+        let mut zero = ByteTargetWriter::new(Vec::new(), Endian::Little);
+        assert_eq!(zero.write_buffer_with_chunk(buf.as_ref(), 0).unwrap(), 10);
+    }
+}
+
+#[cfg(test)]
+mod core22_tests {
+    use super::*;
+
+    #[test]
+    fn an_absurd_declared_length_is_rejected_before_allocating() {
+        // CORE-22: a corrupt 32-bit length must not become an allocation
+        let mut src = ByteSourceReader::new(std::io::Cursor::new(vec![1u8; 8]), Endian::Little);
+        let err = src.read_buffer(u64::MAX).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+        assert_eq!(src.position().unwrap(), 0, "no bytes consumed");
+        // a plausible length that still exceeds the source is also rejected
+        assert!(src.read_buffer(9).is_err());
+        assert_eq!(src.read_buffer(8).unwrap().size(), 8);
     }
 }

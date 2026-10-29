@@ -5,6 +5,9 @@
 //! dictionary spelling ("1", "1-n", "2-2n"); the runtime dictionary parses them.
 #![allow(clippy::all)]
 
+/// The bundled dictionary data version, read from the XML root `version`.
+pub const DICTIONARY_VERSION: &str = "2026b";
+
 /// One data dictionary row (public rows carry `creator: ""`).
 #[derive(Debug, Clone, Copy)]
 pub struct RawDictEntry {

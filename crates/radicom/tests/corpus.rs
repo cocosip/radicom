@@ -275,3 +275,31 @@ fn strip_group_lengths(dataset: &mut Dataset) {
         }
     }
 }
+
+#[test]
+fn iso2022_designators_survive_a_rewrite_of_the_gb2312_corpus_file() {
+    // PS3.5 §6.1.2.5.3: a declared ISO 2022 term must carry its escape
+    // designation; the source file writes ESC $ ) A before every GB2312 run,
+    // so a rewrite that drops it is decoded wrong by conformant peers (CORE-04).
+    let path = corpus_dir().join("charset/chrGB2312.dcm");
+    let bytes = std::fs::read(&path).unwrap();
+    let file = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
+    let written = file.to_bytes(&WriteOptions::default()).unwrap();
+
+    let designator: &[u8] = b"\x1B$)A";
+    let count = written
+        .windows(designator.len())
+        .filter(|window| *window == designator)
+        .count();
+    assert_eq!(count, 2, "both GB2312 runs must be re-designated");
+
+    let expected: &[u8] = b"Zhang^XiaoDong=\x1B$)A\xD5\xC5^\x1B$)A\xD0\xA1\xB6\xAB";
+    assert!(
+        written.windows(expected.len()).any(|w| w == expected),
+        "the PN value must be written with its designators"
+    );
+
+    let back = DicomFile::from_bytes(&written, &ReadOptions::default()).unwrap();
+    let name = back.dataset.get_str(Tag::PATIENT_NAME).unwrap();
+    assert!(name.contains('张'), "{name}");
+}

@@ -691,4 +691,87 @@ mod tests {
             "non-square has no determinant"
         );
     }
+
+    #[test]
+    fn histogram_window_and_clear_cover_edge_values() {
+        let mut histogram = Histogram::new(0, 10);
+        for value in [0, 1, 2, 2, 3, 10] {
+            histogram.add(value);
+        }
+        assert_eq!(histogram.count(2), 2);
+        assert_eq!(histogram.count(99), 0, "out-of-range value counts as zero");
+        // clearing an out-of-range value is a no-op
+        histogram.clear(99);
+        // clearing an in-window bin removes it from the window total too
+        let before = histogram.total();
+        histogram.clear(2);
+        assert_eq!(histogram.total(), before - 2);
+
+        // a full window holds the whole histogram
+        let mut histogram = Histogram::new(0, 4);
+        for value in 0..=4 {
+            histogram.add(value);
+        }
+        histogram.apply_window(0, 4);
+        assert_eq!(histogram.window_total(), histogram.total());
+        assert_eq!(histogram.window_start(), 0);
+        assert_eq!(histogram.window_end(), 4);
+
+        // a shrinking percent window stops at the dense centre
+        let mut histogram = Histogram::new(0, 4);
+        for value in 0..=4 {
+            histogram.add(value);
+        }
+        histogram.apply_window_percent(40);
+        assert!(histogram.window_end() >= histogram.window_start());
+        assert!(histogram.window_total() <= histogram.total());
+
+        // an empty histogram has no percentage to apply
+        let mut empty = Histogram::new(0, 2);
+        empty.apply_window_percent(50);
+        assert_eq!(empty.window_total(), 0);
+
+        // asking for the window total before any window applies 100%
+        let mut fresh = Histogram::new(0, 1);
+        assert_eq!(fresh.window_total(), 0);
+    }
+
+    #[test]
+    fn bit_list_grows_and_reads_beyond_storage_as_false() {
+        let mut bits = BitList::new();
+        assert_eq!(bits.capacity(), 0);
+        assert!(!bits.get(5), "unset storage reads as false");
+        bits.set(9, true);
+        assert!(bits.capacity() >= 10);
+        assert!(bits.get(9));
+        bits.set(9, false);
+        assert!(!bits.get(9));
+    }
+
+    #[test]
+    fn matrix_accessors_validate_and_report_identity() {
+        assert!(Matrix::from_rows(2, 2, vec![1, 2]).is_none());
+        let matrix = Matrix::from_rows(2, 2, vec![1, 0, 0, 1]).unwrap();
+        assert_eq!(matrix.rows(), 2);
+        assert_eq!(matrix.cols(), 2);
+        assert_eq!(matrix.get(1, 1), 1);
+        assert!(matrix.is_identity());
+        assert_eq!(matrix.transpose(), matrix);
+        // determinant of the 0x0 and 1x1 matrices
+        assert_eq!(Matrix::zero(0, 0).determinant(), Some(1));
+        assert_eq!(
+            Matrix::from_rows(1, 1, vec![7]).unwrap().determinant(),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn moving_average_counts_and_averages() {
+        let mut average = MovingAverage::new(2);
+        assert_eq!(average.count(), 0);
+        assert_eq!(average.next(2), 2);
+        assert_eq!(average.next(4), 3);
+        assert_eq!(average.count(), 2);
+        assert_eq!(average.next(10), 7, "the oldest sample drops out");
+    }
 }

@@ -1,7 +1,7 @@
 //! Dataset-building parse observer (RD-02; docs/01-architecture.md §7).
 
 use crate::encoding::charset::{charset_encoding, decode_multi_charset};
-use crate::error::{DataError, Error, TagRef};
+use crate::error::{DataError, Error};
 use crate::io::reader::{ParseContext, ParseObserver};
 use crate::model::buffer::SharedBuffer;
 use crate::model::element::DicomElement;
@@ -180,11 +180,16 @@ impl ParseObserver for DatasetBuilder {
         offset_table: Vec<u32>,
     ) -> Result<(), Error> {
         if !matches!(vr, Vr::Ob | Vr::Ow) {
-            return Err(Error::Data(DataError::UnexpectedType {
-                tag: TagRef(tag.group(), tag.element()),
-                expected: "OB or OW",
-                found: vr.code(),
-            }));
+            // fo-dicom's DicomDatasetReaderObserver leaves the fragment null
+            // and skips the whole sequence; a malformed undefined-length value
+            // must not make the file unreadable.
+            tracing::warn!(
+                tag = %crate::error::TagRef(tag.group(), tag.element()),
+                vr = vr.code(),
+                "undefined-length value is not OB/OW; fragment sequence skipped"
+            );
+            self.fragment_offset_table = None;
+            return Ok(());
         }
         self.fragment_offset_table = Some(offset_table);
         self.fragment_stack
@@ -201,11 +206,10 @@ impl ParseObserver for DatasetBuilder {
     }
 
     fn on_end_fragment(&mut self, _ctx: &ParseContext) -> Result<(), Error> {
-        let mut frags = self.fragment_stack.pop().ok_or_else(|| {
-            Error::Data(DataError::Other {
-                message: "fragment stack underflow".into(),
-            })
-        })?;
+        let Some(mut frags) = self.fragment_stack.pop() else {
+            // the fragment sequence was skipped at begin time
+            return Ok(());
+        };
         if let Some(table) = self.fragment_offset_table.take() {
             frags.set_offset_table(table);
         }
@@ -304,6 +308,27 @@ mod tests {
 
     fn parse(bytes: &[u8], syntax: &Arc<TransferSyntax>) -> Dataset {
         parse_dataset_bytes(bytes, syntax).unwrap()
+    }
+
+    #[test]
+    fn undefined_length_non_ob_fragments_are_skipped_not_an_error() {
+        // fo-dicom's observer ignores a fragment sequence whose VR is not OB/OW
+        // instead of failing the whole file (review CORE-08).
+        let mut bytes = Vec::new();
+        // (0044,1001) UN with undefined length, then an empty offset table and
+        // one fragment, then the sequence delimiter
+        bytes.extend_from_slice(&[
+            0x44, 0x00, 0x01, 0x10, b'U', b'N', 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF,
+        ]);
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 0x00, 0x00, 0x00, 0x00]);
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 0x04, 0x00, 0x00, 0x00]);
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0xDD, 0xE0, 0x00, 0x00, 0x00, 0x00]);
+        bytes.extend_from_slice(&el_header(0x0010, 0x0010, "PN", b"Doe^John"));
+
+        let ds = parse(&bytes, &le());
+        assert!(!ds.contains(&Tag::new(0x0044, 0x1001)));
+        assert_eq!(ds.get_str(Tag::PATIENT_NAME).unwrap(), "Doe^John");
     }
 
     #[test]

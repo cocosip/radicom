@@ -3,7 +3,9 @@
 //! Writing and length computation share one set of header/length helpers so
 //! an explicit-length sequence can never disagree with its own byte count.
 
-use crate::encoding::charset::{charset_encoding, encode_multi_charset};
+use crate::encoding::charset::{
+    charset_encoding, encode_multi_charset_with, iso2022_designator_for_term,
+};
 use crate::error::{DataError, Error};
 use crate::io::byte_source::ByteTargetWriter;
 use crate::model::buffer::ByteBuffer;
@@ -45,6 +47,9 @@ impl Default for WriteOptions {
 struct Charsets {
     first: &'static encoding_rs::Encoding,
     alternates: Vec<&'static encoding_rs::Encoding>,
+    /// ISO 2022 designation the declared first term requires (PS3.5
+    /// §6.1.2.5.3); `None` for the default repertoire and UTF-8.
+    first_designator: Option<&'static [u8]>,
 }
 
 impl Charsets {
@@ -54,6 +59,7 @@ impl Charsets {
             inherited.map(|c| Charsets {
                 first: c.first,
                 alternates: c.alternates.clone(),
+                first_designator: c.first_designator,
             })
         };
         let Some(DicomItem::Element(element)) = ds.item(&Tag::SPECIFIC_CHARACTER_SET) else {
@@ -67,6 +73,7 @@ impl Charsets {
         Some(Charsets {
             first: charset_encoding(first),
             alternates: terms.map(charset_encoding).collect(),
+            first_designator: iso2022_designator_for_term(first),
         })
     }
 }
@@ -172,11 +179,17 @@ impl DicomWriter {
         charset: Option<&Charsets>,
         out: &mut ByteTargetWriter<W>,
     ) -> Result<u64, Error> {
-        let body = self.sequence_body_len(seq, syntax, charset)?;
-        // private SQs are always explicit-length (fo-dicom rule, §8)
+        // Private SQs are always explicit-length (fo-dicom rule, §8); only then
+        // is the body length needed. With the default (undefined) lengths the
+        // recursive length pass would be discarded and re-walk the whole
+        // subtree once per nesting level (review CORE-05).
         let defined = self.options.explicit_length_sequences || seq.tag().is_private();
-        let len = if defined { Some(body) } else { None };
-        let mut written = self.write_header(seq.tag(), Vr::Sq, len, syntax, out)?;
+        let body = if defined {
+            Some(self.sequence_body_len(seq, syntax, charset)?)
+        } else {
+            None
+        };
+        let mut written = self.write_header(seq.tag(), Vr::Sq, body, syntax, out)?;
         for item_ds in seq.items() {
             written += self.write_item_header(item_ds, syntax, charset, out)?;
         }
@@ -195,8 +208,12 @@ impl DicomWriter {
         charset: Option<&Charsets>,
         out: &mut ByteTargetWriter<W>,
     ) -> Result<u64, Error> {
-        let body = self.dataset_len(item, syntax, charset)?;
         let defined = self.options.explicit_length_sequence_items;
+        let body = if defined {
+            self.dataset_len(item, syntax, charset)?
+        } else {
+            0
+        };
         let mut written = write_item_tag(out, body, defined)?;
         let mut inner = 0u64;
         self.write_dataset_into(item, syntax, charset, out, &mut inner)?;
@@ -231,10 +248,14 @@ impl DicomWriter {
             // item lengths must be even; the pad byte is part of the value
             let pad = fragment.size() % 2;
             written += write_item_tag(out, fragment.size() + pad, true)?;
+            // CORE-21: encapsulated payloads are opaque byte streams (already
+            // in the syntax's own representation), so they are copied verbatim
+            // even on a big-endian target - swapping an OW fragment would
+            // corrupt the compressed frame.
             written += write_buffer(
                 out,
                 fragment.as_ref(),
-                f.vr().byte_swap_size(),
+                1,
                 syntax.endian(),
                 self.options.large_object_size,
             )?;
@@ -314,14 +335,14 @@ impl DicomWriter {
             written += 2;
             if long_form {
                 out.write_u16(0).map_err(io_err)?;
-                out.write_u32(len as u32).map_err(io_err)?;
+                out.write_u32(u32_length(tag, len)?).map_err(io_err)?;
                 written += 6;
             } else {
-                out.write_u16(len as u16).map_err(io_err)?;
+                out.write_u16(u16_length(tag, len)?).map_err(io_err)?;
                 written += 2;
             }
         } else {
-            out.write_u32(len as u32).map_err(io_err)?;
+            out.write_u32(u32_length(tag, len)?).map_err(io_err)?;
             written += 4;
         }
         Ok(written)
@@ -421,7 +442,7 @@ impl DicomWriter {
             }
             total += self.item_len(item, syntax, charset)?;
         }
-        Ok(total as u32)
+        u32::try_from(total).map_err(|_| length_overflow(&Tag::new(group, 0x0000), total))
     }
 }
 
@@ -446,9 +467,13 @@ fn encode_value(e: &DicomElement, charset: Option<&Charsets>) -> Option<Vec<u8>>
     }
     let text = e.string_value();
     let mut bytes = match charset {
-        Some(c) if e.vr().is_character_encoded() => {
-            encode_multi_charset(text, c.first, &c.alternates, e.vr() == Vr::Pn)
-        }
+        Some(c) if e.vr().is_character_encoded() => encode_multi_charset_with(
+            text,
+            c.first,
+            &c.alternates,
+            e.vr() == Vr::Pn,
+            c.first_designator,
+        ),
         _ => text.as_bytes().to_vec(),
     };
     if bytes.len() % 2 == 1 {
@@ -493,9 +518,35 @@ fn write_item_tag<W: Write>(
 ) -> Result<u64, Error> {
     out.write_u16(0xFFFE).map_err(io_err)?;
     out.write_u16(0xE000).map_err(io_err)?;
-    let value = if defined { len as u32 } else { 0xFFFF_FFFF };
+    let value = if defined {
+        // CORE-27: never truncate an item length into the 32-bit field
+        u32::try_from(len).map_err(|_| {
+            Error::Data(DataError::Other {
+                message: format!("item length {len} exceeds the 4 GiB DICOM limit"),
+            })
+        })?
+    } else {
+        0xFFFF_FFFF
+    };
     out.write_u32(value).map_err(io_err)?;
     Ok(8)
+}
+
+/// A computed length does not fit the on-wire field (CORE-27): a DICOM
+/// element/item length is a 32-bit value, so `> 4 GiB - 1` must be an error,
+/// never a silent truncation.
+fn length_overflow(tag: &Tag, len: u64) -> Error {
+    Error::Data(DataError::Other {
+        message: format!("{tag}: encoded length {len} exceeds the 4 GiB DICOM limit"),
+    })
+}
+
+fn u32_length(tag: &Tag, len: u64) -> Result<u32, Error> {
+    u32::try_from(len).map_err(|_| length_overflow(tag, len))
+}
+
+fn u16_length(tag: &Tag, len: u64) -> Result<u16, Error> {
+    u16::try_from(len).map_err(|_| length_overflow(tag, len))
 }
 
 /// Item/sequence delimiter (`FFFE,E00D` / `FFFE,E0DD`) with a zero length.
@@ -945,6 +996,202 @@ mod tests {
             &small[8..10],
             &[1, 0],
             "0x0001 stored big-endian from little-endian source"
+        );
+    }
+
+    #[test]
+    fn deep_undefined_length_sequences_round_trip() {
+        // Default WriteOptions write undefined lengths for sequences and items;
+        // the length pass must be skipped then and the nesting stay exact
+        // (review CORE-05).
+        let mut chain: Option<Dataset> = None;
+        for _ in 0..20 {
+            let mut level = Dataset::new();
+            if let Some(inner) = chain.take() {
+                level
+                    .insert_sequence(Tag::PLANE_POSITION_SEQUENCE)
+                    .push(inner);
+            }
+            chain = Some(level);
+        }
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+        ds.insert_sequence(Tag::PLANE_POSITION_SEQUENCE)
+            .push(chain.unwrap());
+
+        fn link_depth(ds: &Dataset) -> usize {
+            let Some(seq) = ds.try_get_sequence(Tag::PLANE_POSITION_SEQUENCE) else {
+                return 0;
+            };
+            match seq.items().first() {
+                Some(item) => 1 + link_depth(item),
+                None => 1,
+            }
+        }
+
+        let mut bytes = Vec::new();
+        DicomWriter::new(WriteOptions::default())
+            .write_dataset(&ds, &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN, &mut bytes)
+            .unwrap();
+        let back = crate::io::dataset_builder::parse_dataset_bytes(
+            &bytes,
+            &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN,
+        )
+        .unwrap();
+        // 19 nested levels inside the chain plus the dataset-level sequence
+        assert_eq!(link_depth(&back), 20);
+
+        let mut again = Vec::new();
+        DicomWriter::new(WriteOptions::default())
+            .write_dataset(&back, &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN, &mut again)
+            .unwrap();
+        assert_eq!(
+            bytes, again,
+            "undefined-length nesting re-serialises identically"
+        );
+    }
+
+    #[test]
+    fn odd_binary_value_on_big_endian_target_is_padded() {
+        let mut ds = Dataset::new();
+        ds.insert_value_with_vr(Tag::new(0x0009, 0x1001), Vr::Ob, vec![1u8, 2, 3]);
+        let be = syntaxes::EXPLICIT_VR_BIG_ENDIAN.clone();
+        let writer = DicomWriter::new(WriteOptions::default());
+        let mut out = Vec::new();
+        writer.write_dataset(&ds, &be, &mut out).unwrap();
+        assert_eq!(
+            out.len() as u64,
+            writer.dataset_length(&ds, &be).unwrap(),
+            "the odd value is padded and the length agrees with the bytes"
+        );
+        assert_eq!(out[out.len() - 1], 0, "OB pads with NUL");
+    }
+
+    #[test]
+    fn empty_charset_element_inherits_the_enclosing_encoding() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::SPECIFIC_CHARACTER_SET, Vr::Cs, "");
+        ds.insert_sequence(Tag::PLANE_POSITION_SEQUENCE)
+            .push(Dataset::new());
+        let mut out = Vec::new();
+        DicomWriter::new(WriteOptions::default())
+            .write_dataset(&ds, &le(), &mut out)
+            .unwrap();
+        assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn dataset_length_counts_fragments_and_existing_group_lengths() {
+        let mut ds = Dataset::new();
+        ds.insert_value_with_vr(Tag::new(0x0008, 0x0000), Vr::Ul, 0u32);
+        ds.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID");
+        let writer = DicomWriter::new(WriteOptions {
+            keep_group_lengths: true,
+            ..WriteOptions::default()
+        });
+        assert!(writer.dataset_length(&ds, &le()).unwrap() > 0);
+
+        let mut encapsulated = Dataset::new();
+        let frags = encapsulated.insert_fragments(Tag::PIXEL_DATA, Vr::Ob);
+        frags.set_offset_table(vec![0]);
+        frags.push_fragment(Arc::new(MemoryBuffer::from(vec![1u8, 2, 3])));
+        let len = DicomWriter::new(WriteOptions::default())
+            .dataset_length(&encapsulated, &le())
+            .unwrap();
+        let mut out = Vec::new();
+        DicomWriter::new(WriteOptions::default())
+            .write_dataset(&encapsulated, &le(), &mut out)
+            .unwrap();
+        assert_eq!(len, out.len() as u64);
+    }
+
+    #[test]
+    fn failing_target_maps_to_a_typed_reader_error() {
+        struct Failing;
+        impl std::io::Write for Failing {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("boom"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::PATIENT_ID, Vr::Lo, "x");
+        let err = DicomWriter::new(WriteOptions::default())
+            .write_dataset(&ds, &le(), &mut Failing)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Reader(crate::error::ReaderError::Other(_))
+        ));
+    }
+
+    #[test]
+    fn encapsulated_fragments_are_not_byte_swapped_on_a_big_endian_target() {
+        let mut ds = Dataset::new();
+        let fragments = ds.insert_fragments(Tag::PIXEL_DATA, Vr::Ow);
+        fragments.set_offset_table(vec![0]);
+        fragments.push_fragment(Arc::new(MemoryBuffer::from(vec![0x01u8, 0x02, 0x03, 0x04])));
+        let be = syntaxes::EXPLICIT_VR_BIG_ENDIAN.clone();
+        let mut out = Vec::new();
+        DicomWriter::new(WriteOptions::default())
+            .write_dataset(&ds, &be, &mut out)
+            .unwrap();
+        assert!(
+            out.windows(4).any(|w| w == [0x01, 0x02, 0x03, 0x04]),
+            "fragment payload copied verbatim (CORE-21)"
+        );
+        assert!(
+            !out.windows(4).any(|w| w == [0x02, 0x01, 0x04, 0x03]),
+            "no unit swap inside the encapsulated payload"
+        );
+    }
+
+    /// A buffer whose size exceeds 4 GiB without holding the bytes.
+    #[derive(Debug)]
+    struct HugeBuffer(u64);
+
+    impl ByteBuffer for HugeBuffer {
+        fn size(&self) -> u64 {
+            self.0
+        }
+        fn is_memory(&self) -> bool {
+            false
+        }
+        fn data(&self) -> std::io::Result<std::borrow::Cow<'_, [u8]>> {
+            Err(std::io::Error::other("huge buffer is not materialized"))
+        }
+    }
+
+    #[test]
+    fn lengths_above_four_gib_are_errors_not_truncation() {
+        // CORE-27: the 32-bit length field cannot hold > 4 GiB
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomElement::new_bytes(
+            Tag::PIXEL_DATA,
+            Vr::Ob,
+            Arc::new(HugeBuffer(u32::MAX as u64 + 2)),
+        ));
+        let err = DicomWriter::new(WriteOptions::default())
+            .write_dataset(&ds, &le(), &mut Vec::new())
+            .unwrap_err();
+        assert!(
+            matches!(&err, Error::Data(DataError::Other { message }) if message.contains("4 GiB")),
+            "{err}"
+        );
+
+        // a UL group length has the same ceiling
+        let options = WriteOptions {
+            keep_group_lengths: true,
+            ..WriteOptions::default()
+        };
+        let err = DicomWriter::new(options)
+            .write_dataset(&ds, &le(), &mut Vec::new())
+            .unwrap_err();
+        assert!(
+            matches!(&err, Error::Data(DataError::Other { message }) if message.contains("4 GiB")),
+            "{err}"
         );
     }
 }

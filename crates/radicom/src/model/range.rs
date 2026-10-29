@@ -51,3 +51,15 @@ mod tests {
         assert_eq!(a.join(&Range::new(6, 9)), None);
     }
 }
+
+#[cfg(test)]
+mod extra_tests {
+    use super::*;
+
+    #[test]
+    fn join_takes_the_outer_bounds() {
+        let joined = Range::new(1, 5).join(&Range::new(-1, 3)).unwrap();
+        assert_eq!(joined, Range::new(-1, 5));
+        assert!(Range::new(1, 2).join(&Range::new(3, 4)).is_none());
+    }
+}

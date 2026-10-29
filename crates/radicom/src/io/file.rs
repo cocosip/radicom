@@ -395,6 +395,12 @@ impl DicomFile {
     /// transfer syntax recorded; rebuilt from the dataset when absent.
     fn refreshed_meta(&self) -> Result<Dataset, Error> {
         let mut meta = self.file_meta.clone();
+        // PS3.10 Table 7.1-1: FileMetaInformationVersion is Type 1 and always
+        // 00\01, even when an incoming meta group omitted it (fo-dicom
+        // DicomFileMetaInformation always sets Version).
+        if !meta.contains(&Tag::FILE_META_INFORMATION_VERSION) {
+            meta.insert_value(Tag::FILE_META_INFORMATION_VERSION, vec![0x00u8, 0x01u8]);
+        }
         let syntax = self.dataset.transfer_syntax();
         meta.insert_str(Tag::TRANSFER_SYNTAX_UID, Vr::Ui, syntax.uid());
         meta.insert_str(
@@ -531,7 +537,13 @@ fn read_meta_block(
     start: u64,
     file_len: u64,
 ) -> std::io::Result<(Vec<u8>, u64)> {
-    let avail = file_len.saturating_sub(start) as usize;
+    // CORE-22: never truncate the remaining file size into `usize`
+    let avail = usize::try_from(file_len.saturating_sub(start)).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "file is larger than the platform address space",
+        )
+    })?;
     file.seek(SeekFrom::Start(start))?;
     let mut buf: Vec<u8> = Vec::new();
     let mut want = avail.min(4096);
@@ -587,7 +599,12 @@ fn scan_meta(buf: &[u8]) -> MetaScan {
                 12,
             )
         };
-        let end = pos + header + len;
+        let end = match pos.checked_add(header).and_then(|p| p.checked_add(len)) {
+            Some(end) => end,
+            // CORE-22: overflow means "more bytes needed", never a wrapped
+            // length that would slice past the buffer
+            None => return MetaScan::More,
+        };
         if end > buf.len() {
             return MetaScan::More;
         }
@@ -655,7 +672,15 @@ fn split_meta(raw: &[u8]) -> Result<(Option<&[u8]>, &[u8]), Error> {
                 12,
             )
         };
-        let end = pos + header + len;
+        let end = match pos.checked_add(header).and_then(|p| p.checked_add(len)) {
+            Some(end) => end,
+            // CORE-22: a declared length near u32::MAX must not wrap `usize`
+            None => {
+                return Err(Error::File(FileError::InvalidFormat(
+                    "meta group element length overflows the address space".into(),
+                )))
+            }
+        };
         if end > raw.len() {
             return Err(Error::File(FileError::InvalidFormat(
                 "meta group is truncated".into(),
@@ -731,13 +756,40 @@ fn attach(e: Error, path: &Path) -> Error {
 }
 
 /// Reads a file's meta group without parsing the dataset (FILE-04).
+///
+/// Only the header and the leading group-0002 bytes are read; the dataset is
+/// never loaded (review CORE-10).
 pub fn read_file_meta(path: impl AsRef<Path>) -> Result<Dataset, Error> {
-    let bytes = std::fs::read(path.as_ref()).map_err(|e| file_err(path.as_ref(), "read", e))?;
-    let (_, meta, _) = detect(&bytes)?;
-    match meta {
-        Some(meta) => parse_dataset_bytes(meta, &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN),
-        None => Ok(Dataset::new()),
+    let path = path.as_ref();
+    let mut file = std::fs::File::open(path).map_err(|e| file_err(path, "open", e))?;
+    let file_len = file
+        .metadata()
+        .map_err(|e| file_err(path, "stat", e))?
+        .len();
+    if file_len < 8 {
+        return Err(Error::File(FileError::InvalidFormat(
+            "file is too short to be DICOM".into(),
+        )));
     }
+    let head_len = file_len.min(132) as usize;
+    let mut head = vec![0u8; head_len];
+    file.read_exact(&mut head)
+        .map_err(|e| file_err(path, "read", e))?;
+    let meta_start = if head_len >= 132 && &head[128..132] == b"DICM" {
+        132
+    } else {
+        0
+    };
+    let (meta_block, meta_len) = read_meta_block(&mut file, meta_start, file_len).map_err(|e| {
+        attach(
+            Error::File(FileError::InvalidFormat(format!("meta group: {e}"))),
+            path,
+        )
+    })?;
+    if meta_len == 0 {
+        return Ok(Dataset::new());
+    }
+    parse_dataset_bytes(&meta_block, &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN)
 }
 
 impl std::fmt::Display for FileFormat {
@@ -861,6 +913,201 @@ mod tests {
             "1.2.3.4.5",
             "media storage instance UID comes from the dataset"
         );
+    }
+
+    #[test]
+    fn saved_files_carry_file_meta_information_version() {
+        // PS3.10 Table 7.1-1: (0002,0001) is Type 1 and must be 00\01.
+        let bytes = sample_file().to_bytes(&WriteOptions::default()).unwrap();
+        let back = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
+        let version = back
+            .file_meta
+            .get_element(Tag::FILE_META_INFORMATION_VERSION)
+            .expect("FileMetaInformationVersion is present");
+        let buffer = version.value().as_buffer().expect("OB value");
+        assert_eq!(buffer.data().unwrap().as_ref(), &[0x00, 0x01]);
+
+        // and a meta group that omitted it gets repaired on save
+        let mut file = sample_file();
+        file.file_meta.remove(Tag::FILE_META_INFORMATION_VERSION);
+        assert!(!file.file_meta.contains(&Tag::FILE_META_INFORMATION_VERSION));
+        let bytes = file.to_bytes(&WriteOptions::default()).unwrap();
+        let back = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
+        assert!(back.file_meta.contains(&Tag::FILE_META_INFORMATION_VERSION));
+    }
+
+    #[test]
+    fn read_file_meta_does_not_need_the_dataset() {
+        // FILE-04: only the header and group-0002 bytes are read; a dataset
+        // whose payload is not a valid element stream must not matter.
+        let mut file = sample_file();
+        file.dataset
+            .insert_str(Tag::STUDY_DESCRIPTION, Vr::Lo, "study");
+        let bytes = file.to_bytes(&WriteOptions::default()).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "radicom-readmeta-{}-{}.dcm",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, &bytes).unwrap();
+        let meta = read_file_meta(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(
+            meta.get_str(Tag::TRANSFER_SYNTAX_UID).unwrap(),
+            "1.2.840.10008.1.2.1"
+        );
+        assert!(!meta.contains(&Tag::STUDY_DESCRIPTION));
+    }
+
+    #[test]
+    fn open_reports_short_files_and_records_the_source() {
+        let path = temp_file("shortfile");
+        std::fs::write(&path, b"abc").unwrap();
+        assert!(matches!(
+            DicomFile::open(&path),
+            Err(Error::File(FileError::InvalidFormat(_)))
+        ));
+        std::fs::remove_file(&path).ok();
+
+        let path = temp_file("withsource");
+        sample_file().save(&path).unwrap();
+        let file = DicomFile::open(&path).unwrap();
+        assert_eq!(file.source(), Some(path.as_path()));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn parses_without_preamble_and_without_meta() {
+        let bytes = sample_file().to_bytes(&WriteOptions::default()).unwrap();
+        // drop the 128-byte preamble and "DICM": meta still starts at offset 0
+        let no_preamble = DicomFile::from_bytes(&bytes[132..], &ReadOptions::default()).unwrap();
+        assert_eq!(no_preamble.format, FileFormat::Dicom3NoPreamble);
+        assert_eq!(
+            no_preamble
+                .file_meta
+                .get_str(Tag::TRANSFER_SYNTAX_UID)
+                .unwrap(),
+            "1.2.840.10008.1.2.1"
+        );
+
+        // a bare explicit-LE dataset: no preamble and no meta group at all
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID");
+        ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.2");
+        let mut raw = Vec::new();
+        DicomWriter::new(WriteOptions::default())
+            .write_dataset(&ds, &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN, &mut raw)
+            .unwrap();
+        let file = DicomFile::from_bytes(&raw, &ReadOptions::default()).unwrap();
+        assert_eq!(file.format, FileFormat::Dicom3NoFileMetaInfo);
+        assert!(file.file_meta.is_empty());
+        assert_eq!(file.dataset.get_str(Tag::PATIENT_ID).unwrap(), "PID");
+    }
+
+    #[test]
+    fn acr_nema_recognition_codes_and_format_display() {
+        for (code, expected) in [
+            ("ACR-NEMA 1.0", FileFormat::AcrNema1),
+            ("ACR-NEMA 2.0", FileFormat::AcrNema2),
+        ] {
+            let mut ds = Dataset::new();
+            ds.insert_str(Tag::RECOGNITION_CODE, Vr::Lo, code);
+            let mut raw = Vec::new();
+            DicomWriter::new(WriteOptions::default())
+                .write_dataset(&ds, &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN, &mut raw)
+                .unwrap();
+            let file = DicomFile::from_bytes(&raw, &ReadOptions::default()).unwrap();
+            assert_eq!(file.format, expected, "{code}");
+        }
+        assert_eq!(FileFormat::Dicom3.to_string(), "DICOM 3 (preamble + meta)");
+        assert_eq!(
+            FileFormat::Dicom3NoPreamble.to_string(),
+            "DICOM 3 (meta, no preamble)"
+        );
+        assert_eq!(
+            FileFormat::Dicom3NoFileMetaInfo.to_string(),
+            "DICOM 3 (no meta information)"
+        );
+        assert_eq!(FileFormat::AcrNema1.to_string(), "ACR-NEMA 1.0");
+        assert_eq!(FileFormat::AcrNema2.to_string(), "ACR-NEMA 2.0");
+    }
+
+    #[test]
+    fn save_and_meta_build_reject_inconsistent_files() {
+        let mut disagree = sample_file();
+        disagree
+            .file_meta
+            .insert_str(Tag::MEDIA_STORAGE_SOP_CLASS_UID, Vr::Ui, "1.2.3.4");
+        assert!(
+            disagree.to_bytes(&WriteOptions::default()).is_err(),
+            "meta/dataset SOP class disagreement must be an error"
+        );
+
+        let mut no_sop = sample_file();
+        no_sop.dataset.remove(Tag::SOP_CLASS_UID);
+        assert!(
+            no_sop.to_bytes(&WriteOptions::default()).is_err(),
+            "a dataset without SOPClassUID cannot build meta"
+        );
+
+        let mut acr = sample_file();
+        acr.format = FileFormat::AcrNema1;
+        let path = temp_file("acr");
+        assert!(matches!(
+            acr.save(&path),
+            Err(Error::File(FileError::FormatNotSaveable(_)))
+        ));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn read_file_meta_reports_short_meta_less_and_truncated_files() {
+        let path = temp_file("meta-short");
+        std::fs::write(&path, b"ab").unwrap();
+        assert!(matches!(
+            read_file_meta(&path),
+            Err(Error::File(FileError::InvalidFormat(_)))
+        ));
+        std::fs::remove_file(&path).ok();
+
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID");
+        let mut raw = Vec::new();
+        DicomWriter::new(WriteOptions::default())
+            .write_dataset(&ds, &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN, &mut raw)
+            .unwrap();
+        let path = temp_file("meta-none");
+        std::fs::write(&path, &raw).unwrap();
+        assert!(read_file_meta(&path).unwrap().is_empty());
+        std::fs::remove_file(&path).ok();
+
+        let mut truncated = sample_file().to_bytes(&WriteOptions::default()).unwrap();
+        truncated.truncate(140);
+        let path = temp_file("meta-trunc");
+        std::fs::write(&path, &truncated).unwrap();
+        let err = read_file_meta(&path).unwrap_err();
+        assert!(format!("{err}").contains("meta"), "{err}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn scan_meta_reports_more_none_and_complete_runs() {
+        assert!(matches!(scan_meta(&[]), MetaScan::More));
+        assert!(matches!(
+            scan_meta(&[0, 0, 0, 0, 0, 0, 0, 0]),
+            MetaScan::None
+        ));
+        // a group-0002 element whose value runs past the buffer needs more
+        let mut partial = vec![0x02, 0x00, 0x10, 0x00, b'U', b'I', 0x02, 0x00];
+        partial.extend_from_slice(b"1.");
+        assert!(matches!(scan_meta(&partial), MetaScan::More));
+        // a complete meta element followed by a non-0002 group ends the run
+        let mut complete = partial.clone();
+        complete.extend_from_slice(&[0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        assert!(matches!(scan_meta(&complete), MetaScan::Run(10)));
     }
 
     #[test]
@@ -1361,7 +1608,7 @@ mod tests {
     }
 
     #[test]
-    fn skip_large_tags_leaves_a_placeholder_and_advances() {
+    fn skip_large_tags_omits_the_attribute_and_advances() {
         let (path, _big) = file_with_large_value(5000);
         {
             let opts = ReadOptions {
@@ -1369,12 +1616,81 @@ mod tests {
                 large_object_size: 1000,
             };
             let file = DicomFile::open_with_options(&path, &opts).unwrap();
-            let buffer = large_value_buffer(&file.dataset);
-            assert_eq!(buffer.size(), 0, "skipped value is an empty placeholder");
-            assert!(buffer.data().unwrap().is_empty());
+            // fo-dicom's FileByteSource hands the observer no buffer for a
+            // skipped value, so the attribute is absent, not present-but-empty
+            // (review CORE-07).
+            assert!(!file.dataset.contains(&Tag::new(0x0009, 0x1001)));
             // the parser still advanced past the skipped value to the next element
             assert_eq!(file.dataset.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
         }
         std::fs::remove_file(&path).ok();
+    }
+}
+
+#[cfg(test)]
+mod extra_tests {
+    use super::*;
+    use crate::io::writer::WriteOptions;
+
+    fn sample() -> DicomFile {
+        let mut dataset = Dataset::new();
+        dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5");
+        dataset.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+        DicomFile {
+            file_meta: Dataset::new(),
+            dataset,
+            format: FileFormat::Dicom3,
+            is_partial: false,
+            source: None,
+        }
+    }
+
+    #[test]
+    fn from_reader_write_and_prefix_lengths() {
+        let mut bytes = Vec::new();
+        sample()
+            .write(&mut bytes, &WriteOptions::default())
+            .unwrap();
+        let mut cursor = std::io::Cursor::new(bytes);
+        let parsed = DicomFile::from_reader(&mut cursor, &ReadOptions::default()).unwrap();
+        assert_eq!(
+            parsed.dataset.get_str(Tag::PATIENT_NAME).unwrap().trim(),
+            "Doe^John"
+        );
+
+        // a non-saveable format is refused up front
+        let mut retired = sample();
+        retired.format = FileFormat::AcrNema1;
+        assert!(!retired.format.is_saveable());
+        assert!(retired
+            .encoded_prefix_len(&WriteOptions::default())
+            .is_err());
+        assert!(retired.to_bytes(&WriteOptions::default()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod core22_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_meta_lengths_are_errors_not_wrapped_offsets() {
+        // (0002,0001) OB declaring 4 GiB - 1 bytes: the computed end must be
+        // checked, and the meta group reported as truncated (CORE-22).
+        let mut raw = vec![0x02, 0x00, 0x01, 0x00, b'O', b'B', 0x00, 0x00];
+        raw.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
+        raw.extend_from_slice(&[0x08, 0x00, 0x05, 0x00]);
+        assert!(matches!(
+            split_meta(&raw),
+            Err(Error::File(FileError::InvalidFormat(_)))
+        ));
+        // the streaming scanner asks for more bytes instead of slicing
+        assert!(matches!(scan_meta(&raw), MetaScan::More));
+        // a valid element run still terminates at the first non-0002 group
+        let mut ok = vec![0x02, 0x00, 0x01, 0x00, b'O', b'B', 0x00, 0x00];
+        ok.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        ok.extend_from_slice(&[0x08, 0x00, 0x05, 0x00, b'C', b'S', 0x02, 0x00, b'Q', b'T']);
+        assert!(matches!(scan_meta(&ok), MetaScan::Run(12)));
     }
 }

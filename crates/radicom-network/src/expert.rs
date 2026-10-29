@@ -541,4 +541,204 @@ mod tests {
             other => panic!("expected an abort error, got {other:?}"),
         }
     }
+
+    #[test]
+    fn debug_and_options_describe_the_connection() {
+        let plain = Connection::new("SCU", "SCP", "10.0.0.1:104");
+        assert!(format!("{plain:?}").contains("10.0.0.1:104"));
+        assert!(format!("{plain:?}").contains("open: false"));
+
+        let options = ClientOptions {
+            max_pdu_length: 8192,
+            ..ClientOptions::default()
+        };
+        let tuned = Connection::new("SCU", "SCP", "10.0.0.2:104").with_options(options);
+        assert_eq!(tuned.options.max_pdu_length, 8192);
+    }
+
+    /// A C-MOVE SCP that completes immediately, and a C-GET SCP that finishes
+    /// with a failure status: enough to drive both non-C-FIND expert arms.
+    struct MoveProvider;
+    struct GetProvider;
+
+    #[async_trait::async_trait]
+    impl crate::services::ServiceProvider for MoveProvider {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec![sop_class::STUDY_ROOT_QR_MOVE.to_string()]
+        }
+
+        fn on_c_move<'a>(
+            &'a self,
+            request: &'a crate::cmove::CMoveRequest,
+        ) -> futures::stream::BoxStream<'a, Result<crate::cmove::CMoveResponse>> {
+            Box::pin(futures::stream::iter(vec![Ok(
+                crate::cmove::CMoveResponse::completed(
+                    request,
+                    crate::cmove::SubOperationSummary::default(),
+                ),
+            )]))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::services::ServiceProvider for GetProvider {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec![sop_class::STUDY_ROOT_QR_GET.to_string()]
+        }
+
+        fn on_c_get<'a>(
+            &'a self,
+            request: &'a crate::cget::CGetRequest,
+        ) -> futures::stream::BoxStream<'a, Result<crate::cget::CGetEvent>> {
+            Box::pin(futures::stream::iter(vec![Ok(
+                crate::cget::CGetEvent::Response(crate::cget::CGetResponse::completed(
+                    request,
+                    crate::cmove::SubOperationSummary::default(),
+                )),
+            )]))
+        }
+    }
+
+    async fn expert_round_trip<P: crate::services::ServiceProvider + 'static>(
+        provider: P,
+        context: PresentationContext,
+        request: ExpertRequest,
+    ) -> Vec<ExpertResponse> {
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(provider), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut connection = Connection::new("SCU", "SCP", addr.to_string());
+        connection.open_association(vec![context]).await.unwrap();
+        let association = connection.association().unwrap();
+        // C-MOVE and C-GET deliver their instances as reverse C-STOREs
+        association.collect_reverse_stores(Arc::new(std::sync::Mutex::new(Vec::new())));
+        let responses = send(association, request).await.unwrap().collect();
+        connection.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+        responses
+    }
+
+    #[tokio::test]
+    async fn send_returns_a_stream_for_move_and_get() {
+        let move_responses = expert_round_trip(
+            MoveProvider,
+            PresentationContext::new(
+                1,
+                sop_class::STUDY_ROOT_QR_MOVE,
+                vec!["1.2.840.10008.1.2".to_string()],
+            ),
+            ExpertRequest::CMove(crate::cmove::CMoveRequest::study("1.2.3", "DEST", 1)),
+        )
+        .await;
+        assert_eq!(move_responses.len(), 1);
+        assert!(!move_responses[0].is_pending());
+        assert!(matches!(move_responses[0], ExpertResponse::CMove(_)));
+
+        let get_responses = expert_round_trip(
+            GetProvider,
+            PresentationContext::new(
+                1,
+                sop_class::STUDY_ROOT_QR_GET,
+                vec!["1.2.840.10008.1.2".to_string()],
+            ),
+            ExpertRequest::CGet(crate::cget::CGetRequest::study("1.2.3", 1)),
+        )
+        .await;
+        assert_eq!(get_responses.len(), 1);
+        assert!(matches!(get_responses[0], ExpertResponse::CGet(_)));
+        assert!(!get_responses[0].is_pending());
+
+        // the C-FIND arm of `send` collects the whole stream
+        let find_responses = expert_round_trip(
+            TwoStudyProvider,
+            find_context(),
+            ExpertRequest::CFind(crate::cfind::CFindRequest::study_query(1)),
+        )
+        .await;
+        assert_eq!(find_responses.len(), 3);
+        assert!(matches!(find_responses[0], ExpertResponse::CFind(_)));
+        assert!(find_responses[0].is_pending());
+        assert!(!find_responses.last().unwrap().is_pending());
+    }
+
+    #[tokio::test]
+    async fn send_streaming_handles_move_and_get() {
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(MoveProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut connection = Connection::new("SCU", "SCP", addr.to_string());
+        connection
+            .open_association(vec![PresentationContext::new(
+                1,
+                sop_class::STUDY_ROOT_QR_MOVE,
+                vec!["1.2.840.10008.1.2".to_string()],
+            )])
+            .await
+            .unwrap();
+        let mut total = 0;
+        let association = connection.association().unwrap();
+        association.collect_reverse_stores(Arc::new(std::sync::Mutex::new(Vec::new())));
+        send_streaming(
+            association,
+            ExpertRequest::CMove(crate::cmove::CMoveRequest::study("1.2.3", "DEST", 1)),
+            |_| {
+                total += 1;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(total, 1);
+        connection.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn send_streaming_handles_get() {
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(GetProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut connection = Connection::new("SCU", "SCP", addr.to_string());
+        connection
+            .open_association(vec![PresentationContext::new(
+                1,
+                sop_class::STUDY_ROOT_QR_GET,
+                vec!["1.2.840.10008.1.2".to_string()],
+            )])
+            .await
+            .unwrap();
+        let association = connection.association().unwrap();
+        association.collect_reverse_stores(Arc::new(std::sync::Mutex::new(Vec::new())));
+        let mut total = 0;
+        send_streaming(
+            association,
+            ExpertRequest::CGet(crate::cget::CGetRequest::study("1.2.3", 1)),
+            |_| {
+                total += 1;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(total, 1);
+        connection.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
 }

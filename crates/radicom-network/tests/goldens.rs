@@ -115,6 +115,40 @@ fn fixture_command_cfind_pending_rsp() -> Vec<u8> {
     command_bytes(&response.to_command()).expect("encode command")
 }
 
+/// The association accept an SCP builds for an accepted context (§9.3.3): the
+/// AE titles repeat the request, the abstract syntax is omitted, one transfer
+/// syntax and the user information are present.
+fn fixture_associate_ac() -> Vec<u8> {
+    let mut accept = Associate::new("RADICOM_SCP", "RADICOM_SCU");
+    accept.presentation_contexts.push(PresentationContext {
+        id: 1,
+        abstract_syntax: String::new(),
+        transfer_syntaxes: vec!["1.2.840.10008.1.2.1".to_string()],
+        result: 0,
+    });
+    accept.user_information = radicom_network::association::build_user_information(
+        16384,
+        "1.2.826.0.1.3680043.10.1330.2",
+        "RADICOM_0_1",
+        Vec::new(),
+    );
+    encode(&Pdu::AssociateAc(accept)).expect("encode")
+}
+
+/// A permanent service-user rejection with reason 1 (no reason given).
+fn fixture_associate_rj() -> Vec<u8> {
+    encode(&Pdu::AssociateRj(radicom_network::AssociateRj {
+        result: radicom_network::RejectResult::Permanent,
+        source: radicom_network::RejectSource::User,
+        reason: 1,
+    }))
+    .expect("encode")
+}
+
+fn fixture_release_rq() -> Vec<u8> {
+    encode(&Pdu::ReleaseRq).expect("encode")
+}
+
 fn check(golden: &str, bytes: Vec<u8>) {
     let produced = hex_lines(&bytes);
     let expected = std::fs::read_to_string(goldens_dir().join(golden))
@@ -130,6 +164,9 @@ fn check(golden: &str, bytes: Vec<u8>) {
 fn pdu_goldens_are_current() {
     check("associate_rq.hex", fixture_associate_rq());
     check("pdata_cecho.hex", fixture_pdata_cecho());
+    check("associate_ac.hex", fixture_associate_ac());
+    check("associate_rj.hex", fixture_associate_rj());
+    check("release_rq.hex", fixture_release_rq());
 }
 
 #[test]

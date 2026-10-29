@@ -681,4 +681,19 @@ mod tests {
         assert_eq!(Action::parse(""), None);
         assert_eq!(Action::parse("?"), None);
     }
+    #[test]
+    fn malformed_patterns_and_blank_rows_are_handled() {
+        assert!(TagPattern::new("(0010,0010{").is_err());
+        // a row with no tag pattern is skipped, a comment is ignored
+        let profile = SecurityProfile::parse(";Z\n# note\n0010,0010;Z\n").unwrap();
+        // an unparseable tag never matches anything
+        assert_eq!(
+            profile.action_for("not-a-tag", AnonOption::BasicProfile),
+            None
+        );
+        assert_eq!(
+            profile.action_for("0010,0010", AnonOption::BasicProfile),
+            Some(Action::ZeroLength)
+        );
+    }
 }

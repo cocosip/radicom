@@ -129,16 +129,16 @@ impl Anonymizer {
         for tag in tags {
             let action = self.profile.action_for_tag(&tag, self.option);
 
-            // sequences: a Remove action deletes the whole sequence; otherwise
-            // recurse into the children (Keep leaves the sequence and its
-            // children untouched). Without the Remove case an SQ tag marked X
-            // would survive as an empty/kept shell. The sequence is moved out and
-            // back rather than cloned, so only the traversal is paid for.
+            // sequences, exactly like fo-dicom `AnonymizeInPlace`: recurse only
+            // for a null or K action (K means "cleaned for sequences"); D/Z/U/C
+            // replace the whole sequence with an empty one (`BlankItem`), and X
+            // removes it. Recursing a D sequence (e.g. ContentSequence) would
+            // keep the children the profile means to delete — an SR free-text
+            // PHI leak. The sequence is moved out and back rather than cloned,
+            // so only the traversal is paid for.
             if matches!(dataset.item(&tag), Some(DicomItem::Sequence(_))) {
                 match action {
-                    Some(Action::Remove) => to_remove.push(tag),
-                    Some(Action::Keep) => {}
-                    _ => {
+                    None | Some(Action::Keep) => {
                         let Some(DicomItem::Sequence(mut sequence)) = dataset.remove(&tag) else {
                             continue;
                         };
@@ -147,59 +147,78 @@ impl Anonymizer {
                         }
                         dataset.insert_or_update(DicomItem::Sequence(sequence));
                     }
+                    Some(Action::Remove) => to_remove.push(tag),
+                    // D/Z/U/C on a sequence: an empty sequence
+                    Some(_) => {
+                        dataset.insert_sequence(tag);
+                    }
                 }
                 continue;
             }
 
-            let Some(action) = action else { continue };
-            if action == Action::Remove {
-                to_remove.push(tag);
-                continue;
-            }
-            // fragments carry no VR and no value the actions know how to blank
-            let Some(DicomItem::Element(element)) = dataset.item(&tag) else {
-                continue;
-            };
-            let vr = element.vr();
-
-            match action {
-                Action::Keep => {}
-                Action::Remove => unreachable!("handled above"),
-                Action::ZeroLength => self.blank(dataset, &tag, vr, false)?,
-                // UID → new UID; numeric strings (DS/IS) → "0"; other typed
-                // values via blank() (dates → MinValue, binary → zero dummy,
-                // generic strings → "ANONYMOUS") so D never writes an invalid
-                // value such as "ANONYMOUS" into a DS/IS element.
-                Action::Dummy if vr == Vr::Ui => self.replace_uid(dataset, &tag, replaced),
-                Action::Dummy => self.blank(dataset, &tag, vr, true)?,
-                Action::Clean | Action::Uid if vr == Vr::Ui => {
-                    self.replace_uid(dataset, &tag, replaced)
+            if let Some(action) = action {
+                if action == Action::Remove {
+                    to_remove.push(tag.clone());
+                    self.apply_patient_override(dataset, &tag);
+                    continue;
                 }
-                Action::Clean | Action::Uid => {
-                    if vr.is_string() {
-                        dataset.insert_str(tag.clone(), vr, "ANONYMOUS");
-                    } else {
-                        self.blank(dataset, &tag, vr, true)?;
+                // fragments carry no VR and no value the actions know how to blank
+                let Some(DicomItem::Element(element)) = dataset.item(&tag) else {
+                    self.apply_patient_override(dataset, &tag);
+                    continue;
+                };
+                let vr = element.vr();
+
+                match action {
+                    Action::Keep => {}
+                    Action::Remove => unreachable!("handled above"),
+                    Action::ZeroLength => self.blank(dataset, &tag, vr, false)?,
+                    // UID → new UID; numeric strings (DS/IS) → "0"; other typed
+                    // values via blank() (dates → MinValue, binary → zero dummy,
+                    // generic strings → "ANONYMOUS") so D never writes an invalid
+                    // value such as "ANONYMOUS" into a DS/IS element.
+                    Action::Dummy if vr == Vr::Ui => self.replace_uid(dataset, &tag, replaced),
+                    Action::Dummy => self.blank(dataset, &tag, vr, true)?,
+                    Action::Clean | Action::Uid if vr == Vr::Ui => {
+                        self.replace_uid(dataset, &tag, replaced)
+                    }
+                    Action::Clean | Action::Uid => {
+                        if vr.is_string() {
+                            dataset.insert_str(tag.clone(), vr, "ANONYMOUS");
+                        } else {
+                            self.blank(dataset, &tag, vr, true)?;
+                        }
                     }
                 }
             }
 
-            // per-tag patient overrides (§12.5)
-            if tag == PATIENT_NAME {
-                if let Some(name) = &self.patient_name {
-                    dataset.insert_str(tag.clone(), Vr::Pn, name.clone());
-                }
-            } else if tag == PATIENT_ID {
-                if let Some(id) = &self.patient_id {
-                    dataset.insert_str(tag.clone(), Vr::Lo, id.clone());
-                }
-            }
+            // Per-tag patient overrides (§12.5): fo-dicom applies them to every
+            // item, whether or not the profile matched the tag. Removing the tag
+            // still wins because `to_remove` is applied after the walk.
+            self.apply_patient_override(dataset, &tag);
         }
 
         for tag in to_remove {
             dataset.remove(&tag);
         }
         Ok(())
+    }
+
+    /// Applies the per-tag patient overrides (§12.5).
+    ///
+    /// fo-dicom runs these checks outside the profile-action switch, so a custom
+    /// profile that does not list PatientName/PatientID still gets the requested
+    /// replacement values.
+    fn apply_patient_override(&self, dataset: &mut Dataset, tag: &Tag) {
+        if *tag == PATIENT_NAME {
+            if let Some(name) = &self.patient_name {
+                dataset.insert_str(tag.clone(), Vr::Pn, name.clone());
+            }
+        } else if *tag == PATIENT_ID {
+            if let Some(id) = &self.patient_id {
+                dataset.insert_str(tag.clone(), Vr::Lo, id.clone());
+            }
+        }
     }
 
     /// Rewrites a UID element to a consistent replacement (§12.5).
@@ -400,10 +419,10 @@ mod tests {
     }
 
     #[test]
-    fn sequence_children_are_anonymized_recursively() {
-        // A sequence the profile keeps-but-processes (D/C/U/Z) is recursed into;
-        // its children are anonymized. (K would leave the whole subtree untouched.)
-        let csv = "0008,1110;D\n0010,0010;Z\n";
+    fn a_keep_sequence_is_recursed_so_its_children_are_cleaned() {
+        // fo-dicom recurses a sequence whose action is K ("cleaned for
+        // sequences"): the sequence survives, its children are anonymized.
+        let csv = "0008,1110;K\n0010,0010;Z\n";
         let profile = SecurityProfile::parse(csv).unwrap();
         let anon = Anonymizer::with_profile(profile, AnonOption::BasicProfile);
 
@@ -420,8 +439,83 @@ mod tests {
                 .try_get_str(Tag::PATIENT_NAME)
                 .as_deref(),
             Some(""),
-            "the nested PatientName is blanked"
+            "the nested PatientName is blanked even under K"
         );
+    }
+
+    #[test]
+    fn a_sequence_marked_dummy_or_zero_is_emptied_not_recursed() {
+        // fo-dicom BlankItem replaces a D/Z/U/C sequence with an empty one; it
+        // must not keep the children (that is the SR content PHI leak).
+        for action in ["D", "Z", "U", "C"] {
+            let csv = format!("0008,1110;{action}\n");
+            let profile = SecurityProfile::parse(&csv).unwrap();
+            let anon = Anonymizer::with_profile(profile, AnonOption::BasicProfile);
+
+            let mut ds = Dataset::new();
+            let mut child = Dataset::new();
+            child.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Nested^Name");
+            ds.insert_sequence(Tag::REFERENCED_STUDY_SEQUENCE)
+                .push(child);
+
+            anon.anonymize_in_place(&mut ds).unwrap();
+            assert!(
+                ds.try_get_sequence(Tag::REFERENCED_STUDY_SEQUENCE)
+                    .is_some(),
+                "{action} keeps the sequence"
+            );
+            assert!(
+                ds.try_get_sequence(Tag::REFERENCED_STUDY_SEQUENCE)
+                    .unwrap()
+                    .items()
+                    .is_empty(),
+                "a sequence marked {action} must be emptied, not recursed"
+            );
+        }
+    }
+
+    #[test]
+    fn sr_content_sequence_free_text_is_gone_after_basic_anonymization() {
+        // Regression (FEAT-01): the Basic profile marks ContentSequence D. The
+        // whole sequence must be emptied, or the SR free text (which has no
+        // profile row of its own) leaks.
+        let mut ds = Dataset::new();
+        ds.insert_str(
+            Tag::SOP_CLASS_UID,
+            Vr::Ui,
+            crate::uids::COMPREHENSIVE_SR_STORAGE,
+        );
+        let mut item = Dataset::new();
+        item.insert_str(Tag::VALUE_TYPE, Vr::Cs, "TEXT");
+        item.insert_str(Tag::TEXT_VALUE, Vr::Ut, "Jane Doe was seen on 2026-01-01");
+        ds.insert_sequence(Tag::CONTENT_SEQUENCE).push(item);
+
+        Anonymizer::basic().anonymize_in_place(&mut ds).unwrap();
+
+        let content = ds
+            .try_get_sequence(Tag::CONTENT_SEQUENCE)
+            .expect("the empty sequence stays");
+        assert!(
+            content.items().is_empty(),
+            "SR ContentSequence must be emptied, got {:?}",
+            content.items()
+        );
+    }
+
+    #[test]
+    fn a_custom_profile_without_a_patient_row_still_gets_the_override() {
+        // FEAT-12: fo-dicom applies Profile.PatientName/PatientID independently
+        // of the profile action, so an unmatched tag is still overridden.
+        let profile = SecurityProfile::parse("0008,0060;K\n").unwrap();
+        let anon = Anonymizer::with_profile(profile, AnonOption::BasicProfile)
+            .with_patient("Alias^Name", "PAT-42");
+        let mut ds = dataset();
+        anon.anonymize_in_place(&mut ds).unwrap();
+        assert_eq!(
+            ds.try_get_str(Tag::PATIENT_NAME).as_deref(),
+            Some("Alias^Name")
+        );
+        assert_eq!(ds.try_get_str(Tag::PATIENT_ID).as_deref(), Some("PAT-42"));
     }
 
     #[test]
@@ -497,9 +591,10 @@ mod tests {
     }
 
     #[test]
-    fn a_sequence_marked_dummy_still_recurses_into_children() {
-        // Z/D/C/U on an SQ keep the sequence but process its children.
-        let csv = "0008,1110;D\n0010,0020;Z\n";
+    fn a_sequence_marked_keep_still_recurses_into_children() {
+        // fo-dicom recurses when the action is null or K; K keeps the sequence
+        // itself but cleans its children ("cleaned for sequences").
+        let csv = "0008,1110;K\n0010,0020;Z\n";
         let profile = SecurityProfile::parse(csv).unwrap();
         let anon = Anonymizer::with_profile(profile, AnonOption::BasicProfile);
 
@@ -586,6 +681,122 @@ mod tests {
             ds.try_get_str(Tag::new(0x5011, 0x1234)).as_deref(),
             Some("ANONYMOUS"),
             "a CleanGraph-tagged private element is cleaned, not left intact"
+        );
+    }
+
+    #[test]
+    fn blanking_follows_the_vr() {
+        let profile = SecurityProfile::parse(
+            "0008,0020;D\n0008,0021;D\n0008,0022;D\n0008,002a;D\n0008,0031;D\n\
+             0028,0010;D\n0028,0011;Z\n0008,0070;D\n0018,0050;D\n0020,0013;D\n\
+             7FE0,0010;D\n7FE0,0011;Z\n",
+        )
+        .unwrap();
+        let anon = Anonymizer::with_profile(profile, AnonOption::BasicProfile);
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::STUDY_DATE, Vr::Da, "20200101");
+        ds.insert_str(Tag::SERIES_DATE, Vr::Da, "20200101");
+        ds.insert_str(Tag::ACQUISITION_DATE_TIME, Vr::Dt, "20200101120000");
+        ds.insert_str(Tag::SERIES_TIME, Vr::Tm, "120000");
+        ds.insert_value(Tag::ROWS, 512u16);
+        ds.insert_value(Tag::COLUMNS, 512u16);
+        ds.insert_str(Tag::MANUFACTURER, Vr::Lo, "ACME");
+        ds.insert_str(Tag::SLICE_THICKNESS, Vr::Ds, "1.5");
+        ds.insert_str(Tag::INSTANCE_NUMBER, Vr::Is, "7");
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::PIXEL_DATA,
+            Vr::Ob,
+            std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![1, 2, 3, 4])),
+        )));
+        anon.anonymize_in_place(&mut ds).unwrap();
+
+        assert_eq!(ds.try_get_str(Tag::STUDY_DATE).as_deref(), Some("19000101"));
+        assert_eq!(
+            ds.try_get_str(Tag::ACQUISITION_DATE_TIME).as_deref(),
+            Some("19000101000000")
+        );
+        assert_eq!(ds.try_get_str(Tag::SERIES_TIME).as_deref(), Some("000000"));
+        assert_eq!(
+            ds.try_get_str(Tag::MANUFACTURER).as_deref(),
+            Some("ANONYMOUS"),
+            "a generic string gets the dummy word"
+        );
+        assert_eq!(
+            ds.try_get_str(Tag::SLICE_THICKNESS).as_deref(),
+            Some("0"),
+            "DS needs a numeric dummy"
+        );
+        assert_eq!(
+            ds.try_get_str(Tag::INSTANCE_NUMBER).as_deref(),
+            Some("0"),
+            "IS needs a numeric dummy"
+        );
+        // binary numeric D writes one zero value (2 bytes for US)
+        assert_eq!(
+            ds.get_element(Tag::ROWS)
+                .unwrap()
+                .value()
+                .as_buffer()
+                .unwrap()
+                .data()
+                .unwrap()
+                .as_ref(),
+            &[0u8, 0]
+        );
+        // binary Z is an empty element
+        assert!(ds.get_element(Tag::COLUMNS).unwrap().is_empty());
+        // Other* is always empty, even for D
+        assert!(ds.get_element(Tag::PIXEL_DATA).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_empty_uid_is_not_replaced() {
+        let mut ds = dataset();
+        ds.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "");
+        Anonymizer::basic().anonymize_in_place(&mut ds).unwrap();
+        assert_eq!(ds.try_get_str(Tag::SOP_INSTANCE_UID).as_deref(), Some(""));
+    }
+
+    #[test]
+    fn anonymize_file_returns_a_clean_clone_and_syncs_the_meta() {
+        let mut file = crate::io::file::DicomFile::from_dataset(dataset());
+        let anon = Anonymizer::basic();
+        let cloned = anon.anonymize_file(&file).unwrap();
+        assert_eq!(
+            cloned.dataset.try_get_str(Tag::PATIENT_ID).as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            file.dataset.try_get_str(Tag::PATIENT_ID).as_deref(),
+            Some("12345"),
+            "the source file is untouched"
+        );
+
+        file.file_meta.remove(MEDIA_STORAGE_SOP_INSTANCE_UID);
+        anon.anonymize_file_in_place(&mut file).unwrap();
+        assert_eq!(
+            file.dataset.try_get_str(Tag::PATIENT_NAME).as_deref(),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn clean_on_a_binary_value_blanks_it() {
+        let profile = SecurityProfile::parse("0028,0010;C\n").unwrap();
+        let anon = Anonymizer::with_profile(profile, AnonOption::BasicProfile);
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::ROWS, 512u16);
+        anon.anonymize_in_place(&mut ds).unwrap();
+        assert_eq!(
+            ds.get_element(Tag::ROWS)
+                .unwrap()
+                .value()
+                .as_buffer()
+                .unwrap()
+                .data()
+                .unwrap()
+                .as_ref(),
+            &[0u8, 0]
         );
     }
 }

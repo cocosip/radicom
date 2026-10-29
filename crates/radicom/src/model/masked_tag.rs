@@ -173,3 +173,20 @@ mod tests {
         assert!(MaskedTag::parse("60xx300").is_err());
     }
 }
+
+#[cfg(test)]
+mod extra_tests {
+    use super::*;
+
+    #[test]
+    fn masked_tags_match_and_render_wildcards() {
+        let masked = MaskedTag::new(0x0010_0010, 0xFFFF_FF00);
+        assert_eq!(masked.card(), 0x0010_0010);
+        assert_eq!(masked.mask(), 0xFFFF_FF00);
+        assert!(masked.matches_u32(0x0010_0011));
+        assert!(masked.matches(0x0010, 0x0011));
+        let rendered = masked.to_general_string();
+        assert!(rendered.contains('x'), "{rendered}");
+        assert!(MaskedTag::exact(0x0010_0010).matches(0x0010, 0x0010));
+    }
+}

@@ -37,21 +37,23 @@ pub enum DataError {
     },
     #[error("tag {tag}: private creator block exhausted")]
     PrivateTagResolution { tag: TagRef },
-    #[error("charset error: {message} (tag: {tag_fmt})")]
+    // CORE-25: the tag's display form is derived from `tag`, not stored twice.
+    #[error(
+        "charset error: {message} (tag: {})",
+        .tag.map(|t| t.to_string()).unwrap_or_else(|| "none".into())
+    )]
     Encoding {
         tag: Option<TagRef>,
         message: String,
-        tag_fmt: String,
     },
     #[error("{message}")]
     Other { message: String },
 }
 
 impl DataError {
-    /// Constructor for [`DataError::Encoding`] that derives the display form of the optional tag.
+    /// Constructor for [`DataError::Encoding`].
     pub fn encoding(tag: Option<TagRef>, message: impl Into<String>) -> Self {
         DataError::Encoding {
-            tag_fmt: tag.map(|t| t.to_string()).unwrap_or_else(|| "none".into()),
             tag,
             message: message.into(),
         }
@@ -129,8 +131,6 @@ pub enum Error {
     Reader(#[from] ReaderError),
     #[error(transparent)]
     Writer(#[from] WriterError),
-    #[error("network error: {0}")]
-    Network(String), // typed sub-errors arrive with the network crate (M5)
     #[error(transparent)]
     Codec(#[from] CodecError),
     #[error(transparent)]
@@ -188,12 +188,10 @@ mod tests {
             Error::Data(DataError::Encoding {
                 tag: Some(tag),
                 message: "bad".into(),
-                tag_fmt: tag.to_string(),
             }),
             Error::Data(DataError::Encoding {
                 tag: None,
                 message: "bad".into(),
-                tag_fmt: "none".into(),
             }),
             Error::Data(DataError::Other {
                 message: "other".into(),
@@ -216,7 +214,6 @@ mod tests {
             }),
             Error::Reader(ReaderError::Other("bad".into())),
             Error::Writer(WriterError("bad".into())),
-            Error::Network("bad".into()),
             Error::Codec(CodecError::UnsupportedTranscode {
                 from: "a".into(),
                 to: "b".into(),

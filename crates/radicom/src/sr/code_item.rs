@@ -128,7 +128,10 @@ fn value_slot(value: &str) -> (Tag, Vr) {
 }
 
 fn is_urn(value: &str) -> bool {
-    value.len() >= 4 && value.as_bytes()[..4].eq_ignore_ascii_case(b"urn:")
+    // fo-dicom `DicomCodeItem` treats any `urn:` **or** `http…` value as a URN
+    value.len() >= 4
+        && (value.as_bytes()[..4].eq_ignore_ascii_case(b"urn:")
+            || value.as_bytes()[..4].eq_ignore_ascii_case(b"http"))
 }
 
 #[cfg(test)]
@@ -302,5 +305,28 @@ mod tests {
             .unwrap();
         assert_eq!(sequence.items().len(), 1);
         assert_eq!(CodeItem::read_from(&sequence.items()[0]).unwrap(), code);
+    }
+
+    #[test]
+    fn http_values_use_urn_code_value_like_fo_dicom() {
+        for value in [
+            "http://example.org/codes/1",
+            "HTTPS://example.org/codes/1",
+            "urn:oid:1.2.3",
+        ] {
+            let mut ds = Dataset::new();
+            CodeItem::new(value, "DCM").write_into(&mut ds);
+            assert_eq!(ds.try_get_str(URN_CODE_VALUE).as_deref(), Some(value));
+            assert_eq!(vr_of(&ds, URN_CODE_VALUE), Some(Vr::Ur));
+            assert!(
+                !ds.contains(&CODE_VALUE),
+                "{value} must not be written as a short CodeValue"
+            );
+            assert_eq!(CodeItem::read_from(&ds).unwrap().value, value);
+        }
+        // a short non-URN stays in CodeValue
+        let mut ds = Dataset::new();
+        CodeItem::new("ABC", "DCM").write_into(&mut ds);
+        assert_eq!(vr_of(&ds, CODE_VALUE), Some(Vr::Sh));
     }
 }

@@ -175,13 +175,7 @@ impl TransformRule {
             TransformRule::PadString(tag, total_length, pad) => {
                 if let Some(value) = dataset.try_get_str(tag) {
                     record(&mut modified, dataset, tag);
-                    let padded = if *total_length < 0 {
-                        let width = (-*total_length) as usize;
-                        format!("{value:>width$}", width = width).replace(' ', &pad.to_string())
-                    } else {
-                        let width = *total_length as usize;
-                        format!("{value:<width$}", width = width).replace(' ', &pad.to_string())
-                    };
+                    let padded = pad_to_width(&value, *total_length, *pad);
                     dataset.insert_str(tag.clone(), tag_vr_or(dataset, tag.clone()), padded);
                 }
             }
@@ -200,8 +194,7 @@ impl TransformRule {
                 if let Some(value) = dataset.try_get_str(tag) {
                     record(&mut modified, dataset, tag);
                     let parts: Vec<&str> = value.split(|c| separators.contains(&c)).collect();
-                    let joined = parts.join("/");
-                    let formatted = format.replace("{0}", &joined);
+                    let formatted = format_parts(format, &parts);
                     dataset.insert_str(tag.clone(), tag_vr_or(dataset, tag.clone()), formatted);
                 }
             }
@@ -297,12 +290,89 @@ fn record(modified: &mut Option<&mut Dataset>, dataset: &Dataset, tag: &Tag) {
     }
 }
 
+/// Pads `value` to `total_length` characters with `pad`.
+///
+/// fo-dicom `DicomTransformRules.PadStringDicomTransformRule`: a negative
+/// `total_length` pads on the left, a positive one on the right, and a value
+/// that is already long enough is returned unchanged. Unlike `format!` +
+/// `replace`, this never touches characters inside the value (FEAT-08).
+fn pad_to_width(value: &str, total_length: i32, pad: char) -> String {
+    let width = total_length.unsigned_abs() as usize;
+    let len = value.chars().count();
+    if len >= width {
+        return value.to_string();
+    }
+    let padding = width - len;
+    let mut out = String::with_capacity(value.len() + padding * pad.len_utf8());
+    if total_length < 0 {
+        for _ in 0..padding {
+            out.push(pad);
+        }
+        out.push_str(value);
+    } else {
+        out.push_str(value);
+        for _ in 0..padding {
+            out.push(pad);
+        }
+    }
+    out
+}
+
+/// Substitutes positional `{0}`, `{1}`, … parts into `format`, like fo-dicom's
+/// `string.Format(_format, parts)` (FEAT-09). `{{`/`}}` produce literal braces;
+/// an out-of-range index keeps the placeholder text.
+fn format_parts(format: &str, parts: &[&str]) -> String {
+    let mut out = String::with_capacity(format.len());
+    let mut chars = format.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '{' if chars.peek() == Some(&'{') => {
+                chars.next();
+                out.push('{');
+            }
+            '}' if chars.peek() == Some(&'}') => {
+                chars.next();
+                out.push('}');
+            }
+            '{' => {
+                let mut digits = String::new();
+                while let Some(d) = chars.peek().copied().filter(char::is_ascii_digit) {
+                    digits.push(d);
+                    chars.next();
+                }
+                if !digits.is_empty() && chars.peek() == Some(&'}') {
+                    chars.next();
+                    let index = digits.parse::<usize>().ok();
+                    match index.and_then(|i| parts.get(i)) {
+                        Some(part) => out.push_str(part),
+                        None => {
+                            out.push('{');
+                            out.push_str(&digits);
+                            out.push('}');
+                        }
+                    }
+                } else {
+                    out.push('{');
+                    out.push_str(&digits);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// The dataset's own VR for the tag when present, else the dictionary VR, else LO.
 fn tag_vr_or(dataset: &Dataset, tag: Tag) -> crate::model::vr::Vr {
-    if let Ok(element) = dataset.get_element(tag) {
+    if let Ok(element) = dataset.get_element(&tag) {
         return element.vr();
     }
-    crate::model::vr::Vr::Lo
+    crate::model::dictionary::dictionary()
+        .entry(&tag)
+        .vrs
+        .first()
+        .copied()
+        .unwrap_or(crate::model::vr::Vr::Lo)
 }
 
 #[cfg(test)]
@@ -436,9 +506,9 @@ mod tests {
 
         let mut ds = Dataset::new();
         ds.insert_str(Tag::OTHER_PATIENT_I_DS, Vr::Sh, "a,b;c");
-        TransformRule::SplitFormat(Tag::OTHER_PATIENT_I_DS, vec![',', ';'], "[{0}]".into())
+        TransformRule::SplitFormat(Tag::OTHER_PATIENT_I_DS, vec![',', ';'], "{0}|{1}".into())
             .apply(&mut ds);
-        assert_eq!(value(&ds, 0x0010, 0x1000).as_deref(), Some("[a/b/c]"));
+        assert_eq!(value(&ds, 0x0010, 0x1000).as_deref(), Some("a|b"));
 
         let mut ds = Dataset::new();
         ds.insert_str(Tag::OTHER_PATIENT_I_DS, Vr::Sh, "AbC");
@@ -446,6 +516,58 @@ mod tests {
         assert_eq!(value(&ds, 0x0010, 0x1000).as_deref(), Some("abc"));
         TransformRule::PadString(Tag::OTHER_PATIENT_I_DS, -5, '0').apply(&mut ds);
         assert_eq!(value(&ds, 0x0010, 0x1000).as_deref(), Some("00abc"));
+    }
+
+    #[test]
+    fn pad_string_only_inserts_the_pad_character() {
+        // FEAT-08: internal spaces must survive padding (and no padding means no
+        // change at all).
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe John");
+        TransformRule::PadString(Tag::PATIENT_NAME, 12, '0').apply(&mut ds);
+        assert_eq!(
+            value(&ds, 0x0010, 0x0010).as_deref(),
+            Some("Doe John0000"),
+            "spaces inside the value are not pad targets"
+        );
+
+        TransformRule::PadString(Tag::PATIENT_NAME, 3, '0').apply(&mut ds);
+        assert_eq!(
+            value(&ds, 0x0010, 0x0010).as_deref(),
+            Some("Doe John0000"),
+            "a value already wider than the target is unchanged"
+        );
+    }
+
+    #[test]
+    fn split_format_uses_positional_parts_and_brace_escapes() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::OTHER_PATIENT_I_DS, Vr::Sh, "a^b^c");
+        TransformRule::SplitFormat(
+            Tag::OTHER_PATIENT_I_DS,
+            vec!['^'],
+            "{2}-{0} ({1}) {{x}}".into(),
+        )
+        .apply(&mut ds);
+        assert_eq!(
+            value(&ds, 0x0010, 0x1000).as_deref(),
+            Some("c-a (b) {x}"),
+            "each placeholder addresses its part and {{}} is a literal brace"
+        );
+
+        // an out-of-range index is preserved instead of panicking
+        TransformRule::SplitFormat(Tag::OTHER_PATIENT_I_DS, vec![' '], "{9}".into()).apply(&mut ds);
+        assert_eq!(value(&ds, 0x0010, 0x1000).as_deref(), Some("{9}"));
+    }
+
+    #[test]
+    fn set_value_on_an_absent_tag_uses_the_dictionary_vr() {
+        // FEAT-10: the dictionary VR (DA here) is authoritative for a tag not
+        // yet present, not LO.
+        let mut ds = Dataset::new();
+        TransformRule::SetValue(Tag::STUDY_DATE, "20260101".into()).apply(&mut ds);
+        let element = ds.get_element(Tag::STUDY_DATE).expect("value inserted");
+        assert_eq!(element.vr(), Vr::Da);
     }
 
     #[test]
@@ -506,5 +628,53 @@ mod tests {
             Some("ACC-123-XYZ"),
             "original recorded"
         );
+    }
+
+    #[test]
+    fn trim_boundaries_and_empty_trim_text() {
+        let mut ds = dataset();
+        // an empty trim string is a no-op at either end
+        TransformRule::TrimString(Tag::PATIENT_NAME, TrimPosition::Start, "".into()).apply(&mut ds);
+        TransformRule::TrimString(Tag::PATIENT_NAME, TrimPosition::End, "".into()).apply(&mut ds);
+        assert_eq!(value(&ds, 0x0010, 0x0010).as_deref(), Some("Doe^John"));
+
+        // whitespace trimming respects Start/End when no character set is given
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "  Doe^John  ");
+        TransformRule::TrimCharacters(Tag::PATIENT_NAME, TrimPosition::Start, None).apply(&mut ds);
+        assert_eq!(value(&ds, 0x0010, 0x0010).as_deref(), Some("Doe^John  "));
+        TransformRule::TrimCharacters(Tag::PATIENT_NAME, TrimPosition::End, None).apply(&mut ds);
+        assert_eq!(value(&ds, 0x0010, 0x0010).as_deref(), Some("Doe^John"));
+
+        // an explicit set trims both ends
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "xxHello");
+        TransformRule::TrimCharacters(Tag::PATIENT_NAME, TrimPosition::Both, Some(vec!['x']))
+            .apply(&mut ds);
+        assert_eq!(value(&ds, 0x0010, 0x0010).as_deref(), Some("Hello"));
+    }
+
+    #[test]
+    fn split_format_keeps_an_unclosed_brace() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+        TransformRule::SplitFormat(Tag::PATIENT_NAME, vec!['^'], "{0".into()).apply(&mut ds);
+        assert_eq!(value(&ds, 0x0010, 0x0010).as_deref(), Some("{0"));
+    }
+
+    #[test]
+    fn a_transform_with_an_unmatched_condition_is_a_no_op() {
+        use crate::rules::match_rule::{MatchOperator, MatchRule};
+        let conditions = MatchRuleSet::new(MatchOperator::And).with(MatchRule::Bool(false));
+        let transform = TransformRuleSet::new()
+            .with(TransformRule::ToUpper(Tag::MODALITY))
+            .with_condition(conditions);
+        let mut ds = dataset();
+        transform.apply(&mut ds);
+        assert_eq!(value(&ds, 0x0008, 0x0060).as_deref(), Some("ct"));
+
+        let mut modified = Dataset::new();
+        transform.apply_recording(&mut ds, &mut modified);
+        assert_eq!(value(&modified, 0x0008, 0x0060), None);
     }
 }

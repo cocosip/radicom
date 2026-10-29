@@ -868,4 +868,24 @@ mod tests {
         assert_eq!(sop_class::STUDY_ROOT_QR_FIND, "1.2.840.10008.5.1.4.1.2.2.1");
         assert_eq!(sop_class::MODALITY_WORKLIST_FIND, "1.2.840.10008.5.1.4.31");
     }
+
+    #[test]
+    fn reserving_an_id_advances_the_allocator_past_it() {
+        let mut allocator = ContextIdAllocator::default();
+        assert_eq!(allocator.next_id(), Some(1));
+        // replaying a proposed set reserves the IDs already handed out
+        allocator.reserve(9);
+        assert_eq!(allocator.next_id(), Some(11));
+        allocator.reserve(12); // even IDs cannot be reserved
+        assert_eq!(allocator.next_id(), Some(13));
+        allocator.reserve(u8::MAX); // 255 is the last odd ID: exhaustion follows
+        assert_eq!(allocator.next_id(), None);
+    }
+
+    #[test]
+    fn accepted_contexts_report_emptiness() {
+        let empty = AcceptedContexts::default();
+        assert!(empty.is_empty());
+        assert!(empty.all().is_empty());
+    }
 }

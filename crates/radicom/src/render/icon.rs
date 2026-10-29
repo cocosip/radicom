@@ -1,7 +1,7 @@
 //! DICOM icon image from an Icon Image Sequence item (REND-10;
 //! docs/01-architecture.md §10).
 //!
-//! `(0000,9113)` IconImageSequence items carry a small preview whose pixel data
+//! `(0088,0200)` IconImageSequence items carry a small preview whose pixel data
 //! is stored native even when the parent image is compressed. This module parses
 //! such an item independently, restricts its photometric interpretation to
 //! MONOCHROME1/2 or PALETTE COLOR, forces one frame, and renders it through the
@@ -14,8 +14,8 @@ use crate::model::tag::Tag;
 use crate::pixel::photometric::PhotometricInterpretation;
 use crate::render::render_frame;
 
-/// `(0000,9113) Icon Image Sequence`.
-const ICON_IMAGE_SEQUENCE: Tag = Tag::new(0x0000, 0x9113);
+/// `(0088,0200) Icon Image Sequence` (PS3.3 C.7.6.1.1.6).
+const ICON_IMAGE_SEQUENCE: Tag = Tag::ICON_IMAGE_SEQUENCE;
 /// `(0028,0004) Photometric Interpretation`.
 const PHOTOMETRIC_INTERPRETATION: Tag = Tag::PHOTOMETRIC_INTERPRETATION;
 /// `(0028,0008) Number of Frames`.
@@ -28,7 +28,7 @@ pub struct IconImage {
 }
 
 impl IconImage {
-    /// Builds an icon from one Icon Image Sequence item (`(0000,9113)`).
+    /// Builds an icon from one Icon Image Sequence item (`(0088,0200)`).
     ///
     /// Rejects a photometric interpretation other than MONOCHROME1/2 or PALETTE
     /// COLOR (docs §1.4), and forces NumberOfFrames to 1 so only the first frame
@@ -65,7 +65,7 @@ impl IconImage {
         Ok(IconImage { dataset: owned })
     }
 
-    /// Extracts the icon from a dataset's `(0000,9113)` sequence (must hold
+    /// Extracts the icon from a dataset's `(0088,0200)` sequence (must hold
     /// exactly one item), else `None` (fo-dicom `DicomIconImage.TryCreate`).
     pub fn try_from_dataset(dataset: &Dataset) -> Option<IconImage> {
         let sequence = dataset.try_get_sequence(ICON_IMAGE_SEQUENCE)?;
@@ -184,5 +184,22 @@ mod tests {
 
         // no sequence at all
         assert!(IconImage::try_from_dataset(&Dataset::new()).is_none());
+    }
+
+    #[test]
+    fn the_icon_sequence_uses_the_standard_tag() {
+        // FEAT-02: the icon lives in (0088,0200), not in the old wrong
+        // (0000,9113) constant that made the whole feature unreachable.
+        assert_eq!(ICON_IMAGE_SEQUENCE.group(), 0x0088);
+        assert_eq!(ICON_IMAGE_SEQUENCE.element(), 0x0200);
+
+        let mut wrong = Dataset::new();
+        wrong
+            .insert_sequence(Tag::new(0x0000, 0x9113))
+            .push(icon_item("MONOCHROME2", 10));
+        assert!(
+            IconImage::try_from_dataset(&wrong).is_none(),
+            "a foreign (0000,9113) sequence is not an icon"
+        );
     }
 }

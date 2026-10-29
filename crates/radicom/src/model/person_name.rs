@@ -121,7 +121,11 @@ impl std::fmt::Display for PersonName {
 /// Parses a DS value: invariant float with fo-dicom's comma-decimal
 /// tolerance (`"1,5"` → 1.5).
 pub fn parse_ds(s: &str) -> Result<f64, crate::error::Error> {
-    let normalized = s.trim().replace(',', ".");
+    let trimmed = s.trim();
+    if let Ok(value) = trimmed.parse::<f64>() {
+        return Ok(value);
+    }
+    let normalized = trimmed.replace(',', ".");
     normalized.parse::<f64>().map_err(|_| {
         crate::error::Error::Data(crate::error::DataError::Other {
             message: format!("invalid DS value \"{s}\""),
@@ -131,10 +135,19 @@ pub fn parse_ds(s: &str) -> Result<f64, crate::error::Error> {
 
 /// Formats an f64 as a DS string: at most 16 characters; longer outputs
 /// demote to 10 significant digits (fo-dicom `ToDecimalString`).
+///
+/// Small magnitudes need scientific notation: `{:.10}` would round e.g.
+/// 1e-20 to `0.0000000000` and silently lose the value.
 pub fn format_ds(v: f64) -> String {
     let full = format!("{v}");
     if full.len() <= 16 {
         return full;
+    }
+    if v != 0.0 && v.abs() < 1e-4 {
+        let scientific = format!("{v:.6e}");
+        if scientific.len() <= 16 {
+            return scientific;
+        }
     }
     let demoted = format!("{v:.10}");
     if demoted.len() <= 16 {
@@ -244,5 +257,16 @@ mod tests {
         assert!(parse_is("abc").is_err());
         assert!(parse_is("3.5xyz").is_err());
         assert_eq!(format_is(-7), "-7");
+    }
+
+    #[test]
+    fn format_ds_preserves_small_magnitudes() {
+        // `{:.10}` would render 1e-20 as 0.0000000000 and lose the value.
+        let text = format_ds(1e-20);
+        assert!(text.len() <= 16, "{text}");
+        assert_ne!(text, "0.0000000000");
+        assert_eq!(parse_ds(&text).unwrap(), 1e-20);
+        // ordinary values keep the plain decimal form
+        assert_eq!(format_ds(2.5), "2.5");
     }
 }

@@ -113,34 +113,60 @@ impl MatchRule {
 /// Matches a DICOM wildcard pattern against a value: `*` matches any run of
 /// characters, `?` matches exactly one; all other characters are literal.
 /// (PS3.4 C.2.2.2 — distinct from filesystem globs, which also use `**`.)
+///
+/// Iterative single-`*` backtracking (the classic two-pointer glob): no
+/// recursion and no `Vec<char>`, so a pathological pattern like
+/// `*a*a*a…b` cannot exhaust the stack or re-scan quadratically.
 pub fn dicom_wildcard_match(value: &str, pattern: &str) -> bool {
-    let value: Vec<char> = value.chars().collect();
-    let pattern: Vec<char> = pattern.chars().collect();
-    wildcard_rec(&value, &pattern)
+    let value_bytes = value.as_bytes();
+    let pattern_bytes = pattern.as_bytes();
+    let mut vi = 0;
+    let mut pi = 0;
+    // most recent `*`: its pattern index and the value offset it may resume at
+    let mut star_pi: Option<usize> = None;
+    let mut star_vi = 0;
+    while vi < value_bytes.len() {
+        if pi < pattern_bytes.len() {
+            match pattern_bytes[pi] {
+                b'*' => {
+                    star_pi = Some(pi);
+                    star_vi = vi;
+                    pi += 1;
+                    continue;
+                }
+                b'?' => {
+                    vi += next_char_len(value, vi);
+                    pi += 1;
+                    continue;
+                }
+                literal if literal == value_bytes[vi] => {
+                    vi += 1;
+                    pi += 1;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        // mismatch (or the pattern ran out): let the last `*` swallow one more
+        // character and retry from there
+        match star_pi {
+            Some(sp) => {
+                pi = sp + 1;
+                star_vi += next_char_len(value, star_vi);
+                vi = star_vi;
+            }
+            None => return false,
+        }
+    }
+    while pi < pattern_bytes.len() && pattern_bytes[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pattern_bytes.len()
 }
 
-fn wildcard_rec(value: &[char], pattern: &[char]) -> bool {
-    match pattern.split_first() {
-        None => value.is_empty(),
-        Some(('*', rest)) => {
-            // `*` consumes zero or more characters
-            if wildcard_rec(value, rest) {
-                return true;
-            }
-            if let Some((_, tail)) = value.split_first() {
-                return wildcard_rec(tail, pattern);
-            }
-            false
-        }
-        Some(('?', rest)) => value
-            .split_first()
-            .map(|(_, tail)| wildcard_rec(tail, rest))
-            .unwrap_or(false),
-        Some((c, rest)) => value
-            .split_first()
-            .map(|(v, tail)| v == c && wildcard_rec(tail, rest))
-            .unwrap_or(false),
-    }
+/// Byte length of the UTF-8 character at `at` (1 at/after the end).
+fn next_char_len(text: &str, at: usize) -> usize {
+    text[at..].chars().next().map(char::len_utf8).unwrap_or(1)
 }
 
 #[cfg(test)]
@@ -231,5 +257,40 @@ mod tests {
         let ds = dataset();
         assert!(MatchRule::Regex(Tag::ACCESSION_NUMBER, "^ACC\\d+$".into()).matches(&ds));
         assert!(!MatchRule::Regex(Tag::ACCESSION_NUMBER, "^MR".into()).matches(&ds));
+        // an invalid pattern never matches instead of panicking
+        assert!(!MatchRule::Regex(Tag::ACCESSION_NUMBER, "(".into()).matches(&ds));
+    }
+
+    #[test]
+    fn nested_rule_sets_participate_in_matching() {
+        let nested = MatchRuleSet::new(MatchOperator::Or)
+            .with(MatchRule::Equals(Tag::MODALITY, "MR".into()))
+            .with(MatchRule::Equals(Tag::MODALITY, "CT".into()));
+        assert!(MatchRule::Set(nested).matches(&dataset()));
+    }
+
+    #[test]
+    fn wildcard_with_an_empty_value_and_trailing_star_is_false() {
+        assert!(!dicom_wildcard_match("", "*a"));
+        assert!(dicom_wildcard_match("", "*"));
+    }
+
+    #[test]
+    fn a_pathological_wildcard_pattern_does_not_recurse() {
+        // 40k single-byte characters would make the old recursive matcher walk
+        // tens of thousands of stack frames; the iterative matcher is flat.
+        let long = "a".repeat(40_000);
+        assert!(dicom_wildcard_match(&long, "*a"));
+        assert!(!dicom_wildcard_match(&long, "*a*a*a*a*a*b"));
+        assert!(dicom_wildcard_match(&long, "*a*a*a*a*a*a"));
+        assert!(dicom_wildcard_match("", "*"));
+        assert!(!dicom_wildcard_match("", "*a"));
+    }
+
+    #[test]
+    fn a_question_mark_matches_one_whole_character() {
+        assert!(dicom_wildcard_match("ü", "?"));
+        assert!(dicom_wildcard_match("Döe^John", "Dö?^J?hn"));
+        assert!(!dicom_wildcard_match("ü", "??"));
     }
 }

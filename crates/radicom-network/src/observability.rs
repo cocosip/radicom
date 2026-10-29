@@ -341,6 +341,35 @@ mod tests {
         // nothing to observe; the point is it must not panic
     }
 
+    #[test]
+    fn an_empty_collector_uses_the_no_op_defaults() {
+        // A user implementation that overrides nothing: every default method
+        // must be callable and a no-op.
+        #[derive(Debug)]
+        struct Silent;
+        impl MetricsCollector for Silent {}
+
+        let silent = Silent;
+        silent.on_bytes_sent(1);
+        silent.on_bytes_received(1);
+        silent.on_connection_opened();
+        silent.on_connection_closed();
+        silent.on_association_opened();
+        silent.on_association_closed();
+
+        let m: Arc<dyn MetricsCollector> = Arc::new(Silent);
+        let _guard = ConnectionGuard::new(Some(m));
+    }
+
+    #[tokio::test]
+    async fn a_counting_stream_shuts_down_and_describes_itself() {
+        use tokio::io::AsyncWriteExt;
+        let (a, _b) = tokio::io::duplex(64);
+        let mut stream = CountingStream::new(a, None);
+        assert!(format!("{stream:?}").contains("CountingStream"));
+        stream.shutdown().await.unwrap();
+    }
+
     #[cfg(feature = "otel")]
     #[test]
     fn tracing_metrics_emit_metric_events() {

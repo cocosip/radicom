@@ -64,6 +64,12 @@ impl Tag {
         self.private_creator.as_deref()
     }
 
+    /// The private creator as a shared handle: `Arc::clone` only touches the
+    /// reference count, so hot paths do not re-allocate the creator string.
+    pub fn private_creator_arc(&self) -> Option<Arc<PrivateCreator>> {
+        self.private_creator.clone()
+    }
+
     /// True for odd groups (PS3.5 §7.8 private data element ranges).
     pub const fn is_private(&self) -> bool {
         self.group & 1 == 1
@@ -151,6 +157,10 @@ impl Tag {
         let element = parse_hex_u16(e).map_err(|_| bad_tag(s))?;
         match creator.filter(|c| !c.is_empty()) {
             None => Ok(Tag::new(group, element)),
+            // A creator only makes sense on an odd (private) group; reject the
+            // odd case with a typed error instead of tripping `Tag::private`'s
+            // debug assertion.
+            Some(_) if group & 1 == 0 => Err(bad_tag(s)),
             Some(c) => Ok(Tag::private(
                 group,
                 element,
@@ -394,6 +404,16 @@ mod tests {
             Tag::parse("(0028,10000)").is_err(),
             ">4 hex digits is an error"
         );
+        // a creator on an even (public) group is malformed - it used to trip
+        // the private-tag debug assertion
+        assert!(
+            Tag::parse("(0028,0010:ACME)").is_err(),
+            "creator on a public group is an error"
+        );
+        assert_eq!(
+            Tag::parse("(0029,1001:ACME)").unwrap(),
+            Tag::private(0x0029, 0x1001, Arc::new(PrivateCreator::new("ACME")))
+        );
     }
 
     #[test]
@@ -419,5 +439,23 @@ mod tests {
                 "(0029,1202:ACME)"
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod extra_tests {
+    use super::*;
+
+    #[test]
+    fn tag_parse_errors_and_conversions() {
+        assert!(Tag::parse("(00100010)").is_err(), "missing comma");
+        assert_eq!(Tag::from(0x0010_0010u32), Tag::PATIENT_NAME);
+        assert_eq!(Tag::PATIENT_NAME.group(), 0x0010);
+        // same group+element: a tag with a creator sorts after one without
+        let creator =
+            std::sync::Arc::new(crate::model::private_creator::PrivateCreator::new("ACME"));
+        let with_creator = Tag::private(0x0029, 0x1001, creator);
+        let plain = Tag::new(0x0029, 0x1001);
+        assert!(with_creator > plain);
     }
 }

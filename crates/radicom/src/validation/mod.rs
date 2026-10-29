@@ -164,7 +164,7 @@ pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
     let no_backslash = |s: &str| !s.contains('\\');
     match vr {
         Vr::Ae => {
-            if content.len() > 16 {
+            if content.chars().count() > 16 {
                 return Err(fail(vr, content, "length exceeds 16"));
             }
             if content.trim().is_empty() {
@@ -188,7 +188,7 @@ pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
             }
         }
         Vr::Cs => {
-            if content.len() > 16 {
+            if content.chars().count() > 16 {
                 return Err(fail(vr, content, "length exceeds 16"));
             }
             if !content
@@ -201,7 +201,7 @@ pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
         }
         Vr::Da => validate_da(content).map_err(|reason| fail(vr, content, reason)),
         Vr::Ds => {
-            if content.len() > 16 {
+            if content.chars().count() > 16 {
                 return Err(fail(vr, content, "length exceeds 16"));
             }
             validate_ds(content).map_err(|reason| fail(vr, content, reason))
@@ -216,7 +216,7 @@ pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
         }
         Vr::Is => validate_is(content).map_err(|reason| fail(vr, content, reason)),
         Vr::Lo => {
-            if content.len() > 64 {
+            if content.chars().count() > 64 {
                 return Err(fail(vr, content, "length exceeds 64"));
             }
             if !no_backslash(content) || has_control(content, true) {
@@ -225,7 +225,7 @@ pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
             Ok(())
         }
         Vr::Lt => {
-            if content.len() > 10240 {
+            if content.chars().count() > 10240 {
                 return Err(fail(vr, content, "length exceeds 10240"));
             }
             if !no_backslash(content) || has_control(content, true) {
@@ -239,7 +239,7 @@ pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
                 return Err(fail(vr, content, "more than three name groups"));
             }
             for g in &groups {
-                if g.len() > 64 {
+                if g.chars().count() > 64 {
                     return Err(fail(vr, content, "group length exceeds 64"));
                 }
                 let comps: Vec<&str> = g.split('^').collect();
@@ -253,7 +253,7 @@ pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
             Ok(())
         }
         Vr::Sh => {
-            if content.len() > 16 {
+            if content.chars().count() > 16 {
                 return Err(fail(vr, content, "length exceeds 16"));
             }
             if !no_backslash(content) || has_control(content, true) {
@@ -262,7 +262,7 @@ pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
             Ok(())
         }
         Vr::St => {
-            if content.len() > 1024 {
+            if content.chars().count() > 1024 {
                 return Err(fail(vr, content, "length exceeds 1024"));
             }
             if !no_backslash(content) || has_control(content, true) {
@@ -274,7 +274,7 @@ pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
             .map(|_| ())
             .map_err(|_| fail(vr, content, "not a valid TM value or range")),
         Vr::Ui => {
-            if content.len() > 64 {
+            if content.chars().count() > 64 {
                 return Err(fail(vr, content, "length exceeds 64"));
             }
             if !crate::model::uid::Uid::is_valid(content) {
@@ -580,5 +580,45 @@ mod tests {
         assert!(!should_validate(true));
         set_validation_enabled(true);
         assert!(should_validate(true));
+    }
+
+    #[test]
+    fn character_limits_count_characters_not_utf8_bytes() {
+        // 40 CJK characters are 120 UTF-8 bytes but still one valid PN group
+        // (PS3.5 §6.2 limits are in characters).
+        let valid = "患".repeat(40);
+        assert!(validate_string(Vr::Pn, &valid).is_ok());
+        assert!(validate_string(Vr::Pn, &"患".repeat(65)).is_err());
+        assert!(validate_string(Vr::Lo, &"检".repeat(64)).is_ok());
+        assert!(validate_string(Vr::Lo, &"检".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn da_rules_cover_ranges_and_day_limits() {
+        assert!(validate_single(Vr::Da, "20240305").is_ok());
+        assert!(validate_single(Vr::Da, "20240305-20240307").is_ok());
+        assert!(validate_single(Vr::Da, "20240305-").is_ok());
+        assert!(validate_single(Vr::Da, "a-b-c").is_err());
+        assert!(validate_single(Vr::Da, "20240332").is_err(), "day > 31");
+        assert!(validate_single(Vr::Da, "2024030X").is_err());
+    }
+
+    #[test]
+    fn is_ds_and_text_limits_cover_every_guard() {
+        assert!(validate_single(Vr::Is, "1234567890123").is_err());
+        assert!(validate_single(Vr::Ds, "12345678901234567").is_err());
+        assert!(validate_single(Vr::Lo, "a\\b").is_err());
+        assert!(validate_single(Vr::Pn, "a\u{7}b").is_err());
+        assert!(validate_single(Vr::Sh, "abc\\def").is_err());
+        assert!(validate_single(Vr::St, "abc\u{7}").is_err());
+        // a VR without a string validator is accepted, and empties always are
+        assert!(validate_single(Vr::Ur, "http://x").is_ok());
+        assert!(validate_single(Vr::Lo, "").is_ok());
+    }
+
+    #[test]
+    fn validate_element_reports_a_typed_failure() {
+        let err = validate_element(&el(Vr::Lo, "a\\b")).unwrap_err();
+        assert!(matches!(err, Error::Validation(_)));
     }
 }
