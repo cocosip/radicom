@@ -11,7 +11,7 @@ use crate::model::item::{DicomFragmentSequence, DicomItem};
 use crate::model::tag::Tag;
 use crate::model::transfer_syntax::TransferSyntax;
 use crate::model::vr::Vr;
-use crate::pixel::codec::{codec_registry, CodecParams, DirectTranscoder};
+use crate::pixel::codec::{codec_registry, CodecParams};
 use crate::pixel::overlay::extract_overlays;
 use crate::pixel::{PixelData, PIXEL_DATA};
 use std::sync::Arc;
@@ -84,14 +84,9 @@ impl Transcoder {
             // row 4: encode only
             self.encode_frames(ds)?
         } else {
-            // row 5: a direct hook wins, otherwise decode then encode
-            match codec_registry().get_direct_transcoder(&self.from, &self.to) {
-                Some(hook) => self.run_direct(ds, hook)?,
-                None => {
-                    let intermediate = self.decode_to_uncompressed(ds)?;
-                    self.encode_frames(&intermediate)?
-                }
-            }
+            // row 5: decode then encode through a codec
+            let intermediate = self.decode_to_uncompressed(ds)?;
+            self.encode_frames(&intermediate)?
         };
 
         // Lossy bookkeeping: the encoded (or decoded) target frames plus the
@@ -219,20 +214,6 @@ impl Transcoder {
             let src = PixelData::from_dataset(&mut source)?;
             let mut dst = PixelData::from_dataset(&mut encoded)?;
             codec.encode(&src, &mut dst, &self.out_params)?;
-        }
-        self.read_frames(&encoded)
-    }
-
-    /// Row 5 via the direct hook.
-    fn run_direct(&self, ds: &Dataset, hook: Arc<dyn DirectTranscoder>) -> Result<Vec<SharedBuffer>, Error> {
-        let mut encoded = ds.clone();
-        encoded.set_transfer_syntax(self.to.clone());
-        encoded.remove(PIXEL_DATA);
-        {
-            let mut source = ds.clone();
-            let src = PixelData::from_dataset(&mut source)?;
-            let mut dst = PixelData::from_dataset(&mut encoded)?;
-            hook.transcode(&src, &mut dst)?;
         }
         self.read_frames(&encoded)
     }

@@ -193,12 +193,6 @@ pub trait Codec: Send + Sync {
     fn decode(&self, src: &PixelData<'_>, dst: &mut PixelData<'_>, params: &CodecParams) -> Result<(), Error>;
 }
 
-/// Optional direct transcoding hook (divergence D2, §5.5).
-pub trait DirectTranscoder: Send + Sync {
-    fn can(&self, from: &TransferSyntax, to: &TransferSyntax) -> bool;
-    fn transcode(&self, src: &PixelData<'_>, dst: &mut PixelData<'_>) -> Result<(), Error>;
-}
-
 // -- registry (CODEC-03, §3) ---------------------------------------------
 
 /// Resolves transfer syntaxes to codecs.
@@ -211,11 +205,6 @@ pub trait CodecRegistry: Send + Sync {
 
     /// The codec for `syntax`, or [`CodecError::NotRegistered`].
     fn get_codec(&self, syntax: &TransferSyntax) -> Result<Arc<dyn Codec>, Error>;
-
-    /// The direct-transcode hook for this pair, if one is registered.
-    fn get_direct_transcoder(&self, _from: &TransferSyntax, _to: &TransferSyntax) -> Option<Arc<dyn DirectTranscoder>> {
-        None
-    }
 }
 
 /// The empty default registry: the core ships zero codecs (D10).
