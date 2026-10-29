@@ -1,0 +1,95 @@
+# fo-dicom 对齐：修复进度（滚动更新）
+
+本文件记录 `docs/fo-dicom-alignment/` 五份走查报告各条目的当前处置状态，供后续轮次继续开发时
+直接对照，避免重复审查。代码是唯一事实来源：状态以当前 `HEAD` 的代码与测试为准，不以报告当时
+的结论为准（报告是快照，见各文件顶部说明）。
+
+更新方式：每完成一个条目，补上对应提交/测试名；发现新差异时在“待办”追加一行。
+
+## 已验证完成（P0 / P1 / P2 核心）
+
+| 报告条目 | 状态 | 证据（测试 / 符号 / 提交） |
+| --- | --- | --- |
+| 01 §2.1 片段分隔符长度未消费 | 已修复 | `parser` 测试；`io/reader.rs` |
+| 01 §2.2 私有序列探测 / 01 §2.5 私有 tag VR 恒 UN | 已修复 | `2a5ce72`、`reader.rs` `IsPrivateSequence` 注释与探测 |
+| 01 §2.3/§2.4 ISO_IR 字符集映射与韩文溢出 | 已修复 | `8db55fc`；`charset.rs` 使用 iso-8859-*；`chrRuss`/`chrArab` 语料 |
+| 01 §2.5b CP-246 条件反转 | 已修复 | `8db55fc`；`GH177` 语料 |
+| 01 §2.5c `Suspended`/`IsPartial` | 已修复 | `53ae9e6`、`7c93c0a`；`file.is_partial`；`corpus.rs` |
+| 01 §2.6 孤立 item tag `(FFFE,E000)` | 已修复 | `53ae9e6`；`reader.rs` |
+| 01 §2.7 `FileWindow` 真正按区间读 | 已修复 | `buffer.rs` `file_window_reads_lazily_and_in_ranges` |
+| 01 §2.10 校验规则收紧（DA/DS/IS） | 已修复 | `validation/mod.rs` 严格解析 |
+| 01 Tag.ToString("G"/"X"/"g") | 已实现 | `0e51b55`；`tag.rs` `the_fo_dicom_format_variants_are_available` |
+| 01/exec `DicomDatasetComparer` 可配置语义 | 已实现 | `Dataset::content_equals`；`content_comparison_skips_unresolved_bulk_data` |
+| 01 写侧 `LargeObjectSize` | 已实现 | `WriteOptions::large_object_size`；`large_object_size_controls_chunking...` |
+| 01 解析器全局锁 / 每元素 seek（P-1/P-2） | 已修复 | `94619fe`、`dd8bac1`、`b8533cd` |
+| 02 §2.1 `width/height` 用 u32 读 US | 已修复 | `8db55fc`；`a_parsed_file_reports_real_dimensions_and_a_full_frame` |
+| 02 §2.2 VOI LUT 16-bit 重标定 | 已修复 | `a_16_bit_voi_lut_is_recalibrated_to_its_own_output_range` |
+| 02 §2.3 LUT 描述符长度/VR/符号 | 已修复 | `74998ce`、`7ed2a45`、`b934433`；palette/voi 测试 |
+| 02 §2.4 overlay 标签与行列序 | 已修复 | `overlay_origin_and_frame_origin_parse_from_standard_bytes` |
+| 02 §2.5 overlay 位平面 LSB-first | 已修复 | `bitlist_sets_and_reads_bits_lsb_first`；`overlay.rs` |
+| 02 §2.6 print tag 常量 | 已修复 | `55ab7b6`；`every_print_tag_names_the_attribute_it_claims` |
+| 02 §2.7–2.9 bit-depth 归一化（RGB/YBR/palette/window） | 已修复 | `c27ec7d`、`b7a096c`；`render` 相关测试 |
+| 02 §2.10 静默吞错 | 已改善 | `render/mod.rs`、`print/render.rs` 有 `tracing::warn!` |
+| 02 §2.11 overlay 合成 OR | 已修复 | `c27ec7d` |
+| 02 §2.13 `WindowWidth==1` | 已修复 | `a_window_width_of_one_is_a_threshold` |
+| 02 §2.14 非直角旋转 | 已修复 | `a_non_right_angle_rotation_is_ignored` |
+| 02 并行渲染 / 逐值窗口 / LUT 预解析 | 已修复 | `9ccfbd1`、`4979e84`、`08a9000` |
+| 03 §2.1–2.4 A-ASSOCIATE 线格 | 已修复 | `c809b1e`；`pdu::tests` 标准字节 |
+| 03 §2.5 Max-PDU 65535 | 已修复 | `MAX_PDU_SIZE = 256 KiB`（fo-dicom `MaxPDULength`）；见本轮提交 |
+| 03 §2.6–2.18 其余协议缺陷 | 已修复 | `c809b1e`、`53ae9e6`、`aa9f71b` 等 |
+| 03 §3.1/§3.4 `read_pdu` 分配与 PDV 共享 | 已修复 | `transport.rs`；`5477b61` |
+| 04 §2.1 DICOMDIR icon offset | 已修复 | `55ab7b6`；`written_offsets_*` 测试 |
+| 04 §2.2 CodeItem tag 模型 / LongCodeValue / URN | 已修复 | `55ab7b6`、`2ec3a5d`；`code_item.rs` |
+| 04 §2.3 JSON group length 剥离 | 已修复 | `group_lengths_are_stripped_at_every_level` |
+| 04 §2.4 匿名化 action_for 按选项 | 已修复 | `c26ec7a`；profile 按选项索引 |
+| 04 §2.5 UID 替换每个 anonymizer | 已修复 | `mod.rs` `replaced` + `replaced_uids()` |
+| 04 §2.7 JSON 三处分歧 | 已修复 | 空 SQ 不写 Value、空分量 `null`、NumberMode 文档化 |
+| 04 §2.8 icon 失败不中断构建 | 已修复 | `a_failing_icon_generator_only_costs_the_preview` |
+| 04 §2.10 `validate_on_read` | 已实现 | `4710dde` |
+| 04 §1 `DicomDirectoryEntry`/FileSetID/IIconGenerator(frame)/scanner Stop+Complete+Header | 已实现 | `a20e750`、`5f3ca60`、`c9091b4`、`ecc51ac`、`dad8d74`、`fbf1f9e` |
+| 04 §1 `DicomDirectoryRecord::ToString()` | 已实现 | `b41359f`；`Display for DirectoryRecord` |
+| 04 §1 JSON dataset 集合 | 已实现 | `ccb9468` |
+| 04 §3.1 `SecurityProfile::basic` 缓存 | 已修复 | `c26ec7a` |
+| 05 §2.1–2.6、2.8–2.11、2.17–2.18 | 已修复 | `012afea`、`8c05e44`、`ca7c3ea` 等；见 05 报告 `【已修复】` |
+| 05 §2.12 `SubOperationSummary` Cancel/Warning | 已修复 | `012afea`；`cmove.rs` `record` |
+| 05 §2.13 release 校验与超时 | 已修复 | `server.rs` `release_timeout`；`release_*` 测试 |
+| 05 §2.15 `command_bytes` 文档 | 已修复 | 测试 `command_bytes_are_implicit_vr_little_endian` |
+| 05 §2.16 对端 A-ABORT 不再当干净关闭 | 已修复 | `server.rs` `Pdu::Abort` → `Err` |
+| 05 §2.19 `build_user_information` 死函数 | 已修复 | `server.rs` 生产调用点 |
+| 05 §3.1/§3.2 C-STORE 默认落盘 + 同步 IO | 已修复 | 默认 `StoreSink::Memory`；`spawn_blocking` |
+| 05 §3.3/§3.4 全局锁 / seek | 已修复 | `94619fe`、`dd8bac1` |
+| 05 §1 取消模式 `DicomClientCancellationMode` | 已实现 | `1115692`；`DicomClient::shutdown` |
+| 05 `expert.rs` `RELEASE_TIMEOUT` 死常量 | 已删除 | `f894cc2` |
+
+## 待办（按价值排序）
+
+1. **文档状态同步**：01/02/04 报告正文仍保留走查时的“缺失/部分实现”措辞，尚未逐条改成“已修复”。
+   完成一个模块的实现后应顺手更新对应行，避免误导后续评审。
+2. **02 §2.12 嵌入式 overlay 多帧**：`OverlayData::extract_embedded`/`load` 仍只取第 0 帧且不按
+   `ImageFrameOrigin` 选帧；`render` 的 `composite_overlay` 未把当前帧传入。需要给 load 增加
+   frame 参数并用 `PixelData` 的按帧窗口切图。
+3. **03 §3.2 `write_pdu` 每 PDU 重编码**：代码已用注释标注为已知上限（无调用方可传入复用缓冲）；
+   若要消除需把编码缓冲穿过 engine，属较大改动。
+4. **03 网络标识统一**：`transport.rs` 用主机名 FNV 哈希、`print_sop.rs` 用 MAC 拼接两套语义，
+   缺统一抽象（03 §1、§3.7）。
+5. **03/05 命令/数据缓冲上限**：`PduSplitter` 只有单一 `max_pdu`，未区分 fo-dicom 的
+   `MaxCommandBuffer`/`MaxDataBuffer`。
+6. **04 §1 其余形态项**：`DicomDirectory::AutoValidate`、`ProgressFilesCount`、
+   `StructuredReport` 的 Stream/`SaveAsync` 重载、自定义 profile 增删单行、`rules` 的 Regex
+   在默认 feature 下可用、图标彩色支持（fo-dicom 只做灰度，可视为设计取舍）。
+7. **05 其余**：监听式 linger（同步 API 无队列，属设计偏差，已在代码注释说明）、多请求
+   watchdog 扫描、Expert 层真正流式、C-MOVE 逐实例串行流水线、C-GET 每实例重建 Transcoder。
+8. **01 其余低项**：`CopyTo` masked 重载、`ReadLargeOnDemand` 每元素一个 fd、`io_err` 保留
+   `needed`、读侧 `EvenLengthBuffer`、`BufferPool` 无消费者（形态项）、`Tag::parse` 宽容度。
+9. **P3 测试体系**：fo-dicom 全量语料已大量引入（`tests-data/` 34 个文件含失败样本与字符集），
+   golden 仍多由自身生成；可继续把关键 golden 换成外部 oracle 并补齐标准字节用例。
+
+## 本轮（2026-10-29）新增
+
+- `3028af1` 默认 C-STORE sink 改为内存解析（去掉临时文件往返）。
+- `2ff0e69` `Dataset::content_equals`（fo-dicom `DicomDatasetComparer` 语义）。
+- `859d50d` `MAX_PDU_SIZE` 提升到 256 KiB。
+- `b41359f` `DirectoryRecord` Display。
+- `f894cc2` 删除死常量 `RELEASE_TIMEOUT`。
+- `1115692` `DicomClientCancellationMode` + `shutdown`。
+- `4aeadd8` 清理 print 测试的 clippy 警告。
