@@ -386,7 +386,7 @@ public void DicomFile_Open_PartialDatasetAvailable(string fileName) {
 
 ---
 
-### 2.7 【中】`ReadLargeOnDemand` 首次访问即整体物化，且每元素一个 fd
+### 2.7 【已缓解】`ReadLargeOnDemand` 首次访问即整体物化，且每元素一个 fd
 
 `crates/radicom/src/model/buffer.rs:430` 附近（`FileWindow` 的 `OnceCell<Bytes>` cache）
 
@@ -458,7 +458,7 @@ pub fn insert_or_update(&mut self, item: impl Into<DicomItem>) -> &mut Self {
 - `parse` 接受不足 4 位的十六进制（`parse_hex_u16`），如 `(28,10)`；fo-dicom 的 `DicomTag.Parse` 要求 ≥8 字符。宽容对读取有利、对写入侧 round-trip 有害。
 - 私有 tag 的 `Ord` 用 `element & 0xFF` 参与比较（`tag.rs:159` 附近注释自承是 hack），导致同一 group 下公私混合时排序与 fo-dicom 不同。`BTreeMap` 的迭代顺序因此与 fo-dicom 的 `Dictionary` 不一致，dump 对比会假阳性。
 
-### 2.12 【低】`push_fragment` 的 O(n²) 偏移计算
+### 2.12 【已修复】`push_fragment` 的 O(n²) 偏移计算
 
 `crates/radicom/src/model/item.rs:102-110`
 
@@ -473,7 +473,7 @@ pub fn push_fragment(&mut self, fragment: SharedBuffer) {
 
 **最小修复**：加一个 `running_offset: u64` 字段增量累加；或解析路径改用 `push_raw`（不维护 offset table）。
 
-### 2.13 【低】`charset_encoding` 每次调用都分配 + 加锁
+### 2.13 【已修复】`charset_encoding` 每次调用都分配 + 加锁
 
 `crates/radicom/src/encoding/charset.rs:83-90`：`normalize_term` 每次 `collect()` 出新 `String`，然后 `REGISTRY.lock()`。解析时每层 charset 只在切换时调用（`dataset_builder.rs:67-83` 有缓存），但写入路径按元素调用。热路径上可改为 `&'static Encoding` 缓存或 `HashMap<&str, _>` 无分配查找。
 
@@ -481,7 +481,7 @@ pub fn push_fragment(&mut self, fragment: SharedBuffer) {
 
 ## 3. 性能问题
 
-### 3.1 【已测量】`require()` 每次 3 次 syscall + 无缓冲 → 磁盘解析比内存慢 10-50 倍
+### 3.1 【已修复】`require()` 每次 3 次 syscall + 无缓冲 → 磁盘解析比内存慢 10-50 倍
 
 `crates/radicom/src/io/byte_source.rs:66-77`（`require`）、`byte_source.rs:79-84`（`is_eof`）、`crates/radicom/src/io/file.rs:114-170`（`open_with_options` 未包 `BufReader`）
 
@@ -536,7 +536,7 @@ bench 只测 `DicomFile::from_bytes(black_box(&encoded), ...)`（`core.rs:98`）
 
 这是 benchmark 覆盖缺口，建议在 `core.rs` 增加 `open(path)` 与 `from_reader(BufReader<File>)` 两行。
 
-### 3.3 【明显】`CompositeBuffer::data()` 恒拼接新 Vec
+### 3.3 【已修复】`CompositeBuffer::data()` 恒拼接新 Vec
 
 `crates/radicom/src/model/buffer.rs:225`
 
@@ -544,7 +544,7 @@ bench 只测 `DicomFile::from_bytes(black_box(&encoded), ...)`（`core.rs:98`）
 
 **建议**：审计 `data()` 调用点，除确有必要的（如需连续切片），一律改 `copy_to` / `get_byte_range`。
 
-### 3.4 【明显】`dictionary::entry` 每次私有查找都新建 `Arc` + 线性扫描
+### 3.4 【已知上限，保留】`dictionary::entry` 每次私有查找都新建 `Arc` + 线性扫描
 
 `crates/radicom/src/model/dictionary.rs:177`（public masked 的 `Vec` 线性 `.find`）、`:163`（private-creator 槽位每次 `Arc::new` 一个 placeholder 条目）
 
@@ -552,7 +552,7 @@ bench 只测 `DicomFile::from_bytes(black_box(&encoded), ...)`（`core.rs:98`）
 
 **建议**：私有 masked 表改为按 `u32` 前缀分桶的 `HashMap`；creator 槽位 placeholder 缓存为 `Lazy` 常量。
 
-### 3.5 【明显】`default_dictionary()` 每次调用都拿一次 `RwLock`
+### 3.5 【已修复】`default_dictionary()` 每次调用都拿一次 `RwLock`
 
 `crates/radicom/src/model/dictionary.rs:233-245`
 
@@ -565,25 +565,25 @@ pub fn default_dictionary() -> Arc<Dictionary> {
 
 每次调用一次 `RwLock::read()` + `Arc::clone`。同上，每元素一次。`set_default_dictionary` 是一次性守卫（`dictionary.rs:249-258`），可以用 `OnceLock`/`AtomicPtr` 把 fast path 变成无锁。
 
-### 3.6 【明显】`Uid::enumerate` 每次排序
+### 3.6 【已修复】`Uid::enumerate` 每次排序
 
 `crates/radicom/src/model/uid.rs:191-196`：每次调用都 `sort` 一遍注册表。若无调用方依赖有序性，改为返回迭代器；若依赖，用 `Lazy` 缓存排序结果。
 
-### 3.7 【明显】`read_meta_block` 反复从头重读
+### 3.7 【已修复】`read_meta_block` 反复从头重读
 
 `crates/radicom/src/io/file.rs:414-427`：以 `take * 2` 增长并从 `start` 重新 seek+read。对超大 meta 组（少见但可能，如带巨大私有 meta）是 O(k²) 重读。有界，低优先。
 
-### 3.8 【明显】deflate 路径双份峰值内存
+### 3.8 【已修复】deflate 路径双份峰值内存
 
 `crates/radicom/src/io/file.rs:151-157`：先把整个剩余文件读进 `comp`，再 `parse_dataset_with(&comp, ...)` 内部 inflate 成另一个 Vec。峰值 = 压缩 + 解压 ≈ 2 倍。可用流式 `ZlibDecoder` 直接喂给解析器（解析器已接受 `Read+Seek`，只需包一层）。
 
-### 3.9 【可疑，未测量】`decode_multi_charset` 对纯 ASCII 无快路径
+### 3.9 【已修复】`decode_multi_charset` 对纯 ASCII 无快路径
 
 `crates/radicom/src/encoding/charset.rs:120-171`：即使值完全是 ASCII（绝大多数 DICOM 文件的所有 PN/LO/SH），也要逐字节扫描并在最后 `flush` 时走一次 `enc.decode`。scan 本身不贵，但 `encoding_rs::ASCII.decode` 也会做校验。
 
 **建议**：入口加 `if bytes.is_ascii() { return String::from_utf8_unchecked(bytes.to_vec()) }`（或 `from_utf8` + `expect`，ASCII 必合法）。J2K/JPEG 路径的性能占比更高，此项优先级低于 3.1。
 
-### 3.10 【可疑，未测量】`private_creators` 用 `HashMap<(u16,u8), String>`
+### 3.10 【已知上限，保留】`private_creators` 用 `HashMap<(u16,u8), String>`
 
 `crates/radicom/src/io/reader.rs:154` 附近的 `PrivateCreators` 类型。每个私有元素都要 `get(&(group, block))`，SipHash 开销对短 key 不划算。可换 `[Option<String>; 256]` per-group 或 `Vec`。非瓶颈，低优先。
 

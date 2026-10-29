@@ -436,7 +436,7 @@ fo-dicom 的 `DicomJsonConverter` 有 `autoValidate`（`JsonDicomConverter.cs:69
 
 均在 clean repo、`--release`、Windows 本机测得，数字是"每次调用"的均值。
 
-### 3.1 `SecurityProfile::basic()` 每次调用解析 655 行 CSV（≈316 µs）
+### 3.1 【已修复】`SecurityProfile::basic()` 每次调用解析 655 行 CSV（≈316 µs）
 
 `anonymizer/profile.rs:227` 每次 `SecurityProfile::basic()` 都重新 `parse(include_str!(...))`：对 655 行做 `split`、逐行 `TagPattern::new`（含字符类编译）、`Action::parse`。`Anonymizer::basic()`（`anonymizer/mod.rs:42`）也调它，所以**每构造一个 anonymizer 就付出一次全表解析**。
 
@@ -444,13 +444,13 @@ fo-dicom 的 `DicomJsonConverter` 有 `autoValidate`（`JsonDicomConverter.cs:69
 
 **最小修法**：包一层 `once_cell::sync::Lazy<Arc<SecurityProfile>>`（workspace 已有 `once_cell`），`basic()` 返回 clone/clone-on-write，或返回 `&'static`。
 
-### 3.2 `action_for` 每元素线性扫全表（O(rows) × O(elements)）
+### 3.2 【已修复】`action_for` 每元素线性扫全表（O(rows) × O(elements)）
 
 `anonymizer/profile.rs:259` 对每个元素遍历最多 655 行并做 `TagPattern::matches`（内部又是字符级匹配）。500 元素 × 655 行 ≈ 32.8 万次模式匹配。实测 500 元素 ≈ 213 µs 里绝大部分在此。
 
 **最小修法**：按 tag 精确命中先查一个 `HashMap<u32, &ProfileRow>`（`ps3.15.csv` 里绝大多数行是字面 tag），只对通配行回退线性扫。
 
-### 3.3 `dump_dataset` 每层重复取字典、每元素 clone tag
+### 3.3 【已修复】`dump_dataset` 每层重复取字典、每元素 clone tag
 
 `dump/mod.rs:41` 在 `write_level` 内部调 `default_dictionary()`（虽返回 `Arc`，仍需锁），`:44` 对每个 item `item.tag().clone()`（`Tag` 含 `Option<Arc<PrivateCreator>>`，clone 会动引用计数），`:49` 再 `dictionary.entry(&tag)` 克隆 `Arc<DictionaryEntry>`。
 
@@ -458,7 +458,7 @@ fo-dicom 的 `DicomJsonConverter` 有 `autoValidate`（`JsonDicomConverter.cs:69
 
 **最小修法**：把 `default_dictionary()` 提到 `dump_dataset` 只取一次；tag 用 `item.tag()` 借用而不 clone。
 
-### 3.4 `anonymize_in_place` 先整体克隆 dataset
+### 3.4 【已修复】`anonymize_in_place` 先整体克隆 dataset
 
 `anonymizer/mod.rs:100`：`let items: Vec<DicomItem> = dataset.items().cloned().collect();` —— 为了在遍历中安全修改，把**每个 item 都克隆一遍**。`DicomItem::Element` 克隆包含 `SharedBuffer`（`Arc`，浅拷贝）+ `ElementValue`；`DicomItem::Sequence` 克隆是**深拷贝整棵子树**。
 
@@ -466,7 +466,7 @@ fo-dicom 的 `DicomJsonConverter` 有 `autoValidate`（`JsonDicomConverter.cs:69
 
 **最小修法**：先收集 `Vec<Tag>`（只收集要删的），再用 `dataset.item(&tag)` 借读判动作；确实需要改时才取可变引用。或者用两层循环"先算动作列表，再逐条应用"。
 
-### 3.5 `rebuild()` 反复整文件序列化直到 offsets 收敛
+### 3.5 【已知上限，保留】`rebuild()` 反复整文件序列化直到 offsets 收敛
 
 `media/mod.rs:447-456`：`loop { write_layout; to_bytes; item_offsets; if measured == positions return }`。每次迭代是**一次完整文件序列化**，最少 2 次（初始 `positions` 全 0 → 测出真值 → 再写一次），每次 `item_offsets` 又扫全文件每个字节。
 

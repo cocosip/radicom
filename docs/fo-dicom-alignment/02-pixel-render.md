@@ -424,7 +424,7 @@ fo-dicom 把整条 LUT 链包进 `PrecalculatedLUT(_lut, BitDepth.MinimumValue, 
 
 `print/render.rs:97-103` `Canvas::filled` 逐像素 `extend_from_slice(&[b,g,r,0xFF])`（可用 `resize`/`chunks_exact_mut` 一次填）；`:141-142` 每个单元格 `to_rgb24` 再 `bilinear_color24`（两次全图分配）；`:146-152` 逐像素调 `Canvas::set`，每次都做四次 `i64` 边界比较（:105-113）。一张 A4@300dpi 是 2480×3508 ≈ 8.7 Mpx，这些常数不可忽略。
 
-### 3.8 【明显】transcoder 每帧一次 `to_vec()`
+### 3.8 【已修复】transcoder 每帧一次 `to_vec()`
 
 `pixel/transcoder.rs:149-158` `read_frames`：`ds.clone()` + 循环内 `pd.get_frame(i)?.data().to_vec()`——**把零拷贝帧窗口立刻物化成独立 `Vec`**，一次性把所有帧读进内存（多帧 cine 时峰值 = 整份像素数据 ×2）。`read_frame`（:161-164）与 `decode_frame`（:119-144，两次 `ds.clone()`）同理。`decode_frames`（:167-187）再 clone 一次源与解码结果。
 
