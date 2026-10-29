@@ -2,11 +2,10 @@
 //! (FILE-01..06; docs/01-architecture.md §7, §5.3).
 
 use crate::error::{Error, FileError};
-use crate::io::byte_source::{ByteSourceReader, WindowSource};
+use crate::io::byte_source::ByteSourceReader;
 use crate::io::dataset_builder::{parse_dataset_bytes, DatasetBuilder};
 use crate::io::reader::{DicomReader, LargeValuePolicy};
 use crate::io::writer::{DicomWriter, WriteOptions};
-use crate::model::buffer::{FileWindow, SharedBuffer};
 use crate::model::dataset::Dataset;
 use crate::model::tag::Tag;
 use crate::model::transfer_syntax::{syntaxes, TransferSyntax};
@@ -167,7 +166,7 @@ impl DicomFile {
             // than one fd per large value
             let shared = Arc::new(buffered.get_ref().try_clone().map_err(|e| file_err(path, "clone", e))?);
             let mut source = ByteSourceReader::new(buffered, syntax.endian())
-                .with_window_source(Arc::new(PathWindow { file: shared }));
+                .with_shared_file(shared);
             let reader = DicomReader {
                 large_object_size: options.large_object_size,
                 large_policy: policy_of(options.read),
@@ -418,16 +417,6 @@ fn parse_slice(
 ///
 /// Holds one shared `Arc<File>`; every window clone-references it and reads
 /// with positional I/O, so a file with many large values still holds one fd.
-struct PathWindow {
-    file: Arc<std::fs::File>,
-}
-
-impl WindowSource for PathWindow {
-    fn window(&self, absolute_offset: u64, len: u64) -> std::io::Result<SharedBuffer> {
-        Ok(Arc::new(FileWindow::from_shared(self.file.clone(), absolute_offset, len)))
-    }
-}
-
 /// Reads up to 4 KiB at `start` for transfer-syntax probing.
 fn read_probe(file: &mut std::fs::File, start: u64, file_len: u64) -> Vec<u8> {
     let take = file_len.saturating_sub(start).min(4096) as usize;

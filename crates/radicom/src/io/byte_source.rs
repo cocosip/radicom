@@ -2,17 +2,10 @@
 //! (IO-02; docs/01-architecture.md §7).
 
 use crate::error::ReaderError;
-use crate::model::buffer::{MemoryBuffer, SharedBuffer};
+use crate::model::buffer::{FileWindow, MemoryBuffer, SharedBuffer};
 use crate::model::endian::Endian;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
-
-/// Supplies a lazy window over `[absolute_offset, absolute_offset+len)` of the
-/// underlying seekable source (FILE-02). A file-backed reader attaches one so
-/// the parser can leave large values on disk.
-pub trait WindowSource: Send + Sync {
-    fn window(&self, absolute_offset: u64, len: u64) -> io::Result<SharedBuffer>;
-}
 
 /// Sequential/seekable byte reader with endianness-aware scalar reads.
 ///
@@ -24,7 +17,9 @@ pub trait WindowSource: Send + Sync {
 pub struct ByteSourceReader<R: Read + Seek> {
     inner: R,
     pub endian: Endian,
-    window: Option<Arc<dyn WindowSource>>,
+    /// When set, large values become lazy windows over this one shared handle
+    /// instead of being read into memory (FILE-02).
+    window_file: Option<Arc<std::fs::File>>,
     /// Total source length; `u64::MAX` when it could not be measured, in which
     /// case EOF detection falls back to the read errors.
     len: u64,
@@ -42,12 +37,12 @@ impl<R: Read + Seek> ByteSourceReader<R> {
             }
             Err(_) => u64::MAX,
         };
-        ByteSourceReader { inner, endian, window: None, len, pos }
+        ByteSourceReader { inner, endian, window_file: None, len, pos }
     }
 
-    /// Attaches a window source so large values can stay off-heap (FILE-02).
-    pub fn with_window_source(mut self, window: Arc<dyn WindowSource>) -> Self {
-        self.window = Some(window);
+    /// Attaches a shared file handle so large values can stay off-heap (FILE-02).
+    pub fn with_shared_file(mut self, file: Arc<std::fs::File>) -> Self {
+        self.window_file = Some(file);
         self
     }
 
@@ -55,8 +50,8 @@ impl<R: Read + Seek> ByteSourceReader<R> {
     /// `None` when this reader has no window source.
     pub fn window_at_current(&mut self, len: u64) -> io::Result<Option<SharedBuffer>> {
         let pos = self.pos;
-        match &self.window {
-            Some(source) => Ok(Some(source.window(pos, len)?)),
+        match &self.window_file {
+            Some(file) => Ok(Some(Arc::new(FileWindow::from_shared(file.clone(), pos, len)))),
             None => Ok(None),
         }
     }
