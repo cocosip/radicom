@@ -409,7 +409,7 @@ impl<F: Fn() -> Vec<u8> + Send + Sync> ByteBuffer for LazyBuffer<F> {
 // read on demand. `data()` materializes the whole value once into a cache,
 // while `get_byte_range`/`copy_to` stream without ever holding it all.
 
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Mutex;
@@ -433,21 +433,18 @@ impl Drop for TempFile {
     }
 }
 
-/// A lazy read-only window over `[offset, offset+len)` of a file
-/// (fo-dicom file byte window; BUF-02).
+/// A lazy read-only window over `[offset, offset+len)` of a shared file
+/// (BUF-02).
 ///
-/// `get_byte_range` and `copy_to` read straight from disk, so a consumer that
-/// only needs part of a large value never materializes it. `data()` does
-/// materialize — once, into the `OnceCell` — because the buffer API hands out
-/// `&[u8]`; that cache is the ceiling of this design, not a bug.
-///
-/// Each window owns its own file handle (fo-dicom's `FileByteBuffer` shares
-/// one); a file with hundreds of large values therefore holds hundreds of
-/// handles while it lives. ponytail: per-window handle, share one `Arc<File>`
-/// per parsed file if the handle count ever becomes a problem.
+/// All windows over one parsed file share a single `Arc<File>`; reads use
+/// positional I/O (`read_at` on Unix, `seek_read` on Windows), so a window
+/// needs no seek cursor and no per-window handle. `get_byte_range`/`copy_to`
+/// read straight from disk (a consumer that only needs part of a large value
+/// never materializes it); `data()` materializes once into the `OnceCell`,
+/// which is the ceiling of the `&[u8]` API.
 #[derive(Debug)]
 pub struct FileWindow {
-    file: Mutex<std::fs::File>,
+    file: Arc<std::fs::File>,
     offset: u64,
     len: u64,
     cache: once_cell::sync::OnceCell<Bytes>,
@@ -457,7 +454,12 @@ impl FileWindow {
     /// Opens `path` and windows `len` bytes starting at `offset`.
     pub fn open(path: impl AsRef<Path>, offset: u64, len: u64) -> io::Result<Self> {
         let file = std::fs::OpenOptions::new().read(true).open(path.as_ref())?;
-        Ok(FileWindow { file: Mutex::new(file), offset, len, cache: once_cell::sync::OnceCell::new() })
+        Ok(Self::from_shared(Arc::new(file), offset, len))
+    }
+
+    /// Windows an already-open shared file, so many windows cost one handle.
+    pub fn from_shared(file: Arc<std::fs::File>, offset: u64, len: u64) -> Self {
+        FileWindow { file, offset, len, cache: once_cell::sync::OnceCell::new() }
     }
 
     pub fn offset(&self) -> u64 {
@@ -479,10 +481,58 @@ impl FileWindow {
     }
 
     fn read_into(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-        let mut file = self.file.lock().expect("file window mutex poisoned");
-        file.seek(SeekFrom::Start(self.offset + offset))?;
-        file.read_exact(buf)
+        read_exact_at(&self.file, self.offset + offset, buf)
     }
+}
+
+/// Fills `buf` from `file` at `offset` without moving a shared cursor, so one
+/// handle serves any number of concurrent windows.
+#[cfg(unix)]
+fn read_exact_at(file: &std::fs::File, mut offset: u64, buf: &mut [u8]) -> io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    let mut done = 0usize;
+    while done < buf.len() {
+        match file.read_at(&mut buf[done..], offset) {
+            Ok(0) => return Err(eof_error()),
+            Ok(n) => {
+                done += n;
+                offset += n as u64;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn read_exact_at(file: &std::fs::File, mut offset: u64, buf: &mut [u8]) -> io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    let mut done = 0usize;
+    while done < buf.len() {
+        match file.seek_read(&mut buf[done..], offset) {
+            Ok(0) => return Err(eof_error()),
+            Ok(n) => {
+                done += n;
+                offset += n as u64;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_exact_at(file: &std::fs::File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut handle = file.try_clone()?;
+    handle.seek(SeekFrom::Start(offset))?;
+    handle.read_exact(buf)
+}
+
+fn eof_error() -> io::Error {
+    io::Error::new(io::ErrorKind::UnexpectedEof, "file window read past its end")
 }
 
 impl ByteBuffer for FileWindow {
@@ -804,6 +854,23 @@ mod tests {
             let mut sink = Vec::new();
             assert_eq!(w.copy_to(&mut sink).unwrap(), 20);
             assert_eq!(sink, payload[10..30]);
+        }
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn windows_over_one_shared_file_read_independently() {
+        let path = std::env::temp_dir().join(format!("radicom-test-fw-shared-{}.bin", std::process::id()));
+        std::fs::write(&path, b"0123456789").unwrap();
+        {
+            let file = Arc::new(std::fs::File::open(&path).unwrap());
+            let first = FileWindow::from_shared(file.clone(), 2, 3);
+            let second = FileWindow::from_shared(file, 7, 3);
+            assert_eq!(&*first.data(), b"234");
+            assert_eq!(&*second.data(), b"789");
+            let mut out = [0u8; 2];
+            first.get_byte_range(1, &mut out);
+            assert_eq!(&out, b"34", "positional reads are independent of the other window");
         }
         std::fs::remove_file(&path).ok();
     }

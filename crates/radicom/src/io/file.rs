@@ -163,8 +163,11 @@ impl DicomFile {
             // source tracks its own position instead of asking the stream, so the
             // buffer is never consulted for offsets (docs/fo-dicom-alignment/05 §3.4).
             let buffered = std::io::BufReader::with_capacity(64 * 1024, file);
+            // one shared handle for every lazy window over this file, rather
+            // than one fd per large value
+            let shared = Arc::new(buffered.get_ref().try_clone().map_err(|e| file_err(path, "clone", e))?);
             let mut source = ByteSourceReader::new(buffered, syntax.endian())
-                .with_window_source(Arc::new(PathWindow { path: path.to_path_buf() }));
+                .with_window_source(Arc::new(PathWindow { file: shared }));
             let reader = DicomReader {
                 large_object_size: options.large_object_size,
                 large_policy: policy_of(options.read),
@@ -399,13 +402,16 @@ fn parse_slice(
 }
 
 /// Builds lazy [`FileWindow`]s over a file for the parser (FILE-02).
+///
+/// Holds one shared `Arc<File>`; every window clone-references it and reads
+/// with positional I/O, so a file with many large values still holds one fd.
 struct PathWindow {
-    path: PathBuf,
+    file: Arc<std::fs::File>,
 }
 
 impl WindowSource for PathWindow {
     fn window(&self, absolute_offset: u64, len: u64) -> std::io::Result<SharedBuffer> {
-        Ok(Arc::new(FileWindow::open(&self.path, absolute_offset, len)?))
+        Ok(Arc::new(FileWindow::from_shared(self.file.clone(), absolute_offset, len)))
     }
 }
 

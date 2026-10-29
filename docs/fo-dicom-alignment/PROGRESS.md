@@ -163,7 +163,15 @@
 
 - 同步 API 无请求队列 → 监听式 linger、watchdog 多请求扫描、C-MOVE 流水线、C-CANCEL 并发。
 - 轻依赖取向 → PKCS#12/系统证书库、完整正则 tag 匹配、私有字典。
-- 已用 `ponytail:` 标注的性能上限 → `write_pdu` 重编码、`FileWindow` 每窗口句柄、命令/数据发送批处理。
+- 已用 `ponytail:` 标注的性能上限 → `write_pdu` 重编码、命令/数据发送批处理（`FileWindow` 每窗口句柄已修复）。
+
+## 代码 Rust 化进展（新目标）
+
+- **内存 / FileWindow**：改为共享 `Arc<File>` + 定位读（Unix `read_at`、Windows `seek_read`），
+  多窗口不再各自开 fd；新增 `FileWindow::from_shared`，`PathWindow` 持有一个共享句柄。多帧大值文件
+  的 fd 数量从 O(大值数) 降为 1。（含 `windows_over_one_shared_file_read_independently` 测试）
+- **内存 / UID 枚举缓存**：修复并发丢失——新增 `ENUM_GEN` 版本号，构建快照期间若有 `register`
+  则不发布该陈旧快照，消除并行测试下的偶发缺失。
 - .NET 专属抽象，Rust 不适用（按能力已覆盖）→ `INetworkManager`、`DicomTimeout`、`NetworkStreamCreationOptions`、
   `IImage`/`IImageManager`、`IPixelData` 接口、每服务独立 provider 接口、`DirectoryRecord` 指针、`CacheType`、`ArrayPool`。
 

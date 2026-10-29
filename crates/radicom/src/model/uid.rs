@@ -3,6 +3,7 @@
 use crate::error::{DataError, Error};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 /// The 13 UID classifications (UID-01).
@@ -130,6 +131,11 @@ type EnumSnapshot = Arc<Vec<Arc<Uid>>>;
 /// Sorted snapshot of the registry, rebuilt only when `register` mutates it.
 static ENUM_CACHE: Lazy<RwLock<Option<EnumSnapshot>>> = Lazy::new(|| RwLock::new(None));
 
+/// Bumped on every `register`, so a snapshot built concurrently with a
+/// registration is never published stale (it would otherwise omit the new UID
+/// until the next mutation).
+static ENUM_GEN: AtomicU64 = AtomicU64::new(0);
+
 /// Forces the generated UID table into the registry.
 pub fn ensure_seeded() {
     Lazy::force(&SEED);
@@ -170,7 +176,8 @@ impl Uid {
             retired,
         });
         REGISTRY.write().expect("registry lock").insert(Arc::from(value), uid.clone());
-        // a registration invalidates the sorted enumerate snapshot
+        // invalidate the sorted snapshot and publish a new generation
+        ENUM_GEN.fetch_add(1, Ordering::AcqRel);
         *ENUM_CACHE.write().expect("enum cache lock") = None;
         uid
     }
@@ -199,6 +206,7 @@ impl Uid {
     /// do not re-sort the whole registry.
     pub fn enumerate() -> Vec<Arc<Uid>> {
         ensure_seeded();
+        let generation = ENUM_GEN.load(Ordering::Acquire);
         {
             let cache = ENUM_CACHE.read().expect("enum cache lock");
             if let Some(list) = cache.as_ref() {
@@ -208,7 +216,11 @@ impl Uid {
         let mut all: Vec<Arc<Uid>> = REGISTRY.read().expect("registry lock").values().cloned().collect();
         all.sort();
         let list = Arc::new(all);
-        *ENUM_CACHE.write().expect("enum cache lock") = Some(Arc::clone(&list));
+        // Only publish when no registration slipped in while we built the list;
+        // otherwise the snapshot would be missing that UID.
+        if ENUM_GEN.load(Ordering::Acquire) == generation {
+            *ENUM_CACHE.write().expect("enum cache lock") = Some(Arc::clone(&list));
+        }
         (*list).clone()
     }
 

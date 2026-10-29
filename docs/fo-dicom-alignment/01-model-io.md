@@ -100,7 +100,7 @@
 | fo-dicom 能力 | 状态 | radicom 对应 | 证据 |
 |---|---|---|---|
 | `FileReadOption.ReadLargeOnDemand` / `SkipLargeTags` / `ReadAll` | ✅ | `file.rs:48-58` | 策略齐全 |
-| 惰性窗口（真正的 on-demand） | 🟡 | `buffer.rs` `FileWindow` | `FileWindow` 把整段窗口缓存进 `OnceCell<Bytes>`（`buffer.rs:430` 附近），**首次访问即整体物化**，与"lazy"声明不符；且每个大元素各自 `File::open` 一次，多帧文件有 fd 耗尽风险 |
+| 惰性窗口（真正的 on-demand） | ✅ | `buffer.rs` `FileWindow` | 用 `Arc<File>` 共享一个句柄 + 定位读（`read_at`/`seek_read`），多窗口不再各自开 fd；`get_byte_range`/`copy_to` 按需读盘，仅 `data()` 因 `&[u8]` API 才整段物化一次 |
 | `IBulkDataUriByteBuffer` | ✅ | `buffer.rs` `BulkDataUri` | |
 | `TempFileBuffer` / `TempFileRemover` | ✅ | `buffer.rs` `TempFileSpill`；`file_ref.rs` `TempFileProvider` | 带 Drop 清扫与延迟重试删除 |
 | `CompositeByteBuffer` | ✅ | `buffer.rs` `CompositeBuffer` | 但 `data()` 恒拼接新 Vec（`buffer.rs:225`），`copy_to()` 才流式（`buffer.rs:251`） |
