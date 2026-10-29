@@ -52,6 +52,17 @@ impl Default for DicomClientOptions {
     }
 }
 
+/// How the client tears down an open association when the caller cancels
+/// outstanding work (fo-dicom `DicomClientCancellationMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DicomClientCancellationMode {
+    /// Gracefully release the association (the fo-dicom default).
+    #[default]
+    ImmediatelyReleaseAssociation,
+    /// Abort the association for the fastest shutdown.
+    ImmediatelyAbortAssociation,
+}
+
 /// Events the client reports while it drives associations (§9.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientEvent {
@@ -416,6 +427,16 @@ impl DicomClient {
         self.sent_on_association = 0;
         self.last_request = None;
     }
+
+    /// Tears down the current association according to `mode`
+    /// (fo-dicom `DicomClientCancellationMode`). A client with no open
+    /// association is unaffected.
+    pub async fn shutdown(&mut self, mode: DicomClientCancellationMode) {
+        match mode {
+            DicomClientCancellationMode::ImmediatelyReleaseAssociation => self.release().await,
+            DicomClientCancellationMode::ImmediatelyAbortAssociation => self.abort().await,
+        }
+    }
 }
 
 /// True when the open association accepted every abstract syntax in `wanted`.
@@ -505,6 +526,30 @@ mod tests {
         let response = client.send_c_echo(sop_class::VERIFICATION).await.unwrap();
         assert_eq!(response.status, crate::dimse::status::SUCCESS);
         client.release().await;
+        handle.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn the_default_cancellation_mode_releases_the_association() {
+        assert_eq!(
+            DicomClientCancellationMode::default(),
+            DicomClientCancellationMode::ImmediatelyReleaseAssociation
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_releases_the_association_in_release_mode() {
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(VerificationProvider), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string());
+        client.send_c_echo(sop_class::VERIFICATION).await.unwrap();
+        client.shutdown(DicomClientCancellationMode::ImmediatelyReleaseAssociation).await;
+        // a clean release is what lets the server's accept_one observe a
+        // graceful close rather than a dropped connection
         handle.await.unwrap().unwrap();
     }
 

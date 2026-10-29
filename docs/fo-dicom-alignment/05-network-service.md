@@ -70,13 +70,13 @@
 | 请求级 watchdog / PendingTable | `_pending` + `Options.RequestTimeout` | **部分实现** | `engine.rs` `PendingTable` 仍负责 ID 与在途请求；超时由关联响应等待直接监控 | 当前是单请求等待超时，尚未实现独立的多请求 watchdog 扫描 |
 | 关联事件 `StateChanged` | `DicomClient.cs:215-221`（6 个事件） | **已实现** | `client.rs:56` `ClientEvent::StateChanged`；接受、释放和中止路径发出 `Open`/`Closing`/`Closed` | 与既有离散事件并存，统一报告关联生命周期状态；回归测试覆盖 |
 | `AssociationRequestTimedOut` 事件 | `DicomClient.cs:215-221` | **已实现** | `client.rs` `ClientEvent::AssociationRequestTimedOut`；超时尝试在 `open_association` 发出 | 每次可重试的关联超时都会携带累计尝试次数 |
-| 取消模式 `DicomClientCancellationMode` | `DicomClient.cs:175` `{ImmediatelyReleaseAssociation, ImmediatelyAbortAssociation}` | **缺失** | grep `CancellationMode` 无命中；只有 `client.rs:323` `release` / `client.rs:328` `abort` 两个方法 | 调用方自己组合，库层面无统一取消语义 |
+| 取消模式 `DicomClientCancellationMode` | `DicomClient.cs:175` `{ImmediatelyReleaseAssociation, ImmediatelyAbortAssociation}` | **已实现** | `client.rs` `DicomClientCancellationMode`；`DicomClient::shutdown(mode)` | 默认 `ImmediatelyReleaseAssociation`；`shutdown` 按模式释放或中止关联，覆盖与既有 `release`/`abort` 同一路径 |
 | 监听式 linger（队列空等 N ms） | `AssociationLingerTimeoutInMs` 默认 50 | 部分实现 | `client.rs:33`、`client.rs:206-208`、`client.rs:138-143` | 只在"配额用尽"时 sleep，队列语义不存在（同步 API 无队列），见 §2.7 |
 | 每关联请求配额 | `MaximumNumberOfRequestsPerAssociation` | 已实现 | `client.rs:30`、`client.rs:129-131` | 语义一致 |
 | 关联请求重试上限 | `MaximumNumberOfConsecutiveTimedOutAssociationRequests`（默认 3） | **已实现** | `client.rs:187-229` | 仅超时/可重试 IO 重试；0 表示不重试，拒绝/TLS/协议错误立即返回；见 §2.8 |
 | C-CANCEL SCU | `DicomCCancelRequest` | 部分实现 | `client.rs:314-320` | 已记录最近一次请求实际使用的 presentation context；公开 client 仍无法在阻塞式 `send_c_find` 期间并发调用 `cancel` |
 | 反向 C-STORE 处理器（C-GET 收图） | `IDicomCStoreProvider` on SCU | 已实现 | `server.rs:1005-1007`、`server.rs:1161-1171` | — |
-| Expert/Advanced 层 | `Client/Advanced/*` | 部分实现 | `expert.rs:33-40` `Connection`、`expert.rs:206-221` `send` | 声称流式实际全缓冲，`RELEASE_TIMEOUT` 声明未用，见 §1.3 |
+| Expert/Advanced 层 | `Client/Advanced/*` | 部分实现 | `expert.rs:33-40` `Connection`、`expert.rs:206-221` `send` | 声称流式实际全缓冲；已删除未使用的 `RELEASE_TIMEOUT` 常量（释放超时现由关联的 `release_timeout` 负责） |
 
 ### 1.3 明确"有意不实现" vs 真实缺口
 
@@ -85,7 +85,7 @@
 | 项 | 位置 | 声明 | 判断 |
 | --- | --- | --- | --- |
 | role selection 默认不协商 | `association.rs:263-275` `accept_roles: false` | 默认拒绝 SCU/SCP 角色选择 | 有意取舍；但意味着 SCP 不能作为 SCU 反向发请求，C-GET 只能走同关联反向 C-STORE |
-| `expert.rs` 的 `RELEASE_TIMEOUT` | `expert.rs:233` | 常量声明 10s | **死代码**：全仓无引用（grep 确认）。不是"有意不实现"，是遗漏 |
+| `expert.rs` 的 `RELEASE_TIMEOUT` | — | 原常量声明 10s | **已修复**：该常量已删除；释放超时由 `Association::release` 的 `release_timeout`（默认 10s）统一负责 |
 
 仍属于真实缺口且无代码层取舍说明的是：
 

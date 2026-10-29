@@ -35,7 +35,7 @@ pub use association::{
 };
 pub use cfind::{CFindRequest, CFindResponse, QueryRetrieveLevel, QueryRoot, RetrieveService};
 pub use cget::{CGetEvent, CGetRequest, CGetResponse};
-pub use client::{ClientEvent, DicomClient, DicomClientOptions};
+pub use client::{ClientEvent, DicomClient, DicomClientCancellationMode, DicomClientOptions};
 pub use cmove::{store_to_destination, CMoveRequest, CMoveResponse, SubOperationSummary};
 pub use dimse::{
     status_description, status_description_for_service_class, Command, CommandField, Priority, Status,
