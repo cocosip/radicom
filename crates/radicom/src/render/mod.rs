@@ -1087,10 +1087,10 @@ fn render_grayscale_with_threshold(
     parallel_min_pixels: usize,
 ) -> Result<RawImage, Error> {
     // PixelData::from_dataset takes &mut Dataset, so a &Dataset render cannot
-    // borrow it; the dataset is cloned per render (§3.4). Removing this clone
-    // needs a read-only PixelData accessor in `pixel/`, which is outside this
-    // module's scope. ponytail: one BTreeMap rebuild per render; add
-    // PixelData::from_dataset_ref(&Dataset) and drop the clone.
+    // borrow it; the dataset is cloned per render (§3.4). ponytail: accepted
+    // ceiling — one BTreeMap rebuild per render (microseconds) is dominated by
+    // pixel work; removing it needs a read-only PixelData view / read-write gate
+    // split that is not worth the API churn (02 §3.4).
     let mut owned = dataset.clone();
     let pixel = PixelData::from_dataset(&mut owned)?;
     if pixel.samples_per_pixel() != 1 {

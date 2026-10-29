@@ -245,3 +245,6 @@
 - **IO / 私有 creator**：`PrivateCreators` 由 `HashMap<(u16,u8), String>` 改为 `HashMap<u16, Box<[Option<Arc<PrivateCreator>>;256]>>`，私有元素解析不再哈希元组、也不为每个元素新建 `PrivateCreator`（改为 clone Arc）。01 §3.10 标【已修复】。
 
 - **媒体 / DICOMDIR（续）**：`record_positions` 不再 `to_bytes()` 做整文件序列化，也不再对整份 dataset 求长度；新增 `DicomFile::encoded_prefix_len` 直接按 preamble+DICM+meta 计算前缀长度。
+
+- **编码 / 字符集（续）**：`charset_encoding`/`is_known_charset` 用 32 字节栈缓冲规范化短 ASCII 词，只有超长/非 ASCII 才回退 `String`，字符集切换不再每次分配。
+- **渲染 / 02 §3.4 定性**：每次渲染 clone `Dataset` 收益为微秒级，消除需读写门拆分；标为【已定性，保留（低收益）】，代码处保留 `ponytail:` 说明。

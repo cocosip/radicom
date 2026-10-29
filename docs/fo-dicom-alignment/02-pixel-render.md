@@ -408,9 +408,11 @@ fo-dicom 把整条 LUT 链包进 `PrecalculatedLUT(_lut, BitDepth.MinimumValue, 
 
 `from_dataset_frame`（:209-212）每次都解析 `(0028,3010)` 序列并 `Vec::with_capacity(count)` 复制整张表。实测：**1×1 帧 + 65536 项 VOI LUT → 0.066 ms/次渲染**，同一帧无 LUT 时 0.002 ms/次。即一次渲染的 97% 时间花在重建一张与上一帧完全相同的表上。`DicomImage` 也无任何缓存（§1.1 `CacheType` 缺失）。
 
-### 3.4 【已知上限，保留】每次渲染 clone 整个 `Dataset`
+### 3.4 【已定性，保留（低收益）】每次渲染 clone 整个 `Dataset`
 
 `render/mod.rs:887`、`:1016`、`:1037`、`:1202`、`:1252`、`:1291`、`:547` 均为 `dataset.clone()`（注释说明是为绕过 `PixelData` 的可变借用）。`Dataset` 是 `BTreeMap`（`model/dataset.rs:32`）+ `Arc<dyn Buffer>`，元素本身不深拷贝，但**每次渲染重建一遍 BTreeMap**。2048² 帧本身 25 ms，可忽略；1×1 帧时就是全部开销。
+
+**结论（已定性）**：收益为微秒级、被像素处理主导；要消除需把 `PixelData` 拆成只读视图/读写门（read-only view + read-write gate），API churn 大于收益，故保留并在代码处用 `ponytail:` 标注。
 
 ### 3.5 【已修复】`DicomImage` 的几何访问器每次 clone 数据集
 
