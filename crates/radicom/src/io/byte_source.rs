@@ -164,6 +164,9 @@ impl<R: Read + Seek> ByteSourceReader<R> {
 pub struct ByteTargetWriter<W: Write> {
     inner: W,
     pub endian: Endian,
+    /// Reused chunk buffer for streamed (non-memory) values, so writing many
+    /// large elements does not allocate a fresh chunk each time.
+    scratch: Vec<u8>,
 }
 
 /// Chunk size for streaming buffers to the target.
@@ -171,7 +174,7 @@ pub const WRITE_CHUNK: usize = 1024 * 1024;
 
 impl<W: Write> ByteTargetWriter<W> {
     pub fn new(inner: W, endian: Endian) -> Self {
-        ByteTargetWriter { inner, endian }
+        ByteTargetWriter { inner, endian, scratch: Vec::new() }
     }
 
     pub fn into_inner(self) -> W {
@@ -228,17 +231,24 @@ impl<W: Write> ByteTargetWriter<W> {
         buffer: &dyn crate::model::buffer::ByteBuffer,
         chunk_size: usize,
     ) -> io::Result<u64> {
+        // A single in-memory slice goes straight out: no chunk copy needed.
+        if let Some(bytes) = buffer.as_slice() {
+            self.inner.write_all(bytes)?;
+            return Ok(bytes.len() as u64);
+        }
         let chunk_size = chunk_size.max(1);
+        if self.scratch.len() < chunk_size {
+            self.scratch.resize(chunk_size, 0);
+        }
         let mut written = 0u64;
-        let mut chunk = vec![0u8; chunk_size];
         let mut offset = 0u64;
         loop {
             let take = (buffer.size() - offset).min(chunk_size as u64) as usize;
             if take == 0 {
                 break;
             }
-            buffer.get_byte_range(offset, &mut chunk[..take]);
-            self.inner.write_all(&chunk[..take])?;
+            buffer.get_byte_range(offset, &mut self.scratch[..take]);
+            self.inner.write_all(&self.scratch[..take])?;
             offset += take as u64;
             written += take as u64;
         }

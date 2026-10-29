@@ -270,3 +270,5 @@
 - **字符串读取 / 媒体与 IO**：`DirectoryRecord::record_type`/`referenced_file_id`、`render/icon` 的 PhotometricInterpretation、`io/file` 的 ACR-NEMA recognition code 改用 `try_get_str_ref`，避免只比较/解析时的 `String` 分配。PROGRESS 状态表补齐 01 §3.10、02 §3.4、04 §3.5 的已修复行。
 
 - **网络 / P-DATA 发送零拷贝**：`write_pdus` 不再把整条消息编码进大 `Vec`；P-DATA 直接用 `write_vectored` 从原始 `Bytes` 切片写出（含奇数补位、按 IOV 上限分块），控制 PDU 仍走 `encode_into`。新增字节级等价测试 `write_pdus_matches_the_encoded_bytes_with_odd_padding`；03 §3.2 与待办同步更新。
+
+- **IO / 写入缓冲**：`ByteBuffer` 新增 `as_slice()`；`write_buffer_with_chunk` 对连续内存值直接 `write_all`（不再整值复制 1 MiB 块），流式值复用 `ByteTargetWriter` 的 scratch 缓冲，跨元素不再每次分配。

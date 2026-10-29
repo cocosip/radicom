@@ -18,6 +18,12 @@ pub trait ByteBuffer: Send + Sync + std::fmt::Debug {
     /// Materializes the whole value (may trigger a lazy load).
     fn data(&self) -> std::borrow::Cow<'_, [u8]>;
 
+    /// A zero-copy view when the value is one contiguous in-memory slice.
+    /// Defaults to `None`; callers fall back to [`ByteBuffer::data`].
+    fn as_slice(&self) -> Option<&[u8]> {
+        None
+    }
+
     /// The bulk-data URI this buffer stands for, when it is a [`BulkDataUri`]
     /// (JSON `BulkDataURI` carrier, docs/08 §1.1). Defaults to `None`.
     fn bulk_uri(&self) -> Option<&str> {
@@ -123,6 +129,9 @@ impl ByteBuffer for MemoryBuffer {
     }
     fn data(&self) -> std::borrow::Cow<'_, [u8]> {
         std::borrow::Cow::Borrowed(&self.0)
+    }
+    fn as_slice(&self) -> Option<&[u8]> {
+        Some(self.0.as_ref())
     }
 }
 
