@@ -223,3 +223,7 @@
 - **网络 / C-STORE 接收**：`handle_command_with_dataset`/`handle_c_store` 直接传递 `bytes::Bytes`，去掉 `dataset_bytes.to_vec()` 的全量拷贝（`Bytes` 克隆仅引用计数）。
 - **IO / PathFile**：删除单实现 `FileRef` trait，方法降为 `PathFile` inherent（去掉 C# 式单实现接口）。
 - **文档**：五份对齐报告 §0/§1 增加"历史快照"状态提示，避免正文旧口吻误读。
+
+- **编码 / 字符集注册表**：`REGISTRY` 由 `Mutex` 改 `RwLock`，并发解码共享读锁，注册仍取写锁。
+- **匿名化 / 动作解析**：新增 `SecurityProfile::action_for_tag`，按 `Tag::to_u32()` 直接查精确索引，仅通配行才格式化 tag 文本；walk 不再每元素 `format!`+解析。含一致性测试。
+- **文档 / 性能项对齐**：01 的 push_fragment、charset、require、CompositeBuffer、default_dictionary、Uid::enumerate、read_meta_block、deflate、ASCII 快路径，02 的 3.8，04 的 3.1–3.4 均标记【已修复】；01 §3.4/3.10 与 04 §3.5 标为已知上限。
