@@ -137,3 +137,14 @@
   Stop/Complete 等快照措辞更正。
 - 代码侧无新增（本轮仅文档同步；相关实现均在此前轮次落地并有测试）。
 
+## 结论
+
+五份报告中的“缺失（❌ / 缺失）”项已全部实现，或明确归类为**有意不实现 / 范围取舍 / 设计边界**；
+仍在 `🟡` 的条目均为设计或性能边界，而非功能缺口：
+
+- 同步 API 无请求队列 → 监听式 linger、watchdog 多请求扫描、C-MOVE 流水线、C-CANCEL 并发。
+- 轻依赖取向 → PKCS#12/系统证书库、完整正则 tag 匹配、私有字典。
+- 已用 `ponytail:` 标注的性能上限 → `write_pdu` 重编码、`FileWindow` 每窗口句柄、命令/数据发送批处理。
+- 形态抽象 → `IImage`/`INetworkManager`、每服务独立 provider trait、`DirectoryRecord` 指针、`CacheType`。
+
+
