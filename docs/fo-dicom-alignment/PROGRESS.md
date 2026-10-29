@@ -216,3 +216,6 @@
 
 - **网络 / PDU 编码**：新增 `pdu::encode_into`，P-DATA 直接写入目标缓冲（无中间 body Vec）；`write_pdu`/`write_pdus` 改用之，批量分片共用一缓冲。含 `encode_into_appends_the_same_bytes_as_encode` 测试。
 
+
+- **模型 / 编码器**：删除未使用的 `DirectTranscoder` 钩子与 `CodecRegistry::get_direct_transcoder`（无任何实现，封装→封装恒走解码+编码），`transcode_dataset` 行 5 简化。
+
