@@ -41,7 +41,7 @@ jobs:
         run: cargo test --workspace --all-features
 
       - name: Generated dictionary is up to date
-        run: cargo xtask gen-dict --check
+        run: cargo run --package xtask -- gen-dict --check
 
       - name: Docs
         run: cargo doc --workspace --all-features --no-deps
@@ -65,7 +65,7 @@ jobs:
       # Production lines only: test/bench/example targets and inline
       # `#[cfg(test)]` modules are excluded by the xtask.
       - name: Production line coverage
-        run: cargo xtask coverage
+        run: cargo run --package xtask -- coverage
 
   msrv:
     name: msrv (1.89)
