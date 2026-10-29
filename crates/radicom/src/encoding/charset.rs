@@ -65,6 +65,24 @@ fn normalize_term(term: &str) -> String {
     term.chars().filter(|c| !matches!(c, ' ' | '-' | '_')).map(|c| c.to_ascii_uppercase()).collect()
 }
 
+/// Calls `f` with the normalized term, using a small stack buffer for the
+/// common short ASCII case so a charset switch does not allocate (review §2.13).
+fn with_normalized_term<R>(term: &str, f: impl FnOnce(&str) -> R) -> R {
+    let mut buffer = [0u8; 32];
+    let mut len = 0usize;
+    for c in term.chars() {
+        if matches!(c, ' ' | '-' | '_') {
+            continue;
+        }
+        if !c.is_ascii() || len == buffer.len() {
+            return f(&normalize_term(term));
+        }
+        buffer[len] = c.to_ascii_uppercase() as u8;
+        len += 1;
+    }
+    f(std::str::from_utf8(&buffer[..len]).expect("normalized ASCII"))
+}
+
 /// Registers or remaps a character set term (ENC-04 extension point).
 pub fn register_charset(term: &str, encoding_name: &str) -> Result<(), Error> {
     let enc = Encoding::for_label(encoding_name.as_bytes()).ok_or_else(|| {
@@ -81,23 +99,22 @@ pub fn register_charset(term: &str, encoding_name: &str) -> Result<(), Error> {
 /// fall back to windows-1252 (encoding_rs's ASCII superset — callers warn,
 /// spec §8.1).
 ///
-/// ponytail: every call normalizes into a fresh `String` and takes the registry
-/// lock. Parsing only pays this on a charset switch (the builder caches), so the
-/// cost is confined to the write path; a thread-local term→encoding cache would
-/// remove it if that ever shows up in a profile (review §2.13).
+/// ponytail: every call takes the registry read lock. Parsing only pays this on
+/// a charset switch (the builder caches), so the cost is confined to the write
+/// path; a thread-local term→encoding cache would remove it if that ever shows up
+/// in a profile (review §2.13). The normalized term no longer allocates for short
+/// ASCII labels.
 pub fn charset_encoding(term: &str) -> &'static Encoding {
     ensure_registry();
-    let normalized = normalize_term(term);
-    if let Some(e) = REGISTRY.read().expect("registry lock").get(&normalized) {
-        return e;
-    }
-    encoding_rs::WINDOWS_1252
+    with_normalized_term(term, |key| {
+        REGISTRY.read().expect("registry lock").get(key).copied().unwrap_or(encoding_rs::WINDOWS_1252)
+    })
 }
 
 /// True when the term is a known charset (used to decide whether to warn).
 pub fn is_known_charset(term: &str) -> bool {
     ensure_registry();
-    REGISTRY.read().expect("registry lock").contains_key(&normalize_term(term))
+    with_normalized_term(term, |key| REGISTRY.read().expect("registry lock").contains_key(key))
 }
 
 fn ensure_registry() {
