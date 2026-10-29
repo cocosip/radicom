@@ -226,18 +226,27 @@ impl Uid {
 
     // -- classification (UID-01) ------------------------------------------
 
-    /// Storage category heuristic: only SOP Class UIDs classify; a private
-    /// root (outside 1.2.840.10008) yields `Private`; names drive the rest.
-    /// The generated table carries precise per-entry categories; this
-    /// heuristic covers unknown/SEEded entries.
+    /// Storage category, mirroring fo-dicom `DicomUID.StorageCategory`.
+    ///
+    /// Only SOP Class UIDs classify: a non-standard root is `Private`, a
+    /// non-SOP-Class UID is `None`. Every real category additionally requires
+    /// the name to contain "Storage" and not be a "Storage Commitment" SOP
+    /// Class, exactly like fo-dicom; the remaining buckets are name-keyed.
     pub fn storage_category(&self) -> StorageCategory {
+        if !self.value.starts_with("1.2.840.10008") {
+            return if self.uid_type == UidType::SopClass {
+                StorageCategory::Private
+            } else {
+                StorageCategory::None
+            };
+        }
         if self.uid_type != UidType::SopClass {
             return StorageCategory::None;
         }
-        if !self.value.starts_with("1.2.840.10008.") {
-            return StorageCategory::Private;
-        }
         let name = self.name.unwrap_or("");
+        if name.starts_with("Storage Commitment") || !name.contains("Storage") {
+            return StorageCategory::None;
+        }
         if name.contains("Image Storage") {
             StorageCategory::Image
         } else if name.contains("Volume Storage") {
@@ -251,7 +260,10 @@ impl Uid {
             StorageCategory::StructuredReport
         } else if name.contains("Waveform") {
             StorageCategory::Waveform
-        } else if name.contains("Document") {
+        } else if name.contains("Encapsulated CDA")
+            || name.contains("Encapsulated PDF")
+            || name.contains("Document Storage")
+        {
             StorageCategory::Document
         } else if name.contains("Raw Data") {
             StorageCategory::Raw
@@ -476,6 +488,44 @@ mod tests {
             false,
         );
         assert_eq!(sr.storage_category(), StorageCategory::StructuredReport);
+
+        // fo-dicom requires the name to contain "Storage" and excludes
+        // Storage Commitment SOP Classes (they are not storage SOP Classes).
+        let commitment = Uid::register(
+            "1.2.840.10008.1.20.1",
+            "Storage Commitment Push Model SOP Class",
+            UidType::SopClass,
+            false,
+        );
+        assert_eq!(commitment.storage_category(), StorageCategory::None);
+
+        let pdf = Uid::register(
+            "1.2.840.10008.5.1.4.1.1.104.1",
+            "Encapsulated PDF Storage",
+            UidType::SopClass,
+            false,
+        );
+        assert_eq!(pdf.storage_category(), StorageCategory::Document, "Encapsulated PDF is Document");
+
+        let raw = Uid::register(
+            "1.2.840.10008.5.1.4.1.1.66",
+            "Raw Data Storage",
+            UidType::SopClass,
+            false,
+        );
+        assert_eq!(raw.storage_category(), StorageCategory::Raw);
+
+        let volume = Uid::register(
+            "1.2.840.10008.5.1.4.1.1.66.4",
+            "Segmentation Storage",
+            UidType::SopClass,
+            false,
+        );
+        assert_eq!(volume.storage_category(), StorageCategory::Other, "no Volume/Image keyword → Other");
+
+        // a non-standard root that is not a SOP class is not Private
+        let private_ts = Uid::register("1.3.46.670589.11.0.2", "Private TS", UidType::TransferSyntax, false);
+        assert_eq!(private_ts.storage_category(), StorageCategory::None);
     }
 
     #[test]

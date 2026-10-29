@@ -55,7 +55,7 @@
 | `IsPrivateSequence` 探测（私有 SQ 是否真为 SQ） | ✅ | `reader.rs` `private_probe`/`parse_private_sequence` | 私有 SQ 会检查 Item/Delimitation 决定隐式或显式，GH626 类文件正常解析 |
 | `IsPrivateSequenceBad`（跳过空 item 后重判隐式/显式） | ✅ | `reader.rs:246` | 跳过空 item 直到有 body 再判定（fo-dicom `IsPrivateSequenceBad`） |
 | `handleBadPrivateSequence` 状态贯通（ParseVR/ParseLength/ParseValue 三处） | ✅ | `Step`/`Mode` 的 `private_probe`/`cp246` 标志 | 三处解析共享同一状态位 |
-| 私有 tag 走私有字典解析 VR | 🟡（范围取舍） | `reader.rs:208` `dictionary_vr` | radicom 不内置私有字典，未知私有 tag 取 `UN`（隐式 VR 下可正确解析为序列）；标准字典覆盖的 tag 正常 |
+| 私有 tag 走私有字典解析 VR | ⛔ 有意不实现（范围取舍） | `reader.rs` `dictionary_vr` | radicom 不内置厂商私有字典，未知私有 tag 取 `UN`（隐式 VR 下可正确解析为序列）；标准字典覆盖的 tag 正常 |
 | `FFFE,E000` 孤立 item → `DicomTag.Item` 身份（#364 修复） | ✅ | `reader.rs` `Step::Orphan` 用 `Tag::ITEM` | 匿名序列以 `(FFFE,E000)` 作为序列 tag（fo-dicom `DicomTag.Item`），GH364/FreezePattern 正确输出 |
 | 序列中 `FFFE,E00D` 后缺 `FFFE,E0DD`（k-pacs 兼容） | ✅ | `reader.rs` T7：`Step::Item` 遇 `SequenceEnd` 向上冒泡 | `parse_level` 的 T7 把 `SequenceDelimitationItem` 当作 item/序列结束，k-pacs 截断序列可解析 |
 | `Suspended` 结果 + 部分数据集（`IsPartial`） | ✅ | `ReadOutcome::Suspended` / `DicomFile.is_partial` | `is_partial` 由解析结果（非 Success 即部分）置位，截断文件返回部分数据集（GH179B） |
@@ -89,10 +89,10 @@
 | `DicomDatasetComparer`（可切换 `CompareInstancesByContent`、跳过 BulkDataUri） | ✅ | `dataset.rs` `content_equals` | 内容比较会跳过未解析的 BulkData（`skips_unresolved_bulk`），不再强制物化 `FileWindow`/`BulkDataUri` |
 | 私有 tag 排序契约 | ✅ | `tag.rs` `Ord`/`Hash` | 与 fo-dicom `DicomTag.CompareTo` 一致：group → **完整** element → creator；不同私有 block 不再相等，避免互相覆盖 |
 | `DicomTag.ToString("G"/"X"/"g"/"J")` | ✅ | `tag.rs` `to_string_with` / `to_json_string` | G/X/g/J 四种格式均实现（X 显示私有 block 掩码） |
-| `DicomTag.Parse` 严格性 | 🟡 | `tag.rs` `parse` | radicom 额外接受 `GGGGEEEE` 连写与不足 4 位十六进制（`tag.rs:parse_hex_u16`），fo-dicom 要求 ≥8 字符；radicom 拒绝 `(0028:0010)` 冒号形式 |
+| `DicomTag.Parse` 严格性 | ✅（有意宽容） | `tag.rs` `parse` | 有意接受 `GGGGEEEE` 连写与不足 4 位十六进制（更宽容，便于手写/JSON）；仍拒绝 `(0028:0010)` 冒号形式 |
 | `DicomVM.Parse` 缓存 | ✅ | `vm.rs` `Vm::parse` | 仅在懒加载字典构建时解析一次并缓存于 `DictionaryEntry.vm`，非热路径，无需额外缓存 |
 | `DicomUIDGenerator.RegenerateAll` / `RootUID` / `GetMetaSopClass` | ✅ | `uid.rs` `regenerate_all` / `root_uid` / `meta_sop_class` | 三者均实现并有测试 |
-| `StorageCategory` 精确表 | 🟡 | `uid.rs:205` | 用 name-前缀启发式判定，fo-dicom 的生成表是逐条目精确值 |
+| `StorageCategory` 精确表 | ✅ | `uid.rs` `storage_category` | 已按 fo-dicom `DicomUID.StorageCategory` 真实算法对齐：非标准根→Private、非 SOPClass→None、名称须含 "Storage" 且排除 "Storage Commitment"，并补 Encapsulated PDF/CDA→Document；fo-dicom 本身亦为名称启发式而非生成表 |
 | `DicomTransferSyntax` 静态表 | ✅ | `transfer_syntax.rs` | 注册表 + `register`/`unregister`，比 fo-dicom 的静态表更灵活 |
 
 ### 1.4 文件与缓冲

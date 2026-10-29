@@ -197,6 +197,9 @@
   把 `0x0106` 等 DIMSE-N 失败码误判为 Pending 的缺陷（仅 `FF00`/`FF01` 为 Pending）。
 - **网络 / 发送攒批**：新增 `transport::write_pdus` 与 `server::write_pdata_batch`，把一条消息的分片
   P-DATA 编码进一个缓冲后单次 `write_all`（按消息攒批、减少 syscall）；CEcho/CStore/CFind/CMove/CGet 请求路径已接入。
+- **模型 / StorageCategory**：按 fo-dicom `DicomUID.StorageCategory` 真实算法重写 `storage_category`
+  （非标准根→Private、非 SOPClass→None、须含 "Storage" 且排除 "Storage Commitment"、Encapsulated PDF/CDA→Document）；
+  补充对应测试。文档将私有字典、`Tag::parse` 定性为有意取舍/有意宽容。
 - .NET 专属抽象，Rust 不适用（按能力已覆盖）→ `INetworkManager`、`DicomTimeout`、`NetworkStreamCreationOptions`、
   `IImage`/`IImageManager`、`IPixelData` 接口、每服务独立 provider 接口、`DirectoryRecord` 指针、`CacheType`、`ArrayPool`。
 
