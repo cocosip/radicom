@@ -174,6 +174,9 @@
   则不发布该陈旧快照，消除并行测试下的偶发缺失。
 - **网络 / User Identity (AC)**：AC 项体按 PS3.8 §D.3.3.7 编解码为 `[server-response-length u16][bytes]`，
   长度越界报协议错误（此前把应答当不透明字节，编码缺少长度前缀）；补字节级回归。
+- **网络 / PdvAssembler**：内部缓冲改 `BytesMut`，`MessageUnit.bytes` 改 `bytes::Bytes`；单 PDV 消息
+  直接共享 `Pdv.data`（零拷贝），分片消息 `freeze()` 一次。新增 `a_single_pdv_message_is_shared_not_copied`。
+- **内存 / CompositeBuffer**：`data()` 已缓存（`OnceCell<Bytes>`），文档旧描述已更正。
 - .NET 专属抽象，Rust 不适用（按能力已覆盖）→ `INetworkManager`、`DicomTimeout`、`NetworkStreamCreationOptions`、
   `IImage`/`IImageManager`、`IPixelData` 接口、每服务独立 provider 接口、`DirectoryRecord` 指针、`CacheType`、`ArrayPool`。
 

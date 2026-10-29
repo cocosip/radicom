@@ -270,7 +270,7 @@ pub const REFUSED_OUT_OF_RESOURCES: u16 = 0xA700;
 
 ## 3. 性能问题
 
-### 3.1 【高】`read_pdu` 每 PDU 两次分配 + 一次整帧拷贝
+### 3.1 【已修复】`read_pdu` 单次分配、整帧读入
 
 **位置**：`transport.rs:49-53`
 
@@ -309,7 +309,7 @@ writer.flush().await?;                  // TcpStream 上 flush 是空操作
 
 **最小修复**：给 `write_pdu` 增加"已编码缓冲"路径（PDV 切片直接 `write_vectored`），或让 `Pdv` 持有 `Bytes` 借用而非 `Vec<u8>` 复制。`flush()` 对 `TcpStream` 无意义，可直接删掉。
 
-### 3.3 【中】消息在发送路径上被复制至少 3 次
+### 3.3 【已修复】`Pdv.data` 改为 `Bytes`，发送分片零拷贝
 
 **位置**：`message.rs:50-59` → `assembler.rs:123-159`（`data[offset..end].to_vec()`）、`pdu.rs:545`（`value.to_vec()`）、`pdu.rs:732`（`extend_from_slice`）
 
@@ -319,7 +319,7 @@ writer.flush().await?;                  // TcpStream 上 flush 是空操作
 
 **最小修复**：`Pdv.data` 改为 `bytes::Bytes`（零拷贝切片），`split` 直接 `Bytes::slice`。
 
-### 3.4 【中】解码路径每 PDV 一次 `to_vec`
+### 3.4 【已修复】解码 PDV 共享帧缓冲，单 PDV 消息不再拷贝
 
 **位置**：`pdu.rs:545`
 

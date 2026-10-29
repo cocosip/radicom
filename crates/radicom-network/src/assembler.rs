@@ -24,7 +24,7 @@ pub enum Stream {
 #[derive(Debug, Clone, Default)]
 pub struct PdvAssembler {
     /// Half-assembled message per `(context id, stream)`.
-    buffers: std::collections::HashMap<(u8, Stream), Vec<u8>>,
+    buffers: std::collections::HashMap<(u8, Stream), bytes::BytesMut>,
 }
 
 /// A completed message unit.
@@ -32,7 +32,9 @@ pub struct PdvAssembler {
 pub struct MessageUnit {
     pub context_id: u8,
     pub stream: Stream,
-    pub bytes: Vec<u8>,
+    /// The message bytes. Single-PDV messages share the PDV's `Bytes` (no copy);
+    /// fragmented ones are frozen from a `BytesMut` exactly once.
+    pub bytes: bytes::Bytes,
 }
 
 impl PdvAssembler {
@@ -55,6 +57,10 @@ impl PdvAssembler {
     pub fn push_pdv(&mut self, pdv: &Pdv) -> Result<Option<MessageUnit>> {
         let stream = if pdv.is_command { Stream::Command } else { Stream::Data };
         let key = (pdv.context_id, stream);
+        // Fast path: a complete message arriving in one PDV is shared, not copied.
+        if pdv.is_last && !self.buffers.contains_key(&key) {
+            return Ok(Some(MessageUnit { context_id: pdv.context_id, stream, bytes: pdv.data.clone() }));
+        }
         let buffer = self.buffers.entry(key).or_default();
         buffer.extend_from_slice(&pdv.data);
         if !pdv.is_last {
@@ -62,7 +68,7 @@ impl PdvAssembler {
         }
 
         // the message is complete: drop the buffer so idle contexts cost nothing
-        let bytes = self.buffers.remove(&key).unwrap_or_default();
+        let bytes = self.buffers.remove(&key).unwrap_or_default().freeze();
         Ok(Some(MessageUnit { context_id: pdv.context_id, stream, bytes }))
     }
 
@@ -217,6 +223,16 @@ mod tests {
     }
 
     #[test]
+    fn a_single_pdv_message_is_shared_not_copied() {
+        let mut assembler = PdvAssembler::new();
+        let source = bytes::Bytes::from_static(b"single");
+        let p = Pdv { context_id: 1, is_command: true, is_last: true, data: source.clone() };
+        let unit = assembler.push_pdv(&p).unwrap().unwrap();
+        assert_eq!(unit.bytes.as_ptr(), source.as_ptr(), "a one-PDV message shares its bytes");
+        assert!(assembler.is_idle());
+    }
+
+    #[test]
     fn assembles_a_command_split_across_pdvs() {
         let mut assembler = PdvAssembler::new();
         assert!(assembler
@@ -326,9 +342,9 @@ mod tests {
             })
             .unwrap();
         assert_eq!(units.len(), 2);
-        assert_eq!((units[0].context_id, units[0].stream, units[0].bytes.clone()), (3, Stream::Command, vec![0xAA]));
+        assert_eq!((units[0].context_id, units[0].stream, units[0].bytes.to_vec()), (3, Stream::Command, vec![0xAA]));
         assert_eq!(
-            (units[1].context_id, units[1].stream, units[1].bytes.clone()),
+            (units[1].context_id, units[1].stream, units[1].bytes.to_vec()),
             (1, Stream::Data, vec![0x01, 0x02, 0x03]),
             "the dataset on context 1 is not touched by the command on context 3"
         );
