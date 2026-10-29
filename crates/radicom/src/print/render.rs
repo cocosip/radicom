@@ -570,6 +570,6 @@ mod tests {
             .filter(|pixel| pixel[0] == 255)
             .count();
         assert_eq!(lit_pixels, 1, "requested width must shrink the rendered patch");
-        assert_eq!(&canvas.bytes[(1 * 8 + 4) * 4..(1 * 8 + 5) * 4], &[255, 255, 255, 255]);
+        assert_eq!(&canvas.bytes[(8 + 4) * 4..(8 + 5) * 4], &[255, 255, 255, 255]);
     }
 }
