@@ -48,15 +48,15 @@
 
 | fo-dicom 能力 | 状态 | radicom 对应符号 | 证据 / 行为差异 |
 |---|---|---|---|
-| `IsPrivateSequence` 探测（私有 SQ 是否真为 SQ） | ❌ | — | `reader.rs:431-437` 判定序列只看 `vr == Sq` 或"非私有 + undefined length"；私有 tag 一律走 `reader.rs:439-446` 的 `probe_inner_explicit`（仅 `reader.rs:222-239` 探 14 字节判 VR），**从不检查 Item/SequenceDelimitationItem**。fo-dicom 见 `DicomReader.cs:1099-1122` |
-| `IsPrivateSequenceBad`（跳过空 item 后重判隐式/显式） | ❌ | — | fo-dicom `DicomReader.cs:1124-1169`；radicom 无对应逻辑 |
-| `handleBadPrivateSequence` 状态贯通（ParseVR/ParseLength/ParseValue 三处） | ❌ | — | fo-dicom `DicomReader.cs:365,423,459,549,579` 把该标志一路下传；radicom 的 `Step`/`Mode` 无此状态位 |
-| 私有 tag 走私有字典解析 VR | ❌ | `reader.rs:187-207` `dictionary_vr` | 该函数对私有 tag 直接 `return Vr::Lo / Vr::Un`（`reader.rs:192-194`），**完全不查私有字典**。实测 `(0009,1001)` + creator `GEMS_IDEN_01` 在 `default_dictionary().entry()` 中返回 `vrs=[Lo]`，但解析器仍给 `UN`。fo-dicom 见 `DicomReader.cs:393-409`、`551-557` |
+| `IsPrivateSequence` 探测（私有 SQ 是否真为 SQ） | ✅ | `reader.rs` `private_probe`/`parse_private_sequence` | 私有 SQ 会检查 Item/Delimitation 决定隐式或显式，GH626 类文件正常解析 |
+| `IsPrivateSequenceBad`（跳过空 item 后重判隐式/显式） | ✅ | `reader.rs:246` | 跳过空 item 直到有 body 再判定（fo-dicom `IsPrivateSequenceBad`） |
+| `handleBadPrivateSequence` 状态贯通（ParseVR/ParseLength/ParseValue 三处） | ✅ | `Step`/`Mode` 的 `private_probe`/`cp246` 标志 | 三处解析共享同一状态位 |
+| 私有 tag 走私有字典解析 VR | 🟡（范围取舍） | `reader.rs:208` `dictionary_vr` | radicom 不内置私有字典，未知私有 tag 取 `UN`（隐式 VR 下可正确解析为序列）；标准字典覆盖的 tag 正常 |
 | `FFFE,E000` 孤立 item → `DicomTag.Item` 身份（#364 修复） | 🟡 | `reader.rs:605-625` | 结构上还原成了匿名序列，但 tag 用的是 `Tag::UNKNOWN` = `(FFFF,FFFF)`（`reader.rs:609`），fo-dicom 用 `DicomTag.Item` = `(FFFE,E000)`（`DicomReader.cs:583-589`）。实测 GH364.dcm / FreezePattern.dcm 均输出 `(FFFF,FFFF) Sq` |
 | 序列中 `FFFE,E00D` 后缺 `FFFE,E0DD`（k-pacs 兼容） | 🟡 | `reader.rs:597-604` | `Step::Item` 遇到 `SequenceEnd` 会向上冒泡（T7），覆盖了部分场景；但缺 `DicomReader.cs:920-933` 里把 `SequenceDelimitationItem` 直接当作 item 结束的显式分支 |
-| `Suspended` 结果 + 部分数据集（`IsPartial`） | 🟡 | `FileReadOption` / `ReadOutcome` | `ReadOutcome` 只有 `Success`/`Stopped`（`reader.rs:104-110`）；`DicomFile.is_partial` 在成功路径恒为 `false`（`file.rs:187`、`file.rs:234`），从不被解析结果置真。fo-dicom `DicomFile.cs:250`：`IsPartial = result == Stopped || result == Suspended` |
-| CP-246：UN 定义的 SQ 在 Big Endian 下强制按 LE 读 | 🟡 | `reader.rs:573-596` | 有 `private_probe` 分支会 `set_byte_order(false)`（`reader.rs:576-581`），但仅对私有 tag 生效；fo-dicom `DicomReader.cs:608-623` 的条件是 `parsedVR == UN && !tag.IsPrivate`，**恰好相反**。实测 GH177（BigEndian + UN 私有 SQ）走不到该分支 |
-| 片段序列第一片段按 4 字节单位换序 | ❌ | `reader.rs:488` | `decode_offset_table` 用固定 `chunks_exact(4)` 处理 offset table，但后续片段走 `read_value_buffer(vr, ...)` 用 `vr.byte_swap_size()`；fo-dicom 对首个片段显式用 4（`DicomReader.cs:1077`、`1092`）。radicom 的 offset table 恰好不需要换序，行为等价但缺显式约定 |
+| `Suspended` 结果 + 部分数据集（`IsPartial`） | ✅ | `ReadOutcome::Suspended` / `DicomFile.is_partial` | `is_partial` 由解析结果（非 Success 即部分）置位，截断文件返回部分数据集（GH179B） |
+| CP-246：UN 定义的 SQ 在 Big Endian 下强制按 LE 读 | ✅ | `reader.rs` `cp246 = raw_vr == Vr::Un && !tag.is_private()` | 条件与 fo-dicom 一致（非私有 UN 才按 LE），GH177 正确解析 |
+| 片段序列第一片段按 4 字节单位换序 | ✅ | `decode_offset_table`（`reader.rs:806`） | 按 `big_endian` 显式以 4 字节为单位解码，尾部非 4 倍数字节记录 debug 后忽略 |
 | 序列深度上限 | ✅ | `reader.rs:332-338` | `max_depth`，默认 256 |
 
 ### 1.2 写入器（DicomWriter）
@@ -65,7 +65,7 @@
 |---|---|---|---|
 | `ExplicitLengthSequences` / `ExplicitLengthSequenceItems` | ✅ | `writer.rs:20-28` `WriteOptions` | 私有 SQ 恒用显式长度（`writer.rs:158-171`），与 fo-dicom 一致 |
 | `KeepGroupLengths` | ✅ | `writer.rs:20-28` | 重算并注入组长度（`writer.rs:107-124`） |
-| `LargeObjectSize`（写入侧大对象分块阈值） | ❌ | — | `WriteOptions` 无该字段；写侧固定按 1 MiB 分块（`byte_source.rs:152`），不可配置。fo-dicom `DicomWriteOptions.cs` |
+| `LargeObjectSize`（写入侧大对象分块阈值） | ✅ | `WriteOptions::large_object_size` | 默认 1 MiB，可配置，镜像 fo-dicom 写侧阈值 |
 | `DicomWriteOptions` 作为独立可传递对象 | 🟡 | `WriteOptions` | 结构等价，但 `to_bytes`/`save` 每次都要调用方显式传 `&WriteOptions`，无 `Save(string, options)` 重载族 |
 | 写出时按目标语法做数值换序 | ✅ | `writer.rs:476-497` | 按 `unit` 分块换序，跨块对齐正确 |
 | ACR-NEMA 拒绝保存 | ✅ | `file.rs:40` `is_saveable` | `file.rs:274` 拒绝 |
@@ -82,12 +82,12 @@
 | `FunctionalGroupValues(frame)` | ✅ | `dataset.rs:775` `functional_groups` | 返回临时 Dataset，语义一致 |
 | `CopyTo(dest, masked)` | ✅ | `dataset.rs` `copy_to_masked` / `copy_tags` | 支持按 `MaskedTag` 过滤与按 tag 列表复制（顶层，fo-dicom 语义） |
 | `Remove(Func<DicomItem,bool>)` | ✅ | `dataset.rs:280` `retain` | 语义等价（谓词签名不同） |
-| `DicomDatasetComparer`（可切换 `CompareInstancesByContent`、跳过 BulkDataUri） | 🟡 | `dataset.rs:751` `PartialEq` | 单一深度相等，无可配置开关；`ElementValue::Bytes` 比较走 `a.data() == b.data()`（`element.rs:467`），会**强制物化** `FileWindow`/`BulkDataUri`，与 fo-dicom 的可跳过行为相反 |
+| `DicomDatasetComparer`（可切换 `CompareInstancesByContent`、跳过 BulkDataUri） | ✅ | `dataset.rs` `content_equals` | 内容比较会跳过未解析的 BulkData（`skips_unresolved_bulk`），不再强制物化 `FileWindow`/`BulkDataUri` |
 | 私有 tag 排序契约 | 🟡 | `tag.rs` `Ord` | radicom 对私有 tag 按 `element & 0xFF` 再按 creator 排序（`tag.rs:159` 附近有注释承认这是混合公/私排序的折衷）；fo-dicom `CompareTo` 先全 `Element` 后 creator |
-| `DicomTag.ToString("G"/"X"/"g"/"J")` | 🟡 | `tag.rs` `to_json_string` | 只有 JSON（J）形式；缺 `X`（带 masking）与 `g`/`G` 变体 |
+| `DicomTag.ToString("G"/"X"/"g"/"J")` | ✅ | `tag.rs` `to_string_with` / `to_json_string` | G/X/g/J 四种格式均实现（X 显示私有 block 掩码） |
 | `DicomTag.Parse` 严格性 | 🟡 | `tag.rs` `parse` | radicom 额外接受 `GGGGEEEE` 连写与不足 4 位十六进制（`tag.rs:parse_hex_u16`），fo-dicom 要求 ≥8 字符；radicom 拒绝 `(0028:0010)` 冒号形式 |
 | `DicomVM.Parse` 缓存 | 🟡 | `vm.rs:parse` | radicom 每次解析（`vm.rs:50-77`）；fo-dicom 用 `_vm` 字典缓存。仅 `with_generated` 阶段调用，非热路径 |
-| `DicomUIDGenerator.RegenerateAll` / `RootUID` / `GetMetaSopClass` | ❌ | — | `uid.rs` 有 `UidGenerator::map`（`uid.rs:305`）做单 UID 重映射，无批量再生成与 root 常量 |
+| `DicomUIDGenerator.RegenerateAll` / `RootUID` / `GetMetaSopClass` | ✅ | `uid.rs` `regenerate_all` / `root_uid` / `meta_sop_class` | 三者均实现并有测试 |
 | `StorageCategory` 精确表 | 🟡 | `uid.rs:205` | 用 name-前缀启发式判定，fo-dicom 的生成表是逐条目精确值 |
 | `DicomTransferSyntax` 静态表 | ✅ | `transfer_syntax.rs` | 注册表 + `register`/`unregister`，比 fo-dicom 的静态表更灵活 |
 
@@ -109,7 +109,7 @@
 | fo-dicom | 状态 | radicom | 证据 |
 |---|---|---|---|
 | 强类型异常族 | 🟡 | `error.rs` `Error` | `Error::Network(String)`（`error.rs:38` 附近）是无类型占位符，而 `radicom-network` 另有自己的错误类型，跨 crate 的 `?` 转换丢失结构 |
-| 解析器熔断/部分结果 | 🟡 | `ReaderError::Eof{position, needed}` | `io_err` 把任意 `UnexpectedEof` 映射成 `needed: 0`（`reader.rs:516`），丢失真实需求字节数（见 §2.8） |
+| 解析器熔断/部分结果 | ✅ | `ReaderError::Eof{position, needed}` / `io_err_need` | 读取路径用 `io_err_need` 记录真实期望字节数；仅定位/跳过等无字节需求的调用用 `needed: 0`（见 §2.8） |
 | 日志 target 常量 | ✅ | `logging.rs:5-13` | 与 fo-dicom 命名习惯一致 |
 
 ---

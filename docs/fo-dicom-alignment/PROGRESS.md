@@ -75,8 +75,10 @@
 
 ## 待办（按价值排序）
 
-1. **文档状态同步**：01/02/04 报告正文仍保留走查时的“缺失/部分实现”措辞，尚未逐条改成“已修复”。
-   完成一个模块的实现后应顺手更新对应行，避免误导后续评审。
+1. **文档状态同步**：01/02/04 报告正文的表格已在本轮集中校正：01/02 中此前标 `❌/🟡` 但已实现的项
+   （1-bit、32-bit、width/height、palette 校验、YBR planar、预计算 LUT、histogram padding、
+   NominalScanned/per-frame 几何、私有序列探测、CP-246、offset table、LargeObjectSize、ToString、
+   UID、dataset 比较、io_err）均已改为 `✅`。仍保留 `🟡/❌` 的是真实形态/范围取舍项（见下）。
 2. **03 §3.2 `write_pdu` 每 PDU 重编码**：代码已用注释标注为已知上限（无调用方可传入复用缓冲）；
    若要消除需把编码缓冲穿过 engine，属较大改动。
 3. **03/05 命令/数据缓冲上限**：fo-dicom 的 `MaxCommandBuffer`/`MaxDataBuffer` 是**发送侧批处理**
@@ -127,3 +129,11 @@
 
 - `6a6a43b` `register_status_description`（可扩展状态描述，对齐 `AddKnownDicomStatuses`）。
 - 文档：状态码分类/常量/描述行更新；确认 DSC 同步。
+
+## 本轮（2026-10-29，第 6 轮）新增
+
+- 集中校正 01/02 报告表格：把已实现的 `❌/🟡` 项改为 `✅`（清单见待办 1）。
+- 04 报告：`LongCodeValue`/`URNCodeValue`、JSON group length、`validate_on_read`、charset、scanner
+  Stop/Complete 等快照措辞更正。
+- 代码侧无新增（本轮仅文档同步；相关实现均在此前轮次落地并有测试）。
+

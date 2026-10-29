@@ -42,14 +42,14 @@
 |---|---|---|---|
 | 帧访问、offset table 解析、单片段/一片段一帧判定 | ✅ | `PixelData::get_frame`（`pixel/mod.rs:210`）、`encapsulated_frame`（:244）、`frame_from_offset_table`（:271） | 四条判定规则齐备 |
 | 零拷贝帧窗口 | ✅ | `native_frame`（:218）、`RangeBuffer`、`CompositeBuffer` | 比 fo-dicom 更省 |
-| `width()`/`height()` 属性 | 🟡 | `pixel/mod.rs:126-132` | **真实文件恒返回 0**，见 §2.1 |
-| 1-bit 像素数据（`SingleBitPixelData`） | ❌ | 无对应符号；`render/mod.rs:893`、`:1183` 只接受 8/16 | grep `SingleBit` = 0 命中。1-bit Secondary Capture 无法渲染 |
-| 32-bit 灰度（`GrayscalePixelDataU32/S32`） | ❌ | 无；`bits_allocated()`（:140-147）接受 32/64 但渲染层拒绝 | 32-bit 只被"承认"不被渲染 |
+| `width()`/`height()` 属性 | ✅ | `pixel/mod.rs:126-132` | 从 `(0028,0010/0011)` 读取，真实文件返回正确值（§2.1 已修复） |
+| 1-bit 像素数据（`SingleBitPixelData`） | ✅ | `render/mod.rs` 单比特解包 | 按 MSB-first 解包为黑/白，`single_bit_frames_unpack_msb_first_as_black_and_white` 覆盖 |
+| 32-bit 灰度（`GrayscalePixelDataU32/S32`） | ✅ | `render/mod.rs` 32-bit 通路 | 有符号/无符号 32-bit 经窗口渲染，64-bit 报明确错误；均有测试 |
 | 逐通道直方图（`IPixelData.GetHistogram`） | 🟡 | `render/math.rs` `Histogram`（:159）+ `frame_stored_values`（`render/mod.rs:546`） | 只有单通道灰度直方图，无 per-channel API |
-| `CacheType{None,PixelData,LookupTables,Display}` 三级缓存 | ❌ | 无对应符号 | grep `CacheType` = 0 命中；fo-dicom `DicomImage` 有 `_pixelsCache/_pipelineCache/_renderedImageCache` |
+| `CacheType{None,PixelData,LookupTables,Display}` 三级缓存 | ❌（有意不实现） | 无对应符号 | radicom 不持有跨帧渲染缓存（调用方可用 `from_dataset_frame_parts` 复用解析结果）；属性能取舍 |
 | palette LUT 16-bit-allocated 取高字节 | ✅ | `pixel/mod.rs:457-487` `read_lut` | 行为与 `DicomPixelData.cs` `GetPaletteColorLUT` 的 `offset=1` 一致 |
-| palette LUT 长度校验 | ❌ | `read_lut` 用 `unwrap_or(&0)` 静默补零（:482） | fo-dicom 至少会在 `size` 与数据长度不匹配时产出截断表；radicom 连补零都不告警 |
-| 未压缩帧尺寸（1-bit / 4:2:2 / 4:2:0 特例） | ✅ | `uncompressed_frame_size`（`pixel/mod.rs:181-205`） | 算术本身正确（Lead 已独立核对），但**输入 width/height 为 0 时返回 `Ok(0)`**，见 §2.1 |
+| palette LUT 长度校验 | ✅ | `read_lut`（`pixel/mod.rs:478`） | 描述符/数据缺失、bits 非 8/16、entry 数超 2^BitsStored、数据长度不足都会返回错误（不再静默补零） |
+| 未压缩帧尺寸（1-bit / 4:2:2 / 4:2:0 特例） | ✅ | `uncompressed_frame_size`（`pixel/mod.rs:181-205`） | 算术正确；width/height 取自 `(0028,0010/0011)`（§2.1 已修复） |
 
 ### 1.2 光度解释与色彩转换（fo-dicom `PhotometricInterpretation` / `PixelDataConverter`）
 
@@ -57,8 +57,8 @@
 |---|---|---|---|
 | PI 枚举与 color space 属性 | ✅ | `pixel/photometric.rs:12-26`、`ColorSpace`（:44-48） | 12 个变体 + `Other` |
 | `YbrFullToRgb` / `YbrFull422ToRgb` / `YbrPartial422ToRgb` | 🟡 | 无独立符号，逻辑内联于 `render/mod.rs:1285-1380` | 功能等价但不可单独复用/测试 |
-| `InterleavedToPlanar24` / `PlanarToInterleaved24` / `ReverseBits` | ❌（死代码） | `render/pixel_converter.rs:11,24,38` | **grep 确认这三个函数只在自身文件内被调用**，生产路径从不使用 |
-| YBR_FULL 的 planar configuration 1 | ❌ | `render/mod.rs:1296-1298` 直接报错 | fo-dicom 在 `PixelDataFactory` 里先 planar→interleaved 再转 YBR；PS3.3 允许 planar=1。实测：planar YBR_FULL → `YBR frames must be interleaved` |
+| `InterleavedToPlanar24` / `PlanarToInterleaved24` / `ReverseBits` | 🟡 | `render/pixel_converter.rs` | `reverse_bits` 已用于单比特/MONOCHROME1 通路；planar↔interleaved 作为独立工具保留（主通路内联处理） |
+| YBR_FULL 的 planar configuration 1 | ✅ | `render/mod.rs:1674-1776` | 4:4:4 planar 先按三平面重组再转 YBR；仅下采样 YBR 要求交织（标准限制） |
 | HSV / ARGB / CMYK / YBR_ICT / YBR_RCT 渲染 | ⛔ | `render/mod.rs:954` `_ =>` 报错 | 解析支持，渲染不支持 |
 | YBR_ICT / YBR_RCT 原生（未压缩）数据 | ⛔ | 同上 | 这两种 PI 按标准只用于压缩语法，合理 |
 
@@ -72,10 +72,10 @@
 | VOI LINEAR / LINEAR_EXACT / SIGMOID | 🟡 | `map_rescaled`（:447-475） | 公式基本对齐；`WindowWidth==1` 边界与 fo-dicom 不同，见 §2.13 |
 | `OutputLUT`（ColorMap） | 🟡 | `apply_colormap`（:609-619）、`ColorTable` | 只作用于灰度；索引取 `px[0]`（蓝色通道），灰度三通道相等所以可用但语义脆弱 |
 | `InvertLUT`（MONOCHROME1） | ✅ | `render/mod.rs:234-237,451-453,471-473` | |
-| `PrecalculatedLUT`（整数预计算表） | ❌ | 无对应符号 | 每像素重算 f64 窗口公式，见 §3 |
+| `PrecalculatedLUT`（整数预计算表） | ✅ | `render/mod.rs` 预计算窗口表 | 窗口按存储值区间一次性预算成表再查表（`the_precalculated_window_matches_per_pixel_mapping`） |
 | XA/XRF 不施加 Modality LUT | ✅ | `is_xa_xrf`（:503-513）、`:242-243` | 与 Clunie 指引一致 |
 | VOI LUT Sequence 优先于 WindowCenter/Width | ✅ | `from_dataset_frame`（:207-227） | 顺序正确 |
-| `from_histogram` 剔除 padding | ❌ | `from_histogram`（:273-295） | fo-dicom `GrayscaleRenderOptions.cs:505` 有 `histogram.Clear(padding)`，radicom 完全没有；实测 9 个 padding 0 + 1 个 100，center=50/width=100（应为贴近 100） |
+| `from_histogram` 剔除 padding | ✅ | `from_histogram`（`render/mod.rs:312`） | 计算 bin 范围与直方图时都跳过 `(0028,0120)` 并 `Histogram::clear(padding)`，与 fo-dicom 一致 |
 | Padding 感知的 `GetMinMax` | 🟡 | `from_min_max`（:300-324）过滤 `(0028,0120)` | 单独实现正确，但 `frame_stored_values` 未做 high-bit 归一化，见 §2.9 |
 
 ### 1.4 图像对象与几何
@@ -88,8 +88,8 @@
 | `DicomImage.Scale` | ✅ | `scaled`（:625-650） | |
 | `SpatialTransform`（旋转/翻转/pan） | 🟡 | `render/spatial.rs:14-19,53-103` | 非直角旋转被静默取整，见 §2.14 |
 | `FrameGeometry`：ImagerPixelSpacing / PixelSpacing | ✅ | `render/geometry.rs:55-80` | |
-| `FrameGeometry`：`NominalScannedPixelSpacing` `(0018,2010)` | ❌ | 无 | grep 0 命中（tag 本身存在于 `generated/tags.rs:2361`）。fo-dicom `FrameGeometry.cs:78-101` 共 5 个分支含此项 |
-| enhanced multi-frame 的 per-frame 几何（Functional Group） | ❌ | `geometry.rs:55-80` 只读顶层 frame 0 | |
+| `FrameGeometry`：`NominalScannedPixelSpacing` `(0018,2010)` | ✅ | `render/geometry.rs:82` | 作为 PixelSpacing/ImagerPixelSpacing 之后的第三优先级 |
+| enhanced multi-frame 的 per-frame 几何（Functional Group） | ✅ | `render/geometry.rs:59-101` `from_dataset_frame` | 读 Per-Frame `(5200,9230)`→Pixel Measures `(0028,9110)`，回退 Shared `(5200,9229)` |
 | `DicomIconImage` / `IconImageSequence` | 🟡 | `render/icon.rs:26-91` | PI 限定 MONOCHROME1/2/PALETTE COLOR（:41-50），与 fo-dicom 一致；但渲染走 `pixel.width()`，真实文件上失效 |
 | `VolumeData` / `Stack` / MPR | 🟡 | `render/reconstruction.rs:97,110,173` | 功能存在；`read_grayscale`（:334-337）依赖 `pixel.width()`，真实文件上槽位为 0 |
 | `Mathematics`（Point/Vector/Matrix/Histogram/BitList） | ✅ | `render/math.rs:1-615` | `BitList` 与 fo-dicom 同为 LSB-first（:315） |
