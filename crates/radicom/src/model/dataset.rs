@@ -555,6 +555,9 @@ fn numeric_hint_fits(hint: Vr, dict_vr: Vr) -> bool {
 }
 
 /// Deep-traversal callback trait (DS-09).
+///
+/// Implement it for structured enter/exit events, or pass a
+/// `FnMut(&DicomElement)` closure when only elements matter.
 pub trait DatasetWalker {
     fn on_element(&mut self, element: &DicomElement);
     fn on_sequence_begin(&mut self, _sequence: &DicomSequence) {}
@@ -564,6 +567,15 @@ pub trait DatasetWalker {
     fn on_fragments_begin(&mut self, _fragments: &DicomFragmentSequence) {}
     fn on_fragment(&mut self, _fragments: &DicomFragmentSequence, _buffer: &SharedBuffer) {}
     fn on_fragments_end(&mut self, _fragments: &DicomFragmentSequence) {}
+}
+
+impl<F> DatasetWalker for F
+where
+    F: FnMut(&DicomElement),
+{
+    fn on_element(&mut self, element: &DicomElement) {
+        self(element);
+    }
 }
 
 #[cfg(test)]
@@ -1040,6 +1052,11 @@ mod tests {
             ],
             "depth-first, tag-ascending traversal"
         );
+
+        // A plain closure is enough when only elements are needed.
+        let mut tags = Vec::new();
+        ds.walk(&mut |element: &DicomElement| tags.push(element.tag().clone()));
+        assert!(tags.contains(&Tag::PATIENT_NAME) && tags.contains(&Tag::PIXEL_DATA));
     }
 
     #[test]

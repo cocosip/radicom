@@ -274,3 +274,5 @@
 - **IO / 写入缓冲**：`ByteBuffer` 新增 `as_slice()`；`write_buffer_with_chunk` 对连续内存值直接 `write_all`（不再整值复制 1 MiB 块），流式值复用 `ByteTargetWriter` 的 scratch 缓冲，跨元素不再每次分配。
 
 - **IO / 缓冲视图（续）**：`RangeBuffer`/`CompositeBuffer` 增加 `as_slice()`（内存底层时返回借用切片），原生帧窗口与多片段帧写出可直接 `write_all`，不再经 chunk 逐段复制。
+
+- **模型 / 遍历 API**：`DatasetWalker` 增加 `FnMut(&DicomElement)` 的 blanket 实现，只需元素的调用方可直接传闭包，保留结构化 enter/exit 回调实现；含闭包遍历测试。
