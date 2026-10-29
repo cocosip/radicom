@@ -34,7 +34,7 @@ pub struct HostedServerConfig {
     /// Upper bound on concurrent connections (0 = unlimited).
     pub max_clients: usize,
     /// Where received instances are spooled before the provider sees them; a
-    /// path keeps the files, `None` spools to a temporary file.
+    /// path keeps the files, `None` parses them in memory (the default).
     pub store_sink: Option<PathBuf>,
     /// TLS material; `None` serves plain TCP (`tls` feature).
     #[cfg(feature = "tls")]
@@ -62,7 +62,7 @@ impl HostedServerConfig {
             max_clients: self.max_clients,
             store_sink: match &self.store_sink {
                 Some(dir) => StoreSink::SpoolToDir(dir.clone()),
-                None => StoreSink::SpoolToTemp,
+                None => StoreSink::Memory,
             },
             #[cfg(feature = "tls")]
             tls: self.tls.clone(),

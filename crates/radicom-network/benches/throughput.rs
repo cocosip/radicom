@@ -71,11 +71,11 @@ async fn main() {
         per_store_bytes as f64 / (1024.0 * 1024.0)
     );
 
-    // Two rows: the in-memory sink and the shipped default (`SpoolToTemp`), so
-    // the reported numbers include the production default rather than only the
-    // fast non-default path (§4.9).
-    run_case("memory_sink", StoreSink::Memory, &file, per_store_bytes).await;
-    run_case("default_sink", StoreSink::default(), &file, per_store_bytes).await;
+    // Two rows: the shipped default (`Memory`) and the on-disk `SpoolToTemp`
+    // alternative, so the reported numbers include the production default
+    // rather than only the fast non-default path (§4.9).
+    run_case("default_memory", StoreSink::default(), &file, per_store_bytes).await;
+    run_case("spool_to_temp", StoreSink::SpoolToTemp, &file, per_store_bytes).await;
 }
 
 async fn run_case(label: &str, sink: StoreSink, file: &DicomFile, per_store_bytes: u64) {

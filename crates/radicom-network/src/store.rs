@@ -1,8 +1,10 @@
 //! C-STORE receive path (SRV-03; docs/01-architecture.md §11, §7.2).
 //!
-//! The SCP spools the incoming dataset to a temporary file and opens it as a
-//! [`DicomFile`], so memory stays bounded for large instances. The sink is
-//! injectable.
+//! The receiver parses the inbound dataset bytes into a [`DicomFile`]. The
+//! bytes are already buffered in memory by the time the sink runs, so the
+//! default [`StoreSink::Memory`] parses them directly; [`StoreSink::SpoolToTemp`]
+//! and [`StoreSink::SpoolToDir`] additionally keep an on-disk copy for callers
+//! that want one.
 
 use crate::dimse::{status, Command, CommandField};
 use crate::error::{NetworkError, Result};
@@ -14,15 +16,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Where an incoming instance is put before the provider sees it (§5.2).
+///
+/// The default parses the already-buffered bytes directly: the C-STORE receiver
+/// has the whole dataset in memory before the sink is consulted, so writing a
+/// temporary file only to parse the same bytes back doubles the work without
+/// bounding memory (audit P-3/§3.1).
 #[derive(Debug, Clone, Default)]
 pub enum StoreSink {
     /// Spool to a temporary file that is removed once the instance is done
-    /// with (the default).
-    #[default]
+    /// with. Kept for callers that want an on-disk artifact during processing.
     SpoolToTemp,
     /// Spool into a named directory, keeping the file afterwards.
     SpoolToDir(PathBuf),
-    /// Keep the bytes in memory and parse them directly.
+    /// Keep the bytes in memory and parse them directly (the default).
+    #[default]
     Memory,
 }
 
@@ -191,6 +198,13 @@ mod tests {
         command.affected_sop_instance_uid = Some("1.2.3.4.5".into());
         command.no_dataset = false;
         command
+    }
+
+    #[test]
+    fn default_sink_parses_in_memory_instead_of_spooling() {
+        // The C-STORE receiver already holds the bytes; the shipped default
+        // must not write a temporary file only to parse the same bytes back.
+        assert!(matches!(StoreSink::default(), StoreSink::Memory));
     }
 
     #[test]
