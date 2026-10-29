@@ -583,7 +583,7 @@ pub fn default_dictionary() -> Arc<Dictionary> {
 
 **建议**：入口加 `if bytes.is_ascii() { return String::from_utf8_unchecked(bytes.to_vec()) }`（或 `from_utf8` + `expect`，ASCII 必合法）。J2K/JPEG 路径的性能占比更高，此项优先级低于 3.1。
 
-### 3.10 【已知上限，保留】`private_creators` 用 `HashMap<(u16,u8), String>`
+### 3.10 【已修复】`private_creators` 用 `HashMap<(u16,u8), String>`
 
 `crates/radicom/src/io/reader.rs:154` 附近的 `PrivateCreators` 类型。每个私有元素都要 `get(&(group, block))`，SipHash 开销对短 key 不划算。可换 `[Option<String>; 256]` per-group 或 `Vec`。非瓶颈，低优先。
 
