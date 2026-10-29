@@ -215,7 +215,7 @@
 
 - **网络 / C-GET**：Serving.transcoder_cache 按 (source, target) 复用 Transcoder，消除每实例重建；含复用测试。
 - **文档 / 05 §3 定性**：§3.1/3.2/3.3/3.4/3.7 经复核已在代码修复、§3.6 本轮修复、§3.8 归为串行窗口的协议约束、§3.9 归为测试便利；小节标题改为【已修复】/【设计边界】/【已定性】。
-- **待续**：write_pdu 单条控制消息的缓冲复用；全仓更多 C# 风格结构 / 性能项。
+- **（历史待办，已处理）**：P-DATA 批量路径已改为零拷贝 `write_vectored`（见后文）；控制 PDU 的小分配属必要开销。全仓结构/性能项持续收敛。
 
 
 - **网络 / PDU 编码**：新增 `pdu::encode_into`，P-DATA 直接写入目标缓冲（无中间 body Vec）；`write_pdu`/`write_pdus` 改用之，批量分片共用一缓冲。含 `encode_into_appends_the_same_bytes_as_encode` 测试。
@@ -230,10 +230,10 @@
 
 - **编码 / 字符集注册表**：`REGISTRY` 由 `Mutex` 改 `RwLock`，并发解码共享读锁，注册仍取写锁。
 - **匿名化 / 动作解析**：新增 `SecurityProfile::action_for_tag`，按 `Tag::to_u32()` 直接查精确索引，仅通配行才格式化 tag 文本；walk 不再每元素 `format!`+解析。含一致性测试。
-- **文档 / 性能项对齐**：01 的 push_fragment、charset、require、CompositeBuffer、default_dictionary、Uid::enumerate、read_meta_block、deflate、ASCII 快路径，02 的 3.8，04 的 3.1–3.4 均标记【已修复】；01 §3.4/3.10 与 04 §3.5 标为已知上限。
+- **文档 / 性能项对齐**：01 的 push_fragment、charset、require、CompositeBuffer、default_dictionary、Uid::enumerate、read_meta_block、deflate、ASCII 快路径，02 的 3.8，04 的 3.1–3.4 均标记【已修复】；01 §3.4/3.10 与 04 §3.5 当时标为已知上限，后续轮次均已修复（见顶部状态表）。
 
 - **打印 / 渲染**：`RawImage::as_bytes_mut` 让 `apply_lut`/`invert` 原地改 BGRA（不再每 cell 分配整图 `Vec`）；`Canvas::filled` 用 `as_chunks_mut` 填充。`print` 测试全过。
-- **文档 / 02 §3 对齐**：3.2/3.3/3.5/3.6/3.7/3.9 标【已修复】，3.4（每次渲染 clone Dataset）标【已知上限，保留】。
+- **文档 / 02 §3 对齐**：3.2/3.3/3.5/3.6/3.7/3.9 标【已修复】，3.4（每次渲染 clone Dataset）当时标【已知上限，保留】，后续以 `PixelDataRef` 修复。
 
 - **IO / 解析零拷贝**：`DicomFile::from_bytes` 抽出 `parse_raw` 直接按 `&[u8]` 解析（不再 `read_to_end` 复制整份文件）；`open_partial`、`parse_dataset_bytes` 去掉 `to_vec()`。C-STORE 接收路径（`StoreSink` → `from_bytes`）因此少一次整包复制。
 - **结构扫描**：`cargo clippy` 在 `--all-targets` 下无 dead_code 告警；已移除 `DirectTranscoder`、`FileRef`、`WindowSource` 三处单实现/空接口。剩余 `ScanVisitor` 为合理回调扩展点，保留。
