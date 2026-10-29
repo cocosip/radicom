@@ -232,4 +232,5 @@
 - **文档 / 02 §3 对齐**：3.2/3.3/3.5/3.6/3.7/3.9 标【已修复】，3.4（每次渲染 clone Dataset）标【已知上限，保留】。
 
 - **IO / 解析零拷贝**：`DicomFile::from_bytes` 抽出 `parse_raw` 直接按 `&[u8]` 解析（不再 `read_to_end` 复制整份文件）；`open_partial`、`parse_dataset_bytes` 去掉 `to_vec()`。C-STORE 接收路径（`StoreSink` → `from_bytes`）因此少一次整包复制。
-- **结构扫描**：`cargo clippy` 在 `--all-targets` 下无 dead_code 告警；已移除 `DirectTranscoder`、`FileRef` 两处单实现/空接口。剩余单实现 trait（`WindowSource`/`ScanVisitor`）为合理扩展点，保留。
+- **结构扫描**：`cargo clippy` 在 `--all-targets` 下无 dead_code 告警；已移除 `DirectTranscoder`、`FileRef`、`WindowSource` 三处单实现/空接口。剩余 `ScanVisitor` 为合理回调扩展点，保留。
+- **IO / 大值窗口**：删除 `WindowSource` trait 与 `PathWindow`，`ByteSourceReader` 改为直接持 `Option<Arc<File>>` 并 `with_shared_file`；用 `FileWindow::from_shared` 建惰性窗口，行为不变。
