@@ -122,8 +122,7 @@ impl Anonymizer {
         let tags: Vec<Tag> = dataset.items().map(|item| item.tag().clone()).collect();
 
         for tag in tags {
-            let tag_text = format!("{:04X},{:04X}", tag.group(), tag.element());
-            let action = self.profile.action_for(&tag_text, self.option);
+            let action = self.profile.action_for_tag(&tag, self.option);
 
             // sequences: a Remove action deletes the whole sequence; otherwise
             // recurse into the children (Keep leaves the sequence and its

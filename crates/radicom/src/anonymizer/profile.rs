@@ -14,6 +14,7 @@
 //! crate light per architecture §"heavy deps isolated").
 
 use crate::error::{DataError, Error};
+use crate::model::tag::Tag;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -349,7 +350,22 @@ impl SecurityProfile {
                 return Some(*action);
             }
         }
-        // not a tag the table names literally: only the wildcard rows can match
+        self.match_wildcard(tag, option)
+    }
+
+    /// The action for a typed [`Tag`] under `option`.
+    ///
+    /// Literal tags resolve from the key directly, so the anonymizer does not
+    /// format every element's tag into a `String` and parse it back (§3.2).
+    pub fn action_for_tag(&self, tag: &Tag, option: AnonOption) -> Option<Action> {
+        if let Some(action) = self.inner.exact[option as usize].get(&tag.to_u32()) {
+            return Some(*action);
+        }
+        // only a wildcard row can still match; it needs the textual form
+        self.match_wildcard(&format!("{:04X},{:04X}", tag.group(), tag.element()), option)
+    }
+
+    fn match_wildcard(&self, tag: &str, option: AnonOption) -> Option<Action> {
         self.inner.wildcards.iter().find_map(|index| {
             let row = &self.inner.rows[*index];
             row.pattern.matches(tag).then(|| row.action_for(option)).flatten()
@@ -523,6 +539,29 @@ mod tests {
                     profile.action_for(tag, option),
                     profile.linear_action_for(tag, option),
                     "index and scan disagree for {tag} under {option:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_tag_lookup_matches_the_textual_lookup() {
+        let profile = SecurityProfile::basic();
+        let probes = [
+            Tag::PATIENT_NAME,
+            Tag::PATIENT_ID,
+            Tag::SOP_INSTANCE_UID,
+            Tag::new(0x0009, 0x0001),
+            Tag::new(0x60FF, 0x3000),
+            Tag::new(0xFFFF, 0xFFFF),
+        ];
+        for option in AnonOption::ALL {
+            for tag in &probes {
+                let text = format!("{:04X},{:04X}", tag.group(), tag.element());
+                assert_eq!(
+                    profile.action_for_tag(tag, option),
+                    profile.action_for(&text, option),
+                    "typed and textual disagree for {tag:?} under {option:?}"
                 );
             }
         }
