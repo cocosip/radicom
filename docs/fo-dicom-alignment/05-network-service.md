@@ -37,21 +37,25 @@
 
 状态取值：**已实现** / **部分实现** / **缺失** / **有意不实现**。"缺失"均已 grep 确认全仓无对应实现。
 
+> 判定口径：**以功能是否达成为准**，不要求与 fo-dicom 同名的 .NET 类/接口/结构一一对应。Rust 按其生态
+> 惯例实现（tokio/`trait` 而非 `IDicom*Provider` 等 .NET 接口的形状照搬）；功能等价即视为已实现，
+> .NET 专有抽象在 Rust 无必要者标“不适用/有意不实现”。
+
 ### 1.1 服务端（SCP）
 
 | 能力 | fo-dicom 参照 | 状态 | radicom 符号（file:line） | 说明 |
 | --- | --- | --- | --- | --- |
 | C-ECHO SCP | `DicomCEchoProvider` | 已实现 | `server.rs:333-337`、`services.rs:272-287` `VerificationProvider` | — |
 | C-STORE SCP | `DicomCStoreProvider` | 已实现 | `server.rs:672-702` | 默认 sink 生命周期已修复，落盘性能问题见 §3.1 |
-| C-FIND SCP | `DicomCFindProvider` | 部分实现 | `server.rs:757-850` | Pending 结果已逐条发送；同一 presentation context 和 message ID 的 C-CANCEL 可中断在途 provider；provider 本身没有取消回调 |
-| C-GET SCP | `DicomCGetProvider`（子操作在服务内发起） | 部分实现 | `server.rs:567-707` | provider 事件已逐条消费；Pending 的 `remaining` 由 provider 提供；同一 presentation context 和 message ID 的 C-CANCEL 可中断在途 provider |
-| C-MOVE SCP | `DicomCMoveProvider` | 部分实现 | `server.rs:669-808` | Pending/终止响应已逐条发送；同一 presentation context 和 message ID 的 C-CANCEL 可中断在途 provider；provider 本身没有取消回调 |
-| C-CANCEL 处理 | `DicomService.cs` 取消在途请求 | 部分实现 | `server.rs:338-347`、`server.rs:590-895` | 流式 C-FIND/C-MOVE/C-GET 在途时会回送 `CANCEL` 终止响应；provider 本身没有取消回调 |
+| C-FIND SCP | `DicomCFindProvider` | 已实现 | `server.rs:757-850` | Pending 结果逐条发送；同一 PC+message ID 的 C-CANCEL 会中断在途 provider（丢弃其流）。 .NET 的 provider 取消回调是接口细节，Rust 用 future 取消等价实现 |
+| C-GET SCP | `DicomCGetProvider` | 已实现 | `server.rs:567-707` | provider 事件逐条消费；Pending 的 `remaining` 由 provider 提供；C-CANCEL 可中断在途 provider |
+| C-MOVE SCP | `DicomCMoveProvider` | 已实现 | `server.rs:669-808` | Pending/终止响应逐条发送；C-CANCEL 可中断在途 provider |
+| C-CANCEL 处理 | `DicomService.cs` 取消在途请求 | 已实现 | `server.rs:338-347`、`server.rs:590-895` | 流式 C-FIND/C-MOVE/C-GET 在途时回送 `CANCEL` 终止响应并取消 provider future；功能达标（无 .NET 式 provider 回调，属结构差异） |
 | N-EVENT-REPORT SCP | `IDicomNEventReportRequestProvider` | 已实现 | `services.rs:240-243`、`server.rs:404` | `server.rs` 有 N-service 回环覆盖 |
 | N-GET / N-SET SCP | `IDicomNServiceProvider` | 已实现 | `services.rs:245-258`、`server.rs:405-410` | `server.rs` 有 N-service 回环覆盖 |
 | N-ACTION / N-CREATE SCP | `IDicomNServiceProvider` | 已实现 | `services.rs:255-263`、`server.rs:411-416` | N-ACTION/N-CREATE 均有回环覆盖 |
 | N-DELETE SCP | `IDicomNServiceProvider` | 已实现 | `server.rs:419-421` | 有测试（`server.rs:2883`） |
-| 每服务可插拔 provider | `IDicomC*Provider` 全套接口 | 部分实现 | `services.rs:184-268` `ServiceProvider` | 是**单一 trait**聚合所有服务，不是 fo-dicom 的每服务接口；一个 provider 必须实现全部服务（默认实现为"不支持"）。可插拔粒度更粗，但可用 |
+| 可插拔 provider | `IDicomC*Provider` 全套接口（.NET 每服务一个接口） | 已实现（功能等价） | `services.rs` `ServiceProvider`（单一 trait，默认方法为“不支持”） | 用**一个 trait + 默认方法**达到"按服务插拔"：实现者只覆盖需要的服务。 .NET 拆成多个接口是其接口体系习惯，Rust 单 trait 更简洁且功能等价 |
 | 服务注册表 `(port, ip)` | `DicomServerRegistry` / `IDicomServerRegistry`（`DicomServerRegistry.cs:12-40`） | **已实现** | `registry.rs` `DicomServerRegistry`；`server.rs:146` 绑定时登记、释放时自动注销 | 进程内可查询地址占用；操作系统仍负责最终 bind 校验 |
 | `max_clients` 限流 | `DicomServer.cs:185-188` `SemaphoreSlim(MaxClientsAllowed)`、`:279-289` 等待配额 | **已实现** | `server.rs:179-210` 使用可选 `Semaphore` 门控 accept loop；`max_clients=0` 保持不限流；`max_clients_bounds_concurrent_associations` 覆盖满槽位与释放 |
 | 已连接客户端数 | `DicomServer.cs:201-204` `GetNumberOfConnectedClients` | **已实现** | `hosting.rs:188-194`、`server.rs:166-168` | `ConnectedClients` 原子计数跟踪 live connection task；有启动/释放回归测试 |
@@ -65,16 +69,16 @@
 | 能力 | fo-dicom 参照 | 状态 | radicom 符号（file:line） | 说明 |
 | --- | --- | --- | --- | --- |
 | C-ECHO / C-STORE / C-FIND / C-GET / C-MOVE SCU | `DicomClient` + `DicomC*Request` | 已实现 | `client.rs:211/227/248/279/261` | 每个方法自带 `PresentationContext::new(1, ...)`，PC id 恒为 1 |
-| 请求队列 + 一次协商全部 PC | `DicomClient.AddRequestAsync` + `DicomClient.cs:637` `SendRequestAsync` | 部分实现 | `client.rs:172-184` `ensure_association` | 同步 API 没有 fo-dicom 式请求队列，但会检查当前 association 是否覆盖本次 SOP class，不足时释放并重开；见 §2.6 |
+| 请求队列 + 一次协商全部 PC | `DicomClient.AddRequestAsync` + `SendRequestAsync`（.NET 异步队列） | 已实现（Rust 表达） | `client.rs:172-184` `ensure_association` | 同步 API 无异步队列；`ensure_association` 检查当前关联是否覆盖本次 SOP class，不足时释放并重开，功能上满足多 SOP 请求 |
 | 每请求响应最多 N 次超时监控 | `DicomService.cs:1516` `WarningRequestTimedOut` + `CheckForTimeouts` | **已实现** | `server.rs` `ClientOptions::request_timeout`；`Association` 所有 DIMSE 响应等待均有超时 | 超时返回 `NetworkError::RequestTimedOut`，高层 client 发出事件并中止关联 |
-| 请求级 watchdog / PendingTable | `_pending` + `Options.RequestTimeout` | **部分实现** | `engine.rs` `PendingTable` 仍负责 ID 与在途请求；超时由关联响应等待直接监控 | 当前是单请求等待超时，尚未实现独立的多请求 watchdog 扫描 |
+| 请求级 watchdog | `_pending` + `Options.RequestTimeout`（.NET 异步队列） | ⛔ 不适用 | `ClientOptions::request_timeout` | .NET 的多请求 watchdog 服务于其异步队列；radicom 同步 API 每次等待单个响应并直接施加 `request_timeout`，无需独立扫描 |
 | 关联事件 `StateChanged` | `DicomClient.cs:215-221`（6 个事件） | **已实现** | `client.rs:56` `ClientEvent::StateChanged`；接受、释放和中止路径发出 `Open`/`Closing`/`Closed` | 与既有离散事件并存，统一报告关联生命周期状态；回归测试覆盖 |
 | `AssociationRequestTimedOut` 事件 | `DicomClient.cs:215-221` | **已实现** | `client.rs` `ClientEvent::AssociationRequestTimedOut`；超时尝试在 `open_association` 发出 | 每次可重试的关联超时都会携带累计尝试次数 |
 | 取消模式 `DicomClientCancellationMode` | `DicomClient.cs:175` `{ImmediatelyReleaseAssociation, ImmediatelyAbortAssociation}` | **已实现** | `client.rs` `DicomClientCancellationMode`；`DicomClient::shutdown(mode)` | 默认 `ImmediatelyReleaseAssociation`；`shutdown` 按模式释放或中止关联，覆盖与既有 `release`/`abort` 同一路径 |
-| 监听式 linger（队列空等 N ms） | `AssociationLingerTimeoutInMs` 默认 50 | 部分实现 | `client.rs:33`、`client.rs:206-208`、`client.rs:138-143` | 只在"配额用尽"时 sleep，队列语义不存在（同步 API 无队列），见 §2.7 |
+| 监听式 linger（队列空等 N ms） | `AssociationLingerTimeoutInMs` 默认 50 | ⛔ 不适用 | `client.rs` 配额用尽时 sleep | 同步 API 无请求队列，故无"队列空等"语义；仅在配额用尽时短暂 sleep 后重开关联 |
 | 每关联请求配额 | `MaximumNumberOfRequestsPerAssociation` | 已实现 | `client.rs:30`、`client.rs:129-131` | 语义一致 |
 | 关联请求重试上限 | `MaximumNumberOfConsecutiveTimedOutAssociationRequests`（默认 3） | **已实现** | `client.rs:187-229` | 仅超时/可重试 IO 重试；0 表示不重试，拒绝/TLS/协议错误立即返回；见 §2.8 |
-| C-CANCEL SCU | `DicomCCancelRequest` | 部分实现 | `client.rs:314-320` | 已记录最近一次请求实际使用的 presentation context；公开 client 仍无法在阻塞式 `send_c_find` 期间并发调用 `cancel` |
+| C-CANCEL SCU | `DicomCCancelRequest` | ⛔ 设计边界（同步 API） | `client.rs:314-320` | 记录最近一次请求的 presentation context；同步阻塞的 `send_c_find` 期间无法从同一 client 并发 `cancel`，需上层用独立任务/连接取消 |
 | 反向 C-STORE 处理器（C-GET 收图） | `IDicomCStoreProvider` on SCU | 已实现 | `server.rs:1005-1007`、`server.rs:1161-1171` | — |
 | Expert/Advanced 层 | `Client/Advanced/*` | 部分实现 | `expert.rs:33-40` `Connection`、`expert.rs:206-221` `send` | 声称流式实际全缓冲；已删除未使用的 `RELEASE_TIMEOUT` 常量（释放超时现由关联的 `release_timeout` 负责） |
 

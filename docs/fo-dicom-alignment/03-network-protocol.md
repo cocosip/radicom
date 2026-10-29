@@ -37,6 +37,10 @@
 
 状态取值：**已实现** / **部分实现** / **缺失** / **有意不实现**。"缺失"仅在已 grep 确认 repo 内无对应实现后标注。
 
+> 判定口径：**以功能是否达成为准**，不要求与 fo-dicom 同名的 .NET 类/接口/结构一一对应。Rust 按其生态
+> 惯例实现（tokio + socket2 + rustls，具体类型而非 `INetworkManager`/`DicomTimeout` 等 .NET 抽象）；
+> 功能等价即视为已实现，.NET 专有抽象在 Rust 无必要者标“不适用/有意不实现”。
+
 ### 1.1 PDU 编解码
 
 | 能力 | fo-dicom 参照 | 状态 | radicom 符号（file:line） | 说明 |

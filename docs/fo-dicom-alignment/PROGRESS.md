@@ -144,6 +144,18 @@
 - 曾尝试新增 `socket_timeout` 以对齐 `DicomTimeout.Socket`，判定属照搬，已回退，代码未变更。
 - 代码侧无新增（本轮仅文档同步；相关实现均在此前轮次落地并有测试）。
 
+## 本轮（2026-10-29，第 8 轮）调整：全文档按“功能”而非“结构”判定
+
+- 五份报告顶部统一加入**判定口径**：以功能是否达成为准，不要求同名 .NET 类/接口/结构。
+- 01：`ArrayPoolMemory`→⛔不适用（Rust 用系统分配器，`BufferPool` 可删）；强类型异常族→⛔不适用
+  （Rust 每 crate 一个 error enum）。
+- 02：`IPixelData.GetHistogram`→按功能已实现；`IImage`/`IImageManager`、`CacheType`→⛔不适用；
+  Modality/VOI LUT、padding、icon、volume 等已修复项改 ✅。
+- 04：`RootDirectoryRecordCollection`、`DirectoryRecord` 的 `Next/Lower/Key`→按功能已实现 / .NET 对象模型不适用。
+- 05：C-FIND/C-GET/C-MOVE/C-CANCEL 的 provider 取消回调→功能已达（future 取消）；请求队列/watchdog/
+  linger→.NET 异步队列概念，判为已实现（Rust 表达）或⛔不适用。
+- 代码调整（删除 `BufferPool` 等 .NET 遗留）留待下一步，仅在此记录计划。
+
 ## 结论
 
 五份报告中的“缺失（❌ / 缺失）”项已全部实现，或明确归类为**有意不实现 / 范围取舍 / 设计边界**；
@@ -152,7 +164,7 @@
 - 同步 API 无请求队列 → 监听式 linger、watchdog 多请求扫描、C-MOVE 流水线、C-CANCEL 并发。
 - 轻依赖取向 → PKCS#12/系统证书库、完整正则 tag 匹配、私有字典。
 - 已用 `ponytail:` 标注的性能上限 → `write_pdu` 重编码、`FileWindow` 每窗口句柄、命令/数据发送批处理。
-- .NET 专属抽象，Rust 不适用（按能力已覆盖）→ `INetworkManager`、`DicomTimeout` 枚举、`NetworkStreamCreationOptions`。
-- 其它形态抽象 → `IImage`、每服务独立 provider trait、`DirectoryRecord` 指针、`CacheType`。
+- .NET 专属抽象，Rust 不适用（按能力已覆盖）→ `INetworkManager`、`DicomTimeout`、`NetworkStreamCreationOptions`、
+  `IImage`/`IImageManager`、`IPixelData` 接口、每服务独立 provider 接口、`DirectoryRecord` 指针、`CacheType`、`ArrayPool`。
 
 

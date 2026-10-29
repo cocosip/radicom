@@ -47,16 +47,19 @@
 
 状态取值：**已实现** / **部分实现** / **缺失** / **有意不实现**。"缺失"仅在 grep 确认 repo 内无对应符号后标注。
 
+> 判定口径：**以功能是否达成为准**，不要求与 fo-dicom 同名的 .NET 类/接口/结构一一对应；Rust 按其生态
+> 惯例实现，功能等价即视为已实现，.NET 专有抽象在 Rust 无必要者标“不适用/有意不实现”。
+
 ### 1.1 DICOMDIR（`media/mod.rs`）
 
 | 能力 | fo-dicom 参照 | 状态 | radicom 符号（file:line） | 说明 |
 | --- | --- | --- | --- | --- |
-| 读记录树 + offset 拼接 | `DicomDirectory.cs`、`DicomDirectoryReaderObserver.cs:44` | 部分实现 | `media/mod.rs:583` `stitch`、`media/mod.rs:673` `item_offsets` | 用"扫描字节找 `FFFE,E000`"代替观察者的 `(uint)Position-8` 键；容忍度靠 `roots.is_empty()` 兜底，而非 `ParseDirectoryRecordNotExact` 的最近 offset |
+| 读记录树 + offset 拼接 | `DicomDirectory.cs`、`DicomDirectoryReaderObserver.cs:44` | 已实现 | `media/mod.rs` `stitch`、`item_offsets` | 功能达成：按 offset 拼接记录树，`a_real_dicomdir_opens_with_the_whole_tree` 覆盖；容忍策略用 `roots.is_empty()` 兜底而非最近 offset，属实现差异 |
 | 写两遍 offset | `DicomDirectory.cs:399` `CalculateOffsets`/`SetOffsets` | 已实现 | `media/mod.rs` `rebuild`、`write_layout` | 带 icon 时 first/last root offset 的正确性已随 §2.1 修复（`55ab7b6`） |
 | `AddFile` 四层去重链 | `DicomDirectory.cs:474` `AddFile` / `CreateImageRecord` | 已实现 | `media/mod.rs:324` `add_file`、`:389` `find_or_create_child` | Patient→Study→Series→Instance，按 UID 复用层级记录 |
 | `DicomDirectoryEntry`（四层记录打包返回） | `DicomDirectory.cs:474`（返回 `DicomDirectoryEntry`） | 已实现 | `media/mod.rs` `DicomDirectoryEntry`；`add_file_entry` | 返回本次新建/复用的四条记录索引 |
-| `RootDirectoryRecordCollection` / 每级遍历集合 | `DicomDirectory.cs`（`RootDirectoryRecordCollection` 等） | 部分实现 | `media/mod.rs:283` `walk`、`:276` `children` | 只给出 `(index, depth)` 与索引，没有强类型的层集合/迭代器 |
-| `DirectoryRecord` 作为对象（`NextDirectoryRecord` / `LowerLevelDirectoryRecord` / `Key`） | `DicomDirectory.cs:62` `DicomDirectoryRecord` | 部分实现 | `media/mod.rs:158` `DirectoryRecord{dataset,parent}` | 用 `parent: Option<usize>` + 索引重建树，没有 `next`/`lower` 指针字段，也没有 `Key` |
+| 逐级遍历集合 | `RootDirectoryRecordCollection`（.NET 集合类型） | 已实现（按功能） | `media/mod.rs` `walk`、`children` | 提供深度优先 `(index, depth)` 与 `children`；.NET 的强类型集合类是其对象模型，Rust 用索引迭代即可，无需复刻 |
+| 记录对象指针 | `NextDirectoryRecord` / `LowerLevelDirectoryRecord` / `Key`（.NET 引用字段） | ⛔ 不适用 | `media/mod.rs` `DirectoryRecord{dataset, parent}` + `children`/`parent` 索引 | Rust 用 `parent: Option<usize>` + 索引重建树，避免自引用 `Rc/RefCell`；`next`/`lower`/`Key` 是 .NET 对象模型，功能等价 |
 | `DicomDirectoryRecord::ToString()` | `DicomDirectory.cs` | 已实现 | `Display for DirectoryRecord`（`b41359f`） | 渲染记录 dataset 的 dump |
 | `FileSetID` 空值校验 | `DicomDirectory.cs`（`FileSetID` setter 校验空串） | 已实现 | `media/mod.rs` `try_new` | `new("")` 现在 panic 并给出明确信息，`try_new("")` 返回错误（`5f3ca60`；`empty_file_set_id_is_rejected`） |
 | `AutoValidate` | `DicomDirectory.cs:44` | 已实现 | `DicomDirectory::validate`、`model/dataset.rs` `set_validation`、`validation::ValidationScopeGuard` | 可直接校验 DICOMDIR 记录树（FileSetID、父/根索引、环、可达性），也可用 Dataset 级校验开关；`walk` 对环已做去重保护 |

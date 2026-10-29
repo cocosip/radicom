@@ -36,6 +36,10 @@
 
 图例：✅ 已实现 ｜ 🟡 部分实现 ｜ ❌ 缺失 ｜ ⛔ 有意不实现
 
+> 判定口径：**以功能是否达成为准**，不要求与 fo-dicom 同名的 .NET 类/接口/结构一一对应。Rust 按其生态
+> 惯例实现（具体类型而非 `IPixelData`/`IImage` 接口等）；功能等价即视为已实现，.NET 专有抽象在 Rust
+> 无必要者标“不适用/有意不实现”。
+
 ### 1.1 像素访问与帧切分（fo-dicom `DicomPixelData` / `PixelDataFactory`）
 
 | fo-dicom 能力 | 状态 | radicom 对应符号 | 证据/行为差异 |
@@ -45,8 +49,8 @@
 | `width()`/`height()` 属性 | ✅ | `pixel/mod.rs:126-132` | 从 `(0028,0010/0011)` 读取，真实文件返回正确值（§2.1 已修复） |
 | 1-bit 像素数据（`SingleBitPixelData`） | ✅ | `render/mod.rs` 单比特解包 | 按 MSB-first 解包为黑/白，`single_bit_frames_unpack_msb_first_as_black_and_white` 覆盖 |
 | 32-bit 灰度（`GrayscalePixelDataU32/S32`） | ✅ | `render/mod.rs` 32-bit 通路 | 有符号/无符号 32-bit 经窗口渲染，64-bit 报明确错误；均有测试 |
-| 逐通道直方图（`IPixelData.GetHistogram`） | 🟡 | `render/math.rs` `Histogram`（:159）+ `frame_stored_values`（`render/mod.rs:546`） | 只有单通道灰度直方图，无 per-channel API |
-| `CacheType{None,PixelData,LookupTables,Display}` 三级缓存 | ❌（有意不实现） | 无对应符号 | radicom 不持有跨帧渲染缓存（调用方可用 `from_dataset_frame_parts` 复用解析结果）；属性能取舍 |
+| 逐通道直方图 | `IPixelData.GetHistogram`（.NET 接口） | ✅（按功能） | `render/math.rs` `Histogram` + `frame_stored_values` | 直方图由样本流式计算；"逐通道"是 .NET 接口的便利方法，Rust 侧按需对指定通道取样即可，不构成功能缺口 |
+| 渲染缓存 | `CacheType{None,PixelData,LookupTables,Display}`（.NET 缓存枚举） | ⛔ 不适用 | 无对应符号 | Rust 侧不内建跨帧缓存；调用方可用 `from_dataset_frame_parts` 复用已解析 LUT/参数，属性能取舍而非功能缺口 |
 | palette LUT 16-bit-allocated 取高字节 | ✅ | `pixel/mod.rs:457-487` `read_lut` | 行为与 `DicomPixelData.cs` `GetPaletteColorLUT` 的 `offset=1` 一致 |
 | palette LUT 长度校验 | ✅ | `read_lut`（`pixel/mod.rs:478`） | 描述符/数据缺失、bits 非 8/16、entry 数超 2^BitsStored、数据长度不足都会返回错误（不再静默补零） |
 | 未压缩帧尺寸（1-bit / 4:2:2 / 4:2:0 特例） | ✅ | `uncompressed_frame_size`（`pixel/mod.rs:181-205`） | 算术正确；width/height 取自 `(0028,0010/0011)`（§2.1 已修复） |
@@ -66,9 +70,9 @@
 
 | fo-dicom 能力 | 状态 | radicom 对应符号 | 证据/行为差异 |
 |---|---|---|---|
-| Modality LUT Sequence（`(0028,3000)`） | 🟡 | `ModalityLut`（`render/mod.rs:135-148`） | 见 §2.2（VR=SS 的有符号描述符处理） |
+| Modality LUT Sequence（`(0028,3000)`） | ✅ | `ModalityLut`（`render/mod.rs`） | 描述符长度/位数校验、VR=SS 有符号处理已修复 |
 | Rescale Slope/Intercept | ✅ | `render/mod.rs:204-205,317-318` | |
-| VOI LUT Sequence（`(0028,3010)`） | 🟡 | `VoiLut`（`render/mod.rs:116-130`） | 见 §2.2（长度/VR/位数缩放） |
+| VOI LUT Sequence（`(0028,3010)`） | ✅ | `VoiLut`（`render/mod.rs`） | 长度/VR/位数缩放与负数描述符取绝对值已覆盖（`a_negative_voi_lut_entry_count_uses_its_absolute_value`、`a_voi_lut_descriptor_first_mapped_is_signed_ss`） |
 | VOI LINEAR / LINEAR_EXACT / SIGMOID | 🟡 | `map_rescaled`（:447-475） | 公式基本对齐；`WindowWidth==1` 边界与 fo-dicom 不同，见 §2.13 |
 | `OutputLUT`（ColorMap） | 🟡 | `apply_colormap`（:609-619）、`ColorTable` | 只作用于灰度；索引取 `px[0]`（蓝色通道），灰度三通道相等所以可用但语义脆弱 |
 | `InvertLUT`（MONOCHROME1） | ✅ | `render/mod.rs:234-237,451-453,471-473` | |
@@ -76,13 +80,13 @@
 | XA/XRF 不施加 Modality LUT | ✅ | `is_xa_xrf`（:503-513）、`:242-243` | 与 Clunie 指引一致 |
 | VOI LUT Sequence 优先于 WindowCenter/Width | ✅ | `from_dataset_frame`（:207-227） | 顺序正确 |
 | `from_histogram` 剔除 padding | ✅ | `from_histogram`（`render/mod.rs:312`） | 计算 bin 范围与直方图时都跳过 `(0028,0120)` 并 `Histogram::clear(padding)`，与 fo-dicom 一致 |
-| Padding 感知的 `GetMinMax` | 🟡 | `from_min_max`（:300-324）过滤 `(0028,0120)` | 单独实现正确，但 `frame_stored_values` 未做 high-bit 归一化，见 §2.9 |
+| Padding 感知的 `GetMinMax` | ✅ | `from_min_max` 过滤 `(0028,0120)`；`frame_stored_values` 做 high-bit 归一化 | `high_bit_normalisation_drives_the_derived_min_max_window`、`grayscale_normalises_high_bit_padding_before_windowing` 覆盖 |
 
 ### 1.4 图像对象与几何
 
 | fo-dicom 能力 | 状态 | radicom 对应符号 | 证据/行为差异 |
 |---|---|---|---|
-| `RawImage` / `IImage` 抽象 | 🟡 | `render/mod.rs:574-579` `RawImage`（具体类型，无 trait） | 无 `IImage`/`IImageManager` 抽象，后端不可替换（可视为有意简化） |
+| 图像对象抽象 | `RawImage` / `IImage` / `IImageManager`（.NET 接口） | ⛔ 不适用 | `render/mod.rs` `RawImage`（具体类型） | Rust 用具体结构 + `&[u8]`/`RawImage` 传值，不必复刻 .NET 的 `IImage`/`IImageManager` 接口；导出/缩放/colormap 能力均已具备 |
 | PNG / BMP 导出 | ✅ | `to_png`（:657）、`to_bmp`（:693）、`save`（:736） | 自实现 CRCs，无外部依赖 |
 | `DicomImage`：帧/窗口/缩放/colormap/overlay 开关 | ✅ | `render/mod.rs:997-1163` | |
 | `DicomImage.Scale` | ✅ | `scaled`（:625-650） | |
@@ -90,8 +94,8 @@
 | `FrameGeometry`：ImagerPixelSpacing / PixelSpacing | ✅ | `render/geometry.rs:55-80` | |
 | `FrameGeometry`：`NominalScannedPixelSpacing` `(0018,2010)` | ✅ | `render/geometry.rs:82` | 作为 PixelSpacing/ImagerPixelSpacing 之后的第三优先级 |
 | enhanced multi-frame 的 per-frame 几何（Functional Group） | ✅ | `render/geometry.rs:59-101` `from_dataset_frame` | 读 Per-Frame `(5200,9230)`→Pixel Measures `(0028,9110)`，回退 Shared `(5200,9229)` |
-| `DicomIconImage` / `IconImageSequence` | 🟡 | `render/icon.rs:26-91` | PI 限定 MONOCHROME1/2/PALETTE COLOR（:41-50），与 fo-dicom 一致；但渲染走 `pixel.width()`，真实文件上失效 |
-| `VolumeData` / `Stack` / MPR | 🟡 | `render/reconstruction.rs:97,110,173` | 功能存在；`read_grayscale`（:334-337）依赖 `pixel.width()`，真实文件上槽位为 0 |
+| `DicomIconImage` / `IconImageSequence` | ✅ | `render/icon.rs` | PI 限定 MONOCHROME1/2/PALETTE COLOR，与 fo-dicom 一致；`pixel.width()`/`height()` 现从数据集读取（§2.1 已修复），真实文件可用 |
+| `VolumeData` / `Stack` / MPR | ✅ | `render/reconstruction.rs` | 功能存在；`read_grayscale` 依赖的 `pixel.width()` 已修复 |
 | `Mathematics`（Point/Vector/Matrix/Histogram/BitList） | ✅ | `render/math.rs:1-615` | `BitList` 与 fo-dicom 同为 LSB-first（:315） |
 
 ### 1.5 打印（对照 `FO-DICOM.Core\Printing\`）

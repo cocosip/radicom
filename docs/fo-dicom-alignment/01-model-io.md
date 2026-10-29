@@ -44,6 +44,10 @@
 
 图例：✅ 已实现 ｜ 🟡 部分实现 ｜ ❌ 缺失 ｜ ⛔ 有意不实现
 
+> 判定口径：**以功能是否达成为准**，不要求与 fo-dicom 同名的 .NET 类/接口/结构一一对应。Rust 按其生态
+> 惯例实现（具体类型而非 `I*` 接口、标准分配器而非 `ArrayPool` 等）；功能等价即视为已实现，.NET 专有
+> 抽象在 Rust 无必要者标“不适用/有意不实现”。
+
 ### 1.1 读取器（DicomReader）
 
 | fo-dicom 能力 | 状态 | radicom 对应符号 | 证据 / 行为差异 |
@@ -101,14 +105,14 @@
 | `TempFileBuffer` / `TempFileRemover` | ✅ | `buffer.rs` `TempFileSpill`；`file_ref.rs` `TempFileProvider` | 带 Drop 清扫与延迟重试删除 |
 | `CompositeByteBuffer` | ✅ | `buffer.rs` `CompositeBuffer` | 但 `data()` 恒拼接新 Vec（`buffer.rs:225`），`copy_to()` 才流式（`buffer.rs:251`） |
 | `EvenLengthBuffer`（读侧自动补齐奇数长度） | 🟡 | `buffer.rs` `EvenLengthBuffer` | 类型存在，但解析路径未使用：`reader.rs:461-511` 的 `parse_fragment_sequence` 接受奇数长度片段而不补/不告警 |
-| 内存池（`ArrayPoolMemory`） | 🟡 | `io/pool.rs` `BufferPool` | **整模块无生产消费者**：`grep` 仅命中 `io/mod.rs:13` 的 re-export 和 `pool.rs` 自身测试。文档声称的性能收益无法成立 |
+| 内存池 | `ArrayPoolMemory`（.NET `ArrayPool`） | ⛔ 不适用 | `io/pool.rs` `BufferPool`（无生产消费者） | .NET 需 `ArrayPool` 复用托管数组；Rust 用系统分配器 + `Bytes`/`Arc` 共享缓冲，无需另造池。`BufferPool` 既无消费者，属可删除的遗留（代码调整阶段处理） |
 | `DirectoryReference` / `IFileReference` | ✅ | `file_ref.rs` | 含 glob、`move_to`、`delete` |
 
 ### 1.5 错误与日志
 
 | fo-dicom | 状态 | radicom | 证据 |
 |---|---|---|---|
-| 强类型异常族 | 🟡 | `error.rs` `Error` | `Error::Network(String)`（`error.rs:38` 附近）是无类型占位符，而 `radicom-network` 另有自己的错误类型，跨 crate 的 `?` 转换丢失结构 |
+| 强类型异常族 | ⛔ 不适用 | `error.rs` `Error`（core）+ `radicom-network` 自己的 `NetworkError` | .NET 用异常继承族；Rust 惯例是每个 crate 自己的 `thiserror` 枚举，`?` 在边界显式转换。core 的 `Error::Network(String)` 仅承载跨 crate 透传文本，不追求与网络异常同构 |
 | 解析器熔断/部分结果 | ✅ | `ReaderError::Eof{position, needed}` / `io_err_need` | 读取路径用 `io_err_need` 记录真实期望字节数；仅定位/跳过等无字节需求的调用用 `needed: 0`（见 §2.8） |
 | 日志 target 常量 | ✅ | `logging.rs:5-13` | 与 fo-dicom 命名习惯一致 |
 
