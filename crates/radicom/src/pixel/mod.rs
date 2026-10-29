@@ -362,6 +362,43 @@ impl<'a> PixelData<'a> {
         }
     }
 
+    /// Appends an owned frame buffer, taking it over without copying when the
+    /// element is still empty (and the frame is evenly sized, as DICOM requires).
+    /// This is the zero-copy path for transcoding, where frames are already
+    /// shared windows over the source (PIX-02).
+    pub fn add_frame_buffer(&mut self, frame: SharedBuffer) -> Result<u32, Error> {
+        if !frame.size().is_multiple_of(2) {
+            // odd frames need padding, which `add_frame` handles by copying
+            return self.add_frame(frame.data());
+        }
+        let index = self.stored_frame_count();
+        match self.kind {
+            PixelDataKind::Encapsulated => {
+                let vr = if self.bits_allocated().unwrap_or(8) <= 8 { Vr::Ob } else { Vr::Ow };
+                let fragments = self.dataset.insert_fragments(PIXEL_DATA, vr);
+                fragments.push_fragment(frame);
+                self.bump_frame_count(index + 1);
+                Ok(index)
+            }
+            _ => {
+                if self.dataset.item(&PIXEL_DATA).is_none() {
+                    let vr = match self.kind {
+                        PixelDataKind::OtherWord => Vr::Ow,
+                        _ => Vr::Ob,
+                    };
+                    self.dataset.insert_or_update(DicomItem::Element(
+                        crate::model::element::DicomElement::new_bytes(PIXEL_DATA, vr, frame),
+                    ));
+                    self.bump_frame_count(index + 1);
+                    Ok(index)
+                } else {
+                    // an existing native element has to be extended by copying
+                    self.add_frame(frame.data())
+                }
+            }
+        }
+    }
+
     /// Frames currently present: an absent element holds none, otherwise
     /// `(0028,0008)` (which reads as 1 when the tag is absent) is trusted.
     fn stored_frame_count(&self) -> u32 {
@@ -752,6 +789,28 @@ mod tests {
         pd.add_frame([7u8, 8]).unwrap();
         pd.add_frame([9u8, 9]).unwrap();
         assert_eq!(pd.get_frame(1).unwrap().data().as_ref(), &[9, 9]);
+    }
+
+    #[test]
+    fn add_frame_buffer_takes_over_even_frames_and_pads_odd_ones() {
+        // first even frame is stored directly, later frames append by copy
+        let mut ds = mono_dataset(2, 2, 8, 1);
+        {
+            let mut pd = PixelData::from_dataset(&mut ds).unwrap();
+            let first: SharedBuffer = Arc::new(MemoryBuffer::from(vec![1u8, 2, 3, 4]));
+            assert_eq!(pd.add_frame_buffer(first).unwrap(), 0);
+            let second: SharedBuffer = Arc::new(MemoryBuffer::from(vec![5u8, 6, 7, 8]));
+            assert_eq!(pd.add_frame_buffer(second).unwrap(), 1);
+            assert_eq!(pd.number_of_frames(), 2);
+            assert_eq!(pd.get_frame(1).unwrap().data().as_ref(), &[5, 6, 7, 8]);
+        }
+
+        // an odd frame cannot be stored verbatim and falls back to padding
+        let mut ds = mono_dataset(2, 2, 8, 1);
+        let mut pd = PixelData::from_dataset(&mut ds).unwrap();
+        let odd: SharedBuffer = Arc::new(MemoryBuffer::from(vec![5u8, 6, 7]));
+        assert_eq!(pd.add_frame_buffer(odd).unwrap(), 0);
+        assert_eq!(pd.get_frame(0).unwrap().data().as_ref(), &[5, 6, 7, 0]);
     }
 
     #[test]

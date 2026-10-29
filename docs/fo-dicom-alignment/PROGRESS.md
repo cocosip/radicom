@@ -252,3 +252,5 @@
 - **网络 / 异步**：`send_c_find_stream`/`send_c_move_stream`/`send_c_get_stream` 由 `Pin<Box<dyn Future>>` 改为原生 `async fn`，去掉每次调用的堆分配与动态派发；`expert.rs` 已在 async fn 中 await，无需装箱。
 
 - **模型 / 渲染（零分配字符串读）**：新增 `Dataset::try_get_str_ref(&Tag) -> Option<&str>`；`number_of_frames`、`photometric_interpretation` 及 `render_frame` 的 PI / VOILUTFunction / SOPClassUID / 首数值读取改用借用视图，热路径读文本 tag 不再分配 `String`。
+
+- **像素 / 转码零拷贝**：新增 `PixelData::add_frame_buffer(SharedBuffer)`：空元素的首帧/单帧直接接管缓冲、封装帧直接 `push_fragment`，仅多帧原生或奇数长度回退复制；`transcode_dataset`/`decode_frames`/`decode_to_uncompressed` 改用之，减少逐帧拷贝。含 `add_frame_buffer_takes_over_even_frames_and_pads_odd_ones` 测试。

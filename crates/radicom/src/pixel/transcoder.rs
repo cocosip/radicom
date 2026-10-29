@@ -105,7 +105,7 @@ impl Transcoder {
         {
             let mut pd = PixelData::from_dataset(&mut out)?;
             for frame in frames {
-                pd.add_frame(frame.data())?;
+                pd.add_frame_buffer(frame)?;
             }
         }
         self.finish(&mut out)?;
@@ -144,7 +144,7 @@ impl Transcoder {
         target.remove(Tag::NUMBER_OF_FRAMES);
         {
             let mut dst = PixelData::from_dataset(&mut target)?;
-            dst.add_frame(bytes.data())?;
+            dst.add_frame_buffer(bytes)?;
         }
         let mut decoded = target.clone();
         decoded.remove(PIXEL_DATA);
@@ -190,7 +190,7 @@ impl Transcoder {
         {
             let mut pd = PixelData::from_dataset(&mut source)?;
             for frame in frames {
-                pd.add_frame(frame.data())?;
+                pd.add_frame_buffer(frame)?;
             }
         }
         let mut decoded = source.clone();
@@ -228,7 +228,7 @@ impl Transcoder {
         {
             let mut pd = PixelData::from_dataset(&mut out)?;
             for frame in frames {
-                pd.add_frame(frame.data())?;
+                pd.add_frame_buffer(frame)?;
             }
         }
         Ok(out)
