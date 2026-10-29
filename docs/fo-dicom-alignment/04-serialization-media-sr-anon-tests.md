@@ -113,7 +113,7 @@
 | 匹配规则 | `DicomMatchRules.cs`（11 个 `*DicomMatchRule` 类） | 已实现 | `rules/match_rule.rs:20` `MatchRule`（12 变体 = 11 + `Set`） | 与 fo-dicom 一一对应 |
 | 变换规则 | `DicomTransformRules.cs`（15 个类） | 已实现 | `rules/transform.rs:26` `TransformRule`（15 变体） | 数量一致 |
 | Modified Attributes Sequence 记录 | `DicomTransformRules.cs`（`AddOrUpdate` 前 `TryGetValues`） | 已实现 | `rules/transform.rs:67` `apply_recording`、`:267` `record` | — |
-| `MatchRule::Regex` / `TransformRule::Regex` 无条件可用 | `DicomMatchRules.cs`（始终可用） | 部分实现 | `rules/match_rule.rs:35`、`transform.rs:36`（`#[cfg(feature="anonymize")]`） | 默认 feature 下**变体不存在**，用默认 feature 构建是 API 的子集 |
+| `MatchRule::Regex` / `TransformRule::Regex` 可用性 | `DicomMatchRules.cs`（始终可用） | 已实现（opt-in） | `rules/match_rule.rs`、`transform.rs`（`#[cfg(feature="regex-rules")]`） | 独立 `regex-rules` feature 提供，避免匿名化被迫引入 `regex`（见 §3.6）；默认 feature 下仍不编译该变体 |
 
 ### 1.6 JSON / XML / 字典 / xtask
 
@@ -469,11 +469,11 @@ fo-dicom 的 `DicomJsonConverter` 有 `autoValidate`（`JsonDicomConverter.cs:69
 
 **最小修法**：`write_dataset_into` 已经知道每个 item 头的绝对偏移；让 writer 回传 item 偏移表（或用 `trace`/观察者钩子），一次写完即可，不必"写—读回—再写"。次选：`item_offsets` 只扫描 `(0004,1220)` 的 payload 区间，而非 `0..bytes.len()`。
 
-### 3.6 【低】`anonymize` feature 拉入 `regex`，但匿名化本身不用 `regex`
+### 3.6 【已修复】`anonymize` feature 拉入 `regex`，但匿名化本身不用 `regex`
 
-`crates/radicom/Cargo.toml`：`anonymize = ["dep:regex"]`。而 `regex::` 只出现在 `rules/match_rule.rs:97` 与 `rules/transform.rs:109`（即 `MatchRule::Regex` / `TransformRule::Regex`）。`anonymizer/profile.rs:12-16` 的模块注释明确说自写正则子集"so matching needs no regex dependency"。
-
-**后果**：feature 名与实际用途错配；开 `anonymize` 是为了用 anonymizer，却顺带引入了它不需要的依赖。修正：把 feature 拆成 `regex-rules`，或把匿名化用到的正则子集真按 feature 名归位。这是配置正确性问题，不是热点，但会误导使用者。
+现已拆成独立 feature：`regex-rules = ["dep:regex"]`，`anonymize = []`；`rules/` 中 `Regex` 变体改由
+`#[cfg(feature = "regex-rules")]` 控制。开匿名化不再引入 `regex`，需要正则规则时单独启用
+`regex-rules`（两者可独立组合，已验证 `--features anonymize` 与 `--features regex-rules` 各自可编译）。
 
 ---
 

@@ -32,8 +32,8 @@ pub enum TransformRule {
     MapValue(Tag, String, String),
     /// Copy the value of `src` to `dst`.
     CopyValue(Tag, Tag),
-    /// Regex replace on `(tag)` (`anonymize` feature).
-    #[cfg(feature = "anonymize")]
+    /// Regex replace on `(tag)` (`regex-rules` feature).
+    #[cfg(feature = "regex-rules")]
     Regex(Tag, String, String),
     /// Prepend a string to `(tag)`.
     Prefix(Tag, String),
@@ -103,7 +103,7 @@ impl TransformRule {
                     }
                 }
             }
-            #[cfg(feature = "anonymize")]
+            #[cfg(feature = "regex-rules")]
             TransformRule::Regex(tag, pattern, replacement) => {
                 if let Some(value) = dataset.try_get_str(tag) {
                     if let Ok(re) = regex::Regex::new(pattern) {
@@ -413,7 +413,7 @@ mod tests {
         assert_eq!(value(&other, 0x0008, 0x0060).as_deref(), Some("MR"));
     }
 
-    #[cfg(feature = "anonymize")]
+    #[cfg(feature = "regex-rules")]
     #[test]
     fn regex_transform_replaces_and_records() {
         let mut ds = Dataset::new();

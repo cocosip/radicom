@@ -2,8 +2,8 @@
 //!
 //! Ports fo-dicom `DicomMatchRules`: a [`MatchRule`] tests a dataset against a
 //! tag/value condition. Rules compose with [`MatchRuleSet`] (And/Or) and
-//! [`MatchRule::Negate`]. Regex matching is available only with the `anonymize`
-//! feature (which already depends on `regex`); the rest are dependency-free.
+//! [`MatchRule::Negate`]. Regex matching is available behind the dedicated
+//! `regex-rules` feature; the rest are dependency-free.
 
 use crate::model::dataset::Dataset;
 use crate::model::tag::Tag;
@@ -31,8 +31,8 @@ pub enum MatchRule {
     Wildcard(Tag, String),
     /// The value is one of the given strings.
     OneOf(Tag, Vec<String>),
-    /// Regex match (`anonymize` feature).
-    #[cfg(feature = "anonymize")]
+    /// Regex match (`regex-rules` feature).
+    #[cfg(feature = "regex-rules")]
     Regex(Tag, String),
     /// Always true / always false.
     Bool(bool),
@@ -93,7 +93,7 @@ impl MatchRule {
                 let v = value(tag);
                 values.contains(&v)
             }
-            #[cfg(feature = "anonymize")]
+            #[cfg(feature = "regex-rules")]
             MatchRule::Regex(tag, pattern) => regex::Regex::new(pattern)
                 .map(|re| re.is_match(&value(tag)))
                 .unwrap_or(false),
@@ -213,7 +213,7 @@ mod tests {
         assert!(!MatchRule::Bool(false).matches(&dataset()));
     }
 
-    #[cfg(feature = "anonymize")]
+    #[cfg(feature = "regex-rules")]
     #[test]
     fn regex_rule_matches() {
         let ds = dataset();
