@@ -412,3 +412,26 @@ These were design intent but the implementation does not match. Do not treat the
   `CodeValue`.
 - **`store.rs` defaults to `SpoolToTemp` and leaks temp files**; the default should not leave files
   behind.
+
+### 15.1 Deferred API limitations
+
+The 2026-10-29 code review (`target/2026-10-29-code-review.md`) raised three interface issues that are
+**not behavioural bugs**. They were deliberately left out of that review's fix batch because each one is
+an API-breaking change or a cross-module redesign, and must land with its own compatibility decision
+rather than be folded into a correctness commit.
+
+1. **`DicomImage` geometry accessors are infallible but return `Result`**
+   (`crates/radicom/src/render/mod.rs`, `width` / `height` / `number_of_frames` / `is_grayscale`).
+   They only wrap a cached field and never fail. They should return `u32` / `bool` and drop the `Result`
+   wrapper; that is a public API break, so it needs a version decision. Note that `RawImage` (same
+   module) already exposes the infallible shape, so `DicomImage` should follow it.
+2. **`PixelDataConverter` is a C#-style namespace class** (`crates/radicom/src/render/pixel_converter.rs`).
+   It is stateless and holds a single `reverse_bits` static; a plain module function is the Rust shape.
+   Pure cleanup with no behaviour change — safe to do on its own, but it renames a public item.
+3. **Deferred-I/O buffers panic instead of reporting an error** (`crates/radicom/src/model/buffer.rs`,
+   `FileWindow` around line 608/613 and `StreamWindow` around line 716). `ByteBuffer::data` cannot
+   return an I/O error, so a read failure on a lazily-loaded value becomes `expect(...)` / a panic
+   rather than a typed error. Fixing this means making the buffer read path fallible across every
+   caller, which contradicts the no-panic guarantee stated in
+   [02-development-guide.md](02-development-guide.md) §5.1 until it is done. Until then, treat
+   `ByteBuffer::data` as an infallible accessor only for values already materialised in memory.
