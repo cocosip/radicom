@@ -105,7 +105,7 @@
 | `TempFileBuffer` / `TempFileRemover` | ✅ | `buffer.rs` `TempFileSpill`；`file_ref.rs` `TempFileProvider` | 带 Drop 清扫与延迟重试删除 |
 | `CompositeByteBuffer` | ✅ | `buffer.rs` `CompositeBuffer` | 但 `data()` 恒拼接新 Vec（`buffer.rs:225`），`copy_to()` 才流式（`buffer.rs:251`） |
 | `EvenLengthBuffer`（读侧自动补齐奇数长度） | 🟡 | `buffer.rs` `EvenLengthBuffer` | 类型存在，但解析路径未使用：`reader.rs:461-511` 的 `parse_fragment_sequence` 接受奇数长度片段而不补/不告警 |
-| 内存池 | `ArrayPoolMemory`（.NET `ArrayPool`） | ⛔ 不适用 | `io/pool.rs` `BufferPool`（无生产消费者） | .NET 需 `ArrayPool` 复用托管数组；Rust 用系统分配器 + `Bytes`/`Arc` 共享缓冲，无需另造池。`BufferPool` 既无消费者，属可删除的遗留（代码调整阶段处理） |
+| 内存池 | `ArrayPoolMemory`（.NET `ArrayPool`） | ⛔ 不适用 | —（原 `io/pool.rs` 已删除） | .NET 需 `ArrayPool` 复用托管数组；Rust 用系统分配器 + `Bytes`/`Arc` 共享缓冲。原 `BufferPool`/`PooledBuffer` 无任何生产消费者，已作为 .NET 遗留删除 |
 | `DirectoryReference` / `IFileReference` | ✅ | `file_ref.rs` | 含 glob、`move_to`、`delete` |
 
 ### 1.5 错误与日志

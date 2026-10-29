@@ -154,7 +154,7 @@
 - 04：`RootDirectoryRecordCollection`、`DirectoryRecord` 的 `Next/Lower/Key`→按功能已实现 / .NET 对象模型不适用。
 - 05：C-FIND/C-GET/C-MOVE/C-CANCEL 的 provider 取消回调→功能已达（future 取消）；请求队列/watchdog/
   linger→.NET 异步队列概念，判为已实现（Rust 表达）或⛔不适用。
-- 代码调整（删除 `BufferPool` 等 .NET 遗留）留待下一步，仅在此记录计划。
+- 代码调整：删除无任何生产消费者的 `io/pool.rs`（`BufferPool`/`PooledBuffer`，.NET `ArrayPool` 遗留）。
 
 ## 结论
 
