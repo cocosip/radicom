@@ -12,7 +12,7 @@
 
 use crate::error::{Error, ReaderError};
 use crate::io::byte_source::ByteSourceReader;
-use crate::model::buffer::{EmptyBuffer, EndianBuffer, SharedBuffer};
+use crate::model::buffer::{EmptyBuffer, EndianBuffer, EvenLengthBuffer, SharedBuffer};
 use crate::model::endian::Endian;
 use crate::model::tag::Tag;
 use crate::model::transfer_syntax::TransferSyntax;
@@ -614,7 +614,13 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                         observer.on_begin_fragment(&self.ctx(start), tag, vr, table.clone())?;
                         offset_table = Some(table);
                     } else {
-                        observer.on_fragment(&self.ctx(pos), buffer)?;
+                        // PS3.5 A.4: a fragment value is even-length. A stray odd
+                        // length is padded to even for consumers (fo-dicom
+                        // EvenLengthBuffer) instead of silently accepted.
+                        if length % 2 == 1 {
+                            tracing::warn!(length, "odd-length pixel data fragment padded to even");
+                        }
+                        observer.on_fragment(&self.ctx(pos), EvenLengthBuffer::wrap_if_needed(buffer))?;
                     }
                 }
                 (0xFFFE, 0xE0DD) => {

@@ -427,6 +427,38 @@ mod tests {
     }
 
     #[test]
+    fn odd_length_fragment_is_padded_to_even() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x7FE0u16.to_le_bytes());
+        bytes.extend_from_slice(&0x0010u16.to_le_bytes());
+        bytes.extend_from_slice(b"OB");
+        bytes.extend_from_slice(&[0, 0]);
+        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        // empty basic offset table
+        bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        bytes.extend_from_slice(&0xE000u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        // a 3-byte (odd) fragment, non-conformant but tolerated
+        bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        bytes.extend_from_slice(&0xE000u16.to_le_bytes());
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
+        bytes.extend_from_slice(&sequence_delimiter());
+
+        let ds = parse(&bytes, &le());
+        let frags = match ds.item(&Tag::PIXEL_DATA) {
+            Some(DicomItem::Fragments(f)) => f,
+            other => panic!("expected fragments, got {other:?}"),
+        };
+        assert_eq!(frags.fragments().len(), 1);
+        assert_eq!(
+            &*frags.fragments()[0].data(),
+            &[0xAA, 0xBB, 0xCC, 0x00],
+            "an odd fragment is exposed even-length with a zero pad"
+        );
+    }
+
+    #[test]
     fn t5_orphan_item_treated_as_undefined_sq() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
