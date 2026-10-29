@@ -77,24 +77,24 @@ impl TransformRule {
                     .map(|item| item.tag().clone())
                     .collect();
                 for tag in victims {
-                    record(&mut modified, dataset, tag.clone());
+                    record(&mut modified, dataset, &tag);
                     dataset.remove(&tag);
                 }
             }
             TransformRule::SetValue(tag, value) => {
-                record(&mut modified, dataset, tag.clone());
+                record(&mut modified, dataset, tag);
                 dataset.insert_str(tag.clone(), tag_vr_or(dataset, tag.clone()), value.clone());
             }
             TransformRule::MapValue(tag, from, to) => {
                 if dataset.try_get_str(tag).as_deref() == Some(from.as_str()) {
-                    record(&mut modified, dataset, tag.clone());
+                    record(&mut modified, dataset, tag);
                     dataset.insert_str(tag.clone(), tag_vr_or(dataset, tag.clone()), to.clone());
                 }
             }
             TransformRule::CopyValue(src, dst) => {
                 let found = dataset.items().find(|i| i.tag() == src).cloned();
                 if let Some(item) = found {
-                    record(&mut modified, dataset, dst.clone());
+                    record(&mut modified, dataset, dst);
                     if let DicomItem::Element(e) = &item {
                         let (vr, buffer) = (e.vr(), e.encoded());
                         dataset.insert_or_update(DicomItem::Element(
@@ -107,7 +107,7 @@ impl TransformRule {
             TransformRule::Regex(tag, pattern, replacement) => {
                 if let Some(value) = dataset.try_get_str(tag) {
                     if let Ok(re) = regex::Regex::new(pattern) {
-                        record(&mut modified, dataset, tag.clone());
+                        record(&mut modified, dataset, tag);
                         let replaced = re.replace_all(&value, replacement.as_str()).into_owned();
                         dataset.insert_str(tag.clone(), tag_vr_or(dataset, tag.clone()), replaced);
                     }
@@ -115,19 +115,19 @@ impl TransformRule {
             }
             TransformRule::Prefix(tag, prefix) => {
                 if let Some(value) = dataset.try_get_str(tag) {
-                    record(&mut modified, dataset, tag.clone());
+                    record(&mut modified, dataset, tag);
                     dataset.insert_str(tag.clone(), tag_vr_or(dataset, tag.clone()), format!("{prefix}{value}"));
                 }
             }
             TransformRule::Append(tag, suffix) => {
                 if let Some(value) = dataset.try_get_str(tag) {
-                    record(&mut modified, dataset, tag.clone());
+                    record(&mut modified, dataset, tag);
                     dataset.insert_str(tag.clone(), tag_vr_or(dataset, tag.clone()), format!("{value}{suffix}"));
                 }
             }
             TransformRule::TrimString(tag, position, trim) => {
                 if let Some(mut value) = dataset.try_get_str(tag) {
-                    record(&mut modified, dataset, tag.clone());
+                    record(&mut modified, dataset, tag);
                     if matches!(position, TrimPosition::Start | TrimPosition::Both) && !trim.is_empty() {
                         while value.starts_with(trim.as_str()) {
                             value = value[trim.len()..].to_string();
@@ -143,7 +143,7 @@ impl TransformRule {
             }
             TransformRule::TrimCharacters(tag, position, chars) => {
                 if let Some(value) = dataset.try_get_str(tag) {
-                    record(&mut modified, dataset, tag.clone());
+                    record(&mut modified, dataset, tag);
                     let trimmed = match chars {
                         Some(set) => match position {
                             TrimPosition::Both => value.trim_matches(|c| set.contains(&c)),
@@ -162,7 +162,7 @@ impl TransformRule {
             }
             TransformRule::PadString(tag, total_length, pad) => {
                 if let Some(value) = dataset.try_get_str(tag) {
-                    record(&mut modified, dataset, tag.clone());
+                    record(&mut modified, dataset, tag);
                     let padded = if *total_length < 0 {
                         let width = (-*total_length) as usize;
                         format!("{value:>width$}", width = width).replace(' ', &pad.to_string())
@@ -175,7 +175,7 @@ impl TransformRule {
             }
             TransformRule::Truncate(tag, length) => {
                 if let Some(value) = dataset.try_get_str(tag) {
-                    record(&mut modified, dataset, tag.clone());
+                    record(&mut modified, dataset, tag);
                     let truncated = value
                         .split('\\')
                         .map(|part| part.chars().take(*length).collect::<String>())
@@ -186,7 +186,7 @@ impl TransformRule {
             }
             TransformRule::SplitFormat(tag, separators, format) => {
                 if let Some(value) = dataset.try_get_str(tag) {
-                    record(&mut modified, dataset, tag.clone());
+                    record(&mut modified, dataset, tag);
                     let parts: Vec<&str> = value.split(|c| separators.contains(&c)).collect();
                     let joined = parts.join("/");
                     let formatted = format.replace("{0}", &joined);
@@ -195,19 +195,19 @@ impl TransformRule {
             }
             TransformRule::ToUpper(tag) => {
                 if let Some(value) = dataset.try_get_str(tag) {
-                    record(&mut modified, dataset, tag.clone());
+                    record(&mut modified, dataset, tag);
                     dataset.insert_str(tag.clone(), tag_vr_or(dataset, tag.clone()), value.to_uppercase());
                 }
             }
             TransformRule::ToLower(tag) => {
                 if let Some(value) = dataset.try_get_str(tag) {
-                    record(&mut modified, dataset, tag.clone());
+                    record(&mut modified, dataset, tag);
                     dataset.insert_str(tag.clone(), tag_vr_or(dataset, tag.clone()), value.to_lowercase());
                 }
             }
             TransformRule::GenerateUid(tag) => {
                 if dataset.contains(tag) {
-                    record(&mut modified, dataset, tag.clone());
+                    record(&mut modified, dataset, tag);
                     dataset.insert_str(tag.clone(), tag_vr_or(dataset, tag.clone()), Uid::generate_value());
                 }
             }
@@ -264,11 +264,11 @@ impl TransformRuleSet {
 }
 
 /// Clones the current `(tag)` element into `modified`, when both exist.
-fn record(modified: &mut Option<&mut Dataset>, dataset: &Dataset, tag: Tag) {
+fn record(modified: &mut Option<&mut Dataset>, dataset: &Dataset, tag: &Tag) {
     let Some(target) = modified.as_deref_mut() else {
         return;
     };
-    if let Some(item) = dataset.items().find(|i| i.tag() == &tag).cloned() {
+    if let Some(item) = dataset.items().find(|i| i.tag() == tag).cloned() {
         target.insert_or_update(item);
     }
 }
