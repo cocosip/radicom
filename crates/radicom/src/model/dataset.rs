@@ -937,6 +937,50 @@ impl PartialEq for Dataset {
 
 impl Eq for Dataset {}
 
+impl Dataset {
+    /// Content comparison matching fo-dicom `DicomDatasetComparer`.
+    ///
+    /// Same as [`PartialEq`] for tags, VRs and values (recursing through
+    /// sequences), except that an element backed by an unresolved bulk-data
+    /// URI is compared by tag alone: its bytes have not been fetched, so
+    /// comparing them would be meaningless (fo-dicom `DicomValueComparer`
+    /// skips a `BulkDataUriByteBuffer` that is not in memory).
+    pub fn content_equals(&self, other: &Self) -> bool {
+        self.items.len() == other.items.len()
+            && self.items.iter().all(|(tag, item)| {
+                other.items.get(tag).is_some_and(|other_item| items_content_equal(item, other_item))
+            })
+    }
+}
+
+fn items_content_equal(a: &DicomItem, b: &DicomItem) -> bool {
+    match (a, b) {
+        (DicomItem::Element(x), DicomItem::Element(y)) => {
+            if x.tag() != y.tag() || x.vr() != y.vr() {
+                return false;
+            }
+            if skips_unresolved_bulk(x) || skips_unresolved_bulk(y) {
+                return true;
+            }
+            x.value() == y.value()
+        }
+        (DicomItem::Sequence(x), DicomItem::Sequence(y)) => {
+            x.tag() == y.tag()
+                && x.items().len() == y.items().len()
+                && x.items().iter().zip(y.items()).all(|(d1, d2)| d1.content_equals(d2))
+        }
+        (DicomItem::Fragments(x), DicomItem::Fragments(y)) => x == y,
+        _ => false,
+    }
+}
+
+fn skips_unresolved_bulk(element: &DicomElement) -> bool {
+    element
+        .value()
+        .as_buffer()
+        .is_some_and(|buffer| buffer.bulk_uri().is_some() && !buffer.is_memory())
+}
+
 /// Shared functional groups sequence (0020,9116).
 pub const SHARED_FUNCTIONAL_GROUPS: Tag = Tag::PLANE_ORIENTATION_SEQUENCE;
 /// Per-frame functional groups sequence (0020,9111).
@@ -1108,6 +1152,33 @@ mod derived_tests {
         // a value difference breaks it
         b.insert_str(PATIENT_ID, Vr::Lo, "Y");
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn content_comparison_skips_unresolved_bulk_data() {
+        use crate::model::buffer::BulkDataUri;
+
+        let unresolved = |uri: &str| -> SharedBuffer { Arc::new(BulkDataUri::new(uri)) };
+        let resolved = |data: Vec<u8>| -> SharedBuffer {
+            Arc::new(BulkDataUri::with_data("http://example/bulk", data))
+        };
+
+        let mut a = Dataset::new();
+        a.insert(DicomElement::new_bytes(Tag::PIXEL_DATA, Vr::Ob, unresolved("http://a/1"))).unwrap();
+        let mut b = Dataset::new();
+        b.insert(DicomElement::new_bytes(Tag::PIXEL_DATA, Vr::Ob, unresolved("http://b/2"))).unwrap();
+        assert!(a.content_equals(&b), "unresolved bulk data is compared by tag only");
+
+        let mut c = Dataset::new();
+        c.insert(DicomElement::new_bytes(Tag::PIXEL_DATA, Vr::Ob, resolved(vec![1, 2, 3]))).unwrap();
+        let mut d = Dataset::new();
+        d.insert(DicomElement::new_bytes(Tag::PIXEL_DATA, Vr::Ob, resolved(vec![1, 2, 4]))).unwrap();
+        assert!(!c.content_equals(&d), "materialized bulk data still compares bytes");
+
+        // tag set must match exactly
+        let mut e = Dataset::new();
+        e.insert_str(PATIENT_ID, Vr::Lo, "X");
+        assert!(!a.content_equals(&e));
     }
 
     #[test]

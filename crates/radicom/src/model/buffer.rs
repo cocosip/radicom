@@ -76,7 +76,11 @@ impl ByteBuffer for BulkDataUri {
         self.fallback.as_ref().map_or(0, |b| b.len() as u64)
     }
     fn is_memory(&self) -> bool {
-        true
+        // Only a URI buffer with a materialized fallback really holds its
+        // bytes; a URI-only buffer has nothing in memory (fo-dicom's
+        // `BulkDataUriByteBuffer.IsMemory`), which lets content comparison
+        // skip it instead of comparing empty placeholders.
+        self.fallback.is_some()
     }
     fn data(&self) -> std::borrow::Cow<'_, [u8]> {
         match &self.fallback {
