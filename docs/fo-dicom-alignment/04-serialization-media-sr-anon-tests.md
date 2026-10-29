@@ -89,7 +89,7 @@
 | `StructuredReport` 打开/保存 | `StructuredReport/DicomStructuredReport.cs:33` `Open`/`:70` `Save` | 已实现 | `sr/structured_report.rs` `open`/`open_reader`/`save`/`write_to` | 支持路径与 `Read+Seek`/`Write` 流重载（fo-dicom 的 Stream 形态）；`SaveAsync` 不适用（核心 crate 无 async） |
 | `StructuredReport` 继承 `DicomContentItem`（自身即根节点） | `DicomStructuredReport.cs:15`（`: DicomContentItem`） | 有意不实现 | `sr/structured_report.rs:16`（包一层 `DicomFile`） | radicom 用 `root_items()` 暴露根，组合优于继承，合理 |
 | 单根 CONTAINER 校验 | `DicomStructuredReport.cs`（`AutoValidate`） | 已实现 | `sr/structured_report.rs:81` `validate` | 显式调用，非自动 |
-| `CodeItem` 三段自动分派（short/long/URN） | `StructuredReport/DicomCodeItem.cs:24`（`CodeValue`/`LongCodeValue`/`URNCodeValue` 三选一） | **实现错误** | `sr/code_item.rs:23` `SHORT`、`:31` `LONG`、`:114` `needs_long` | 见 §2.2：模块的"短/长 tag 族"前提本身不成立；`SHORT` 整族非法，`LONG` 的 version tag 错，`LongCodeValue`/`URNCodeValue` 从未实现 |
+| `CodeItem` 三段自动分派（short/long/URN） | `StructuredReport/DicomCodeItem.cs:24`（`CodeValue`/`LongCodeValue`/`URNCodeValue` 三选一） | 已修复 | `sr/code_item.rs` 按内容写 `(0008,0100)` SH / `(0008,0119)` UC / `(0008,0120)` UR，dict VR 正确（§2.2 已修复，`55ab7b6`/`2ec3a5d`） | 原"短/长 tag 族"前提已删除；保留一条 value tag 的按值分派 |
 | `DicomCodeItem::FromUrn` | `DicomCodeItem.cs:50` | 已实现 | `sr/code_item.rs` `from_urn`（`2ec3a5d`） | URN → CodeItem 入口 |
 | `DicomCodeItem` 相等语义（Value+Scheme+Version） | `DicomCodeItem.cs:110` `Equals` | 已实现 | `sr/code_item.rs:39` `#[derive(PartialEq, Eq)]` | 字段含 `value`/`scheme`/`meaning`/`scheme_version`；`meaning` 也参与相等，比 fo-dicom 更严（fo-dicom 不比 meaning） |
 | `DicomMeasuredValue`（decimal + units） | `StructuredReport/DicomMeasuredValue.cs` | 已实现 | `sr/content_item.rs` `MeasuredValue` | 数值按 DS 规则格式化并在超长/非有限时报错，支持单位 code sequence（§2.6） |
@@ -100,7 +100,7 @@
 | 能力 | fo-dicom 参照 | 状态 | radicom 符号（file:line） | 说明 |
 | --- | --- | --- | --- | --- |
 | PS3.15 全表（生成、内嵌） | `DicomAnonymizerGenerated.cs` | 已实现 | `anonymizer/profile.rs:227` `basic`、`ps3.15.csv`（655 行） | 行数与 fo-dicom 一致 |
-| 11 选项 × 6 动作矩阵 | `DicomAnonymizer.cs:29` `SecurityProfile` | **实现错误** | `anonymizer/profile.rs:259` `action_for` | "首行匹配即止"vs fo-dicom"每选项一张表"，见 §2.4 |
+| 11 选项 × 6 动作矩阵 | `DicomAnonymizer.cs:29` `SecurityProfile` | 已修复 | `anonymizer/profile.rs:347` `action_for`、`:360` `action_for_tag` | 按选项分别建表；空单元格不再遮蔽后续行，"首行匹配"语义已修正（§2.4，`c26ec7a`） |
 | 动作 D/Z/X/K/C/U | `DicomAnonymizer.cs:38` `SecurityProfileActions` | 已实现 | `anonymizer/profile.rs:60` `Action` | — |
 | 正则 tag 匹配（私有组/曲线/覆盖层通配） | `DicomAnonymizer.cs:150`（`Dictionary<Regex,...>`） | 有意不实现（自写子集） | `anonymizer/profile.rs` 自写极小正则子集 | 只支持字面量、`[类]`、`{n}`；这是**有意**的轻依赖选择，PS3.15 全表用该子集即可精确匹配。`regex` 仅由 `rules/` 的独立 `regex-rules` feature 使用（§3.6 已解耦） |
 | SQ 递归 | `DicomAnonymizer.cs:250` | 已实现 | `anonymizer/mod.rs:98` `walk`、`:111-114` | X 删整条、K 保留、其余递归 |
@@ -129,9 +129,9 @@
 | dataset 集合 → JSON 数组 | `DicomJson.cs:31` `ConvertDicomToJson(IEnumerable)` | 已实现 | `radicom-json/src/lib.rs` `datasets_to_json`（`ccb9468`） | QIDO-RS 多结果数组 |
 | JSON 数组 → dataset 集合 | `DicomJson.cs:56` `ConvertJsonToDicomArray` | 已实现 | `radicom-json/src/lib.rs` `json_to_datasets`（`ccb9468`） | 同上 |
 | group length 写出时剥离 | `JsonDicomConverter.cs` | 已实现 | `radicom-json/src/lib.rs` `dataset_to_value` | `(GGGG,0000)` 在每层都被跳过；`group_lengths_are_stripped_at_every_level` 覆盖 |
-| 空 SQ 不写 `Value` | `JsonDicomConverter.cs` | **不一致** | `lib.rs:135-144`、`:172-176` | radicom 写 `"Value":[]`，fo-dicom 不写 |
-| 空值组件写 `null` | `JsonDicomConverter.cs` | **不一致** | `lib.rs:214`、`:503-509` | radicom 写 `""`，fo-dicom 写 `null`（见 §2.7） |
-| 数字默认模式 | `JsonDicomConverter.cs:69`（默认 `AsNumber`） | 有意不同 | `lib.rs:54-65`（默认 `PreferablyAsNumber`） | 差异见 §2.7，需明确声明 |
+| 空 SQ 不写 `Value` | `JsonDicomConverter.cs` | 已实现 | `lib.rs:171-175` | 空序列只写 `{"vr":"SQ"}`，与 fo-dicom 一致 |
+| 空值组件写 `null` | `JsonDicomConverter.cs` | 已实现 | `lib.rs:249` | 空分量写 `null`（§2.7） |
+| 数字默认模式 | `JsonDicomConverter.cs:69`（默认 `AsNumber`） | 有意不同（已文档化） | `lib.rs:54-65`（默认 `PreferablyAsNumber`） | 文档已声明差异；需要 fo-dicom 语义时可选 `NumberMode::AsNumber`（§2.7） |
 | XML 单向导出 | `Serialization/DicomXML.cs:22` | 已实现 | `radicom-json/src/xml.rs:27` `dataset_to_xml` | fo-dicom 同样只有写 |
 | `privateCreator` 属性 | `DicomXML.cs:157` | 已实现 | `xml.rs:81-83` | — |
 | 片段序列 XML 表示 | `DicomXML.cs:108`（按 VR 走 `InlineBinary`） | 已实现（与自身注释矛盾） | `xml.rs:43`、`:220` `write_fragments` | 注释 `:42` 说"不可表示"，实际会写 `<Fragment>`；见 §2.9 |

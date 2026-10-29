@@ -621,7 +621,7 @@ async fn loopback_honours_a_small_peer_max_pdu() {   // 注释说 "a 64-byte max
 | 3 | C-MOVE 终端计数归零 | `server.rs:727-757` | **已修复** | 用累加 summary 兜底，并有回归测试 |
 | 4 | `max_clients` 不生效 | `server.rs:179-210` | **已修复** | Semaphore 门控 accept loop，并有并发槽位测试 |
 | 5 | 服务端无 ACSE 超时 | `server.rs:269-281` | **已修复** | 首个 PDU 读取超时并发送 Provider A-ABORT |
-| 6 | C-GET `remaining` 语义 | `server.rs:567-665` | **部分修复** | Pending 改由 provider 驱动；未提供 Pending 时无法推导总数 |
+| 6 | C-GET `remaining` 语义 | `server.rs:567-665` | **已调整（设计边界）** | Pending 由 provider 驱动；provider 不产生 Pending 时无法推导总数，属同步流式 API 的边界（§2.4） |
 | 7 | 客户端 PC 不复用 | `client.rs:149-155` | 中 | 中（需重开关联） |
 | 8 | 默认 C-STORE 慢 4 倍 + 阻塞 IO | `store.rs:60-77` | 中高 | 小（走内存路径 + `spawn_blocking`） |
 | 9 | 请求超时体系缺失（engine 死代码） | `engine.rs`、`client.rs:60` | 中 | 大（需设计接线） |
