@@ -80,7 +80,7 @@
 | 关联请求重试上限 | `MaximumNumberOfConsecutiveTimedOutAssociationRequests`（默认 3） | **已实现** | `client.rs:187-229` | 仅超时/可重试 IO 重试；0 表示不重试，拒绝/TLS/协议错误立即返回；见 §2.8 |
 | C-CANCEL SCU | `DicomCCancelRequest` | ⛔ 设计边界（同步 API） | `client.rs:314-320` | 记录最近一次请求的 presentation context；同步阻塞的 `send_c_find` 期间无法从同一 client 并发 `cancel`，需上层用独立任务/连接取消 |
 | 反向 C-STORE 处理器（C-GET 收图） | `IDicomCStoreProvider` on SCU | 已实现 | `server.rs:1005-1007`、`server.rs:1161-1171` | — |
-| Expert/Advanced 层 | `Client/Advanced/*` | 部分实现 | `expert.rs:33-40` `Connection`、`expert.rs:206-221` `send` | 声称流式实际全缓冲；已删除未使用的 `RELEASE_TIMEOUT` 常量（释放超时现由关联的 `release_timeout` 负责） |
+| Expert/Advanced 层 | `Client/Advanced/*` | 已实现 | `expert.rs` `Connection`、`send` / `send_streaming` | `send_streaming` 复用关联的 `*_stream` 逐条回调、不整体缓冲；`send` 保留为返回缓冲迭代器的便捷入口。已删除未使用的 `RELEASE_TIMEOUT`（释放超时由关联的 `release_timeout` 负责） |
 
 ### 1.3 明确"有意不实现" vs 真实缺口
 

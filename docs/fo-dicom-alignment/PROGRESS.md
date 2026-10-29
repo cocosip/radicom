@@ -190,6 +190,8 @@
   ImageBox 的 smoothing/density 属 SCP 参数（Core 不渲染）——均为能力等价，行状态已更正。
 - **像素 / YCbCr 结构**：把内联的 YCbCr→RGB 公式抽为纯函数 `ybr_full_to_rgb` / `ybr_partial_to_rgb`，
   共享 `ycbcr_to_rgb` 矩阵，可独立单测；`render_ybr_frame` 保留布局解包。
+- **网络 / Expert 流式**：新增 `expert::send_streaming`，复用关联的 `send_c_find_stream` / `send_c_move_stream` /
+  `send_c_get_stream` 逐条回调，不再整体缓冲；`send` 保留为缓冲迭代器入口。加端到端 C-FIND 流式测试。
 - .NET 专属抽象，Rust 不适用（按能力已覆盖）→ `INetworkManager`、`DicomTimeout`、`NetworkStreamCreationOptions`、
   `IImage`/`IImageManager`、`IPixelData` 接口、每服务独立 provider 接口、`DirectoryRecord` 指针、`CacheType`、`ArrayPool`。
 

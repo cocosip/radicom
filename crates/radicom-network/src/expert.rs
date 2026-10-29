@@ -219,6 +219,42 @@ pub async fn send(association: &mut WireAssociation, request: ExpertRequest) -> 
     }
 }
 
+/// Sends one request and forwards each response to `on_response` as it arrives,
+/// without collecting the whole answer set (§9.2). Use [`send`] when you want
+/// the responses buffered into an iterator instead.
+pub async fn send_streaming<F>(
+    association: &mut WireAssociation,
+    request: ExpertRequest,
+    mut on_response: F,
+) -> Result<()>
+where
+    F: FnMut(ExpertResponse) -> std::io::Result<()>,
+{
+    match request {
+        ExpertRequest::CFind(request) => {
+            association
+                .send_c_find_stream(&request, |response| {
+                    on_response(ExpertResponse::CFind(Box::new(response)))
+                })
+                .await
+        }
+        ExpertRequest::CMove(request) => {
+            association
+                .send_c_move_stream(&request, |response| {
+                    on_response(ExpertResponse::CMove(Box::new(response)))
+                })
+                .await
+        }
+        ExpertRequest::CGet(request) => {
+            association
+                .send_c_get_stream(&request, |response| {
+                    on_response(ExpertResponse::CGet(Box::new(response)))
+                })
+                .await
+        }
+    }
+}
+
 /// The response command field a request kind expects (§6.1).
 pub fn expected_response_field(kind: &ExpertRequest) -> CommandField {
     match kind {
@@ -235,6 +271,42 @@ mod tests {
     use crate::services::VerificationProvider;
     use crate::server::{DicomServer, ServerOptions};
     use std::sync::Arc;
+
+    /// A C-FIND SCP that returns two pending matches and a success.
+    struct TwoStudyProvider;
+
+    #[async_trait::async_trait]
+    impl crate::services::ServiceProvider for TwoStudyProvider {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec![sop_class::STUDY_ROOT_QR_FIND.to_string()]
+        }
+
+        fn on_c_find<'a>(
+            &'a self,
+            request: &'a crate::cfind::CFindRequest,
+        ) -> futures::stream::BoxStream<'a, Result<crate::cfind::CFindResponse>> {
+            use futures::StreamExt;
+            let make = |uid: &str| {
+                let mut item = radicom::model::dataset::Dataset::new();
+                item.insert_str(
+                    radicom::model::tag::Tag::STUDY_INSTANCE_UID,
+                    radicom::model::vr::Vr::Ui,
+                    uid,
+                );
+                Ok(crate::cfind::CFindResponse::pending(request, item))
+            };
+            let items = vec![make("1.2.3"), make("1.2.4")];
+            futures::stream::iter(items)
+                .chain(futures::stream::once(async move {
+                    Ok(crate::cfind::CFindResponse::success(request, 2))
+                }))
+                .boxed()
+        }
+    }
+
+    fn find_context() -> PresentationContext {
+        PresentationContext::new(1, sop_class::STUDY_ROOT_QR_FIND, vec!["1.2.840.10008.1.2".to_string()])
+    }
 
     fn echo_context() -> PresentationContext {
         PresentationContext::new(1, sop_class::VERIFICATION, vec!["1.2.840.10008.1.2".to_string()])
@@ -266,6 +338,37 @@ mod tests {
         assert_eq!(stream.next(), None);
         assert!(stream.is_drained());
         assert_eq!(ResponseStream::from(vec![1, 2]).count(), 2, "usable as an iterator");
+    }
+
+    #[tokio::test]
+    async fn send_streaming_forwards_each_response_without_buffering() {
+        let server = DicomServer::bind("127.0.0.1:0", Arc::new(TwoStudyProvider), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+
+        let mut connection = Connection::new("SCU", "SCP", addr.to_string());
+        connection.open_association(vec![find_context()]).await.unwrap();
+        let association = connection.association().unwrap();
+        let request = ExpertRequest::CFind(crate::cfind::CFindRequest::study_query(1));
+
+        let (mut total, mut pending) = (0, 0);
+        send_streaming(association, request, |response| {
+            total += 1;
+            if response.is_pending() {
+                pending += 1;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(total, 3, "two pending matches plus the final success");
+        assert_eq!(pending, 2);
+        connection.release().await.unwrap();
     }
 
     #[test]
