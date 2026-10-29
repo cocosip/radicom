@@ -5,13 +5,15 @@
 //! handled by the protocol engine.
 
 use crate::error::{NetworkError, Result};
+use once_cell::sync::Lazy;
 use radicom::model::buffer::MemoryBuffer;
 use radicom::model::dataset::Dataset;
 use radicom::model::element::DicomElement;
 use radicom::model::item::DicomItem;
 use radicom::model::tag::Tag;
 use radicom::model::vr::Vr;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 /// Command set tags (§6.1).
 pub mod tag {
@@ -475,7 +477,7 @@ impl StatusState {
 
 /// Service-class context for status descriptions whose wording differs by
 /// operation family.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StatusServiceClass {
     /// Use the generic PS3.7/PS3.4 wording.
     Generic,
@@ -546,9 +548,32 @@ pub fn status_description(code: u16) -> &'static str {
     }
 }
 
+/// Caller-registered status descriptions, keyed by code and service class.
+///
+/// Mirrors fo-dicom's `DicomStatus.AddKnownDicomStatuses`: applications can add
+/// wording for private or newer status codes without rebuilding the crate.
+static STATUS_DESCRIPTIONS: Lazy<RwLock<HashMap<(u16, StatusServiceClass), &'static str>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+
+/// Registers a description for `(code, service_class)`, overriding the built-in
+/// wording. Descriptions are `&'static str` so the lookup stays allocation-free.
+pub fn register_status_description(
+    code: u16,
+    service_class: StatusServiceClass,
+    description: &'static str,
+) {
+    STATUS_DESCRIPTIONS.write().unwrap().insert((code, service_class), description);
+}
+
 /// Returns a status description with service-class-specific wording where the
 /// DICOM standard assigns different meanings to the same numeric code.
+///
+/// A description registered through [`register_status_description`] wins over
+/// the built-in table.
 pub fn status_description_for_service_class(code: u16, service_class: StatusServiceClass) -> &'static str {
+    if let Some(description) = STATUS_DESCRIPTIONS.read().unwrap().get(&(code, service_class)) {
+        return description;
+    }
     match (code, service_class) {
         (0xA900, StatusServiceClass::Storage) => "Data set does not match SOP class",
         (0xA900, StatusServiceClass::QueryRetrieve) => "Identifier does not match SOP class",
@@ -937,6 +962,19 @@ mod tests {
             Status::new(0xA900).description_for(StatusServiceClass::Storage),
             "Data set does not match SOP class"
         );
+    }
+
+    #[test]
+    fn a_custom_status_description_can_be_registered() {
+        // a private/new code the built-in table does not know
+        assert_eq!(status_description_for_service_class(0xEE01, StatusServiceClass::QueryRetrieve), "Unknown status");
+        register_status_description(0xEE01, StatusServiceClass::QueryRetrieve, "Custom query status");
+        assert_eq!(
+            status_description_for_service_class(0xEE01, StatusServiceClass::QueryRetrieve),
+            "Custom query status"
+        );
+        // only the registered service class is overridden
+        assert_eq!(status_description_for_service_class(0xEE01, StatusServiceClass::Storage), "Unknown status");
     }
 
     #[test]
