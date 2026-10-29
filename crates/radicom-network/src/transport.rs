@@ -44,7 +44,7 @@ pub async fn read_pdu<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Pdu
 
     let length = u32::from_be_bytes([header[2], header[3], header[4], header[5]]);
     if length > MAX_PDU_SIZE {
-        return Err(NetworkError::protocol("PDU length exceeds 65535"));
+        return Err(NetworkError::protocol("PDU length exceeds the 262144-byte receive limit"));
     }
     // One allocation sized from the validated length field, then read the body
     // straight into it: no intermediate zero-initialised copy (§3.1). The
@@ -193,12 +193,12 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_pdu_is_a_protocol_error() {
-        // 0x00010000 is above the largest value this side ever advertises, so
+        // 0x00040001 is above the largest value this side ever advertises, so
         // rejecting it is not a false claim about our own capacity.
         let (mut client, mut server) = duplex(64);
-        client.write_all(&[0x05, 0x00, 0x00, 0x01, 0x00, 0x00]).await.unwrap();
+        client.write_all(&[0x05, 0x00, 0x00, 0x04, 0x00, 0x01]).await.unwrap();
         match read_pdu(&mut server).await {
-            Err(NetworkError::Protocol(message)) => assert!(message.contains("65535"), "got {message}"),
+            Err(NetworkError::Protocol(message)) => assert!(message.contains("262144"), "got {message}"),
             other => panic!("expected Protocol error, got {other:?}"),
         }
     }
@@ -219,7 +219,7 @@ mod tests {
         let (mut client, mut server) = duplex(64);
         client.write_all(&[0x04, 0x00, 0xFF, 0xFF, 0xFF, 0xFF]).await.unwrap();
         match read_pdu(&mut server).await {
-            Err(NetworkError::Protocol(message)) => assert!(message.contains("65535"), "got {message}"),
+            Err(NetworkError::Protocol(message)) => assert!(message.contains("262144"), "got {message}"),
             other => panic!("expected a Protocol error, got {other:?}"),
         }
     }

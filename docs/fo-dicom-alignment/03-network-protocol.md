@@ -164,15 +164,14 @@ User Identity 按 PS3.8 D.3.3.7 编解码为
 并对两个 payload 长度做边界校验；`user_identity_is_type_positive_then_length_prefixed_fields`
 覆盖标准线格。
 
-### 2.5 【设计限制】Max-PDU 能力被限定为 65535
+### 2.5 【已修复】Max-PDU 能力上限提升到 fo-dicom 的 256 KiB
 
-P-DATA-TF 的长度字段本身是 32 位，但当前接收路径的实现上限仍为
-`MAX_PDU_SIZE = 65535`。`clamp_max_pdu_length` 会把 RQ/AC 通告值钳到这个上限，
-因此实现不会再向对端承诺一个自己拒绝的值；配置值 0 也会转换为 65535。
-
-这与 fo-dicom 默认可协商的 256 KiB 以及 unlimited 语义仍有差异，属于当前有界设计
-的兼容性限制。若要完全对齐，需要把 transport、分片和内存上限一起改为按协商值工作，
-而不能只放宽单个常量。
+`MAX_PDU_SIZE` 现为 `256 * 1024`（262144），与 fo-dicom `DicomServiceOptions.MaxPDULength`
+默认值一致。P-DATA-TF 的长度字段本就是 32 位，旧的 65535 上限会拒绝合规对端发来的
+大 PDU。`clamp_max_pdu_length` 仍把通告值钳到该上限，因此实现不会通告自己拒绝的值；
+`read_pdu`/`decode_bytes` 用同一常量做接收门限。`a_pdu_at_the_advertised_max_is_accepted`
+覆盖 256 KiB PDU 的接收，`advertised_max_pdu_is_clamped_to_what_we_can_receive` 覆盖
+超限配置的钳位与未超限值的原样通告。
 
 ---
 

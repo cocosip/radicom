@@ -12,7 +12,11 @@ use bytes::Bytes;
 /// A peer may send a P-DATA-TF up to the Max-PDU-Length *we advertise*, so
 /// [`clamp_max_pdu_length`] clamps every advertised value to this constant: the
 /// read side then rejects only what we never promised to accept.
-pub const MAX_PDU_SIZE: u32 = 65535;
+///
+/// 256 KiB matches fo-dicom's default `DicomServiceOptions.MaxPDULength`
+/// (262144). The P-DATA-TF length field is 32-bit, so the old 65535 ceiling
+/// needlessly rejected compliant large PDUs (03-network-protocol §2.5).
+pub const MAX_PDU_SIZE: u32 = 256 * 1024;
 
 /// Clamps a configured max-PDU length to what this implementation can receive.
 ///
@@ -296,7 +300,7 @@ pub fn decode_bytes(frame: Bytes) -> Result<Pdu> {
     let pdu_type = PduType::from_code(frame[0]).ok_or(NetworkError::protocol("unknown PDU type"))?;
     let length = u32::from_be_bytes([frame[2], frame[3], frame[4], frame[5]]);
     if length > MAX_PDU_SIZE {
-        return Err(NetworkError::protocol("PDU length exceeds 65535"));
+        return Err(NetworkError::protocol("PDU length exceeds the 262144-byte receive limit"));
     }
     let end = 6 + length as usize;
     if frame.len() < end {
@@ -1279,8 +1283,8 @@ mod tests {
         assert!(matches!(decode(&[0x01, 0x00]), Err(NetworkError::Protocol(_))));
         // declared length beyond the buffer
         assert!(matches!(decode(&[0x05, 0, 0, 0, 0, 8, 0, 0]), Err(NetworkError::Protocol(_))));
-        // length above the 65535 limit
-        assert!(matches!(decode(&[0x05, 0, 0, 1, 0, 0]), Err(NetworkError::Protocol(_))));
+        // length above the 262144 limit
+        assert!(matches!(decode(&[0x05, 0, 0x00, 0x04, 0x00, 0x01]), Err(NetworkError::Protocol(_))));
     }
 
     #[test]
@@ -1326,7 +1330,7 @@ mod tests {
         // A peer may send a P-DATA-TF up to the value we advertise, so a
         // larger configured value must never reach the wire: it would be
         // self-reported capacity this side then rejects on read.
-        for configured in [131072u32, u32::MAX, 0] {
+        for configured in [MAX_PDU_SIZE + 1, u32::MAX, 0] {
             let mut assoc = Associate::new("SCP", "SCU");
             assoc.user_information.max_pdu_length = configured;
             let bytes = encode(&Pdu::AssociateRq(assoc));
@@ -1334,6 +1338,12 @@ mod tests {
             let advertised = u32::from_be_bytes([value[0], value[1], value[2], value[3]]);
             assert_eq!(advertised, MAX_PDU_SIZE, "configured {configured} is clamped");
         }
+        // A value at or below the ceiling is advertised verbatim.
+        let mut assoc = Associate::new("SCP", "SCU");
+        assoc.user_information.max_pdu_length = 131072;
+        let bytes = encode(&Pdu::AssociateRq(assoc));
+        let value = item_value(&user_items(&bytes), item::MAX_PDU_LENGTH).expect("max PDU item");
+        assert_eq!(u32::from_be_bytes([value[0], value[1], value[2], value[3]]), 131072);
     }
 
     #[test]
