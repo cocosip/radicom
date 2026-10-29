@@ -207,6 +207,17 @@ impl ByteBuffer for RangeBuffer {
             }
         }
     }
+    fn as_slice(&self) -> Option<&[u8]> {
+        if !self.inner.is_memory() {
+            return None;
+        }
+        match self.inner.data() {
+            std::borrow::Cow::Borrowed(b) => {
+                Some(&b[self.offset as usize..(self.offset + self.len) as usize])
+            }
+            std::borrow::Cow::Owned(_) => None,
+        }
+    }
     fn get_byte_range(&self, offset: u64, buf: &mut [u8]) {
         self.inner.get_byte_range(self.offset + offset, buf);
     }
@@ -250,6 +261,15 @@ impl ByteBuffer for CompositeBuffer {
             Bytes::from(out)
         });
         std::borrow::Cow::Borrowed(bytes)
+    }
+    fn as_slice(&self) -> Option<&[u8]> {
+        if !self.is_memory() {
+            return None;
+        }
+        match self.data() {
+            std::borrow::Cow::Borrowed(bytes) => Some(bytes),
+            std::borrow::Cow::Owned(_) => None,
+        }
     }
     fn get_byte_range(&self, offset: u64, buf: &mut [u8]) {
         let mut remaining = offset;
@@ -706,6 +726,7 @@ mod tests {
         let r = RangeBuffer::new(m.clone(), 2, 3);
         assert_eq!(r.size(), 3);
         assert_eq!(&*r.data(), &[2, 3, 4]);
+        assert_eq!(r.as_slice(), Some(&[2, 3, 4][..]));
         let mut out = [0u8; 2];
         r.get_byte_range(1, &mut out);
         assert_eq!(out, [3, 4]);
@@ -720,6 +741,7 @@ mod tests {
         ]);
         assert_eq!(c.size(), 6);
         assert_eq!(&*c.data(), &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(c.as_slice(), Some(&[1, 2, 3, 4, 5, 6][..]));
         let mut out = [0u8; 3];
         c.get_byte_range(1, &mut out);
         assert_eq!(out, [2, 3, 4]);

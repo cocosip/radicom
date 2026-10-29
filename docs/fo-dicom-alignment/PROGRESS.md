@@ -272,3 +272,5 @@
 - **网络 / P-DATA 发送零拷贝**：`write_pdus` 不再把整条消息编码进大 `Vec`；P-DATA 直接用 `write_vectored` 从原始 `Bytes` 切片写出（含奇数补位、按 IOV 上限分块），控制 PDU 仍走 `encode_into`。新增字节级等价测试 `write_pdus_matches_the_encoded_bytes_with_odd_padding`；03 §3.2 与待办同步更新。
 
 - **IO / 写入缓冲**：`ByteBuffer` 新增 `as_slice()`；`write_buffer_with_chunk` 对连续内存值直接 `write_all`（不再整值复制 1 MiB 块），流式值复用 `ByteTargetWriter` 的 scratch 缓冲，跨元素不再每次分配。
+
+- **IO / 缓冲视图（续）**：`RangeBuffer`/`CompositeBuffer` 增加 `as_slice()`（内存底层时返回借用切片），原生帧窗口与多片段帧写出可直接 `write_all`，不再经 chunk 逐段复制。
