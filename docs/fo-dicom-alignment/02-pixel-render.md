@@ -159,7 +159,7 @@ let window = Arc::new(RangeBuffer::new(buffer, offset, frame_size));  // 0 长�
 
 **下游同一根因**：`render/mod.rs:899`（灰度）、`:1040`（`pixel_info`→`width/height/number_of_frames`）、`:1181`（`read_frame_samples`）、`:1306`（YBR）、`render/icon.rs:55` 之后的图标渲染、`render/reconstruction.rs:337`（`width*height*samples` = 0）、`pixel/transcoder.rs`（逐帧尺寸 0，实测 `transcode explicit→implicit` 后 `get_frame(0) = Ok(0)`）。
 
-### 2.2 【高】16-bit VOI LUT 输出用 `>> 8`，而非按输出范围重标定
+### 2.2 【已修复】16-bit VOI LUT 输出按输出范围重标定（不再用 `>> 8`）
 
 **位置**：`render/mod.rs:99-105`；相关 `render/mod.rs:58-85`。
 
@@ -180,7 +180,7 @@ PS3.3 C.11.2.1.1 明确 LUT 输出的数值范围是 `0..2^n−1`（n = 描述�
 | LUT 数据 | 正确输出 | radicom |
 |---|---|---|
 | `[0, 65535]` | 255 | 255 ✅ |
-| `[0, 1000]` | 255 | **3** ❌ |
+| `[0, 1000]` | 255 | 255 ✅（已按输出范围重标定） |
 
 窄区间 16-bit LUT（real-world 常见，例如把 12-bit 输入映射到 0..4095）会渲染成近乎全黑。
 
@@ -197,7 +197,7 @@ fn a_16_bit_voi_lut_scales_its_entries_down_to_a_byte() {
 
 注释直接写着 "scale by >>8"，即测试断言的是实现，不是标准。
 
-### 2.3 【高】LUT 描述符/数据的长度、VR、符号处理全线缺失
+### 2.3 【已修复】LUT 描述符/数据的长度、VR、符号处理
 
 **位置**：`render/mod.rs:58-85`（`LutTable::from_item`）、`:64`、`:66`、`:77-82`；`pixel/mod.rs:457-487`。
 
@@ -276,7 +276,7 @@ pub const REFERENCED_IMAGE_BOX_SEQUENCE: Tag = Tag::new(0x2010, 0x0500); // 实�
 
 顺带：`print/models.rs:45` 把 `(2020,0010)` 命名为 `IMAGE_POSITION`，与 `(0020,0030)` 同名不同义，易误用。
 
-### 2.7 【中】RGB 与 YBR 两条路径的 bit-depth 契约互相矛盾
+### 2.7 【已修复】RGB 与 YBR 两条路径的 bit-depth 契约统一
 
 **位置**：`render/mod.rs:1214-1231`（RGB 走 `BitDepth::normalize` + to8）vs `:1314-1320`（YBR 直接 `>> 8`）。
 
@@ -292,9 +292,9 @@ RGB 用 `BitDepth::new(bits, stored, high_bit, false)` 归一化再做 `>> down`
 | 深度元数据 | RGB | YBR_FULL |
 |---|---|---|
 | 16/16/15 | ✅ 128 | ✅ 128 |
-| 12/12/**11**（低位对齐） | ✅ 128 | ❌ `[0,135,0]` |
+| 12/12/**11**（低位对齐） | ✅ 128 | ✅ 128（`ybr_normalises_bits_stored_for_low_aligned_16_bit_data`） |
 | 12/12/**15**（高位对齐） | ✅ 128 | ✅ 128 |
-| 10/10/**9** | ✅ 128 | ❌ `[0,135,0]` |
+| 10/10/**9** | ✅ 128 | ✅ 128 |
 
 即**低位对齐的 12-in-16 / 10-in-16 YBR 全部渲染错误**（绿屏，因为 Cb/Cr 被右移成 0）。fo-dicom 的 `GrayscalePixelDataU16` 构造器统一做 `shiftLeft/shiftRight`（`PixelData.cs` U16 类构造函数），色彩路径同样适用。
 
