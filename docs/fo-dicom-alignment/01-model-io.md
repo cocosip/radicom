@@ -544,11 +544,13 @@ bench 只测 `DicomFile::from_bytes(black_box(&encoded), ...)`（`core.rs:98`）
 
 **建议**：审计 `data()` 调用点，除确有必要的（如需连续切片），一律改 `copy_to` / `get_byte_range`。
 
-### 3.4 【已知上限，保留】`dictionary::entry` 每次私有查找都新建 `Arc` + 线性扫描
+### 3.4 【已缓解，保留】`dictionary::entry` 每次私有查找都新建 `Arc` + 线性扫描
 
 `crates/radicom/src/model/dictionary.rs:177`（public masked 的 `Vec` 线性 `.find`）、`:163`（private-creator 槽位每次 `Arc::new` 一个 placeholder 条目）
 
-`entry()` 在解析热路径上被**每个元素调用一次**（经 `reader.rs:195` → `dictionary_vr`）。私有 tag 的 masked 查找是 `Vec<Arc<DictionaryEntry>>` 线性扫描；creator 槽位条目每次调用都新分配。
+`entry()` 在解析热路径上被**每个元素调用一次**（经 `reader.rs` → `dictionary_vr`）。私有 tag 的 masked 查找是 `Vec<Arc<DictionaryEntry>>` 线性扫描；creator 槽位条目每次调用都新分配。
+
+**现状**：creator 槽位 placeholder 已是 `Lazy` 共享静态（`private_creator_placeholder`，有 `Arc::ptr_eq` 测试），不再每次分配；`private` 表为 `RwLock` 共享读，masked 条目极少，保留线性扫描。
 
 **建议**：私有 masked 表改为按 `u32` 前缀分桶的 `HashMap`；creator 槽位 placeholder 缓存为 `Lazy` 常量。
 
