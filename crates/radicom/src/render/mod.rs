@@ -44,7 +44,7 @@ pub use interpolation::{bilinear_bgra32, bilinear_color24, bilinear_grayscale, n
 pub use math::{
     BitList, Histogram, Interval, Matrix, MovingAverage, Point2, Point3, Rect, Vector3,
 };
-pub use pixel_converter::PixelDataConverter;
+pub use pixel_converter::reverse_bits;
 pub use reconstruction::{DicomGenerator, ImageData, Slice, Stack, StackType, VolumeData};
 pub use spatial::SpatialTransform;
 
@@ -1506,20 +1506,24 @@ impl DicomImage {
         Self::from_dataset(&file.dataset)
     }
 
-    pub fn width(&self) -> Result<u32, Error> {
-        Ok(self.width)
+    /// Image width, resolved once at construction.
+    pub fn width(&self) -> u32 {
+        self.width
     }
 
-    pub fn height(&self) -> Result<u32, Error> {
-        Ok(self.height)
+    /// Image height, resolved once at construction.
+    pub fn height(&self) -> u32 {
+        self.height
     }
 
-    pub fn number_of_frames(&self) -> Result<u32, Error> {
-        Ok(self.number_of_frames)
+    /// Number of frames, resolved once at construction.
+    pub fn number_of_frames(&self) -> u32 {
+        self.number_of_frames
     }
 
-    pub fn is_grayscale(&self) -> Result<bool, Error> {
-        Ok(self.samples_per_pixel == 1)
+    /// True for a single-sample (grayscale) image.
+    pub fn is_grayscale(&self) -> bool {
+        self.samples_per_pixel == 1
     }
 
     /// The frame the default `render` draws.
@@ -3194,10 +3198,10 @@ mod tests {
             Some(5000.0),
         );
         let img = DicomImage::from_dataset(&ds).unwrap();
-        assert_eq!(img.width().unwrap(), 3);
-        assert_eq!(img.height().unwrap(), 2);
-        assert_eq!(img.number_of_frames().unwrap(), 1);
-        assert!(img.is_grayscale().unwrap());
+        assert_eq!(img.width(), 3);
+        assert_eq!(img.height(), 2);
+        assert_eq!(img.number_of_frames(), 1);
+        assert!(img.is_grayscale());
         assert_eq!(img.current_frame(), 0);
         // no overrides → identical to the low-level render
         assert_eq!(
@@ -3218,11 +3222,11 @@ mod tests {
             Some(5000.0),
         );
         let img = DicomImage::from_dataset(&ds).unwrap();
-        assert_eq!(img.width().unwrap(), ds.get_or(Tag::COLUMNS, 0u32));
-        assert_eq!(img.height().unwrap(), ds.get_or(Tag::ROWS, 0u32));
-        assert_eq!(img.number_of_frames().unwrap(), 1);
+        assert_eq!(img.width(), ds.get_or(Tag::COLUMNS, 0u32));
+        assert_eq!(img.height(), ds.get_or(Tag::ROWS, 0u32));
+        assert_eq!(img.number_of_frames(), 1);
         assert_eq!(
-            img.is_grayscale().unwrap(),
+            img.is_grayscale(),
             ds.get_or(Tag::SAMPLES_PER_PIXEL, 1u16) == 1
         );
     }
