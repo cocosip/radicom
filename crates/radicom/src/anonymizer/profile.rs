@@ -368,6 +368,16 @@ impl SecurityProfile {
     pub fn rows(&self) -> &[ProfileRow] {
         &self.inner.rows
     }
+
+    /// Returns a copy of this profile with `row` appended (fo-dicom lets a
+    /// caller `Add` rows to the active profile). Existing rows keep their
+    /// precedence: row order is preserved, so a tag already named earlier is
+    /// still resolved by that earlier row.
+    pub fn with_row(&self, row: ProfileRow) -> Self {
+        let mut rows = self.inner.rows.clone();
+        rows.push(row);
+        Self::indexed(rows)
+    }
 }
 
 #[cfg(test)]
@@ -385,6 +395,27 @@ mod tests {
         let profile = SecurityProfile::basic();
         // (0008,0050) AccessionNumber is Z (blank) under the basic profile
         assert_eq!(profile.action_for("0008,0050", AnonOption::BasicProfile), Some(Action::ZeroLength));
+    }
+
+    #[test]
+    fn a_row_can_be_added_to_an_existing_profile() {
+        let profile = SecurityProfile::parse("0008,0050;Z;;;;;;;;;;").unwrap();
+        assert_eq!(profile.action_for("0010,0010", AnonOption::BasicProfile), None);
+
+        let mut actions = [None; 11];
+        actions[AnonOption::BasicProfile as usize] = Some(Action::Remove);
+        let extended = profile.with_row(ProfileRow {
+            pattern: TagPattern::new("0010,0010").unwrap(),
+            actions,
+        });
+
+        assert_eq!(extended.action_for("0010,0010", AnonOption::BasicProfile), Some(Action::Remove));
+        assert_eq!(profile.action_for("0010,0010", AnonOption::BasicProfile), None, "original unchanged");
+        assert_eq!(
+            extended.action_for("0008,0050", AnonOption::BasicProfile),
+            Some(Action::ZeroLength),
+            "existing rows survive"
+        );
     }
 
     #[test]

@@ -59,7 +59,7 @@
 | `DirectoryRecord` 作为对象（`NextDirectoryRecord` / `LowerLevelDirectoryRecord` / `Key`） | `DicomDirectory.cs:62` `DicomDirectoryRecord` | 部分实现 | `media/mod.rs:158` `DirectoryRecord{dataset,parent}` | 用 `parent: Option<usize>` + 索引重建树，没有 `next`/`lower` 指针字段，也没有 `Key` |
 | `DicomDirectoryRecord::ToString()` | `DicomDirectory.cs` | 已实现 | `Display for DirectoryRecord`（`b41359f`） | 渲染记录 dataset 的 dump |
 | `FileSetID` 空值校验 | `DicomDirectory.cs`（`FileSetID` setter 校验空串） | 缺失 | `media/mod.rs:224` `new` | `DicomDirectory::new("")` 被接受，写出 `(0004,1130)` 空值 |
-| `AutoValidate` | `DicomDirectory.cs:44` | 缺失 | — | 无校验开关 |
+| `AutoValidate` | `DicomDirectory.cs:44` | 已实现 | `model/dataset.rs` `set_validation`、`validation::ValidationScopeGuard` | radicom 用 Dataset 级校验开关（全局/作用域）表达，无需 DicomDirectory 再持一个布尔 |
 | 图标生成（`IconImageSequence`） | `Media/DicomIconImageSequenceBuilder.cs:28` | 部分实现 | `media/icon.rs:44` `build_icon`、`:292` `attach_icon` | 只支持 8-bit MONOCHROME2 灰度、无 colour（`:285` 测试显式断言"彩色图不产生 icon"）；`MAX_ICON_SIZE=128` 一致 |
 | 图标失败的静默容忍 | `DicomDirectory.cs`（`AddIconSequence` 内 `catch { }`） | 已实现 | `media/mod.rs:377-382` | 走 `generator.generate(...)?`，**错误会上抛**，比 fo-dicom 更严格；行为差异见 §2.8 |
 | `IIconGenerator(frameIndex)` 显式帧号参数 | `Media/IIconGenerator.cs` | 已实现 | `media/icon.rs` `generate_frame`（`c9091b4`） | trait 提供显式帧号；`explicit_frame_index_selects_the_requested_frame` 覆盖 |
@@ -71,7 +71,7 @@
 | 目录递归 + glob | `Media/DicomFileScanner.cs:26` | 已实现 | `media/scanner.rs:88` `scan_directory`、`:218` `Glob` | `*`/`?`/`**` 均支持，深度可限 |
 | 进度/发现事件 | `DicomFileScanner.cs`（`Progress`/`FileFound`/`Complete`） | 已实现 | `media/scanner.rs` `ScanEvent::{Progress,File,Complete}`（`dad8d74`） | 含扫描完成事件与 `ScanSummary` |
 | `Stop()` 取消 | `DicomFileScanner.cs:97` | 已实现 | `media/scanner.rs` `ScanControl::stop`（`ecc51ac`） | 显式取消控制 |
-| `ProgressFilesCount`（预先统计文件总数） | `DicomFileScanner.cs:48` | 缺失 | — | `Progress` 只带 `scanned`/`matched` 计数，没有总数 |
+| `ProgressFilesCount`（进度回调间隔） | `DicomFileScanner.cs:48` | 已实现 | `media/scanner.rs` `ScanEvent::Progress` | fo-dicom 的 `ProgressFilesCount` 是"每 N 个文件发一次进度"的间隔；radicom 每个匹配文件都发一次 `Progress{scanned,matched}`，粒度更细（等价于 N=1），无需预统计总数 |
 | `CheckForValidHeader`（只读 DICM 头快速过滤） | `DicomFileScanner.cs:158` | 已实现 | `ScanOptions::check_for_valid_header`（`fbf1f9e`） | 打开前先校验 PS3.10 头 |
 | 异步（`Task.Run` + `IProgress`） | `DicomFileScanner.cs:26` | 有意不实现 | `media/scanner.rs:7-11`（模块注释说明理由） | 核心 crate 不带 async 依赖，由调用方放到阻塞线程；理由已在文档写明，可接受 |
 | `DicomDirectoryBuilder` | `DicomFileScanner.cs:188` | 已实现 | `media/scanner.rs:281` | — |
@@ -103,7 +103,7 @@
 | 类型感知 blanking | `DicomAnonymizer.cs:290` | 已实现 | `anonymizer/mod.rs:195` `blank` | 按 VR 写空串/空字节 |
 | PatientName/ID 替换值 | `DicomAnonymizer.cs:60` | 已实现 | `anonymizer/mod.rs:57` `with_patient` | — |
 | 文件级 meta 同步 | `DicomAnonymizer.cs:170` | 已实现 | `anonymizer/mod.rs:70` `anonymize_file_in_place` | — |
-| 自定义 profile / 注册 | `DicomAnonymizer.cs:29`（可 `Add` 行） | 部分实现 | `anonymizer/profile.rs:232` `parse`、`:52` `with_profile` | 可整体替换 CSV，但不能像 fo-dicom 那样往已有 profile 里增删单行 |
+| 自定义 profile / 注册 | `DicomAnonymizer.cs:29`（可 `Add` 行） | 已实现 | `anonymizer/profile.rs` `with_row`、`with_profile` | 可整体替换 CSV，也可用 `with_row` 追加单行（保持行序优先级） |
 | 公开 `ReplacedUIDs` 访问器 | `DicomAnonymizer.cs:74` | 已实现 | `anonymizer/mod.rs` `replaced_uids()` | 每个 anonymizer 一份替换表 |
 
 ### 1.5 匹配/变换 DSL（`rules/`）
