@@ -535,18 +535,16 @@ impl DicomDirectory {
         index
     }
 
-    /// Computes offsets, patches the links and rebuilds the sequence (§3.3).
+    /// Computes offsets, then fills them into the already-built sequence (§3.3).
     ///
     /// PS3.3 F.2.2: every offset is an **absolute byte position in the file**.
-    /// The positions are measured from the layout that is being written (see
-    /// [`record_positions`](Self::record_positions)), so a first write with
-    /// placeholder offsets is enough to fix the sizes, and the second write only
-    /// fills the values in — offset values are fixed-width ULs.
+    /// One write with placeholder offsets fixes every element width (offsets are
+    /// fixed-width ULs), so the measured positions can be patched in place
+    /// instead of rebuilding the whole sequence a second time (review §3.5).
     ///
-    /// ponytail: two full serializations per rebuild. One pass would need the
-    /// writer to report where each `(0004,1220)` value landed so the buffer can
-    /// be patched in place; do that if DICOMDIR writing ever shows up in a
-    /// profile (review §3.5).
+    /// Fills the record sequence once with placeholder offsets, measures the
+    /// resulting layout, then patches the offset values in place. One record
+    /// clone instead of two full sequences (review §3.5).
     fn rebuild(&mut self) -> Result<(), Error> {
         let links: Vec<(Option<usize>, Option<usize>)> = (0..self.records.len())
             .map(|index| (self.next_sibling(index), self.children(index).first().copied()))
@@ -555,7 +553,51 @@ impl DicomDirectory {
         let placeholders = vec![0u32; self.records.len()];
         self.write_layout(&links, &placeholders)?;
         let positions = self.record_positions()?;
-        self.write_layout(&links, &positions)
+        self.patch_offsets(&links, &positions);
+        Ok(())
+    }
+
+    /// Rewrites the offset values already present in the record datasets and
+    /// the sequence items built by [`Self::write_layout`].
+    fn patch_offsets(&mut self, links: &[(Option<usize>, Option<usize>)], positions: &[u32]) {
+        for (index, record) in self.records.iter_mut().enumerate() {
+            record.dataset.remove(tags::OFFSET_NEXT);
+            record.dataset.remove(tags::OFFSET_LOWER);
+            if let Some(next) = links[index].0 {
+                record.dataset.insert_value(tags::OFFSET_NEXT, positions[next]);
+            }
+            if let Some(child) = links[index].1 {
+                record.dataset.insert_value(tags::OFFSET_LOWER, positions[child]);
+            }
+        }
+        if let Some(sequence) = self.file.dataset.sequence_mut(tags::DIR_RECORD_SEQUENCE) {
+            for (index, item) in sequence.items_mut().iter_mut().enumerate() {
+                item.remove(tags::OFFSET_NEXT);
+                item.remove(tags::OFFSET_LOWER);
+                if let Some(next) = links[index].0 {
+                    item.insert_value(tags::OFFSET_NEXT, positions[next]);
+                }
+                if let Some(child) = links[index].1 {
+                    item.insert_value(tags::OFFSET_LOWER, positions[child]);
+                }
+            }
+        }
+        match self.roots.first().copied() {
+            Some(index) => {
+                self.file.dataset.insert_value(tags::OFFSET_FIRST_ROOT, positions[index]);
+            }
+            None => {
+                self.file.dataset.remove(tags::OFFSET_FIRST_ROOT);
+            }
+        }
+        match self.roots.last().copied() {
+            Some(index) => {
+                self.file.dataset.insert_value(tags::OFFSET_LAST_ROOT, positions[index]);
+            }
+            None => {
+                self.file.dataset.remove(tags::OFFSET_LAST_ROOT);
+            }
+        }
     }
 
     /// Absolute byte position of every record item in the file about to be

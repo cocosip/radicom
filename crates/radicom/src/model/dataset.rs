@@ -298,6 +298,15 @@ impl Dataset {
         }
     }
 
+    /// Mutable access to an existing sequence, for in-place updates that must
+    /// not rebuild (and re-clone) the whole sequence.
+    pub fn sequence_mut(&mut self, tag: Tag) -> Option<&mut DicomSequence> {
+        match self.items.get_mut(&tag) {
+            Some(DicomItem::Sequence(s)) => Some(s),
+            _ => None,
+        }
+    }
+
     /// Appends a fragment sequence for encapsulated pixel data.
     pub fn insert_fragments(&mut self, tag: Tag, vr: Vr) -> &mut DicomFragmentSequence {
         let frags = DicomFragmentSequence::new(tag.clone(), vr);
