@@ -154,10 +154,10 @@ architecture document.
 | NET-02 | PDU codec for all 7 types with bounds checking and PDV handling | P0 |
 | NET-03 | Association model: presentation contexts, odd IDs, role selection | P0 |
 | NET-04 | Extended negotiation (SOP class and common) plus user identity | P1 |
-| NET-05 | Protocol engine: receive loop, backpressure, pending table, PDV reassembly | P0 |
-| NET-06 | Streaming send: on-the-fly PDV chunking, circuit breaker, on-the-wire transcoding | P0 |
-| NET-07 | Timeouts and watchdog with pending cleanup | P1 |
-| NET-08 | Connection lifecycle, graceful/forced close, typed error propagation | P0 |
+| NET-05 | Protocol engine: receive loop, pending-ID table, PDV reassembly | P0 |
+| NET-06 | Chunked send: on-the-fly PDV chunking and on-the-wire transcoding (a per-message circuit breaker is not implemented) | P0 |
+| NET-07 | Timeouts: association/request/release deadlines with pending cleanup (no background watchdog task) | P1 |
+| NET-08 | Connection lifecycle: release/abort close paths, typed error propagation | P0 |
 | SRV-01 | Generic `DicomServer<P>`: listening, per-connection tasks, **enforced max-clients**, lifecycle | P0 |
 | SRV-02 | Built-in C-ECHO SCP | P0 |
 | SRV-03 | C-STORE receive with an injectable spool sink; failures answered without dropping the connection | P0 |
@@ -268,7 +268,7 @@ A group is done when:
 | R1 | Tolerance rules are scattered folklore; missing one fails on real data | High | Build the corpus from fo-dicom's issue list; fuzz the reader |
 | R2 | Codec boundary churn breaks `radicom-codecs` after the freeze | High | Boundary review with stakeholders; semver discipline |
 | R3 | Multi-charset (ISO 2022) handling is intricate and corrupts CJK names | High | Standalone charset module with fo-dicom-aligned tests against real samples |
-| R4 | Network detail (async window, circuit breaker, max-PDU interplay) causes interop bugs | Medium | Loopback plus peer tests, PDU goldens |
+| R4 | Network detail (send windows, max-PDU interplay, negotiation order) causes interop bugs | Medium | Loopback plus peer tests, PDU goldens |
 | R5 | DICOMDIR offset computation and record stitching are error-prone | Medium | Two-pass writer, golden files, offset tolerance tests |
 | R6 | Dictionary XML licensing/version drift | Low | Keep the MS-PL attribution; pin the standard version constant |
 | R7 | P2 scope creep delaying P0 | Medium | P2 only after M7; status table keeps deferrals visible |
@@ -351,12 +351,14 @@ binaries using `std::time::Instant`:
 
 | Binary | Measures | Run with |
 |---|---|---|
-| `crates/radicom/benches/core.rs` | parse_dataset, write_dataset, get_frame, render_frame | `cargo bench -p radicom --all-features` |
+| `crates/radicom/benches/core.rs` | parse_dataset, write_dataset, get_frame, render_frame, open() on-demand vs materialized | `cargo bench -p radicom --all-features` |
+| `crates/radicom/benches/workflows.rs` | charset encode/decode (UTF-8 + ISO 2022), deflate, uncompressed transcoding, validation, DICOMDIR build/save, directory scan, on-demand open, anonymize | `cargo bench -p radicom --all-features` |
 | `crates/radicom-json/benches/json.rs` | dataset_to_json, json_to_dataset, json_roundtrip | `cargo bench -p radicom-json` |
-| `crates/radicom-network/benches/throughput.rs` | loopback C-STORE MiB/s | `cargo bench -p radicom-network` |
+| `crates/radicom-network/benches/throughput.rs` | loopback C-STORE MiB/s (memory and spool sinks) | `cargo bench -p radicom-network` |
 
-Note: `core.rs` benchmarks `from_bytes`; the file `open()` path is measured separately because on-demand
-windows make it a different code path.
+`workflows.rs` is feature-gated: the anonymize row only runs with `--all-features`. `core.rs` benchmarks
+`from_bytes`; the file `open()` path is measured separately because on-demand windows make it a
+different code path.
 
 ### 5.9 CI stages
 
@@ -370,7 +372,7 @@ windows make it a different code path.
 | fuzz | local/manual | both fuzz targets |
 | interop | local / self-hosted | DCMTK / fo-dicom matrix |
 | bench | local/manual | `cargo bench` against a baseline |
-| coverage | local/manual | `cargo llvm-cov` with `llvm-tools-preview`; current production line coverage **90.03%** (core 90.19%, network 91.30%, json 76.76%) |
+| coverage | push to `master`/`main`, pull request, `workflow_dispatch` | `cargo xtask coverage` (runs `cargo llvm-cov`; production lines only — test/bench/example targets and inline `#[cfg(test)]` modules are excluded) with a **95% floor**. Current measured numbers are in [05-code-review-2026-10-29.md](05-code-review-2026-10-29.md). |
 
 ### 5.10 Conventions
 

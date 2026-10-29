@@ -25,6 +25,13 @@ interop (environment), and a handful of single-consumer / no-outer-consumer shap
 deliberately were not created. Observability is implemented through `tracing` field conventions and
 introduces **no `opentelemetry` dependency**.
 
+A second, adversarial review on 2026-10-29 found real parity defects behind previously "DONE" claims
+(wrong functional-group tags, a missing FileMetaInformationVersion, dropped ISO 2022 designators, the
+Icon Image Sequence tag, multi-fragment single-frame data, an SR anonymization PHI leak, and several
+network wire mismatches). Those are fixed with regression tests; see
+[05-code-review-2026-10-29.md](05-code-review-2026-10-29.md). "DONE" below now means the behaviour is
+verified by a test that would have failed before that review.
+
 ## Done (with code evidence)
 
 | Module group | Features | Evidence (file / symbol) |
@@ -53,19 +60,33 @@ introduces **no `opentelemetry` dependency**.
 | `image` crate backend | Optional | The dependency was **not** added; PNG/BMP export is covered by the hand-written encoders (`to_png`/`to_bmp`), so no export capability is missing |
 | `IPixelData`/`Image` traits, `InvertLut`/`PaddingLut`/`CompositeLut`/`PrecalculatedLut`, `CacheType` | Shape | Single-implementation / no-outer-consumer abstractions from fo-dicom's internal architecture; Rust already has concrete equivalents (`RawImage`/`BitDepth`/`ColorTable`), and empty trait shells were deliberately not created |
 | Additional OBS integrations | Not needed | Covered by OBS-01 (`MetricsCollector`) plus OBS-02 (`TracingMetrics` under the `otel` feature, emitted through `tracing` field conventions, **no `opentelemetry` dependency**) |
+| Streaming datasets, TLS system trust store, JSON `BulkDataURI` for deferred buffers | Feature (backlog) | Tracked with acceptance criteria in [06-backlog.md](06-backlog.md); current behaviour is documented and tested |
+| SR builders for SCOORD/SCOORD3D/TCOORD/WAVEFORM and full SR-IOD validation; print `SmoothingType`/`BorderDensity` | Feature (backlog) | Same backlog document; the shipped SR/print surface is tested |
+
+## Documented divergences from fo-dicom
+
+These are deliberate, tested differences rather than missing features.
+
+| Area | Divergence | Why |
+|---|---|---|
+| JSON `NumberMode` default | `JsonOptions::default()` uses `PreferablyAsNumber`, not fo-dicom's `AsNumber`. An IS/DS value is written as a JSON number only when the number's own text form is identical, so `"0001"` stays a string. | fo-dicom writes `1`, which loses the stored text; `NumberMode::AsNumber` reproduces fo-dicom exactly when byte-compatible output is required. |
+| JSON `BulkDataURI` for deferred buffers | A value backed by `FileWindow`/`StreamWindow` is materialised and base64-encoded; `BulkDataURI` is only echoed when the buffer already carries a URI. A URI-provider callback is in `docs/06-backlog.md`. | Output is valid PS3.18 JSON; emitting a URI for a buffer with no URI requires a bundle/resolver this crate does not have. |
 
 ## Reproducing
 
 ```pwsh
 cargo test --workspace --all-features
 cargo clippy --workspace --all-features --all-targets
+cargo xtask coverage          # production line coverage, 95% floor
 ```
 
 ## Current Test Baseline
 
-14 test suites green: 1060 tests, 1 ignored, 0 failures; clippy clean. Breakdown: core lib 637, core binary
-0, cli_dump 1, corpus 6, fuzz 3, goldens 1, radicom-dict 5, radicom-json lib 48, JSON goldens 1,
-radicom-network lib 352, network fuzz 1, network goldens 3, interop 3 (2 run plus 1 ignored), xtask 0.
+14 test targets green: **1,333 tests, 1 ignored, 0 failures**; clippy and rustdoc clean; production
+line coverage **95.89%** (core 95.96%, json 97.12%, network 95.55%). Breakdown: core lib 799, dump
+binary 5, cli_dump 1, corpus 7, core fuzz 3, core goldens 1, radicom-dict 5, radicom-json lib 74, JSON
+goldens 1, radicom-network lib 423, network fuzz 2, network goldens 3, interop 2 run + 1 ignored,
+xtask 6, peer_interop example 1.
 
 > Caveat: this audit checks feature presence and code paths. It is **not** an adversarial correctness
 > review against real-world data; use the corpus and interoperability suites for that.

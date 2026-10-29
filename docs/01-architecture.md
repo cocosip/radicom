@@ -51,13 +51,15 @@ pub struct Tag { group: u16, element: u16, private_creator: Option<Arc<PrivateCr
 | Comparison | Rule |
 |---|---|
 | Both public | compare `group`, then `element` |
-| Both private, same group, same creator | compare **low 8 bits of `element` only** (block-relative order) |
+| Both private, same group | compare `group`, then the **full `element`**, then the creator string |
 | Anything else | compare `group`, then `element`, then the creator string |
 
-`Hash` follows the same normalisation (private tags hash by group + low byte + creator).
+`Hash` follows the same fields: `group`, full `element`, then the creator string.
 
-**Do not "clean this up".** It keeps the sorted container stable across private blocks regardless of
-which block a tag resolved to, and it matches fo-dicom. Changing it changes serialized byte order.
+**Do not "clean this up".** Comparing the low 8 bits alone would make `(gggg,1101:C)` and
+`(gggg,1201:C)` compare equal, so one private block could overwrite another. The full-element rule
+matches fo-dicom `DicomTag.CompareTo` (group → element → creator) and keeps serialized byte order
+stable; changing it changes the byte order of serialized datasets.
 
 ### 1.3 String formats
 
