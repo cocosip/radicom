@@ -525,26 +525,66 @@ impl Status {
     pub fn description_for(&self, service_class: StatusServiceClass) -> &'static str {
         status_description_for_service_class(self.code, service_class)
     }
+
+    /// The fo-dicom-style wildcard pattern for this code (`Bxxx`, `Cxxx`,
+    /// `A7xx`, `A9xx`) or its exact four-digit form, e.g. for logging.
+    pub fn pattern(&self) -> String {
+        status_pattern(self.code)
+    }
 }
 
 /// Returns a generic PS3.7/PS3.4 description for a DIMSE status code.
+///
+/// Mirrors fo-dicom `DicomStatus.Lookup`: exact codes first, then the
+/// wildcard families (`A7xx`, `A9xx`, `Bxxx`, `Cxxx`).
 pub fn status_description(code: u16) -> &'static str {
     match code {
         0x0000 => "Success",
-        0x0001 | 0x0002 | 0x0107 | 0x0108 => "Warning",
-        0x0100..=0x0106 | 0xFF00 => "Pending",
-        0xFF01 => "Pending with warning",
-        0xFE00 => "Cancel",
+        0x0001 | 0x0002 => "Warning",
+        0x0107 => "Attribute list error",
+        0x0116 => "Attribute Value Out of Range",
+        0x0106 => "Invalid attribute value",
         0x0110 => "Processing failure",
-        0x0122 => "SOP class not supported",
+        0x0111 => "Duplicate SOP instance",
+        0x0112 => "No Such object instance",
+        0x0113 => "No such event type",
+        0x0114 => "No such argument",
+        0x0115 => "Invalid argument value",
+        0x0117 => "Invalid object instance",
+        0x0118 => "No Such SOP class",
+        0x0119 => "Class-instance conflict",
+        0x0120 => "Missing attribute",
+        0x0121 => "Missing attribute value",
+        0x0122 => "Refused: SOP class not supported",
+        0x0123 => "No such action type",
+        0x0210 => "Duplicate invocation",
+        0x0211 => "Unrecognized operation",
+        0x0212 => "Mistyped argument",
+        0x0213 => "Resource limitation",
+        0xFE00 => "Cancel",
+        0xFF00 => "Pending",
+        0xFF01 => "Pending with warning",
         0xA700 => "Out of resources",
         0xA701 => "Unable to calculate number of matches",
         0xA702 => "Unable to perform sub-operations",
+        0xA703..=0xA7FF => "Out of resources",
         0xA801 => "Move destination unknown",
-        0xA900 => "Identifier or data set does not match SOP class",
+        0xA900..=0xA9FF => "Identifier or data set does not match SOP class",
         0xB000..=0xBFFF => "Completed with warnings",
         0xC000..=0xCFFF => "Unable to process",
         _ => "Unknown status",
+    }
+}
+
+/// The fo-dicom-style pattern for a status code: fixed hex nibbles with `x`
+/// wildcards for the mask families, otherwise the exact four-digit code.
+pub fn status_pattern(code: u16) -> String {
+    match code {
+        0xB000..=0xBFFF => "Bxxx".to_string(),
+        0xC000..=0xCFFF => "Cxxx".to_string(),
+        0xA700..=0xA7FF => "A7xx".to_string(),
+        0xA900..=0xA9FF => "A9xx".to_string(),
+        _ => format!("{code:04X}"),
     }
 }
 
@@ -587,34 +627,24 @@ pub fn classify(code: u16) -> StatusState {
     if let Some(state) = exact_state(code) {
         return state;
     }
-    // then the mask classes, most mask bits first (Bxxx warnings, Cxxx, etc.)
+    // then the mask families: Bxxx warnings, Cxxx failures
     if code & 0xF000 == 0xB000 {
         return StatusState::Warning;
     }
     if code & 0xF000 == 0xC000 {
         return StatusState::Failure;
     }
-    if code & 0xFF00 == 0x0100 {
-        // 0x0100..0x010F are the pending progress family; 0x0110 and above
-        // in the same 0x01xx byte are failures (ProcessingFailure is 0x0110)
-        if code & 0x00F0 == 0x0000 {
-            return StatusState::Pending;
-        }
-    }
-    if code & 0xFF00 == 0x0000 {
-        return StatusState::Success;
-    }
-    // unknown codes fall back to ProcessingFailure classification
+    // every other code is a failure (PS3.7 only defines FF00/FF01 as pending)
     StatusState::Failure
 }
 
 fn exact_state(code: u16) -> Option<StatusState> {
     Some(match code {
         0x0000 => StatusState::Success,
-        0x0001 | 0x0002 | 0x0107 | 0x0108 => StatusState::Warning,
-        // 0xFF00/0xFF01 are the "match found / no match" pending statuses;
-        // 0x0100..0x0106 are the operation-progress pending family
-        0x0100 | 0x0101 | 0x0102 | 0x0106 | 0xFF00 | 0xFF01 => StatusState::Pending,
+        0x0001 | 0x0002 | 0x0107 | 0x0108 | 0x0116 => StatusState::Warning,
+        // 0xFF00/0xFF01 are the only pending statuses; DIMSE-N codes such as
+        // 0x0106 (Invalid attribute value) are failures, not pending
+        0xFF00 | 0xFF01 => StatusState::Pending,
         0xFE00 => StatusState::Cancel,
         _ => return None,
     })
@@ -655,6 +685,26 @@ pub mod status {
     /// matches" (PS3.7 Annex C / PS3.4 C.4.3). Previously the opaque
     /// `OUT_OF_RESOURCES_2`, which named neither the service nor the meaning.
     pub const UNABLE_TO_CALCULATE_MATCH_COUNT: u16 = 0xA701;
+    // Generic DIMSE-N / Q/R statuses (PS3.7 Annex C; fo-dicom DicomStatus table).
+    pub const WARNING: u16 = 0x0001;
+    pub const ATTRIBUTE_LIST_ERROR: u16 = 0x0107;
+    pub const ATTRIBUTE_VALUE_OUT_OF_RANGE: u16 = 0x0116;
+    pub const INVALID_ATTRIBUTE_VALUE: u16 = 0x0106;
+    pub const DUPLICATE_SOP_INSTANCE: u16 = 0x0111;
+    pub const NO_SUCH_OBJECT_INSTANCE: u16 = 0x0112;
+    pub const NO_SUCH_EVENT_TYPE: u16 = 0x0113;
+    pub const NO_SUCH_ARGUMENT: u16 = 0x0114;
+    pub const INVALID_ARGUMENT_VALUE: u16 = 0x0115;
+    pub const INVALID_OBJECT_INSTANCE: u16 = 0x0117;
+    pub const NO_SUCH_SOP_CLASS: u16 = 0x0118;
+    pub const CLASS_INSTANCE_CONFLICT: u16 = 0x0119;
+    pub const MISSING_ATTRIBUTE: u16 = 0x0120;
+    pub const MISSING_ATTRIBUTE_VALUE: u16 = 0x0121;
+    pub const NO_SUCH_ACTION_TYPE: u16 = 0x0123;
+    pub const DUPLICATE_INVOCATION: u16 = 0x0210;
+    pub const UNRECOGNIZED_OPERATION: u16 = 0x0211;
+    pub const MISTYPED_ARGUMENT: u16 = 0x0212;
+    pub const RESOURCE_LIMITATION: u16 = 0x0213;
 }
 
 #[cfg(test)]
@@ -880,11 +930,25 @@ mod tests {
         assert_eq!(classify(status::SUBOPERATIONS_COMPLETED_WITH_WARNINGS), StatusState::Warning);
         assert_eq!(classify(status::PROCESSING_FAILURE), StatusState::Failure);
 
-        // pending family
-        assert_eq!(classify(0x0100), StatusState::Pending);
-        assert_eq!(classify(0x0101), StatusState::Pending);
-        assert_eq!(classify(0x0102), StatusState::Pending);
-        assert_eq!(classify(0x0106), StatusState::Pending);
+        // DIMSE-N codes are failures, not the pending family
+        assert_eq!(classify(status::INVALID_ATTRIBUTE_VALUE), StatusState::Failure);
+        assert_eq!(classify(status::ATTRIBUTE_VALUE_OUT_OF_RANGE), StatusState::Warning);
+        assert_eq!(classify(0x0100), StatusState::Failure, "only FF00/FF01 are pending");
+    }
+
+    #[test]
+    fn status_patterns_and_descriptions_cover_the_wildcard_families() {
+        assert_eq!(status_pattern(0xB123), "Bxxx");
+        assert_eq!(status_pattern(0xC001), "Cxxx");
+        assert_eq!(status_pattern(0xA703), "A7xx");
+        assert_eq!(status_pattern(0xA9FF), "A9xx");
+        assert_eq!(status_pattern(0x0110), "0110");
+        assert_eq!(Status::new(0xB000).pattern(), "Bxxx");
+
+        assert_eq!(status_description(0xA7FF), "Out of resources");
+        assert_eq!(status_description(0xA701), "Unable to calculate number of matches", "exact wins");
+        assert_eq!(status_description(0xA9FF), "Identifier or data set does not match SOP class");
+        assert_eq!(status_description(status::MISSING_ATTRIBUTE), "Missing attribute");
     }
 
     #[test]
@@ -928,6 +992,25 @@ mod tests {
         assert_eq!(IDENTIFIER_DOES_NOT_MATCH_SOP_CLASS, 0xA900);
         assert_eq!(STORAGE_DATA_SET_DOES_NOT_MATCH_SOP_CLASS, 0xA900);
         assert_eq!(SUBOPERATIONS_COMPLETED_WITH_WARNINGS, 0xB000);
+        assert_eq!(WARNING, 0x0001);
+        assert_eq!(ATTRIBUTE_LIST_ERROR, 0x0107);
+        assert_eq!(ATTRIBUTE_VALUE_OUT_OF_RANGE, 0x0116);
+        assert_eq!(INVALID_ATTRIBUTE_VALUE, 0x0106);
+        assert_eq!(DUPLICATE_SOP_INSTANCE, 0x0111);
+        assert_eq!(NO_SUCH_OBJECT_INSTANCE, 0x0112);
+        assert_eq!(NO_SUCH_EVENT_TYPE, 0x0113);
+        assert_eq!(NO_SUCH_ARGUMENT, 0x0114);
+        assert_eq!(INVALID_ARGUMENT_VALUE, 0x0115);
+        assert_eq!(INVALID_OBJECT_INSTANCE, 0x0117);
+        assert_eq!(NO_SUCH_SOP_CLASS, 0x0118);
+        assert_eq!(CLASS_INSTANCE_CONFLICT, 0x0119);
+        assert_eq!(MISSING_ATTRIBUTE, 0x0120);
+        assert_eq!(MISSING_ATTRIBUTE_VALUE, 0x0121);
+        assert_eq!(NO_SUCH_ACTION_TYPE, 0x0123);
+        assert_eq!(DUPLICATE_INVOCATION, 0x0210);
+        assert_eq!(UNRECOGNIZED_OPERATION, 0x0211);
+        assert_eq!(MISTYPED_ARGUMENT, 0x0212);
+        assert_eq!(RESOURCE_LIMITATION, 0x0213);
     }
 
     #[test]

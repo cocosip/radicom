@@ -92,8 +92,8 @@
 | (0000,0000) 组长度重算 | `DicomMessage` 编码 | 已实现 | `dimse.rs:300-306` | 用 writer 算长度再减 12，有测试 `dimse.rs:580` |
 | (0000,0800) Command Data Set Type | `DicomMessage.cs:127`（`0x0202` / `0x0101`） | 已实现 | `dimse.rs:44` `NO_DATA_SET`、`dimse.rs:257-262` | 用 `0x0001` 表示"有数据集"，PS3.7 允许（≠0101H 即可），但与 fo-dicom 的 `0x0202` 不同 |
 | 优先级元素 | `DicomPriority.cs` | **已实现** | `dimse.rs:49-75` `Priority` | `Medium=0`、`High=1`、`Low=2`，缺失/未知值回落 Medium |
-| 状态码分类 | `DicomStatus.cs:Lookup`（mask + 通配 `Bxxx`/`Cxxx`/`A7xx`） | 部分实现 | `dimse.rs` `classify` / `exact_state` | 按类归并（`Bxxx`/`Cxxx`/`A7xx`/`01xx`）已实现；仍无 fo-dicom 的字符串通配表 |
-| 状态码常量表 | `DicomStatus.cs:311-515` | 部分实现 | `dimse.rs` `status` | 常量按语义独立命名；`0xA900`/`0xA700` 的多义性由 `status_description_for_service_class` 表达，见 §2.8 |
+| 状态码分类 | `DicomStatus.cs:Lookup`（mask + 通配 `Bxxx`/`Cxxx`/`A7xx`） | 已实现 | `dimse.rs` `classify` / `status_pattern` | `classify` 先精确后 `Bxxx`/`Cxxx` 家族；`status_pattern` 返回 fo-dicom 风格通配串（`Bxxx`/`Cxxx`/`A7xx`/`A9xx`）。修正此前把 `0x0106` 等 DIMSE-N 失败码误判为 Pending 的问题（PS3.7 仅 `FF00`/`FF01` 为 Pending） |
+| 状态码常量表 | `DicomStatus.cs:311-515` | 已实现 | `dimse.rs` `status` / `status_description` | 常量与描述覆盖 PS3.7 Annex C 的通用码（`0x0106`–`0x0123`、`0x0210`–`0x0213` 等）；`0xA900`/`0xA700` 多义性由 `status_description_for_service_class` 表达，见 §2.8 |
 | 状态码 → 名称/描述 | `DicomStatus.Description`、`DicomStatus.ToString` | 已实现（可扩展） | `dimse.rs` `status_description*`、`register_status_description` | 内置 Generic/Storage/QueryRetrieve 措辞；`register_status_description` 支持应用注册私有/新状态描述（对应 `AddKnownDicomStatuses`） |
 | 离线命令集解析容错 | `DicomMessage` 从 Dataset 构造 | 已实现 | `dimse.rs:311` `from_dataset` | 缺字段用 `get_or` 兜底 |
 

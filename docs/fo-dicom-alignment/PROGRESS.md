@@ -192,6 +192,9 @@
   共享 `ycbcr_to_rgb` 矩阵，可独立单测；`render_ybr_frame` 保留布局解包。
 - **网络 / Expert 流式**：新增 `expert::send_streaming`，复用关联的 `send_c_find_stream` / `send_c_move_stream` /
   `send_c_get_stream` 逐条回调，不再整体缓冲；`send` 保留为缓冲迭代器入口。加端到端 C-FIND 流式测试。
+- **网络 / 状态码表**：`status_description` 覆盖 PS3.7 Annex C 通用码与 `A7xx`/`A9xx`/`Bxxx`/`Cxxx` 家族；
+  新增 `status_pattern` 与 `Status::pattern`（fo-dicom 通配串）；补齐 `status` 常量。修正 `classify`
+  把 `0x0106` 等 DIMSE-N 失败码误判为 Pending 的缺陷（仅 `FF00`/`FF01` 为 Pending）。
 - .NET 专属抽象，Rust 不适用（按能力已覆盖）→ `INetworkManager`、`DicomTimeout`、`NetworkStreamCreationOptions`、
   `IImage`/`IImageManager`、`IPixelData` 接口、每服务独立 provider 接口、`DirectoryRecord` 指针、`CacheType`、`ArrayPool`。
 
