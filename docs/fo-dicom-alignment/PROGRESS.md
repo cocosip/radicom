@@ -254,3 +254,5 @@
 - **模型 / 渲染（零分配字符串读）**：新增 `Dataset::try_get_str_ref(&Tag) -> Option<&str>`；`number_of_frames`、`photometric_interpretation` 及 `render_frame` 的 PI / VOILUTFunction / SOPClassUID / 首数值读取改用借用视图，热路径读文本 tag 不再分配 `String`。
 
 - **像素 / 转码零拷贝**：新增 `PixelData::add_frame_buffer(SharedBuffer)`：空元素的首帧/单帧直接接管缓冲、封装帧直接 `push_fragment`，仅多帧原生或奇数长度回退复制；`transcode_dataset`/`decode_frames`/`decode_to_uncompressed` 改用之，减少逐帧拷贝。含 `add_frame_buffer_takes_over_even_frames_and_pads_odd_ones` 测试。
+
+- **像素 / 只读视图（02 §3.4 修复）**：新增 `PixelDataRef<'a>` 只读门，与 `PixelData` 共享 `pixel_read_methods!` 宏；`render` 全部只读路径与 `transcoder::read_frame/read_frames/decode_frame` 改用 `PixelDataRef::from_dataset(&Dataset)`，去掉每次渲染/读帧的 `Dataset` clone（仅保留必须产出新数据集的克隆）。02 §3.4 由【已定性，保留】改为【已修复】。

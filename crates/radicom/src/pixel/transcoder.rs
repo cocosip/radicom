@@ -13,7 +13,7 @@ use crate::model::transfer_syntax::TransferSyntax;
 use crate::model::vr::Vr;
 use crate::pixel::codec::{codec_registry, CodecParams};
 use crate::pixel::overlay::extract_overlays;
-use crate::pixel::{PixelData, PIXEL_DATA};
+use crate::pixel::{PixelData, PixelDataRef, PIXEL_DATA};
 use std::sync::Arc;
 
 /// `(0028,2110)` Lossy Image Compression.
@@ -92,13 +92,10 @@ impl Transcoder {
         // Lossy bookkeeping: the encoded (or decoded) target frames plus the
         // source's uncompressed first-frame size, captured before `frames` moves.
         let encoded_bytes = frames.first().map(|f| f.data().len() as u64).unwrap_or(0);
-        let original_bytes = {
-            let mut owned = ds.clone();
-            PixelData::from_dataset(&mut owned)
-                .ok()
-                .and_then(|p| p.uncompressed_frame_size().ok())
-                .unwrap_or(0)
-        };
+        let original_bytes = PixelDataRef::from_dataset(ds)
+            .ok()
+            .and_then(|p| p.uncompressed_frame_size().ok())
+            .unwrap_or(0);
 
         out.remove(PIXEL_DATA);
         out.remove(Tag::NUMBER_OF_FRAMES);
@@ -131,8 +128,7 @@ impl Transcoder {
     /// Decodes one frame without mutating the source (TR-02, §5.6).
     pub fn decode_frame(&self, ds: &Dataset, frame: u32) -> Result<crate::model::buffer::SharedBuffer, Error> {
         if !self.from.is_encapsulated() {
-            let mut owned = ds.clone();
-            return PixelData::from_dataset(&mut owned)?.get_frame(frame);
+            return PixelDataRef::from_dataset(ds)?.get_frame(frame);
         }
         let codec = codec_registry().get_codec(&self.from)?;
         let bytes = self.read_frame(ds, frame)?;
@@ -164,8 +160,7 @@ impl Transcoder {
     /// `to_vec()` materialisation is needed; `add_frame` copies once into the
     /// output when it is written.
     fn read_frames(&self, ds: &Dataset) -> Result<Vec<SharedBuffer>, Error> {
-        let mut owned = ds.clone();
-        let pd = PixelData::from_dataset(&mut owned)?;
+        let pd = PixelDataRef::from_dataset(ds)?;
         let count = pd.number_of_frames();
         let mut frames = Vec::with_capacity(count as usize);
         for i in 0..count {
@@ -176,8 +171,7 @@ impl Transcoder {
 
     /// One frame of `ds` as a zero-copy shared buffer.
     fn read_frame(&self, ds: &Dataset, frame: u32) -> Result<SharedBuffer, Error> {
-        let mut owned = ds.clone();
-        PixelData::from_dataset(&mut owned)?.get_frame(frame)
+        PixelDataRef::from_dataset(ds)?.get_frame(frame)
     }
 
     /// Row 3: decode `ds` and return the decoded frames.

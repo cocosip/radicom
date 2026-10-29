@@ -83,30 +83,8 @@ pub struct PixelData<'a> {
     kind: PixelDataKind,
 }
 
-impl<'a> PixelData<'a> {
-    /// Chooses the storage kind for a dataset that is about to receive pixel
-    /// data (§1.3).
-    pub fn create_new(ds: &'a mut Dataset) -> Result<Self, Error> {
-        let syntax = ds.transfer_syntax();
-        let bits = ds.get_or(BITS_ALLOCATED, 8u16);
-        let kind = if syntax.is_encapsulated() {
-            if bits > 16 {
-                return Err(pixel_err("encapsulated pixel data supports at most 16 bits allocated"));
-            }
-            PixelDataKind::Encapsulated
-        } else if matches!(bits, 16 | 32 | 64) {
-            PixelDataKind::OtherWord
-        } else {
-            PixelDataKind::OtherByte
-        };
-        Ok(PixelData { dataset: ds, kind })
-    }
-
-    /// Binds to an existing pixel data element, dispatching on its kind.
-    pub fn from_dataset(ds: &'a mut Dataset) -> Result<Self, Error> {
-        let kind = kind_of(ds)?;
-        Ok(PixelData { dataset: ds, kind })
-    }
+macro_rules! pixel_read_methods {
+    () => {
 
 
     pub fn kind(&self) -> PixelDataKind {
@@ -114,11 +92,7 @@ impl<'a> PixelData<'a> {
     }
 
     pub fn dataset(&self) -> &Dataset {
-        self.dataset
-    }
-
-    pub fn dataset_mut(&mut self) -> &mut Dataset {
-        self.dataset
+        &*self.dataset
     }
 
     // -- properties backed by tags (§1.2) -----------------------------------
@@ -324,122 +298,15 @@ impl<'a> PixelData<'a> {
         }
     }
 
-    /// Appends a frame, returning its index (§1.5).
-    pub fn add_frame(&mut self, data: impl AsRef<[u8]>) -> Result<u32, Error> {
-        let mut bytes = data.as_ref().to_vec();
-        if bytes.len() % 2 == 1 {
-            bytes.push(0);
-        }
-        // the index comes from the frames actually stored, not from
-        // `(0028,0008)`, which reads as 1 when absent
-        let index = self.stored_frame_count();
-        match self.kind {
-            PixelDataKind::Encapsulated => {
-                let vr = if self.bits_allocated().unwrap_or(8) <= 8 { Vr::Ob } else { Vr::Ow };
-                let buffer: SharedBuffer = Arc::new(MemoryBuffer::from(bytes));
-                let frags = self.dataset.insert_fragments(PIXEL_DATA, vr);
-                frags.push_fragment(buffer);
-                self.bump_frame_count(index + 1);
-                Ok(index)
-            }
-            _ => {
-                let vr = match self.kind {
-                    PixelDataKind::OtherWord => Vr::Ow,
-                    _ => Vr::Ob,
-                };
-                let mut combined = match self.dataset.item(&PIXEL_DATA) {
-                    Some(DicomItem::Element(e)) => e.value().as_buffer().map(|b| b.data().to_vec()).unwrap_or_default(),
-                    _ => Vec::new(),
-                };
-                combined.extend_from_slice(&bytes);
-                let buffer: SharedBuffer = Arc::new(MemoryBuffer::from(combined));
-                self.dataset.insert_or_update(DicomItem::Element(
-                    crate::model::element::DicomElement::new_bytes(PIXEL_DATA, vr, buffer),
-                ));
-                self.bump_frame_count(index + 1);
-                Ok(index)
-            }
-        }
-    }
-
-    /// Appends an owned frame buffer, taking it over without copying when the
-    /// element is still empty (and the frame is evenly sized, as DICOM requires).
-    /// This is the zero-copy path for transcoding, where frames are already
-    /// shared windows over the source (PIX-02).
-    pub fn add_frame_buffer(&mut self, frame: SharedBuffer) -> Result<u32, Error> {
-        if !frame.size().is_multiple_of(2) {
-            // odd frames need padding, which `add_frame` handles by copying
-            return self.add_frame(frame.data());
-        }
-        let index = self.stored_frame_count();
-        match self.kind {
-            PixelDataKind::Encapsulated => {
-                let vr = if self.bits_allocated().unwrap_or(8) <= 8 { Vr::Ob } else { Vr::Ow };
-                let fragments = self.dataset.insert_fragments(PIXEL_DATA, vr);
-                fragments.push_fragment(frame);
-                self.bump_frame_count(index + 1);
-                Ok(index)
-            }
-            _ => {
-                if self.dataset.item(&PIXEL_DATA).is_none() {
-                    let vr = match self.kind {
-                        PixelDataKind::OtherWord => Vr::Ow,
-                        _ => Vr::Ob,
-                    };
-                    self.dataset.insert_or_update(DicomItem::Element(
-                        crate::model::element::DicomElement::new_bytes(PIXEL_DATA, vr, frame),
-                    ));
-                    self.bump_frame_count(index + 1);
-                    Ok(index)
-                } else {
-                    // an existing native element has to be extended by copying
-                    self.add_frame(frame.data())
-                }
-            }
-        }
-    }
-
     /// Frames currently present: an absent element holds none, otherwise
     /// `(0028,0008)` (which reads as 1 when the tag is absent) is trusted.
+    #[allow(dead_code)] // used by PixelData::add_frame; unused in the read-only view
     fn stored_frame_count(&self) -> u32 {
         if self.dataset.contains(&PIXEL_DATA) {
             self.number_of_frames()
         } else {
             0
         }
-    }
-
-    /// Sets `(0028,0008)` when there is more than one frame.
-    fn bump_frame_count(&mut self, frames: u32) {
-        if frames > 1 {
-            self.dataset.insert_str(NUMBER_OF_FRAMES, Vr::Is, frames.to_string());
-        } else {
-            self.dataset.remove(NUMBER_OF_FRAMES);
-        }
-    }
-
-    /// Replaces the pixel data with an empty element of the current kind.
-    pub fn clear(&mut self) {
-        match self.kind {
-            PixelDataKind::Encapsulated => {
-                self.dataset.remove(PIXEL_DATA);
-            }
-            PixelDataKind::OtherWord => {
-                self.dataset
-                    .insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_empty(
-                        PIXEL_DATA,
-                        Vr::Ow,
-                    )));
-            }
-            PixelDataKind::OtherByte => {
-                self.dataset
-                    .insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_empty(
-                        PIXEL_DATA,
-                        Vr::Ob,
-                    )));
-            }
-        }
-        self.dataset.remove(NUMBER_OF_FRAMES);
     }
 
     /// Wraps a frame so callers always see native byte order (§1.2).
@@ -568,8 +435,168 @@ impl<'a> PixelData<'a> {
         }
         Ok(out)
     }
+    };
 }
 
+/// Read-only gate over a dataset's pixel data.
+///
+/// PixelData takes &mut Dataset because it can append frames; a renderer or
+/// transcoder that only reads can use this view and skip the per-call dataset
+/// clone (docs/fo-dicom-alignment/02 §3.4). It exposes the same accessors.
+pub struct PixelDataRef<'a> {
+    dataset: &'a Dataset,
+    kind: PixelDataKind,
+}
+
+impl<'a> PixelData<'a> {
+
+    /// Chooses the storage kind for a dataset that is about to receive pixel
+    /// data (§1.3).
+    pub fn create_new(ds: &'a mut Dataset) -> Result<Self, Error> {
+        let syntax = ds.transfer_syntax();
+        let bits = ds.get_or(BITS_ALLOCATED, 8u16);
+        let kind = if syntax.is_encapsulated() {
+            if bits > 16 {
+                return Err(pixel_err("encapsulated pixel data supports at most 16 bits allocated"));
+            }
+            PixelDataKind::Encapsulated
+        } else if matches!(bits, 16 | 32 | 64) {
+            PixelDataKind::OtherWord
+        } else {
+            PixelDataKind::OtherByte
+        };
+        Ok(PixelData { dataset: ds, kind })
+    }
+
+    /// Binds to an existing pixel data element, dispatching on its kind.
+    pub fn from_dataset(ds: &'a mut Dataset) -> Result<Self, Error> {
+        let kind = kind_of(ds)?;
+        Ok(PixelData { dataset: ds, kind })
+    }
+
+    pub fn dataset_mut(&mut self) -> &mut Dataset {
+        self.dataset
+    }
+
+    /// Appends a frame, returning its index (§1.5).
+    pub fn add_frame(&mut self, data: impl AsRef<[u8]>) -> Result<u32, Error> {
+        let mut bytes = data.as_ref().to_vec();
+        if bytes.len() % 2 == 1 {
+            bytes.push(0);
+        }
+        // the index comes from the frames actually stored, not from
+        // `(0028,0008)`, which reads as 1 when absent
+        let index = self.stored_frame_count();
+        match self.kind {
+            PixelDataKind::Encapsulated => {
+                let vr = if self.bits_allocated().unwrap_or(8) <= 8 { Vr::Ob } else { Vr::Ow };
+                let buffer: SharedBuffer = Arc::new(MemoryBuffer::from(bytes));
+                let frags = self.dataset.insert_fragments(PIXEL_DATA, vr);
+                frags.push_fragment(buffer);
+                self.bump_frame_count(index + 1);
+                Ok(index)
+            }
+            _ => {
+                let vr = match self.kind {
+                    PixelDataKind::OtherWord => Vr::Ow,
+                    _ => Vr::Ob,
+                };
+                let mut combined = match self.dataset.item(&PIXEL_DATA) {
+                    Some(DicomItem::Element(e)) => e.value().as_buffer().map(|b| b.data().to_vec()).unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                combined.extend_from_slice(&bytes);
+                let buffer: SharedBuffer = Arc::new(MemoryBuffer::from(combined));
+                self.dataset.insert_or_update(DicomItem::Element(
+                    crate::model::element::DicomElement::new_bytes(PIXEL_DATA, vr, buffer),
+                ));
+                self.bump_frame_count(index + 1);
+                Ok(index)
+            }
+        }
+    }
+
+    /// Appends an owned frame buffer, taking it over without copying when the
+    /// element is still empty (and the frame is evenly sized, as DICOM requires).
+    /// This is the zero-copy path for transcoding, where frames are already
+    /// shared windows over the source (PIX-02).
+    pub fn add_frame_buffer(&mut self, frame: SharedBuffer) -> Result<u32, Error> {
+        if !frame.size().is_multiple_of(2) {
+            // odd frames need padding, which `add_frame` handles by copying
+            return self.add_frame(frame.data());
+        }
+        let index = self.stored_frame_count();
+        match self.kind {
+            PixelDataKind::Encapsulated => {
+                let vr = if self.bits_allocated().unwrap_or(8) <= 8 { Vr::Ob } else { Vr::Ow };
+                let fragments = self.dataset.insert_fragments(PIXEL_DATA, vr);
+                fragments.push_fragment(frame);
+                self.bump_frame_count(index + 1);
+                Ok(index)
+            }
+            _ => {
+                if self.dataset.item(&PIXEL_DATA).is_none() {
+                    let vr = match self.kind {
+                        PixelDataKind::OtherWord => Vr::Ow,
+                        _ => Vr::Ob,
+                    };
+                    self.dataset.insert_or_update(DicomItem::Element(
+                        crate::model::element::DicomElement::new_bytes(PIXEL_DATA, vr, frame),
+                    ));
+                    self.bump_frame_count(index + 1);
+                    Ok(index)
+                } else {
+                    // an existing native element has to be extended by copying
+                    self.add_frame(frame.data())
+                }
+            }
+        }
+    }
+
+    /// Sets `(0028,0008)` when there is more than one frame.
+    fn bump_frame_count(&mut self, frames: u32) {
+        if frames > 1 {
+            self.dataset.insert_str(NUMBER_OF_FRAMES, Vr::Is, frames.to_string());
+        } else {
+            self.dataset.remove(NUMBER_OF_FRAMES);
+        }
+    }
+
+    /// Replaces the pixel data with an empty element of the current kind.
+    pub fn clear(&mut self) {
+        match self.kind {
+            PixelDataKind::Encapsulated => {
+                self.dataset.remove(PIXEL_DATA);
+            }
+            PixelDataKind::OtherWord => {
+                self.dataset
+                    .insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_empty(
+                        PIXEL_DATA,
+                        Vr::Ow,
+                    )));
+            }
+            PixelDataKind::OtherByte => {
+                self.dataset
+                    .insert_or_update(DicomItem::Element(crate::model::element::DicomElement::new_empty(
+                        PIXEL_DATA,
+                        Vr::Ob,
+                    )));
+            }
+        }
+        self.dataset.remove(NUMBER_OF_FRAMES);
+    }
+
+    pixel_read_methods!();
+}
+
+impl<'a> PixelDataRef<'a> {
+    /// Binds to an existing pixel data element through a shared borrow.
+    pub fn from_dataset(ds: &'a Dataset) -> Result<Self, Error> {
+        Ok(PixelDataRef { dataset: ds, kind: kind_of(ds)? })
+    }
+
+    pixel_read_methods!();
+}
 
 impl DicomItem {
     /// The element's byte buffer, if it holds one.
@@ -811,6 +838,20 @@ mod tests {
         let odd: SharedBuffer = Arc::new(MemoryBuffer::from(vec![5u8, 6, 7]));
         assert_eq!(pd.add_frame_buffer(odd).unwrap(), 0);
         assert_eq!(pd.get_frame(0).unwrap().data().as_ref(), &[5, 6, 7, 0]);
+    }
+
+    #[test]
+    fn pixel_data_ref_reads_the_same_frame_without_a_mutable_borrow() {
+        let mut ds = mono_dataset(2, 1, 8, 1);
+        {
+            let mut pd = PixelData::from_dataset(&mut ds).unwrap();
+            pd.add_frame([1u8, 2]).unwrap();
+            pd.add_frame([3u8, 4]).unwrap();
+        }
+        let view = PixelDataRef::from_dataset(&ds).unwrap();
+        assert_eq!(view.width(), 2);
+        assert_eq!(view.number_of_frames(), 2);
+        assert_eq!(view.get_frame(1).unwrap().data().as_ref(), &[3, 4]);
     }
 
     #[test]

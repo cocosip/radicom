@@ -21,7 +21,7 @@ use crate::model::dataset::Dataset;
 use crate::model::tag::Tag;
 use crate::model::vr::Vr;
 use crate::pixel::overlay::OverlayData;
-use crate::pixel::PixelData;
+use crate::pixel::PixelDataRef;
 
 pub mod bit_depth;
 pub mod color_table;
@@ -416,8 +416,7 @@ impl GrayscaleRenderOptions {
     /// docs §4): a window over `[0, 2^bitsStored-1]` (unsigned) or
     /// `[-2^(bitsStored-1), 2^(bitsStored-1)-1]` (signed).
     pub fn from_bit_range(dataset: &Dataset) -> Result<Self, Error> {
-        let mut owned = dataset.clone();
-        let pixel = PixelData::from_dataset(&mut owned)?;
+                let pixel = PixelDataRef::from_dataset(dataset)?;
         let bits = match pixel.bits_stored() {
             0 => pixel.bits_allocated()?,
             b => b,
@@ -647,12 +646,12 @@ fn first_number(dataset: &Dataset, tag: Tag) -> Option<f64> {
 /// Borrows one native 1/8/16/32-bit frame's byte window plus its [`BitDepth`] and
 /// frame dimensions.
 ///
-/// `PixelData::from_dataset` needs `&mut Dataset`, so the dataset is cloned; a
+/// Reads a frame through the read-only [`PixelDataRef`] view, so the caller's
+/// dataset is borrowed, not cloned.
 /// read-only pixel accessor in `pixel/` would remove that clone, but it is out
 /// of this module's scope (§3.4 ceiling, documented at `render_grayscale_with_options`).
 fn frame_sample_buffer(dataset: &Dataset, frame: u32) -> Result<(crate::model::buffer::SharedBuffer, BitDepth, usize, usize), Error> {
-    let mut owned = dataset.clone();
-    let pixel = PixelData::from_dataset(&mut owned)?;
+        let pixel = PixelDataRef::from_dataset(dataset)?;
     let bits = pixel.bits_allocated()?;
     if bits == 64 {
         return Err(unsupported("64-bit grayscale samples are not supported (supported: 1, 8, 16, 32)"));
@@ -1086,13 +1085,8 @@ fn render_grayscale_with_threshold(
     options: &GrayscaleRenderOptions,
     parallel_min_pixels: usize,
 ) -> Result<RawImage, Error> {
-    // PixelData::from_dataset takes &mut Dataset, so a &Dataset render cannot
-    // borrow it; the dataset is cloned per render (§3.4). ponytail: accepted
-    // ceiling — one BTreeMap rebuild per render (microseconds) is dominated by
-    // pixel work; removing it needs a read-only PixelData view / read-write gate
-    // split that is not worth the API churn (02 §3.4).
-    let mut owned = dataset.clone();
-    let pixel = PixelData::from_dataset(&mut owned)?;
+    // Render reads through PixelDataRef, so the dataset is only borrowed (02 §3.4).
+    let pixel = PixelDataRef::from_dataset(dataset)?;
     if pixel.samples_per_pixel() != 1 {
         return Err(unsupported("only single-sample grayscale can be rendered"));
     }
@@ -1405,9 +1399,9 @@ impl DicomImage {
     pub fn from_dataset_frame(dataset: &Dataset, frame: u32) -> Result<Self, Error> {
         // One clone: validate and read the geometry from it, then keep it as the
         // owned dataset (the previous code cloned twice, §3.5).
-        let mut owned = dataset.clone();
+        let owned = dataset.clone();
         let (width, height, number_of_frames, samples_per_pixel) = {
-            let pixel = PixelData::from_dataset(&mut owned)?;
+            let pixel = PixelDataRef::from_dataset(&owned)?;
             (pixel.width(), pixel.height(), pixel.number_of_frames(), pixel.samples_per_pixel())
         };
         Ok(DicomImage {
@@ -1577,7 +1571,7 @@ fn overlay_covers_frame(overlay: &OverlayData, frame: u32) -> bool {
 /// Returns `(samples, width, height)`; samples are raw stored values, in the
 /// dataset's sample order (interleaved or planar as stored).
 fn read_frame_samples(
-    pixel: &PixelData<'_>,
+    pixel: &PixelDataRef<'_>,
     frame: u32,
 ) -> Result<(Vec<u16>, u32, u32), Error> {
     let (width, height) = (pixel.width(), pixel.height());
@@ -1601,8 +1595,7 @@ fn read_frame_samples(
 
 /// RgbColorPipeline (docs §2): 3 samples per pixel → BGRA directly.
 fn render_rgb_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error> {
-    let mut owned = dataset.clone();
-    let pixel = PixelData::from_dataset(&mut owned)?;
+        let pixel = PixelDataRef::from_dataset(dataset)?;
     if pixel.samples_per_pixel() != 3 {
         return Err(unsupported("RGB expects 3 samples per pixel"));
     }
@@ -1651,8 +1644,7 @@ fn render_rgb_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error> {
 
 /// PaletteColorPipeline (docs §2): palette index → 256-entry R/G/B LUT.
 fn render_palette_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error> {
-    let mut owned = dataset.clone();
-    let pixel = PixelData::from_dataset(&mut owned)?;
+        let pixel = PixelDataRef::from_dataset(dataset)?;
     if pixel.samples_per_pixel() != 1 {
         return Err(unsupported("PALETTE COLOR expects 1 sample per pixel"));
     }
@@ -1699,8 +1691,7 @@ fn render_ybr_frame(
     partial: bool,
     subsampled: bool,
 ) -> Result<RawImage, Error> {
-    let mut owned = dataset.clone();
-    let pixel = PixelData::from_dataset(&mut owned)?;
+        let pixel = PixelDataRef::from_dataset(dataset)?;
     // PS3.3 C.7.6.3.1.3: YBR_FULL may be planar (configuration 1); subsampled
     // YBR (4:2:2) is defined only interleaved.
     let planar = pixel.planar_configuration() == 1;
