@@ -247,9 +247,7 @@ Outstanding work is environment- or scope-limited, not missing implementation:
 | `image` crate backend | Optional | Not a dependency; PNG/BMP export is covered by the hand-written encoders |
 | Single-consumer trait abstractions from fo-dicom | Form | Rust side has concrete equivalents; empty trait shells are deliberately not created |
 | C-MOVE against a real peer | Environment | The peer did not map the destination AE to this host; loopback covers the function |
-| `DicomImage` geometry accessors return a pointless `Result` | API break | Deliberately deferred; see [01-architecture.md](01-architecture.md) §15.1 |
-| `PixelDataConverter` namespace class | Cleanup | Deliberately deferred; a plain module function is the Rust shape (§15.1) |
-| Deferred-I/O buffers panic on read failure | Cross-module redesign | `ByteBuffer::data` cannot report I/O errors; see §15.1 |
+| Deferred-I/O buffers panic on read failure | Cross-module redesign | `ByteBuffer::data` cannot carry an I/O error; ~120 call sites to migrate. **The only open item from the 2026-10-29 code review** — see [01-architecture.md](01-architecture.md) §15.1 for the detail and the intended fix |
 
 ### 3.1 Definition of done (per feature group)
 

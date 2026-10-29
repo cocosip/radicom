@@ -413,25 +413,30 @@ These were design intent but the implementation does not match. Do not treat the
 - **`store.rs` defaults to `SpoolToTemp` and leaks temp files**; the default should not leave files
   behind.
 
-### 15.1 Deferred API limitations
+### 15.1 Deferred: buffer reads can panic (open item)
 
-The 2026-10-29 code review (`target/2026-10-29-code-review.md`) raised three interface issues that are
-**not behavioural bugs**. They were deliberately left out of that review's fix batch because each one is
-an API-breaking change or a cross-module redesign, and must land with its own compatibility decision
-rather than be folded into a correctness commit.
+This is the one interface issue from the 2026-10-29 code review
+(`target/2026-10-29-code-review.md`) that is still open. The other two issues it raised were resolved:
+`DicomImage`'s geometry accessors now return `u32` / `bool` instead of a `Result` that could never be
+`Err`, and `PixelDataConverter` is now the module function `render::reverse_bits`.
 
-1. **`DicomImage` geometry accessors are infallible but return `Result`**
-   (`crates/radicom/src/render/mod.rs`, `width` / `height` / `number_of_frames` / `is_grayscale`).
-   They only wrap a cached field and never fail. They should return `u32` / `bool` and drop the `Result`
-   wrapper; that is a public API break, so it needs a version decision. Note that `RawImage` (same
-   module) already exposes the infallible shape, so `DicomImage` should follow it.
-2. **`PixelDataConverter` is a C#-style namespace class** (`crates/radicom/src/render/pixel_converter.rs`).
-   It is stateless and holds a single `reverse_bits` static; a plain module function is the Rust shape.
-   Pure cleanup with no behaviour change — safe to do on its own, but it renames a public item.
-3. **Deferred-I/O buffers panic instead of reporting an error** (`crates/radicom/src/model/buffer.rs`,
-   `FileWindow` around line 608/613 and `StreamWindow` around line 716). `ByteBuffer::data` cannot
-   return an I/O error, so a read failure on a lazily-loaded value becomes `expect(...)` / a panic
-   rather than a typed error. Fixing this means making the buffer read path fallible across every
-   caller, which contradicts the no-panic guarantee stated in
-   [02-development-guide.md](02-development-guide.md) §5.1 until it is done. Until then, treat
-   `ByteBuffer::data` as an infallible accessor only for values already materialised in memory.
+**Deferred-I/O buffers panic instead of reporting an error**
+(`crates/radicom/src/model/buffer.rs`): `FileWindow` (in `data` / `get_byte_range`, around line 608/613)
+and `StreamWindow` (in `ensure`, around line 716) call `expect(...)` when the underlying file read or
+temp-file spill fails. `ByteBuffer::data` returns `Cow<'_, [u8]>` and therefore cannot carry an I/O
+error, so a failure on a lazily-loaded value becomes a panic instead of a typed error.
+
+Why it was not fixed with the rest: making the read path fallible means changing `ByteBuffer::data`
+(and `get_byte_range`, `copy_to`) to return a `Result`, then updating every caller — roughly 120
+`.data()` call sites across the reader, writer, JSON, render, pixel, print and DIMSE modules. That is a
+cross-module API redesign, not a local fix, and it is the reason the no-panic guarantee in
+[02-development-guide.md](02-development-guide.md) §5.1 does not hold for deferred buffers today.
+
+Until it is fixed, treat `ByteBuffer::data()` as safe only for values already materialised in memory
+(`MemoryBuffer`, `SharedBuffer`, `CompositeBuffer` and any cached window). For a `FileWindow` or
+`StreamWindow` on a file that may be truncated or unreadable, the call can panic.
+
+Sketch of the intended fix: add `fn try_data(&self) -> io::Result<Cow<'_, [u8]>>` to `ByteBuffer`,
+implement it for the window types, keep `data()` as a thin `expect` wrapper for the in-memory types,
+and migrate the read paths that must not panic (parser, writer, pixel access) first. Sites that operate
+on already-loaded memory can keep using `data()`.

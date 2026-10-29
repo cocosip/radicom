@@ -32,6 +32,13 @@ fo-dicom's behaviour, then fix the one that is wrong — including the document.
 [01-architecture.md](01-architecture.md) §15 lists places where the implementation does not match the
 intended design. Those are defects, not contracts.
 
+### Open items at a glance
+
+| What | Where |
+|---|---|
+| Known deviations from the intended design | [01-architecture.md](01-architecture.md) §15 |
+| **Deferred-I/O buffers can panic on a read failure** — the only still-open finding of the 2026-10-29 code review | [01-architecture.md](01-architecture.md) §15.1, and the outstanding-work table in [02-development-guide.md](02-development-guide.md) §3 |
+
 ---
 
 ## Project Background
