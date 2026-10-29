@@ -97,10 +97,10 @@
 | `FilmSession`（copies/priority/label/medium/destination） | ✅ | `print/models.rs:52-124` | 五项属性均提供读写方法 |
 | `FilmBox`（display format / film size / trim） | ✅ | `print/models.rs:105-204` | |
 | `ImageDisplayFormat` STANDARD/ROW/COL/SLIDE/SUPERSLIDE/CUSTOM | 🟡 | `print/layout.rs:81-134` | 解析齐全；CUSTOM 的布局返回空（:126-162），SLIDE/SUPERSLIDE 恒 1 格 |
-| `ImageBox`（position/polarity/magnification/smoothing/min-max density/requested size） | 🟡 | `print/models.rs:266-340` | 所有属性均有读写方法；胶片渲染仍未应用 magnification/smoothing/density/requested size |
+| `ImageBox`（position/polarity/magnification/smoothing/min-max density/requested size） | 🟡 | `print/models.rs:266-340` | 所有属性均有读写方法；胶片渲染已应用 `REPLICATE` 最近邻放大，其余 magnification/smoothing/density/requested size 仍待接入 |
 | `PresentationLut` / `PresentationLUTShape` | ✅ | `print/presentation_lut.rs:20-183` | 已支持 Shape、Sequence、Descriptor/Data 解析与输出映射；Descriptor entry count 按 VR 解码 |
 | `FilmBox.Initialize()` 默认值填充 | 🟡 | `initialize_image_boxes`（`print/models.rs:178-187`） | 只填 position，且写的是**错误的 tag**，见 §2.6 |
-| 胶片渲染（`FilmBoxExtensions.Print`） | 🟡 | `print/render.rs:51-86` | 画布/裁切/极性可用；magnification/smoothing/border density/requested size 全忽略 |
+| 胶片渲染（`FilmBoxExtensions.Print`） | 🟡 | `print/render.rs:51-86` | 画布/裁切/极性可用；`REPLICATE` 使用最近邻缩放，smoothing/其它 magnification/border density/requested size 仍待接入 |
 | `Save` / `Load` / `Print` / 打印 SCU | ⛔ | 无 | 网络打印不在范围，视为有意不实现 |
 
 ---

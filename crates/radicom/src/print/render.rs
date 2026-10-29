@@ -109,7 +109,7 @@ impl FilmBox {
             if image_box.polarity() {
                 invert(&mut patch);
             }
-            canvas.blit_scaled(cell, &patch, scale.pixels_per_mm);
+            canvas.blit_scaled(cell, &patch, scale.pixels_per_mm, image_box.magnification_type().as_deref());
         }
 
         Ok(canvas.into_raw_image())
@@ -175,7 +175,7 @@ impl Canvas {
         }
     }
 
-    fn blit_scaled(&mut self, cell: &LayoutCell, patch: &RawImage, px_per_mm: f64) {
+    fn blit_scaled(&mut self, cell: &LayoutCell, patch: &RawImage, px_per_mm: f64, magnification: Option<&str>) {
         let cell_x = (cell.x * px_per_mm).round() as i64;
         let cell_y = (cell.y * px_per_mm).round() as i64;
         let cell_w = (cell.width * px_per_mm).round() as i64;
@@ -190,13 +190,23 @@ impl Canvas {
 
         // Resample the BGRA patch directly into one full-image buffer, then copy
         // its rows into the canvas — no RGB round trip and no per-pixel set (§3.7).
-        let rescaled = bilinear_bgra32(
-            patch.as_bytes(),
-            patch.width() as usize,
-            patch.height() as usize,
-            dst_w as usize,
-            dst_h as usize,
-        );
+        let rescaled = if magnification.is_some_and(|value| value.eq_ignore_ascii_case("REPLICATE")) {
+            nearest_bgra32(
+                patch.as_bytes(),
+                patch.width() as usize,
+                patch.height() as usize,
+                dst_w as usize,
+                dst_h as usize,
+            )
+        } else {
+            bilinear_bgra32(
+                patch.as_bytes(),
+                patch.width() as usize,
+                patch.height() as usize,
+                dst_w as usize,
+                dst_h as usize,
+            )
+        };
 
         let off_x = cell_x + (cell_w - dst_w) / 2;
         let off_y = cell_y + (cell_h - dst_h) / 2;
@@ -224,6 +234,31 @@ impl Canvas {
     fn into_raw_image(self) -> RawImage {
         RawImage::new(self.width, self.height, self.bytes)
     }
+}
+
+/// Nearest-neighbour BGRA resampling used by the DICOM `REPLICATE` mode.
+fn nearest_bgra32(input: &[u8], input_width: usize, input_height: usize, output_width: usize, output_height: usize) -> Vec<u8> {
+    let mut output = vec![0u8; output_width * output_height * 4];
+    let x_ratio = if output_width <= 1 {
+        0.0
+    } else {
+        (input_width.saturating_sub(1)) as f64 / (output_width - 1) as f64
+    };
+    let y_ratio = if output_height <= 1 {
+        0.0
+    } else {
+        (input_height.saturating_sub(1)) as f64 / (output_height - 1) as f64
+    };
+    for y in 0..output_height {
+        let source_y = (y as f64 * y_ratio).round() as usize;
+        for x in 0..output_width {
+            let source_x = (x as f64 * x_ratio).round() as usize;
+            let source = (source_y * input_width + source_x) * 4;
+            let target = (y * output_width + x) * 4;
+            output[target..target + 4].copy_from_slice(&input[source..source + 4]);
+        }
+    }
+    output
 }
 
 fn invert(image: &mut RawImage) {
@@ -439,7 +474,7 @@ mod tests {
         let (cw, ch, ppm) = (30u32, 25u32, 3.0f64);
         let bg = crate::pixel::Color32::new(5, 6, 7);
         let mut actual = Canvas::filled(cw, ch, bg);
-        actual.blit_scaled(&cell, &patch, ppm);
+        actual.blit_scaled(&cell, &patch, ppm, None);
 
         // reference implementation: the previous RGB round-trip + per-pixel set
         let mut expected = Canvas::filled(cw, ch, bg);
@@ -468,5 +503,26 @@ mod tests {
         }
 
         assert_eq!(actual.bytes, expected.bytes, "direct BGRA blit matches the RGB round trip byte for byte");
+    }
+
+    #[test]
+    fn replicate_magnification_uses_nearest_neighbour() {
+        let patch = RawImage::new(
+            2,
+            1,
+            vec![
+                0, 0, 0, 255, // black
+                255, 255, 255, 255, // white
+            ],
+        );
+        let cell = LayoutCell { x: 0.0, y: 0.0, width: 4.0, height: 2.0 };
+        let mut canvas = Canvas::filled(4, 2, crate::pixel::Color32::new(0, 0, 0));
+        canvas.blit_scaled(&cell, &patch, 1.0, Some("REPLICATE"));
+
+        let row = &canvas.bytes[..16];
+        assert_eq!(&row[0..4], &[0, 0, 0, 255]);
+        assert_eq!(&row[4..8], &[0, 0, 0, 255]);
+        assert_eq!(&row[8..12], &[255, 255, 255, 255]);
+        assert_eq!(&row[12..16], &[255, 255, 255, 255]);
     }
 }
