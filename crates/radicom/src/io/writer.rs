@@ -119,7 +119,7 @@ impl DicomWriter {
                     Endian::Little => len.to_le_bytes(),
                     Endian::Big => len.to_be_bytes(),
                 };
-                *written += self.write_leaf(Tag::new(g, 0x0000), Vr::Ul, ValueRef::Bytes(&len_bytes), syntax, out)?;
+                *written += self.write_leaf(&Tag::new(g, 0x0000), Vr::Ul, ValueRef::Bytes(&len_bytes), syntax, out)?;
             }
             if is_group_length {
                 // removed unless recalculated above (PS3.5 §7.2)
@@ -141,7 +141,7 @@ impl DicomWriter {
             DicomItem::Element(e) => {
                 let bytes = encode_value(e, charset);
                 match bytes {
-                    Some(value) => self.write_leaf(e.tag().clone(), e.vr(), ValueRef::Bytes(&value), syntax, out),
+                    Some(value) => self.write_leaf(e.tag(), e.vr(), ValueRef::Bytes(&value), syntax, out),
                     // binary VR: stream the buffer, swapping when the target
                     // byte order differs from the in-memory (native) order
                     None => self.write_binary(e, syntax, out),
@@ -163,7 +163,7 @@ impl DicomWriter {
         // private SQs are always explicit-length (fo-dicom rule, §5.2)
         let defined = self.options.explicit_length_sequences || seq.tag().is_private();
         let len = if defined { Some(body) } else { None };
-        let mut written = self.write_header(seq.tag().clone(), Vr::Sq, len, syntax, out)?;
+        let mut written = self.write_header(seq.tag(), Vr::Sq, len, syntax, out)?;
         for item_ds in seq.items() {
             written += self.write_item_header(item_ds, syntax, charset, out)?;
         }
@@ -201,7 +201,7 @@ impl DicomWriter {
         out: &mut ByteTargetWriter<W>,
     ) -> Result<u64, Error> {
         // encapsulated data always uses undefined length + delimiters
-        let mut written = self.write_header(f.tag().clone(), f.vr(), None, syntax, out)?;
+        let mut written = self.write_header(f.tag(), f.vr(), None, syntax, out)?;
         // fragment 0: the basic offset table
         let table = f.offset_table();
         let mut table_bytes = Vec::with_capacity(table.len() * 4);
@@ -231,7 +231,7 @@ impl DicomWriter {
     /// A leaf element whose value is fully materialized.
     fn write_leaf<W: Write>(
         &self,
-        tag: Tag,
+        tag: &Tag,
         vr: Vr,
         value: ValueRef<'_>,
         syntax: &TransferSyntax,
@@ -260,7 +260,7 @@ impl DicomWriter {
         };
         let size = buffer.size();
         let pad = size % 2;
-        let mut written = self.write_header(e.tag().clone(), e.vr(), Some(size + pad), syntax, out)?;
+        let mut written = self.write_header(e.tag(), e.vr(), Some(size + pad), syntax, out)?;
         written += write_buffer(out, buffer.as_ref(), e.vr().byte_swap_size(), syntax.endian(), self.options.large_object_size)?;
         if pad == 1 {
             out.write_u8(e.vr().padding()).map_err(io_err)?;
@@ -273,7 +273,7 @@ impl DicomWriter {
     /// `value_len = None` writes the undefined length `0xFFFFFFFF`.
     fn write_header<W: Write>(
         &self,
-        tag: Tag,
+        tag: &Tag,
         vr: Vr,
         value_len: Option<u64>,
         syntax: &TransferSyntax,
@@ -320,7 +320,7 @@ impl DicomWriter {
                 group = Some(g);
                 // a UL value is always 4 bytes, so the size does not depend
                 // on the computed length
-                total += leaf_len(Tag::new(g, 0x0000), Vr::Ul, 4, syntax);
+                total += leaf_len(&Tag::new(g, 0x0000), Vr::Ul, 4, syntax);
             }
             if item.tag().element() == 0x0000 {
                 continue;
@@ -345,17 +345,17 @@ impl DicomWriter {
                         size + size % 2
                     }
                 };
-                leaf_len(e.tag().clone(), e.vr(), value_len, syntax)
+                leaf_len(e.tag(), e.vr(), value_len, syntax)
             }
             DicomItem::Sequence(seq) => {
                 let body = self.sequence_body_len(seq, syntax, charset)?;
                 let defined = self.options.explicit_length_sequences || seq.tag().is_private();
-                header_len(seq.tag().clone(), Vr::Sq, body, syntax)
+                header_len(seq.tag(), Vr::Sq, body, syntax)
                     + body
                     + if defined { 0 } else { 8 }
             }
             DicomItem::Fragments(f) => {
-                let mut total = header_len(f.tag().clone(), f.vr(), 0, syntax);
+                let mut total = header_len(f.tag(), f.vr(), 0, syntax);
                 let table = f.offset_table().len() as u64 * 4;
                 total += 8 + table;
                 for fragment in f.fragments() {
@@ -445,11 +445,11 @@ fn effective_vr(vr: Vr, value_len: u64) -> (Vr, bool) {
     }
 }
 
-fn leaf_len(tag: Tag, vr: Vr, value_len: u64, syntax: &TransferSyntax) -> u64 {
+fn leaf_len(tag: &Tag, vr: Vr, value_len: u64, syntax: &TransferSyntax) -> u64 {
     header_len(tag, vr, value_len, syntax) + value_len
 }
 
-fn header_len(_tag: Tag, vr: Vr, value_len: u64, syntax: &TransferSyntax) -> u64 {
+fn header_len(_tag: &Tag, vr: Vr, value_len: u64, syntax: &TransferSyntax) -> u64 {
     let (_, long_form) = effective_vr(vr, value_len);
     if syntax.is_explicit_vr() {
         if long_form {
