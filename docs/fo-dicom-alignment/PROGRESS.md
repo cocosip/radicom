@@ -227,3 +227,6 @@
 - **编码 / 字符集注册表**：`REGISTRY` 由 `Mutex` 改 `RwLock`，并发解码共享读锁，注册仍取写锁。
 - **匿名化 / 动作解析**：新增 `SecurityProfile::action_for_tag`，按 `Tag::to_u32()` 直接查精确索引，仅通配行才格式化 tag 文本；walk 不再每元素 `format!`+解析。含一致性测试。
 - **文档 / 性能项对齐**：01 的 push_fragment、charset、require、CompositeBuffer、default_dictionary、Uid::enumerate、read_meta_block、deflate、ASCII 快路径，02 的 3.8，04 的 3.1–3.4 均标记【已修复】；01 §3.4/3.10 与 04 §3.5 标为已知上限。
+
+- **打印 / 渲染**：`RawImage::as_bytes_mut` 让 `apply_lut`/`invert` 原地改 BGRA（不再每 cell 分配整图 `Vec`）；`Canvas::filled` 用 `as_chunks_mut` 填充。`print` 测试全过。
+- **文档 / 02 §3 对齐**：3.2/3.3/3.5/3.6/3.7/3.9 标【已修复】，3.4（每次渲染 clone Dataset）标【已知上限，保留】。
