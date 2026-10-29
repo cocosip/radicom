@@ -59,12 +59,13 @@ pub async fn read_pdu<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Pdu
 
 /// Writes one PDU frame to an async stream.
 ///
-/// Ceiling: `pdu` is a structured value, so it has to be encoded on every call;
-/// the signature gives no place to hand in a reusable buffer, and the call sites
-/// all hold a `&Pdu` rather than bytes. Removing that per-send allocation would
-/// require threading a caller-owned encode buffer through the engine (§3.2).
+/// P-DATA is encoded straight into the frame buffer (no intermediate body
+/// `Vec`); a one-shot frame still allocates its output buffer, since the
+/// signature takes `&Pdu`. Batched P-DATA goes through [`write_pdus`], which
+/// reuses one buffer for every frame of a message.
 pub async fn write_pdu<W: AsyncWrite + Unpin>(writer: &mut W, pdu: &Pdu) -> Result<()> {
-    let bytes = pdu::encode(pdu)?;
+    let mut bytes = Vec::new();
+    pdu::encode_into(pdu, &mut bytes)?;
     writer.write_all(&bytes).await.map_err(NetworkError::Io)?;
     writer.flush().await.map_err(NetworkError::Io)?;
     Ok(())
@@ -78,7 +79,7 @@ pub async fn write_pdu<W: AsyncWrite + Unpin>(writer: &mut W, pdu: &Pdu) -> Resu
 pub async fn write_pdus<W: AsyncWrite + Unpin>(writer: &mut W, pdus: &[Pdu]) -> Result<()> {
     let mut buffer = Vec::with_capacity(64);
     for pdu in pdus {
-        buffer.extend_from_slice(&pdu::encode(pdu)?);
+        pdu::encode_into(pdu, &mut buffer)?;
     }
     writer.write_all(&buffer).await.map_err(NetworkError::Io)?;
     writer.flush().await.map_err(NetworkError::Io)?;

@@ -295,7 +295,9 @@ reader.read_exact(&mut frame[HEADER_LEN..]).await?;
 
 一次分配，零拷贝。
 
-### 3.2 【高】`write_pdu` 每 PDU 重新编码整帧
+### 3.2 【已修复】`write_pdu` 每 PDU 重新编码整帧
+
+**现状**：`pdu::encode_into` 把 P-DATA 直接写入目标帧缓冲（不再先构造 body `Vec` 再拷贝）；一条消息的多个分片经 `write_pdus` 共用一个缓冲、一次 `write_all`。逐条控制 PDU 仍需一次输出分配（签名收 `&Pdu`），属必要开销。
 
 **位置**：`transport.rs:59-64`
 

@@ -635,20 +635,38 @@ fn decode_abort(body: &[u8]) -> Result<Abort> {
 /// Fails when an A-ASSOCIATE item value does not fit its 16-bit Item-length
 /// (PS3.8 §9.3.2): writing a wrapped length would corrupt the PDU silently.
 pub fn encode(pdu: &Pdu) -> Result<Vec<u8>> {
-    let body = match pdu {
-        Pdu::AssociateRq(a) => encode_associate(a, true)?,
-        Pdu::AssociateAc(a) => encode_associate(a, false)?,
-        Pdu::AssociateRj(rj) => vec![0, rj.result.code(), rj.source.code(), rj.reason],
-        Pdu::PData(p) => encode_pdata(p),
-        Pdu::ReleaseRq | Pdu::ReleaseRp => vec![0, 0, 0, 0],
-        Pdu::Abort(a) => vec![0, 0, a.source.code(), a.reason],
-    };
-    let mut out = Vec::with_capacity(body.len() + 6);
+    let mut out = Vec::new();
+    encode_into(pdu, &mut out)?;
+    Ok(out)
+}
+
+/// Appends one encoded frame to `out`.
+///
+/// P-DATA is encoded straight into `out` (the hot send path allocates no
+/// intermediate body buffer); the other, rare PDU kinds build their body first.
+pub fn encode_into(pdu: &Pdu, out: &mut Vec<u8>) -> Result<()> {
+    if let Pdu::PData(p) = pdu {
+        encode_pdata_into(p, out);
+        return Ok(());
+    }
+    let body = encode_body(pdu)?;
+    out.reserve(body.len() + 6);
     out.push(pdu.pdu_type() as u8);
     out.push(0);
     out.extend_from_slice(&(body.len() as u32).to_be_bytes());
     out.extend_from_slice(&body);
-    Ok(out)
+    Ok(())
+}
+
+fn encode_body(pdu: &Pdu) -> Result<Vec<u8>> {
+    Ok(match pdu {
+        Pdu::AssociateRq(a) => encode_associate(a, true)?,
+        Pdu::AssociateAc(a) => encode_associate(a, false)?,
+        Pdu::AssociateRj(rj) => vec![0, rj.result.code(), rj.source.code(), rj.reason],
+        Pdu::PData(_) => unreachable!("P-DATA is encoded directly by encode_into"),
+        Pdu::ReleaseRq | Pdu::ReleaseRp => vec![0, 0, 0, 0],
+        Pdu::Abort(a) => vec![0, 0, a.source.code(), a.reason],
+    })
 }
 
 /// `type(1) reserved(1) length(2) value`, the item framing used inside A-ASSOCIATE
@@ -803,8 +821,10 @@ fn encode_associate(a: &Associate, is_rq: bool) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn encode_pdata(p: &PData) -> Vec<u8> {
-    let mut out = Vec::new();
+fn encode_pdata_into(p: &PData, out: &mut Vec<u8>) {
+    // header placeholder: type(1) reserved(1) length(4), patched below
+    let start = out.len();
+    out.extend_from_slice(&[0x04, 0, 0, 0, 0, 0]);
     for pdv in &p.pdvs {
         // value is padded to an even length on the wire (§3.3)
         let pad = pdv.data.len() % 2;
@@ -824,7 +844,8 @@ fn encode_pdata(p: &PData) -> Vec<u8> {
             out.push(0);
         }
     }
-    out
+    let body_len = (out.len() - start - 6) as u32;
+    out[start + 2..start + 6].copy_from_slice(&body_len.to_be_bytes());
 }
 
 #[cfg(test)]
@@ -840,6 +861,19 @@ mod tests {
         let bytes = encode(&pdu);
         assert_eq!(bytes.len(), 6 + u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]) as usize);
         decode(&bytes).expect("decode")
+    }
+
+    #[test]
+    fn encode_into_appends_the_same_bytes_as_encode() {
+        let pdu = Pdu::PData(PData {
+            pdvs: vec![Pdv { context_id: 3, is_command: true, is_last: true, data: vec![1, 2, 3].into() }],
+        });
+        let frame = encode(&pdu);
+        let mut buffer = vec![0xAA];
+        super::encode_into(&pdu, &mut buffer).expect("encode");
+        assert_eq!(&buffer[1..], &frame[..], "encode_into matches encode byte for byte");
+        super::encode_into(&pdu, &mut buffer).expect("encode");
+        assert_eq!(&buffer[1 + frame.len()..], &frame[..], "a second frame appends cleanly");
     }
 
     /// Storage SOP class used by the byte-layout fixtures below.
