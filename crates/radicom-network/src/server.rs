@@ -429,7 +429,7 @@ where
                                 &mut serving,
                                 context_id,
                                 command,
-                                &unit.bytes,
+                                unit.bytes,
                                 &syntax,
                             )
                             .await?;
@@ -541,7 +541,7 @@ async fn handle_command_with_dataset<P: ServiceProvider, S>(
     serving: &mut Serving<'_, P, S>,
     context_id: u8,
     command: Command,
-    dataset_bytes: &[u8],
+    dataset_bytes: bytes::Bytes,
     syntax: &Arc<radicom::model::transfer_syntax::TransferSyntax>,
 ) -> Result<()>
 where
@@ -549,11 +549,11 @@ where
 {
     match command.field {
         CommandField::CStoreRq => handle_c_store(serving, context_id, command, dataset_bytes, syntax).await,
-        CommandField::CFindRq => handle_c_find(serving, context_id, command, dataset_bytes, syntax).await,
-        CommandField::CMoveRq => handle_c_move(serving, context_id, command, dataset_bytes, syntax).await,
-        CommandField::CGetRq => handle_c_get(serving, context_id, command, dataset_bytes, syntax).await,
+        CommandField::CFindRq => handle_c_find(serving, context_id, command, &dataset_bytes, syntax).await,
+        CommandField::CMoveRq => handle_c_move(serving, context_id, command, &dataset_bytes, syntax).await,
+        CommandField::CGetRq => handle_c_get(serving, context_id, command, &dataset_bytes, syntax).await,
         field if crate::nservice::is_n_request(field) => {
-            let dataset = match crate::message::decode_dataset(dataset_bytes, syntax) {
+            let dataset = match crate::message::decode_dataset(&dataset_bytes, syntax) {
                 Ok(dataset) => dataset,
                 Err(error) => return serving.fail(context_id, &command, &error.to_string()).await,
             };
@@ -1015,7 +1015,7 @@ async fn handle_c_store<P: ServiceProvider, S>(
     serving: &mut Serving<'_, P, S>,
     context_id: u8,
     command: Command,
-    dataset_bytes: &[u8],
+    bytes: bytes::Bytes,
     syntax: &Arc<radicom::model::transfer_syntax::TransferSyntax>,
 ) -> Result<()>
 where
@@ -1030,7 +1030,6 @@ where
     // slow disk must not stall this (or any other) connection's runtime task
     // (§3.2).
     let sink = serving.options.store_sink.clone();
-    let bytes = dataset_bytes.to_vec();
     let syntax = syntax.clone();
     let instance = match tokio::task::spawn_blocking(move || sink.materialize(&bytes, &syntax)).await {
         Ok(Ok(instance)) => instance,
