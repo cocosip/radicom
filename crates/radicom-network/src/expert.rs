@@ -18,7 +18,7 @@ use crate::error::{NetworkError, Result};
 use crate::pdu::PresentationContext;
 use crate::server::{Association as WireAssociation, ClientOptions};
 
-/// One connection-level event for the expert API (§9.2).
+/// One connection-level event for the expert API (§11.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionEvent {
     Connected {
@@ -32,7 +32,7 @@ pub enum ConnectionEvent {
     },
 }
 
-/// The expert connection: one socket, one association at a time (§9.2).
+/// The expert connection: one socket, one association at a time (§11.4).
 pub struct Connection {
     remote: String,
     calling_ae: String,
@@ -86,12 +86,12 @@ impl Connection {
         &self.remote
     }
 
-    /// The events observed so far, oldest first (§9.2 event stream).
+    /// The events observed so far, oldest first (§11.4 event stream).
     pub fn events(&self) -> &[ConnectionEvent] {
         &self.events
     }
 
-    /// Opens the association (§9.2).
+    /// Opens the association (§11.4).
     ///
     /// Returns `AlreadyAssociated` when one is still open: each connection
     /// carries exactly one association at a time.
@@ -127,7 +127,7 @@ impl Connection {
         ))
     }
 
-    /// Releases the association gracefully (§9.2).
+    /// Releases the association gracefully (§11.4).
     pub async fn release(&mut self) -> Result<()> {
         let association = self.association.take().ok_or(NetworkError::protocol(
             "no open association on this connection",
@@ -148,7 +148,7 @@ impl Connection {
     }
 }
 
-/// A response stream handle (§9.2).
+/// A response stream handle (§11.4).
 ///
 /// The expert layer returns responses one at a time; this small cursor keeps
 /// the "stream" shape without pulling every response into memory twice. It is
@@ -188,7 +188,7 @@ impl<T> Iterator for ResponseStream<T> {
     }
 }
 
-/// The request kinds the expert layer can send on an open association (§9.2).
+/// The request kinds the expert layer can send on an open association (§11.4).
 #[derive(Debug, Clone)]
 pub enum ExpertRequest {
     CFind(crate::cfind::CFindRequest),
@@ -196,7 +196,7 @@ pub enum ExpertRequest {
     CGet(crate::cget::CGetRequest),
 }
 
-/// What one expert request produced (§9.2).
+/// What one expert request produced (§11.4).
 #[derive(Debug, Clone)]
 pub enum ExpertResponse {
     CFind(Box<CFindResponse>),
@@ -216,7 +216,7 @@ impl ExpertResponse {
 }
 
 /// Sends one request on an open association and returns its response stream
-/// (§9.2).
+/// (§11.4).
 pub async fn send(
     association: &mut WireAssociation,
     request: ExpertRequest,
@@ -253,7 +253,7 @@ pub async fn send(
 }
 
 /// Sends one request and forwards each response to `on_response` as it arrives,
-/// without collecting the whole answer set (§9.2). Use [`send`] when you want
+/// without collecting the whole answer set (§11.4). Use [`send`] when you want
 /// the responses buffered into an iterator instead.
 pub async fn send_streaming<F>(
     association: &mut WireAssociation,
@@ -288,7 +288,7 @@ where
     }
 }
 
-/// The response command field a request kind expects (§6.1).
+/// The response command field a request kind expects (§11.3).
 pub fn expected_response_field(kind: &ExpertRequest) -> CommandField {
     match kind {
         ExpertRequest::CFind(_) => CommandField::CFindRsp,
@@ -532,7 +532,7 @@ mod tests {
             connection.events().last(),
             Some(&ConnectionEvent::Aborted { reason: 3 })
         );
-        // §2.16: the server reports the peer's abort instead of a clean close
+        // the server reports the peer's abort instead of a clean close
         match handle.await.unwrap() {
             Err(NetworkError::Abort {
                 source_code,

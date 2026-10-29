@@ -12,7 +12,7 @@ use radicom::io::writer::{DicomWriter, WriteOptions};
 use radicom::model::dataset::Dataset;
 use radicom::model::transfer_syntax::{syntaxes, TransferSyntax};
 
-/// Encodes a command set, keeping its recomputed group length (§5.3).
+/// Encodes a command set, keeping its recomputed group length (§11.1).
 pub fn encode_command(dataset: &Dataset) -> Result<Vec<u8>> {
     let options = WriteOptions {
         keep_group_lengths: true,
@@ -25,7 +25,7 @@ pub fn encode_command(dataset: &Dataset) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Decodes a command set (§5.2).
+/// Decodes a command set (§11.2).
 pub fn decode_command(bytes: &[u8]) -> Result<Dataset> {
     parse_dataset_bytes(bytes, &syntaxes::IMPLICIT_VR_LITTLE_ENDIAN).map_err(|e| {
         NetworkError::Io(std::io::Error::new(
@@ -35,7 +35,7 @@ pub fn decode_command(bytes: &[u8]) -> Result<Dataset> {
     })
 }
 
-/// Encodes a dataset under the negotiated syntax, dropping group lengths (§5.3).
+/// Encodes a dataset under the negotiated syntax, dropping group lengths (§11.1).
 pub fn encode_dataset(dataset: &Dataset, syntax: &TransferSyntax) -> Result<Vec<u8>> {
     let options = WriteOptions {
         keep_group_lengths: false,
@@ -48,7 +48,7 @@ pub fn encode_dataset(dataset: &Dataset, syntax: &TransferSyntax) -> Result<Vec<
     Ok(out)
 }
 
-/// Decodes a dataset under the negotiated syntax (§5.2: validation off).
+/// Decodes a dataset under the negotiated syntax (§11.2: validation off).
 pub fn decode_dataset(bytes: &[u8], syntax: &TransferSyntax) -> Result<Dataset> {
     parse_dataset_bytes(bytes, syntax).map_err(|e| {
         NetworkError::Io(std::io::Error::new(
@@ -58,7 +58,7 @@ pub fn decode_dataset(bytes: &[u8], syntax: &TransferSyntax) -> Result<Dataset> 
     })
 }
 
-/// Splits a command (and optional dataset) into P-DATA-TF PDUs (§5.3).
+/// Splits a command (and optional dataset) into P-DATA-TF PDUs (§11.1).
 ///
 /// The command stream always occupies its own P-DATA-TF, before the dataset.
 pub fn split_message(
@@ -133,7 +133,7 @@ mod tests {
         let back = decode_dataset(&bytes, &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
         assert!(
             !back.contains(&Tag::new(0x0010, 0x0000)),
-            "group lengths removed on send (§5.3)"
+            "group lengths removed on send (§11.1)"
         );
     }
 

@@ -8,7 +8,7 @@
 //! { "00100010": { "vr": "PN", "Value": [{ "Alphabetic": "Doe^John" }] } }
 //! ```
 //!
-//! Fragment sequences are deliberately not representable (§1.1 of
+//! Fragment sequences are deliberately not representable (§12.1 of
 //! docs/01-architecture.md §12): they return an error that suggests
 //! transcoding, matching fo-dicom.
 //!
@@ -33,7 +33,7 @@ use serde_json::{Map, Number, Value};
 use std::sync::Arc;
 pub use xml::dataset_to_xml;
 
-/// Errors of the JSON model (§1).
+/// Errors of the JSON model (§12.1).
 #[derive(Debug, thiserror::Error)]
 pub enum JsonError {
     #[error("fragment sequences cannot be represented in DICOM JSON; transcode the pixel data to a native syntax first")]
@@ -57,7 +57,7 @@ pub enum JsonError {
 /// Result alias for the JSON crate.
 pub type Result<T> = std::result::Result<T, JsonError>;
 
-/// How IS/DS/SV/UV values are written (§1.2).
+/// How IS/DS/SV/UV values are written (§12.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NumberMode {
     /// Always a JSON number when the value parses, else the string.
@@ -70,7 +70,7 @@ pub enum NumberMode {
     PreferablyAsNumber,
 }
 
-/// Serialization options (§1.2).
+/// Serialization options (§12.1).
 #[derive(Debug, Clone)]
 pub struct JsonOptions {
     /// Non-standard: use attribute keywords instead of tags as keys. Only
@@ -95,7 +95,7 @@ impl Default for JsonOptions {
     }
 }
 
-/// The 8-character hex key of a tag (§1.1).
+/// The 8-character hex key of a tag (§12.1).
 pub fn tag_key(tag: &Tag) -> String {
     tag.to_json_string()
 }
@@ -105,7 +105,7 @@ fn parse_tag_key(key: &str) -> Option<Tag> {
     Tag::parse(key).ok()
 }
 
-/// Serializes a dataset to DICOM JSON (§1.4).
+/// Serializes a dataset to DICOM JSON (§12.1).
 pub fn dataset_to_json(dataset: &Dataset, options: &JsonOptions) -> Result<String> {
     let value = dataset_to_value(dataset, options)?;
     if options.format_indented {
@@ -115,7 +115,7 @@ pub fn dataset_to_json(dataset: &Dataset, options: &JsonOptions) -> Result<Strin
     }
 }
 
-/// Serializes a collection of datasets as a DICOM JSON array (§1.4).
+/// Serializes a collection of datasets as a DICOM JSON array (§12.1).
 pub fn datasets_to_json(datasets: &[Dataset], options: &JsonOptions) -> Result<String> {
     let values = datasets
         .iter()
@@ -129,7 +129,7 @@ pub fn datasets_to_json(datasets: &[Dataset], options: &JsonOptions) -> Result<S
     }
 }
 
-/// Serializes a dataset to a JSON value tree (§1.4).
+/// Serializes a dataset to a JSON value tree (§12.1).
 ///
 /// Group-length elements `(GGGG,0000)` are skipped, here and in every nested
 /// item: PS3.18 Annex F has no representation for them and they are redundant
@@ -176,14 +176,14 @@ fn sequence_to_value(sequence: &DicomSequence, options: &JsonOptions) -> Result<
     }
     let mut object = Map::new();
     object.insert("vr".to_string(), Value::String("SQ".to_string()));
-    // an empty sequence carries no Value, like fo-dicom (§1.1, PS3.18 Annex F)
+    // an empty sequence carries no Value, like fo-dicom (§12.1, PS3.18 Annex F)
     if !values.is_empty() {
         object.insert("Value".to_string(), Value::Array(values));
     }
     Ok(Value::Object(object))
 }
 
-/// True for VRs carried as a base64 `InlineBinary` (§1.1).
+/// True for VRs carried as a base64 `InlineBinary` (§12.1).
 fn is_binary(vr: Vr) -> bool {
     matches!(
         vr,
@@ -198,12 +198,12 @@ fn element_to_value(element: &DicomElement, options: &JsonOptions) -> Result<Val
 
     if is_binary(vr) {
         if let Some(buffer) = element.value().as_buffer() {
-            // a BulkDataUri buffer emits the URI, not its (absent) bytes (§1.1)
+            // a BulkDataUri buffer emits the URI, not its (absent) bytes (§12.1)
             if let Some(uri) = buffer.bulk_uri() {
                 object.insert("BulkDataURI".to_string(), Value::String(uri.to_string()));
                 return Ok(Value::Object(object));
             }
-            // an empty binary value carries no carrier at all (§1.1)
+            // an empty binary value carries no carrier at all (§12.1)
             if buffer.size() > 0 {
                 let encoded =
                     base64::engine::general_purpose::STANDARD.encode(buffer.data()?.as_ref());
@@ -215,19 +215,19 @@ fn element_to_value(element: &DicomElement, options: &JsonOptions) -> Result<Val
 
     if vr == Vr::Sq {
         // an SQ stored as an element (a length-0 sequence) serializes as a bare
-        // {"vr":"SQ"}, with no Value array (§1.1)
+        // {"vr":"SQ"}, with no Value array (§12.1)
         return Ok(Value::Object(object));
     }
 
     let values = element_values(element, vr, options)?;
-    // an empty element omits Value entirely (§1.1)
+    // an empty element omits Value entirely (§12.1)
     if !values.is_empty() {
         object.insert("Value".to_string(), Value::Array(values));
     }
     Ok(Value::Object(object))
 }
 
-/// Builds the `Value` array for a non-binary element (§1.1).
+/// Builds the `Value` array for a non-binary element (§12.1).
 fn element_values(element: &DicomElement, vr: Vr, options: &JsonOptions) -> Result<Vec<Value>> {
     // bytes that are not a binary VR come from a parsed element (e.g. US);
     // strings are the other possible representation
@@ -260,7 +260,7 @@ fn element_values(element: &DicomElement, vr: Vr, options: &JsonOptions) -> Resu
             .filter(|p| !p.is_empty())
             .map(parse_float_value)
             .collect()),
-        // a zero-length component is `null`, not `""` (§1.1, PS3.18 Annex F)
+        // a zero-length component is `null`, not `""` (§12.1, PS3.18 Annex F)
         _ => Ok(text
             .split('\\')
             .map(|part| {
@@ -375,13 +375,13 @@ fn parse_float_value(part: &str) -> Value {
         .unwrap_or_else(|| Value::String(part.to_string()))
 }
 
-/// IS/DS/SV/UV rendering (§1.2).
+/// IS/DS/SV/UV rendering (§12.1).
 fn numeric_value(part: &str, mode: NumberMode) -> Value {
     let trimmed = part.trim();
     match mode {
         NumberMode::AsString => Value::String(part.to_string()),
         NumberMode::AsNumber => match trimmed.parse::<f64>() {
-            // NaN and infinities always stay strings (§1.2)
+            // NaN and infinities always stay strings (§12.1)
             Ok(value) if value.is_finite() => integer_aware_number(trimmed, value)
                 .unwrap_or_else(|| Value::String(part.to_string())),
             _ => Value::String(part.to_string()),
@@ -421,7 +421,7 @@ fn format_number_like(value: f64) -> String {
     format!("{value}")
 }
 
-/// PN as the three-group object (§1.1).
+/// PN as the three-group object (§12.1).
 fn person_name_value(text: &str) -> Value {
     let name = PersonName::parse(text);
     let mut object = Map::new();
@@ -444,12 +444,12 @@ fn person_name_value(text: &str) -> Value {
     Value::Object(object)
 }
 
-/// Deserializes a dataset from DICOM JSON (§1.4).
+/// Deserializes a dataset from DICOM JSON (§12.1).
 ///
 /// With [`JsonOptions::validate_on_read`] the result is run through
 /// [`Dataset::validate`], which checks every value against its VR rules and
 /// value multiplicity, recursing into sequences — the equivalent of fo-dicom's
-/// `autoValidate`. Without it, reading stays tolerant (§1.3).
+/// `autoValidate`. Without it, reading stays tolerant (§12.1).
 pub fn json_to_dataset(json: &str, options: &JsonOptions) -> Result<Dataset> {
     let value: Value = serde_json::from_str(json)?;
     let dataset = value_to_dataset(&value)?;
@@ -459,7 +459,7 @@ pub fn json_to_dataset(json: &str, options: &JsonOptions) -> Result<Dataset> {
     Ok(dataset)
 }
 
-/// Deserializes a DICOM JSON array into a collection of datasets (§1.4).
+/// Deserializes a DICOM JSON array into a collection of datasets (§12.1).
 pub fn json_to_datasets(json: &str, options: &JsonOptions) -> Result<Vec<Dataset>> {
     let value: Value = serde_json::from_str(json)?;
     let Value::Array(values) = value else {
@@ -480,7 +480,7 @@ pub fn json_to_datasets(json: &str, options: &JsonOptions) -> Result<Vec<Dataset
         .collect()
 }
 
-/// Deserializes a dataset from a JSON value tree (§1.4).
+/// Deserializes a dataset from a JSON value tree (§12.1).
 pub fn value_to_dataset(value: &Value) -> Result<Dataset> {
     let Value::Object(object) = value else {
         return Err(JsonError::Unsupported(
@@ -491,7 +491,7 @@ pub fn value_to_dataset(value: &Value) -> Result<Dataset> {
 
     for (key, attribute) in object {
         let Some(tag) = parse_tag_key(key) else {
-            // unknown keys (keywords, private extensions) are skipped (§1.3)
+            // unknown keys (keywords, private extensions) are skipped (§12.1)
             continue;
         };
         let Some(item) = attribute_to_item(tag, attribute)? else {
@@ -509,7 +509,7 @@ fn attribute_to_item(tag: Tag, attribute: &Value) -> Result<Option<DicomItem>> {
             reason: "an attribute must be an object".to_string(),
         });
     };
-    // "vr" may sit at any property position (§1.3)
+    // "vr" may sit at any property position (§12.1)
     let Some(vr_code) = object.get("vr").and_then(Value::as_str) else {
         return Err(JsonError::MissingVr {
             tag: tag.to_json_string(),
@@ -546,7 +546,7 @@ fn attribute_to_item(tag: Tag, attribute: &Value) -> Result<Option<DicomItem>> {
 
     let values: &[Value] = match object.get("Value") {
         Some(Value::Array(values)) => values,
-        // an attribute without a carrier is an empty element (§1.1) — except an
+        // an attribute without a carrier is an empty element (§12.1) — except an
         // SQ, which is an empty sequence, not a length-0 element
         None | Some(Value::Null) => {
             if vr == Vr::Sq {
@@ -691,7 +691,7 @@ fn check_value_vr(vr: Vr, tag: &Tag) -> Result<()> {
     })
 }
 
-/// Joins the JSON values into the `\`-separated internal text form (§1.3).
+/// Joins the JSON values into the `\`-separated internal text form (§12.1).
 fn values_to_text(vr: Vr, values: &[Value], tag: &Tag) -> Result<String> {
     let mut parts = Vec::with_capacity(values.len());
     for value in values {
@@ -710,7 +710,7 @@ fn value_to_text(vr: Vr, value: &Value, tag: &Tag) -> Result<String> {
             Ok(text.clone())
         }
         Value::Number(number) => Ok(number.to_string()),
-        // PN groups (§1.1): missing leading groups keep their `=` placeholders
+        // PN groups (§12.1): missing leading groups keep their `=` placeholders
         Value::Object(object) if vr == Vr::Pn => {
             let parts: Vec<String> = ["Alphabetic", "Ideographic", "Phonetic"]
                 .iter()
@@ -1104,7 +1104,7 @@ mod tests {
 
     #[test]
     fn duplicate_properties_take_the_last_value() {
-        // serde_json itself keeps the last duplicate, which is the rule (§1.3)
+        // serde_json itself keeps the last duplicate, which is the rule (§12.1)
         let json = r#"{"00100020":{"vr":"LO","Value":["first"]},"00100020":{"vr":"LO","Value":["second"]}}"#;
         let ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
         assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "second");
@@ -1137,7 +1137,7 @@ mod tests {
     fn validate_on_read_checks_values_against_their_vr() {
         // CS allows upper case only; this value is not valid CS
         let json = r#"{"00080060":{"vr":"CS","Value":["lower case"]}}"#;
-        // reading is tolerant by default (§1.3)
+        // reading is tolerant by default (§12.1)
         assert!(json_to_dataset(json, &JsonOptions::default()).is_ok());
 
         let strict = JsonOptions {

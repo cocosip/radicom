@@ -46,7 +46,7 @@ impl QueryRetrieveLevel {
         }
     }
 
-    /// The SOP class this level queries under (§7.3).
+    /// The SOP class this level queries under (§11.4).
     pub fn sop_class(self, root: QueryRoot) -> &'static str {
         use crate::association::sop_class as sc;
         match (root, self) {
@@ -56,7 +56,7 @@ impl QueryRetrieveLevel {
         }
     }
 
-    /// The retrieve SOP class for this level (§7.4, §7.5).
+    /// The retrieve SOP class for this level (§11.4).
     ///
     /// A worklist is query-only, so it has no retrieve model.
     pub fn retrieve_sop_class(
@@ -77,18 +77,18 @@ impl QueryRetrieveLevel {
         Some(pair)
     }
 
-    /// The C-MOVE SOP class for this level (§7.5).
+    /// The C-MOVE SOP class for this level (§11.4).
     pub fn move_sop_class(self, root: QueryRoot) -> Option<&'static str> {
         self.retrieve_sop_class(root, RetrieveService::Move)
     }
 
-    /// The C-GET SOP class for this level (§7.4).
+    /// The C-GET SOP class for this level (§11.4).
     pub fn get_sop_class(self, root: QueryRoot) -> Option<&'static str> {
         self.retrieve_sop_class(root, RetrieveService::Get)
     }
 }
 
-/// Which Q/R information model the query uses (§7.3).
+/// Which Q/R information model the query uses (§11.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QueryRoot {
     Patient,
@@ -96,7 +96,7 @@ pub enum QueryRoot {
     Study,
 }
 
-/// The retrieve service a request belongs to (§7.4, §7.5).
+/// The retrieve service a request belongs to (§11.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetrieveService {
     /// C-GET: instances come back on the *same* association.
@@ -133,7 +133,7 @@ const IMAGE_KEYS: &[(u16, u16, Vr)] = &[
 
 const PATIENT_KEYS: &[(u16, u16, Vr)] = &[(0x0010, 0x0010, Vr::Pn)];
 
-/// A C-FIND request (§7.3).
+/// A C-FIND request (§11.4).
 #[derive(Debug, Clone)]
 pub struct CFindRequest {
     pub message_id: u16,
@@ -221,7 +221,7 @@ fn level_keys(level: QueryRetrieveLevel) -> &'static [(u16, u16, Vr)] {
     }
 }
 
-/// A C-FIND response (§7.3).
+/// A C-FIND response (§11.4).
 #[derive(Debug, Clone)]
 pub struct CFindResponse {
     pub message_id_being_responded_to: u16,
@@ -510,7 +510,7 @@ mod tests {
     }
 
     /// The provider stream contract: items come as Pending, then exactly one
-    /// terminal response (§7.3). The engine loop driving it lives in `server`.
+    /// terminal response (§11.4). The engine loop driving it lives in `server`.
     #[tokio::test]
     async fn provider_stream_yields_items_then_one_terminal_response() {
         let provider = FixedProvider {

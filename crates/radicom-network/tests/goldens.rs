@@ -1,4 +1,4 @@
-//! PDU byte-stream golden baselines (docs/02-development-guide.md §5.3/§5.4).
+//! PDU byte-stream golden baselines (docs/02-development-guide.md §5.3/§11.1).
 //!
 //! The hex fixtures under `tests-data/goldens/` are produced by
 //! `cargo xtask regen-goldens`. Whitespace is ignored, so the comparison pins the
@@ -70,7 +70,7 @@ fn fixture_pdata_cecho() -> Vec<u8> {
 
 /// The association request as `Association::open` builds it (user information
 /// included): pins that a real RQ carries Implementation Class UID (0x52) and
-/// Version Name (0x55), not an empty user item (§2.19, §4.10).
+/// Version Name (0x55), not an empty user item.
 fn fixture_associate_rq_user_info() -> Vec<u8> {
     let mut associate = Associate::new("RADICOM_SCP", "RADICOM_SCU");
     associate
@@ -98,7 +98,7 @@ fn fixture_command_n_get_rq() -> Vec<u8> {
 }
 
 /// The command set the SCP sends as a reverse C-STORE sub-operation during a
-/// C-GET (§7.4): a C-STORE-RQ naming the instance as Affected.
+/// C-GET (§11.4): a C-STORE-RQ naming the instance as Affected.
 fn fixture_command_cget_reverse_store_rq() -> Vec<u8> {
     let mut command = Command::request(CommandField::CStoreRq, 1);
     command.affected_sop_class_uid = Some("1.2.840.10008.1.2.4.50".to_string());
@@ -147,7 +147,7 @@ fn service_command_goldens_are_current() {
 
 #[test]
 fn real_association_request_carries_implementation_identity() {
-    // §2.19/§4.10: the user information of a real RQ must carry Implementation
+    // /the user information of a real RQ must carry Implementation
     // Class UID (0x52) and Version Name (0x55), not just Max PDU Length.
     let bytes = fixture_associate_rq_user_info();
     let Pdu::AssociateRq(request) = radicom_network::pdu::decode(&bytes).expect("decode RQ") else {

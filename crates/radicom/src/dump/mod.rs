@@ -44,7 +44,7 @@ pub fn dump_dataset(dataset: &Dataset, options: &DumpOptions) -> String {
 /// Formats one element's line at `depth`.
 ///
 /// The dictionary is resolved once per dump, and the tag is borrowed from the
-/// item instead of cloned (§3.3).
+/// item instead of cloned.
 fn write_level(
     dataset: &Dataset,
     depth: usize,
@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn long_values_are_truncated_to_the_limit() {
-        // §4.2(e): the old form asserted only that the full value is absent,
+        // (e): the old form asserted only that the full value is absent,
         // which a dump that prints no values at all also satisfies. Assert the
         // elided prefix positively, and that a short value is printed in full.
         let mut ds = Dataset::new();

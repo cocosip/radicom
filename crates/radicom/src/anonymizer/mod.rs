@@ -5,7 +5,7 @@
 //! consistently through a map that lives on the `Anonymizer` (fo-dicom's
 //! `ReplacedUIDs`), so the same old UID maps to the same new one across every
 //! dataset and file anonymized by that instance; a file's media-storage SOP
-//! instance UID is kept in sync with the dataset's SOP instance UID (§6.2).
+//! instance UID is kept in sync with the dataset's SOP instance UID (§12.5).
 
 use crate::anonymizer::profile::{Action, AnonOption, SecurityProfile};
 use crate::error::Error;
@@ -30,7 +30,7 @@ const SOP_INSTANCE_UID: Tag = Tag::SOP_INSTANCE_UID;
 /// (0002,0003) MediaStorageSOPInstanceUID.
 const MEDIA_STORAGE_SOP_INSTANCE_UID: Tag = Tag::MEDIA_STORAGE_SOP_INSTANCE_UID;
 
-/// Anonymizer that applies a profile under one option set (§6.2).
+/// Anonymizer that applies a profile under one option set (§12.5).
 #[derive(Debug, Clone)]
 pub struct Anonymizer {
     profile: SecurityProfile,
@@ -65,20 +65,20 @@ impl Anonymizer {
         }
     }
 
-    /// Replaces PatientName / PatientID with the given values when set (§6.2).
+    /// Replaces PatientName / PatientID with the given values when set (§12.5).
     pub fn with_patient(mut self, name: impl Into<String>, id: impl Into<String>) -> Self {
         self.patient_name = Some(name.into());
         self.patient_id = Some(id.into());
         self
     }
 
-    /// The original → replacement UID map accumulated so far (§6.2, fo-dicom
+    /// The original → replacement UID map accumulated so far (§12.5, fo-dicom
     /// `ReplacedUIDs`). Two instances never share it.
     pub fn replaced_uids(&self) -> HashMap<String, String> {
         lock(&self.replaced).clone()
     }
 
-    /// Anonymizes a dataset in place (§6.2).
+    /// Anonymizes a dataset in place (§12.5).
     pub fn anonymize_in_place(&self, dataset: &mut Dataset) -> Result<(), Error> {
         let mut replaced = lock(&self.replaced);
         self.walk(dataset, &mut replaced)
@@ -87,7 +87,7 @@ impl Anonymizer {
     /// Anonymizes a file in place, syncing the media-storage SOP instance UID.
     pub fn anonymize_file_in_place(&self, file: &mut DicomFile) -> Result<(), Error> {
         self.anonymize_in_place(&mut file.dataset)?;
-        // §6.2: keep the file-meta instance UID equal to the (now anonymized)
+        // §12.5: keep the file-meta instance UID equal to the (now anonymized)
         // dataset SOP instance UID so the two never disagree
         if file.file_meta.contains(&MEDIA_STORAGE_SOP_INSTANCE_UID) {
             if let Some(sop_instance) = file.dataset.try_get_str(SOP_INSTANCE_UID) {
@@ -98,14 +98,14 @@ impl Anonymizer {
         Ok(())
     }
 
-    /// Clones and anonymizes a dataset (§6.2).
+    /// Clones and anonymizes a dataset (§12.5).
     pub fn anonymize(&self, dataset: &Dataset) -> Result<Dataset, Error> {
         let mut clone = dataset.clone();
         self.anonymize_in_place(&mut clone)?;
         Ok(clone)
     }
 
-    /// Clones and anonymizes a file (§6.2).
+    /// Clones and anonymizes a file (§12.5).
     pub fn anonymize_file(&self, file: &DicomFile) -> Result<DicomFile, Error> {
         let mut clone = file.clone();
         self.anonymize_file_in_place(&mut clone)?;
@@ -113,11 +113,11 @@ impl Anonymizer {
     }
 
     /// The recursive walk: apply each element's action, recurse into sequences
-    /// unless the action is K (§6.2).
+    /// unless the action is K (§12.5).
     ///
     /// Only the tags are collected up front — the items themselves stay in the
     /// dataset, so a 32 MB pixel buffer or a whole SR subtree is never cloned
-    /// just to be walked (§3.4).
+    /// just to be walked.
     fn walk(
         &self,
         dataset: &mut Dataset,
@@ -184,7 +184,7 @@ impl Anonymizer {
                 }
             }
 
-            // per-tag patient overrides (§6.2)
+            // per-tag patient overrides (§12.5)
             if tag == PATIENT_NAME {
                 if let Some(name) = &self.patient_name {
                     dataset.insert_str(tag.clone(), Vr::Pn, name.clone());
@@ -202,7 +202,7 @@ impl Anonymizer {
         Ok(())
     }
 
-    /// Rewrites a UID element to a consistent replacement (§6.2).
+    /// Rewrites a UID element to a consistent replacement (§12.5).
     fn replace_uid(
         &self,
         dataset: &mut Dataset,
@@ -220,7 +220,7 @@ impl Anonymizer {
         dataset.insert_str(tag.clone(), Vr::Ui, new_uid);
     }
 
-    /// Blanks an element to a value suitable for its VR (§6.2, fo-dicom
+    /// Blanks an element to a value suitable for its VR (§12.5, fo-dicom
     /// `BlankItem`). `non_zero` requests a dummy (D) rather than zero-length (Z).
     fn blank(&self, dataset: &mut Dataset, tag: &Tag, vr: Vr, non_zero: bool) -> Result<(), Error> {
         let tag = tag.clone();
@@ -576,7 +576,7 @@ mod tests {
 
     #[test]
     fn the_clean_graph_option_cleans_private_curve_tags() {
-        // §2.4: CleanGraph must reach the 50xx/60xx rows even though the leading
+        // CleanGraph must reach the 50xx/60xx rows even though the leading
         // odd-private-group row matches those tags first
         let anon = Anonymizer::with_profile(SecurityProfile::basic(), AnonOption::CleanGraph);
         let mut ds = Dataset::new();

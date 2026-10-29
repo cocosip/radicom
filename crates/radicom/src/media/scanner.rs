@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-/// What the scanner does when a directory entry cannot be read (§3.5).
+/// What the scanner does when a directory entry cannot be read (§12.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScanErrorPolicy {
     /// Record the error and keep walking (the safe default).
@@ -28,7 +28,7 @@ pub enum ScanErrorPolicy {
     Stop,
 }
 
-/// Scan configuration (§3.5).
+/// Scan configuration (§12.2).
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
     /// Maximum recursion depth; `0` scans only the root, `None` is unlimited.
@@ -76,7 +76,7 @@ impl ScanControl {
     }
 }
 
-/// A progress or file event during a scan (§3.5).
+/// A progress or file event during a scan (§12.2).
 #[derive(Debug, Clone)]
 pub enum ScanEvent {
     /// Emitted after each matched file with running totals.
@@ -87,7 +87,7 @@ pub enum ScanEvent {
     Complete { summary: ScanSummary },
 }
 
-/// Receives scan events (§3.5). Implement to stream progress or collect files.
+/// Receives scan events (§12.2). Implement to stream progress or collect files.
 pub trait ScanVisitor {
     fn on_event(&mut self, event: ScanEvent);
 }
@@ -102,7 +102,7 @@ where
     }
 }
 
-/// Result summary of a scan (§3.5).
+/// Result summary of a scan (§12.2).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScanSummary {
     /// Directories visited.
@@ -117,7 +117,7 @@ pub struct ScanSummary {
     pub stopped: bool,
 }
 
-/// Scans `root` and feeds matched files to `on_match` (§3.5).
+/// Scans `root` and feeds matched files to `on_match` (§12.2).
 ///
 /// `on_match` is called with the file path and may return an error to abort
 /// (used to wire the DICOMDIR builder). Events go to `visitor`.
@@ -274,7 +274,7 @@ fn handle_error(
     }
 }
 
-/// A DICOMDIR builder driven by the scanner (§3.5).
+/// A DICOMDIR builder driven by the scanner (§12.2).
 ///
 /// Collects matched files, then turns them into a `DicomDirectory` in one pass.
 pub struct DicomDirectoryBuilder {
@@ -306,7 +306,7 @@ impl DicomDirectoryBuilder {
         build_with_icon(self.files, self.file_set_id, &mut file_id, None)
     }
 
-    /// Builds the directory, attaching an icon to every record (§3.4).
+    /// Builds the directory, attaching an icon to every record (§12.2).
     pub fn build_with_icon<E>(
         self,
         mut file_id: impl FnMut(&Path) -> PathBuf,
@@ -340,7 +340,7 @@ where
     Ok(directory)
 }
 
-/// A glob matcher supporting `*`, `?` and `**` (§3.5).
+/// A glob matcher supporting `*`, `?` and `**` (§12.2).
 ///
 /// `*` matches within one path segment, `?` one character, `**` across
 /// segments. The grammar is small and standard-library-free.

@@ -15,7 +15,7 @@ use crate::model::transfer_syntax::TransferSyntax;
 use crate::pixel::{PixelData, PixelDataRef};
 use std::sync::{Arc, LazyLock, RwLock};
 
-// -- parameters (CODEC-02, §2.2) -----------------------------------------
+// -- parameters (CODEC-02, §9.1) -----------------------------------------
 
 /// Chroma sample factor for JPEG encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -167,7 +167,7 @@ impl CodecParams {
     }
 }
 
-// -- codec trait (CODEC-01, §2.1) ----------------------------------------
+// -- codec trait (CODEC-01, §9.1) ----------------------------------------
 
 /// A codec for one transfer syntax. Implementations live in
 /// radicom-codecs only.
@@ -203,7 +203,7 @@ pub trait Codec: Send + Sync {
     ) -> Result<(), Error>;
 }
 
-// -- registry (CODEC-03, §3) ---------------------------------------------
+// -- registry (CODEC-03, §9.1) ---------------------------------------------
 
 /// Resolves transfer syntaxes to codecs.
 pub trait CodecRegistry: Send + Sync {

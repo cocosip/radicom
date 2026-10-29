@@ -13,7 +13,7 @@
 use crate::error::{NetworkError, Result};
 use crate::pdu::{CommonExtended, ExtendedNegotiation, UserInformation};
 
-/// Field numbers shared by all three application-info models (§4.3).
+/// Field numbers shared by all three application-info models (§11.2).
 mod field {
     /// Storage: 1 = level of support, 2 = digital signature, 3 = element coercion.
     pub const STORAGE_LEVEL_OF_SUPPORT: u8 = 1;
@@ -30,7 +30,7 @@ mod field {
     pub const RETRIEVE_ENHANCED_MULTIFRAME: u8 = 4;
 }
 
-/// The Service Class Application Information of one SOP class (§4.3).
+/// The Service Class Application Information of one SOP class (§11.2).
 ///
 /// A flat byte array: index `n - 1` is field `n`, every field exactly one byte,
 /// no length prefixes (PS3.7 §D.3.3.5). A field value of 0 means "not
@@ -93,7 +93,7 @@ impl AppInfo {
     }
 }
 
-/// Storage Service Class application info (§4.3).
+/// Storage Service Class application info (§11.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StorageAppInfo {
     /// 1 = level 2 (coercion) supported; 0 = level 1.
@@ -145,7 +145,7 @@ pub enum StorageOption {
     ElementCoercion,
 }
 
-/// C-FIND application info (§4.3).
+/// C-FIND application info (§11.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FindAppInfo {
     pub relational_queries: u8,
@@ -183,7 +183,7 @@ impl FindAppInfo {
     }
 }
 
-/// C-GET / C-MOVE application info (§4.3).
+/// C-GET / C-MOVE application info (§11.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RetrieveAppInfo {
     pub relational_retrieval: u8,
@@ -210,7 +210,7 @@ impl RetrieveAppInfo {
     }
 }
 
-/// What the SCP accepts of an extended-negotiation request (§4.3).
+/// What the SCP accepts of an extended-negotiation request (§11.2).
 ///
 /// The default answers every requested field with 0, "not supported", which is
 /// exactly what a peer must understand: it asked, and the answer says no. A
@@ -234,7 +234,7 @@ impl ExtendedNegotiationPolicy {
         ExtendedNegotiationPolicy::Custom(f)
     }
 
-    /// Builds the AC-side extended-negotiation items (§3.2 item 0x56).
+    /// Builds the AC-side extended-negotiation items (§11.2 item 0x56).
     pub fn answer(&self, requested: &[ExtendedNegotiation]) -> Vec<ExtendedNegotiation> {
         requested
             .iter()
@@ -257,7 +257,7 @@ impl ExtendedNegotiationPolicy {
     }
 }
 
-/// Applies the SCP's answer to the request's extended-negotiation items (§4.3).
+/// Applies the SCP's answer to the request's extended-negotiation items (§11.2).
 ///
 /// Only the 0x56 items change: the AC carries `accepted`, not `requested`, and
 /// the encoder already picks the right side per direction. Nothing else is
@@ -268,7 +268,7 @@ pub fn apply_answer(user_information: &mut UserInformation, policy: &ExtendedNeg
     user_information.extended_negotiations = policy.answer(&user_information.extended_negotiations);
 }
 
-/// Validates a common extended negotiation item (§4.3).
+/// Validates a common extended negotiation item (§11.2).
 pub fn validate_common_extended(common: &CommonExtended) -> Result<()> {
     if common.service_class_uid.is_empty() {
         return Err(NetworkError::protocol(

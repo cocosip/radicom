@@ -203,7 +203,7 @@ fn a_truncated_file_keeps_its_readable_prefix() {
 }
 
 /// A real SR document walks correctly: the content tree parses into the expected
-/// number of nodes with the expected value types (docs/09, SR-01 §4.1).
+/// number of nodes with the expected value types (docs/02-development-guide.md §5.1, docs/01-architecture.md §12.3).
 #[test]
 fn a_real_sr_document_walks_its_content_tree() {
     use radicom::sr::{ContentItem, ValueType};

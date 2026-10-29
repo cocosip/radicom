@@ -7,7 +7,7 @@
 use crate::error::{AbortSource, NetworkError, RejectResult, RejectSource, Result};
 use bytes::Bytes;
 
-/// Upper bound for a whole received PDU (§3.1).
+/// Upper bound for a whole received PDU (§11.2).
 ///
 /// A peer may send a P-DATA-TF up to the Max-PDU-Length *we advertise*, so
 /// [`clamp_max_pdu_length`] clamps every advertised value to this constant: the
@@ -15,7 +15,7 @@ use bytes::Bytes;
 ///
 /// 256 KiB matches fo-dicom's default `DicomServiceOptions.MaxPDULength`
 /// (262144). The P-DATA-TF length field is 32-bit, so the old 65535 ceiling
-/// needlessly rejected compliant large PDUs (03-network-protocol §2.5).
+/// needlessly rejected compliant large PDUs (03-network-protocol).
 pub const MAX_PDU_SIZE: u32 = 256 * 1024;
 
 /// Clamps a configured max-PDU length to what this implementation can receive.
@@ -33,7 +33,7 @@ pub fn clamp_max_pdu_length(configured: u32) -> u32 {
 /// The Application Context Name every DICOM association uses.
 pub const APPLICATION_CONTEXT: &str = "1.2.840.10008.3.1.1.1";
 
-/// PDU type codes (§3.1).
+/// PDU type codes (§11.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PduType {
@@ -87,7 +87,7 @@ impl Pdu {
     }
 }
 
-/// Item type codes used inside A-ASSOCIATE and user information (§3.2).
+/// Item type codes used inside A-ASSOCIATE and user information (§11.2).
 mod item {
     pub const APPLICATION_CONTEXT: u8 = 0x10;
     pub const PRESENTATION_CONTEXT_RQ: u8 = 0x20;
@@ -109,7 +109,7 @@ mod item {
 /// One proposed or accepted presentation context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresentationContext {
-    /// Odd, 1..=255 (§4.1).
+    /// Odd, 1..=255 (§11.2).
     pub id: u8,
     pub abstract_syntax: String,
     pub transfer_syntaxes: Vec<String>,
@@ -132,7 +132,7 @@ impl PresentationContext {
     }
 }
 
-/// Role selection pair for one abstract syntax (§4.1).
+/// Role selection pair for one abstract syntax (§11.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoleSelection {
     pub sop_class: String,
@@ -140,7 +140,7 @@ pub struct RoleSelection {
     pub scp_role: bool,
 }
 
-/// Extended negotiation for one SOP class (§4.3).
+/// Extended negotiation for one SOP class (§11.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtendedNegotiation {
     pub sop_class: String,
@@ -152,7 +152,7 @@ pub struct ExtendedNegotiation {
     pub accepted: Vec<u8>,
 }
 
-/// Asynchronous operations window (§3.2, item 0x53).
+/// Asynchronous operations window (§11.2, item 0x53).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AsyncOperations {
     pub invoked: u16,
@@ -180,7 +180,7 @@ impl AsyncOperations {
     // honour. The type exists to decode and round-trip a peer's item.
 }
 
-/// User identity negotiation (§4.3).
+/// User identity negotiation (§11.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserIdentity {
     /// 1 = username, 2 = username+passcode, 3 = Kerberos, 4 = SAML, 5 = JWT.
@@ -206,7 +206,7 @@ impl UserIdentity {
     }
 }
 
-/// User information sub-items (§3.2).
+/// User information sub-items (§11.2).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UserInformation {
     pub max_pdu_length: u32,
@@ -222,7 +222,7 @@ pub struct UserInformation {
     pub user_identity_response: Option<Vec<u8>>,
 }
 
-/// SOP class common extended negotiation (§4.3).
+/// SOP class common extended negotiation (§11.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommonExtended {
     pub service_class_uid: String,
@@ -239,7 +239,7 @@ impl UserInformation {
     }
 }
 
-/// A-ASSOCIATE-RQ or A-ASSOCIATE-AC body (§3.2).
+/// A-ASSOCIATE-RQ or A-ASSOCIATE-AC body (§11.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Associate {
     pub protocol_version: u16,
@@ -264,7 +264,7 @@ impl Associate {
     }
 }
 
-/// A-ASSOCIATE-RJ body (§3.3).
+/// A-ASSOCIATE-RJ body (§11.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssociateRj {
     pub result: RejectResult,
@@ -272,7 +272,7 @@ pub struct AssociateRj {
     pub reason: u8,
 }
 
-/// One PDV inside a P-DATA-TF (§3.3).
+/// One PDV inside a P-DATA-TF (§11.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pdv {
     pub context_id: u8,
@@ -281,17 +281,17 @@ pub struct Pdv {
     /// True when this PDV completes the message unit.
     pub is_last: bool,
     /// The PDV value. `Bytes` so a decoded PDV shares its frame's buffer
-    /// instead of copying it (§3.4).
+    /// instead of copying it.
     pub data: Bytes,
 }
 
-/// P-DATA-TF body (§3.3).
+/// P-DATA-TF body (§11.2).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PData {
     pub pdvs: Vec<Pdv>,
 }
 
-/// A-ABORT body (§3.3).
+/// A-ABORT body (§11.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Abort {
     pub source: AbortSource,
@@ -309,7 +309,7 @@ pub fn decode(bytes: &[u8]) -> Result<Pdu> {
 }
 
 /// Decodes one PDU from an owned frame, letting each P-DATA PDV share the
-/// frame's buffer (`Bytes::slice`) instead of copying it (§3.4).
+/// frame's buffer (`Bytes::slice`) instead of copying it.
 pub fn decode_bytes(frame: Bytes) -> Result<Pdu> {
     if frame.len() < 6 {
         return Err(NetworkError::protocol(
@@ -357,7 +357,7 @@ fn u32_at(bytes: &[u8], at: usize) -> Result<u32> {
     Ok(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
 }
 
-/// AE titles are 16 bytes, space padded (§3.2).
+/// AE titles are 16 bytes, space padded (§11.2).
 fn decode_ae(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes)
         .trim_end_matches([' ', '\0'])
@@ -411,7 +411,7 @@ fn decode_associate(body: &[u8], is_rq: bool) -> Result<Associate> {
             item::USER_INFORMATION => {
                 user_information = decode_user_information(value, is_rq)?;
             }
-            // unknown top-level items are skipped by length (§3.2)
+            // unknown top-level items are skipped by length (§11.2)
             _ => {}
         }
         offset = end;
@@ -460,7 +460,7 @@ fn decode_presentation_context(value: &[u8]) -> Result<PresentationContext> {
 /// Decodes the user-information sub-items.
 ///
 /// Item 0x56 means "requested" in an RQ and "accepted" in an AC: the wire
-/// cannot say which, so the association direction decides (§4.3).
+/// cannot say which, so the association direction decides (§11.2).
 fn decode_user_information(value: &[u8], is_rq: bool) -> Result<UserInformation> {
     let mut out = UserInformation::default();
     let mut offset = 0usize;
@@ -633,7 +633,7 @@ fn decode_associate_rj(body: &[u8]) -> Result<AssociateRj> {
 fn decode_pdata_bytes(body: Bytes) -> Result<PData> {
     // The PDV count is bounded by the PDU length, but preallocation is capped
     // so a large count cannot front-load a huge allocation; the vector grows as
-    // PDVs actually arrive (§3.5).
+    // PDVs actually arrive.
     const PDV_COUNT_PREALLOC_CAP: usize = 1024;
     let mut pdvs = Vec::with_capacity((body.len() / 6).min(PDV_COUNT_PREALLOC_CAP));
     let mut offset = 0usize;
@@ -652,7 +652,7 @@ fn decode_pdata_bytes(body: Bytes) -> Result<PData> {
         // indistinguishable from real data at this layer, so it is kept.
         // The DIMSE assembler delimits real content by the command group
         // length and by dataset parsing, which tolerate trailing padding.
-        // `slice` shares the frame buffer: no per-PDV copy (§3.4).
+        // `slice` shares the frame buffer: no per-PDV copy.
         let value = body.slice(start + 2..end);
         pdvs.push(Pdv {
             context_id,
@@ -900,7 +900,7 @@ fn encode_pdata_into(p: &PData, out: &mut Vec<u8>) {
     let start = out.len();
     out.extend_from_slice(&[0x04, 0, 0, 0, 0, 0]);
     for pdv in &p.pdvs {
-        // value is padded to an even length on the wire (§3.3)
+        // value is padded to an even length on the wire (§11.2)
         let pad = pdv.data.len() % 2;
         let value_len = pdv.data.len() + pad;
         out.extend_from_slice(&((value_len + 2) as u32).to_be_bytes());
@@ -1360,7 +1360,7 @@ mod tests {
     #[test]
     fn extended_negotiation_lands_on_the_side_matching_the_pdu() {
         // item 0x56 carries "requested" in an RQ and "accepted" in an AC; the
-        // wire cannot say which, so the PDU type must decide (§4.3)
+        // wire cannot say which, so the PDU type must decide (§11.2)
         let mut assoc = Associate::new("SCP", "SCU");
         assoc
             .user_information
@@ -1442,7 +1442,7 @@ mod tests {
 
     #[test]
     fn decode_bytes_matches_decode_and_preserves_pdvs() {
-        // §3.4: the zero-copy owned-frame path must decode exactly like the
+        // the zero-copy owned-frame path must decode exactly like the
         // borrowed one (same PDVs, same bytes).
         let pdata = PData {
             pdvs: vec![

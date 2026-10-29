@@ -22,7 +22,7 @@ use radicom::io::file::DicomFile;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Client-side tuning (§9.1).
+/// Client-side tuning (§11.4).
 #[derive(Debug, Clone)]
 pub struct DicomClientOptions {
     /// Requests sent on one association before it is released; `None` keeps
@@ -32,7 +32,6 @@ pub struct DicomClientOptions {
     /// How long a spent association waits before it is released. This is a
     /// cooldown after the request quota is reached, not fo-dicom's
     /// listen-style linger: the synchronous API queues nothing while it sleeps
-    /// (§2.7).
     pub quota_cooldown: Duration,
     /// Association attempts per batch before giving up (consecutive cap).
     pub max_consecutive_timeout_retries: u32,
@@ -63,7 +62,7 @@ pub enum DicomClientCancellationMode {
     ImmediatelyAbortAssociation,
 }
 
-/// Events the client reports while it drives associations (§9.1).
+/// Events the client reports while it drives associations (§11.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientEvent {
     /// The association lifecycle changed state.
@@ -88,7 +87,7 @@ pub enum ClientEvent {
     },
 }
 
-/// The high-level client (§9.1).
+/// The high-level client (§11.4).
 ///
 /// One `DicomClient` describes a destination; requests are sent with the
 /// `send_*` methods, which open associations as needed.
@@ -97,13 +96,13 @@ pub struct DicomClient {
     pub calling_ae: String,
     pub called_ae: String,
     pub options: DicomClientOptions,
-    /// Reverse C-STORE handler, required for C-GET (§7.4).
+    /// Reverse C-STORE handler, required for C-GET (§11.4).
     reverse_store: Option<crate::server::ReverseStoreHandler>,
     events: Option<Arc<dyn Fn(ClientEvent) + Send + Sync>>,
     /// Requests already sent on the current association.
     sent_on_association: usize,
     /// The message ID and presentation-context ID of the last request, so a
-    /// C-CANCEL travels on the context that request used (§2.18).
+    /// C-CANCEL travels on the context that request used.
     last_request: Option<(u16, u8)>,
     association: Option<Association>,
 }
@@ -174,7 +173,7 @@ impl DicomClient {
         result
     }
 
-    /// True when the current association has reached its request quota (§9.1).
+    /// True when the current association has reached its request quota (§11.4).
     fn quota_spent(&self) -> bool {
         matches!(self.options.max_requests_per_association, Some(max) if self.sent_on_association >= max)
     }
@@ -183,7 +182,7 @@ impl DicomClient {
     /// spent.
     ///
     /// The synchronous API queues nothing while it sleeps, so this is a fixed
-    /// delay before the release, not a wait for new work (§2.7).
+    /// delay before the release, not a wait for new work.
     async fn retire_if_spent(&mut self) {
         if self.quota_spent() {
             self.cooldown().await;
@@ -196,7 +195,7 @@ impl DicomClient {
     ///
     /// An association is negotiated once, so a request whose SOP class was
     /// never proposed would fail for as long as that association lives: the
-    /// association is released and reopened with the contexts at hand (§2.6).
+    /// association is released and reopened with the contexts at hand.
     /// Retries only when the peer does not answer at all; a rejection is
     /// permanent and is reported immediately.
     async fn ensure_association(
@@ -264,7 +263,7 @@ impl DicomClient {
                     self.association = Some(association);
                     return Ok(());
                 }
-                // a rejection is permanent: retrying it just burns time (§9.1)
+                // a rejection is permanent: retrying it just burns time (§11.4)
                 Err(other @ NetworkError::Reject { .. }) => {
                     if let NetworkError::Reject { reason, .. } = &other {
                         self.emit(ClientEvent::AssociationRejected { reason: *reason });
@@ -279,7 +278,7 @@ impl DicomClient {
                     }
                     // only a peer that never answered is worth another attempt:
                     // a refusal, a TLS failure or a protocol error will not
-                    // improve, and 0 retries means exactly that (§2.8)
+                    // improve, and 0 retries means exactly that
                     if !is_retryable(&other)
                         || attempt >= self.options.max_consecutive_timeout_retries
                     {
@@ -306,12 +305,12 @@ impl DicomClient {
         self.last_request = None;
     }
 
-    /// Sleeps the quota cooldown (§2.7: a post-quota delay, not a queue wait).
+    /// Sleeps the quota cooldown (a post-quota delay, not a queue wait).
     async fn cooldown(&self) {
         tokio::time::sleep(self.options.quota_cooldown).await;
     }
 
-    /// Sends a C-ECHO (§7.1, §9.1).
+    /// Sends a C-ECHO (§11.4).
     pub async fn send_c_echo(&mut self, sop_class: impl Into<String>) -> Result<CEchoResponse> {
         let sop_class = sop_class.into();
         let context = PresentationContext::new(
@@ -340,7 +339,7 @@ impl DicomClient {
         response
     }
 
-    /// Sends a C-STORE (§7.2, §9.1).
+    /// Sends a C-STORE (§11.4).
     pub async fn send_c_store(&mut self, file: &DicomFile) -> Result<CStoreResponse> {
         let sop_class = file
             .dataset
@@ -371,7 +370,7 @@ impl DicomClient {
         response
     }
 
-    /// Runs a C-FIND and collects every response (§7.3, §9.1).
+    /// Runs a C-FIND and collects every response (§11.4).
     pub async fn send_c_find(&mut self, request: &CFindRequest) -> Result<Vec<CFindResponse>> {
         let context = PresentationContext::new(
             1,
@@ -399,7 +398,7 @@ impl DicomClient {
         Ok(responses)
     }
 
-    /// Runs a C-MOVE and collects every response (§7.5, §9.1).
+    /// Runs a C-MOVE and collects every response (§11.4).
     pub async fn send_c_move(&mut self, request: &CMoveRequest) -> Result<Vec<CMoveResponse>> {
         let context = PresentationContext::new(
             1,
@@ -427,7 +426,7 @@ impl DicomClient {
         Ok(responses)
     }
 
-    /// Runs a C-GET and collects every response (§7.4, §9.1).
+    /// Runs a C-GET and collects every response (§11.4).
     ///
     /// Instances arrive as reverse C-STORE sub-operations, so a reverse-store
     /// handler must have been registered and the storage classes the handler
@@ -494,11 +493,11 @@ impl DicomClient {
         Ok(responses)
     }
 
-    /// Sends a C-CANCEL (0x0FFF) for an in-flight request (§7.6, SRV-08).
+    /// Sends a C-CANCEL (0x0FFF) for an in-flight request (§11.4, SRV-08).
     ///
     /// `message_id` names the request to cancel, and the cancel travels on the
     /// presentation context that request used — a C-CANCEL sent on another
-    /// context is a protocol error at the SCP (§2.18). Returns `Ok(false)` when
+    /// context is a protocol error at the SCP. Returns `Ok(false)` when
     /// no association is open or the ID is not a request this client sent.
     /// As with fo-dicom, cancel is only meaningful while the request is still
     /// producing responses; the SCP's streaming C-FIND path returns a terminal
@@ -522,7 +521,7 @@ impl DicomClient {
         self.close_association().await;
     }
 
-    /// Aborts the association (§9.1 cancellation mode).
+    /// Aborts the association (§11.4 cancellation mode).
     pub async fn abort(&mut self) {
         if let Some(association) = self.association.take() {
             self.emit(ClientEvent::StateChanged {
@@ -571,7 +570,7 @@ fn covers_roles(association: &Association, wanted: &[crate::pdu::RoleSelection])
     })
 }
 
-/// True for the transport-level failures a retry can plausibly fix (§2.8).
+/// True for the transport-level failures a retry can plausibly fix.
 ///
 /// A peer that never answered at all is worth one more attempt; a refusal, a
 /// TLS failure or a protocol error describes a peer that will answer the same
@@ -892,7 +891,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_reports_whether_it_named_a_request_that_was_sent() {
-        // §4.1: the previous test cancelled an id whose response had already
+        // §11.2: the previous test cancelled an id whose response had already
         // arrived and then only asserted "the association still works", which
         // passes for any implementation, including one that ignores C-CANCEL
         // entirely. The observable contract here is the return value — true only
@@ -993,7 +992,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_second_sop_class_gets_its_own_association() {
-        // §2.6: an association is negotiated once, so a C-STORE after a C-ECHO
+        // an association is negotiated once, so a C-STORE after a C-ECHO
         // used to fail with "SOP class ... is not supported by the association"
         struct EchoAndStore;
         #[async_trait::async_trait]
@@ -1134,7 +1133,7 @@ mod tests {
 
     #[tokio::test]
     async fn zero_retries_means_one_attempt() {
-        // §2.8: max_consecutive_timeout_retries = 0 means "do not retry"
+        // max_consecutive_timeout_retries = 0 means "do not retry"
         let (addr, attempts) = silent_peer().await;
         let mut client =
             DicomClient::new("SCU", "SCP", addr.to_string()).with_options(impatient_options(0));
@@ -1243,7 +1242,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_cancel_travels_on_the_context_the_request_used() {
-        // §2.18: C-CANCEL names the cancelled request, and the SCP resolves it
+        // C-CANCEL names the cancelled request, and the SCP resolves it
         // within the presentation context it arrives on — so it must be the
         // context the request used, not context 1.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

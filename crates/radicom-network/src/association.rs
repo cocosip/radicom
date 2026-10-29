@@ -8,7 +8,7 @@
 use crate::error::{NetworkError, Result};
 use crate::pdu::{PresentationContext, RoleSelection, UserInformation};
 
-/// Well-known SOP class UIDs used by the negotiation rules (§4.2).
+/// Well-known SOP class UIDs used by the negotiation rules (§11.2).
 pub mod sop_class {
     pub const VERIFICATION: &str = "1.2.840.10008.1.1";
     pub const STORAGE_COMMITMENT_PUSH: &str = "1.2.840.10008.1.20.1";
@@ -29,7 +29,7 @@ pub mod transfer_syntax {
     pub const EXPLICIT_VR_BIG_ENDIAN: &str = "1.2.840.10008.1.2.2";
 }
 
-/// Presentation-context states (§4.1).
+/// Presentation-context states (§11.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextState {
     Proposed,
@@ -75,7 +75,7 @@ impl ContextState {
     }
 }
 
-/// Assigns presentation-context IDs: odd, 1, 3, 5, ... (§4.1).
+/// Assigns presentation-context IDs: odd, 1, 3, 5, ... (§11.2).
 #[derive(Debug, Clone)]
 pub struct ContextIdAllocator {
     /// The next candidate ID; 0 marks exhaustion (IDs are odd, so 0 is free).
@@ -108,7 +108,7 @@ impl ContextIdAllocator {
     }
 }
 
-/// A proposed presentation context before negotiation (§4.1).
+/// A proposed presentation context before negotiation (§11.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProposedContext {
     pub id: u8,
@@ -128,7 +128,7 @@ impl ProposedContext {
     }
 
     /// True when this context has the same abstract syntax, transfer syntax
-    /// set and roles as `other` (§4.1 dedup rule).
+    /// set and roles as `other` (§11.2 dedup rule).
     pub fn is_duplicate_of(&self, other: &ProposedContext) -> bool {
         if self.abstract_syntax != other.abstract_syntax || self.roles.len() != other.roles.len() {
             return false;
@@ -149,7 +149,7 @@ impl ProposedContext {
     }
 }
 
-/// Builds the proposed context set, deduplicating identical entries (§4.1).
+/// Builds the proposed context set, deduplicating identical entries (§11.2).
 #[derive(Debug, Clone, Default)]
 pub struct ContextSetBuilder {
     contexts: Vec<ProposedContext>,
@@ -264,7 +264,7 @@ impl NegotiatedContext {
     }
 }
 
-/// How the SCP chooses among offered transfer syntaxes (§4.1).
+/// How the SCP chooses among offered transfer syntaxes (§11.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SyntaxPriority {
     /// Offer order wins: the first offered syntax the SCP supports.
@@ -274,7 +274,7 @@ pub enum SyntaxPriority {
     Preferred,
 }
 
-/// SCP-side negotiation: decides acceptance per proposed context (§4.1).
+/// SCP-side negotiation: decides acceptance per proposed context (§11.2).
 #[derive(Debug, Clone)]
 pub struct NegotiationPolicy {
     /// Abstract syntaxes this SCP supports.
@@ -309,7 +309,7 @@ impl NegotiationPolicy {
         }
     }
 
-    /// Negotiates every proposed context, in order (§4.1).
+    /// Negotiates every proposed context, in order (§11.2).
     pub fn negotiate(&self, proposed: &[PresentationContext]) -> Vec<NegotiatedContext> {
         proposed.iter().map(|pc| self.negotiate_one(pc)).collect()
     }
@@ -375,7 +375,7 @@ impl NegotiationPolicy {
     }
 }
 
-/// The association's view of accepted contexts, used to route messages (§4.2).
+/// The association's view of accepted contexts, used to route messages (§11.2).
 #[derive(Debug, Clone, Default)]
 pub struct AcceptedContexts {
     contexts: Vec<NegotiatedContext>,
@@ -423,7 +423,7 @@ impl AcceptedContexts {
             .find(|c| c.abstract_syntax == abstract_syntax)
     }
 
-    /// Picks the context a message should travel on (§4.2):
+    /// Picks the context a message should travel on (§11.2):
     /// an exact syntax match first, then the first context of the abstract
     /// syntax, otherwise `SopClassNotSupported`.
     pub fn pick(
@@ -448,7 +448,7 @@ impl AcceptedContexts {
     }
 
     /// True when the peer holds the SCP role for the abstract syntax, so this
-    /// side may send it requests of that class (§4.1).
+    /// side may send it requests of that class (§11.2).
     ///
     /// This is the acceptor's view: role selection pairs are stored as they
     /// were granted to the association's requestor.
@@ -469,7 +469,7 @@ impl AcceptedContexts {
     }
 }
 
-/// Builds the user-information item for an association request (§3.2, §4.3).
+/// Builds the user-information item for an association request (§11.2).
 pub fn build_user_information(
     max_pdu_length: u32,
     implementation_class_uid: &str,

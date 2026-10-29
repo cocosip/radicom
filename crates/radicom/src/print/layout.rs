@@ -7,7 +7,7 @@
 
 use crate::error::{DataError, Error};
 
-/// A film's physical size in millimetres (§5).
+/// A film's physical size in millimetres (§12.4).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FilmSize {
     pub width_mm: f64,
@@ -22,7 +22,7 @@ impl FilmSize {
         }
     }
 
-    /// Parses a DICOM film size string (§5).
+    /// Parses a DICOM film size string (§12.4).
     ///
     /// Recognises the standard named sizes (`8INX10IN`, `A4`, `A3`, ...) and the
     /// `NNCMXNNCM` form. Returns `None` for an unknown string so the caller can
@@ -69,7 +69,7 @@ impl FilmSize {
     }
 }
 
-/// A rectangular cell in millimetres, origin at the film's top-left (§5).
+/// A rectangular cell in millimetres, origin at the film's top-left (§12.4).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayoutCell {
     pub x: f64,
@@ -78,7 +78,7 @@ pub struct LayoutCell {
     pub height: f64,
 }
 
-/// How images are arranged on the film (§5, PS3.3 C.13.3.2).
+/// How images are arranged on the film (§12.4, PS3.3 C.13.3.2).
 ///
 /// The doc names six forms; `CUSTOM` and `SLIDE`/`SUPERSLIDE` are accepted by
 /// the parser but this round only lays out the three composite forms
@@ -100,7 +100,7 @@ pub enum ImageDisplayFormat {
 }
 
 impl ImageDisplayFormat {
-    /// Parses a DICOM `ImageDisplayFormat` string (§5).
+    /// Parses a DICOM `ImageDisplayFormat` string (§12.4).
     pub fn parse(text: &str) -> Result<ImageDisplayFormat, Error> {
         let text = text.trim();
         let (kind, rest) = match text.split_once('\\') {
@@ -143,7 +143,7 @@ impl ImageDisplayFormat {
     }
 
     /// Computes each cell's rectangle on `film`, inset by `margin` mm on every
-    /// side (§5). `STANDARD`/`ROW`/`COL` are laid out; `SLIDE`, `SUPERSLIDE`
+    /// side (§12.4). `STANDARD`/`ROW`/`COL` are laid out; `SLIDE`, `SUPERSLIDE`
     /// and `CUSTOM` return an empty list (no closed-form grid this round).
     pub fn layout(&self, film: FilmSize, margin: f64) -> Vec<LayoutCell> {
         let left = margin;

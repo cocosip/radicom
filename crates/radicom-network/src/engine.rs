@@ -11,16 +11,16 @@ use crate::error::{NetworkError, Result};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// Options for the engine (§5.3, §5.4).
+/// Options for the engine (§11.1).
 #[derive(Debug, Clone)]
 pub struct EngineOptions {
     /// Largest PDU this side accepts; also bounds what it sends.
     pub max_pdu_length: u32,
-    /// Bound on the PDU send queue; senders await when full (§5.3).
+    /// Bound on the PDU send queue; senders await when full (§11.1).
     pub pdu_queue_capacity: usize,
     /// Maximum PDVs batched into one P-DATA-TF; 1 for buggy peers.
     pub max_pdvs_per_pdu: usize,
-    /// Opt-in per-request watchdog; `None` disables it (§5.4).
+    /// Opt-in per-request watchdog; `None` disables it (§11.1).
     pub request_timeout: Option<Duration>,
 }
 
@@ -35,7 +35,7 @@ impl Default for EngineOptions {
     }
 }
 
-/// One request awaiting a response (§5.4).
+/// One request awaiting a response (§11.1).
 #[derive(Debug, Clone)]
 pub struct PendingRequest {
     pub message_id: u16,
@@ -56,13 +56,13 @@ impl PendingRequest {
         }
     }
 
-    /// True when the watchdog should fire (§5.4).
+    /// True when the watchdog should fire (§11.1).
     pub fn is_timed_out(&self, now: Instant, timeout: Duration) -> bool {
         now.duration_since(self.last_activity) >= timeout
     }
 }
 
-/// The pending-request table and message-ID sequence (§5.2, D3).
+/// The pending-request table and message-ID sequence (§11.2, D3).
 #[derive(Debug, Default)]
 pub struct PendingTable {
     entries: HashMap<u16, PendingRequest>,
@@ -127,7 +127,7 @@ impl PendingTable {
         }
     }
 
-    /// Requests whose watchdog has expired (§5.4).
+    /// Requests whose watchdog has expired (§11.1).
     pub fn timed_out(&self, now: Instant, timeout: Duration) -> Vec<u16> {
         let mut ids: Vec<u16> = self
             .entries
@@ -139,14 +139,14 @@ impl PendingTable {
         ids
     }
 
-    /// Every outstanding message ID, for failing them on close (§5.5).
+    /// Every outstanding message ID, for failing them on close (§11.1).
     pub fn message_ids(&self) -> Vec<u16> {
         let mut ids: Vec<u16> = self.entries.keys().copied().collect();
         ids.sort_unstable();
         ids
     }
 
-    /// True when the peer's response completes the request (§5.2).
+    /// True when the peer's response completes the request (§11.2).
     ///
     /// `Pending` keeps the entry; anything else removes it.
     pub fn apply_response(
@@ -164,7 +164,7 @@ impl PendingTable {
     }
 }
 
-/// P-DATA circuit-breaker state (§5.3).
+/// P-DATA circuit-breaker state (§11.1).
 ///
 /// When a request times out while its PDVs are still queued, the engine stops
 /// accepting new P-DATA for that message and flags the connection, so the
@@ -207,7 +207,7 @@ impl CircuitBreaker {
     }
 }
 
-/// Connection lifecycle state (§5.5).
+/// Connection lifecycle state (§11.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
     /// Accepting and sending.
@@ -217,7 +217,7 @@ pub enum ConnectionState {
     Closed,
 }
 
-/// Graceful-close bookkeeping (§5.5).
+/// Graceful-close bookkeeping (§11.1).
 #[derive(Debug, Clone)]
 pub struct ConnectionLifecycle {
     state: ConnectionState,
@@ -246,7 +246,7 @@ impl ConnectionLifecycle {
         self.pending_requests = pending_requests;
     }
 
-    /// Requests a graceful close; refuses while work is outstanding (§5.5).
+    /// Requests a graceful close; refuses while work is outstanding (§11.1).
     pub fn try_close(&mut self) -> Result<()> {
         if self.state != ConnectionState::Open {
             return Err(NetworkError::protocol("connection is already closing"));
@@ -260,7 +260,7 @@ impl ConnectionLifecycle {
         Ok(())
     }
 
-    /// Forces the close regardless of outstanding work (§5.5).
+    /// Forces the close regardless of outstanding work (§11.1).
     pub fn force_close(&mut self) {
         self.state = ConnectionState::Closed;
         self.queued_pdus = 0;
@@ -278,7 +278,7 @@ impl ConnectionLifecycle {
     }
 }
 
-/// Backpressure accounting for the bounded PDU queue (§5.3).
+/// Backpressure accounting for the bounded PDU queue (§11.1).
 #[derive(Debug, Clone)]
 pub struct PduQueue {
     capacity: usize,
@@ -301,7 +301,7 @@ impl PduQueue {
         self.depth
     }
 
-    /// Reserves a slot; `false` means the sender must await (§5.3).
+    /// Reserves a slot; `false` means the sender must await (§11.1).
     pub fn try_reserve(&mut self) -> bool {
         if self.depth >= self.capacity {
             return false;

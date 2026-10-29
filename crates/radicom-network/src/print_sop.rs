@@ -29,7 +29,7 @@ pub mod uids {
 /// Mirrors fo-dicom `MetaSopClasses.Instances` / `GetMetaSopClass`.
 pub struct MetaSopClasses;
 
-/// The meta → sub SOP class table, built once at compile time (§3.6).
+/// The meta → sub SOP class table, built once at compile time.
 const TABLE: &[(&str, &[&str])] = &[
     (
         uids::BASIC_GRAYSCALE_PRINT_MANAGEMENT_META,

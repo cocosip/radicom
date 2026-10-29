@@ -76,7 +76,7 @@ async fn main() {
 
     // Two rows: the shipped default (`Memory`) and the on-disk `SpoolToTemp`
     // alternative, so the reported numbers include the production default
-    // rather than only the fast non-default path (§4.9).
+    // rather than only the fast non-default path.
     run_case(
         "default_memory",
         StoreSink::default(),

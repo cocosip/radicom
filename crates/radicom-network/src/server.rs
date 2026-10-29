@@ -22,11 +22,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 
-/// Implementation identity written into user information (§3.2).
+/// Implementation identity written into user information (§11.2).
 pub const IMPLEMENTATION_CLASS_UID: &str = "1.2.826.0.1.3680043.10.1330.2";
 pub const IMPLEMENTATION_VERSION_NAME: &str = "RADICOM_0_1";
 
-/// Server options (§8).
+/// Server options (§11.4).
 #[derive(Debug, Clone)]
 pub struct ServerOptions {
     /// Called AE title accepted by the SCP; `None` accepts any title.
@@ -42,13 +42,13 @@ pub struct ServerOptions {
     /// already held, so a silent peer cannot occupy it forever (review #14).
     #[cfg(feature = "tls")]
     pub tls_handshake_timeout: Duration,
-    /// Socket options applied to every accepted connection (§2.12).
+    /// Socket options applied to every accepted connection.
     pub tcp: TcpOptions,
     /// Where incoming C-STORE instances are put before the provider sees them.
     pub store_sink: crate::store::StoreSink,
-    /// Answers SOP Class Extended Negotiation requests (§4.3).
+    /// Answers SOP Class Extended Negotiation requests (§11.2).
     pub extended_negotiation: crate::extended::ExtendedNegotiationPolicy,
-    /// User identity types this SCP accepts, and the response to echo (§4.3).
+    /// User identity types this SCP accepts, and the response to echo (§11.2).
     pub user_identity: UserIdentityPolicy,
     /// TLS material; `None` serves plain TCP (NET-01, `tls` feature).
     #[cfg(feature = "tls")]
@@ -81,7 +81,7 @@ impl Drop for ConnectionCountGuard {
     }
 }
 
-/// How an SCP handles User Identity negotiation (§4.3).
+/// How an SCP handles User Identity negotiation (§11.2).
 #[derive(Debug, Clone, Default)]
 pub enum UserIdentityPolicy {
     /// Reject the association when a user identity is requested.
@@ -131,7 +131,7 @@ impl Default for ServerOptions {
     }
 }
 
-/// A DIMSE server bound to one address (§8).
+/// A DIMSE server bound to one address (§11.4).
 pub struct DicomServer<P: ServiceProvider> {
     listener: TcpListener,
     provider: Arc<P>,
@@ -142,7 +142,7 @@ pub struct DicomServer<P: ServiceProvider> {
 }
 
 impl<P: ServiceProvider + 'static> DicomServer<P> {
-    /// Binds and starts accepting (§8).
+    /// Binds and starts accepting (§11.4).
     pub async fn bind(
         addr: impl tokio::net::ToSocketAddrs,
         provider: Arc<P>,
@@ -174,7 +174,7 @@ impl<P: ServiceProvider + 'static> DicomServer<P> {
         }
     }
 
-    /// Serves connections until the listener errors (§8).
+    /// Serves connections until the listener errors (§11.4).
     pub async fn run(self) -> Result<()> {
         let (_shutdown, receiver) = tokio::sync::watch::channel(false);
         self.run_until(receiver).await
@@ -279,7 +279,7 @@ impl<P: ServiceProvider + 'static> DicomServer<P> {
     }
 }
 
-/// Drives one accepted connection through association, one exchange, release (§5).
+/// Drives one accepted connection through association, one exchange, release (§11.1).
 async fn serve_connection<P: ServiceProvider, S>(
     stream: S,
     provider: Arc<P>,
@@ -368,16 +368,16 @@ where
         options.max_pdu_length,
         IMPLEMENTATION_CLASS_UID,
         IMPLEMENTATION_VERSION_NAME,
-        // the AC echoes exactly the roles granted above (§4.1, review #16)
+        // the AC echoes exactly the roles granted above (§11.2, review #16)
         negotiated.iter().flat_map(|c| c.roles.clone()).collect(),
     );
 
-    // extended negotiation: the AC echoes one item per requested SOP class (§4.3)
+    // extended negotiation: the AC echoes one item per requested SOP class (§11.2)
     user.extended_negotiations = options
         .extended_negotiation
         .answer(&request.user_information.extended_negotiations);
 
-    // user identity: refused identities reject the association (§4.3)
+    // user identity: refused identities reject the association (§11.2)
     if let Some(identity) = &request.user_information.user_identity {
         let Some(response) = options.user_identity.answer(identity) else {
             let reject = AssociateRj {
@@ -403,7 +403,7 @@ where
         request.user_information.max_pdu_length
     };
     let splitter = PduSplitter::new(peer_max_pdu, 16);
-    // a command awaiting its dataset (§5.2)
+    // a command awaiting its dataset (§11.2)
     let mut awaiting_dataset: std::collections::HashMap<u8, Command> =
         std::collections::HashMap::new();
 
@@ -434,7 +434,7 @@ where
                         Stream::Command => {
                             let command = command_from_bytes(&unit.bytes)?;
                             // Only C-STORE, C-FIND, C-MOVE and C-GET carry a
-                            // dataset (§7.2..§7.5). Any other request is
+                            // dataset (§7.2..§11.4). Any other request is
                             // answered at once: trusting the peer's
                             // (0000,0800) flag would hang the engine on a peer
                             // that sets it wrongly.
@@ -489,7 +489,7 @@ where
                 return Ok(());
             }
             // PS3.8 §9.3.8: the peer gave up on the association. Returning Ok
-            // here would report a peer abort as a clean close (§2.16).
+            // here would report a peer abort as a clean close.
             Pdu::Abort(abort) => {
                 return Err(NetworkError::Abort {
                     source_code: abort.source.code(),
@@ -515,7 +515,7 @@ fn transfer_syntax_of(uid: &str) -> Arc<radicom::model::transfer_syntax::Transfe
         .unwrap_or_else(|_| syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone())
 }
 
-/// Writes one DIMSE message's P-DATA PDUs in a single `write_all` (§3.2).
+/// Writes one DIMSE message's P-DATA PDUs in a single `write_all` (§11.2).
 async fn write_pdata_batch<S>(stream: &mut S, pdus: Vec<crate::pdu::PData>) -> Result<()>
 where
     S: tokio::io::AsyncWrite + Unpin,
@@ -540,7 +540,7 @@ fn transcoder_for<'a>(
     })
 }
 
-/// Dispatches a command that carries no dataset (§5.1).
+/// Dispatches a command that carries no dataset (§11.1).
 async fn handle_command<P: ServiceProvider, S>(
     serving: &mut Serving<'_, P, S>,
     context_id: u8,
@@ -564,7 +564,7 @@ where
             }
         }
         CommandField::CCancelRq => {
-            // §7.6 / SRV-08: streaming C-FIND handles its own cancel while
+            // §11.4 / SRV-08: streaming C-FIND handles its own cancel while
             // waiting for provider output. A cancel received by the idle
             // dispatcher has no matching in-flight operation, so consume it
             // and keep the association healthy.
@@ -572,7 +572,7 @@ where
             Ok(())
         }
         // N-services without a dataset (N-GET / N-DELETE, and any N request
-        // sent with the no-dataset flag set) — §7.6 / SRV-07.
+        // sent with the no-dataset flag set) — §11.4 / SRV-07.
         field if crate::nservice::is_n_request(field) => {
             // responses are written on the request's own context, so they use
             // that context's accepted syntax (review #15)
@@ -608,7 +608,7 @@ where
     }
 }
 
-/// Dispatches a command together with its dataset — the C-STORE path (§7.2).
+/// Dispatches a command together with its dataset — the C-STORE path (§11.4).
 async fn handle_command_with_dataset<P: ServiceProvider, S>(
     serving: &mut Serving<'_, P, S>,
     context_id: u8,
@@ -651,7 +651,7 @@ where
     }
 }
 
-/// Dispatches an N-service request to the matching provider method (§7.6, SRV-07).
+/// Dispatches an N-service request to the matching provider method (§11.4, SRV-07).
 async fn handle_n_service<P: ServiceProvider, S>(
     serving: &mut Serving<'_, P, S>,
     context_id: u8,
@@ -697,7 +697,7 @@ where
     }
 }
 
-/// True for failures that mean the association itself is unusable (§2.10).
+/// True for failures that mean the association itself is unusable.
 ///
 /// Everything else — a missing SOP class, an instance without the UIDs needed
 /// to address it, a transcode that cannot run — describes one sub-operation,
@@ -710,7 +710,7 @@ fn is_fatal(error: &NetworkError) -> bool {
 }
 
 /// The C-GET path: deliver instances back as reverse C-STORE sub-operations
-/// (§7.4).
+/// (§11.4).
 async fn handle_c_get<P: ServiceProvider, S>(
     serving: &mut Serving<'_, P, S>,
     context_id: u8,
@@ -815,7 +815,7 @@ where
                             Ok(result) => result,
                             // PS3.4 C.4.2: an instance that cannot be delivered is one
                             // failed sub-operation, not a reason to drop the
-                            // association and every instance already sent (§2.10)
+                            // association and every instance already sent
                             Err(error) if is_fatal(&error) => return Err(error),
                             Err(_) => (StatusState::Failure, false),
                         };
@@ -893,7 +893,7 @@ where
 }
 
 /// The C-MOVE path: decode the Identifier and relay the provider's progress
-/// (§7.5).
+/// (§11.4).
 async fn handle_c_move<P: ServiceProvider, S>(
     serving: &mut Serving<'_, P, S>,
     context_id: u8,
@@ -1021,7 +1021,7 @@ where
     Ok(())
 }
 
-/// The C-FIND path: decode the Identifier and stream the matches back (§7.3).
+/// The C-FIND path: decode the Identifier and stream the matches back (§11.4).
 async fn handle_c_find<P: ServiceProvider, S>(
     serving: &mut Serving<'_, P, S>,
     context_id: u8,
@@ -1129,7 +1129,7 @@ where
     Ok(())
 }
 
-/// The C-STORE path: spool the instance and hand it to the provider (§7.2).
+/// The C-STORE path: spool the instance and hand it to the provider (§11.4).
 async fn handle_c_store<P: ServiceProvider, S>(
     serving: &mut Serving<'_, P, S>,
     context_id: u8,
@@ -1150,10 +1150,10 @@ where
             .await;
     }
 
-    // parse failures become a failure status; the connection survives (§5.2).
+    // parse failures become a failure status; the connection survives (§11.2).
     // The spool does synchronous file IO, so it runs on the blocking pool: a
     // slow disk must not stall this (or any other) connection's runtime task
-    // (§3.2).
+    // (§11.2).
     let sink = serving.options.store_sink.clone();
     let syntax = syntax.clone();
     let instance =
@@ -1185,12 +1185,12 @@ struct Serving<'a, P: ServiceProvider, S> {
     provider: &'a Arc<P>,
     options: &'a ServerOptions,
     /// Owned so a nested sub-operation can read the reverse C-STORE responses
-    /// of its own C-GET (§7.4).
+    /// of its own C-GET (§11.4).
     assembler: PdvAssembler,
     /// Completed units that arrived in the same P-DATA-TF as a dispatched request.
     pending_units: VecDeque<MessageUnit>,
     accepted: &'a AcceptedContexts,
-    /// The next message ID for reverse sub-operations (§7.4).
+    /// The next message ID for reverse sub-operations (§11.4).
     reverse_message_id: u16,
     /// Transcoder per (source, target) syntax pair, reused across the many
     /// sub-operations of one C-GET instead of rebuilt per instance.
@@ -1222,7 +1222,7 @@ where
         send_command(self.stream, self.splitter, context_id, command).await
     }
 
-    /// Sends a command followed by an optional dataset (§5.3).
+    /// Sends a command followed by an optional dataset (§11.1).
     async fn send_with_dataset(
         &mut self,
         context_id: u8,
@@ -1238,7 +1238,7 @@ where
             None => None,
         };
         // Owned bytes handed straight to the splitter: each PDV is a shared
-        // slice instead of a fresh copy (§3.3).
+        // slice instead of a fresh copy (§11.2).
         for pdata in self
             .splitter
             .split_message_bytes(context_id, command_bytes, payload)?
@@ -1261,7 +1261,7 @@ where
         self.send(context_id, &response).await
     }
 
-    /// Reads PDUs until the C-STORE response for `message_id` arrives (§7.4).
+    /// Reads PDUs until the C-STORE response for `message_id` arrives (§11.4).
     ///
     /// Only the reverse sub-operations of the running C-GET can arrive here:
     /// the association is single-threaded, so the SCU has nothing else in
@@ -1320,7 +1320,7 @@ where
         }
     }
 
-    /// Delivers one instance as a reverse C-STORE sub-operation (§7.4).
+    /// Delivers one instance as a reverse C-STORE sub-operation (§11.4).
     ///
     /// The SCU side must have registered a C-STORE handler, otherwise this is
     /// `ReverseStoreHandlerMissing` on the *caller*; the SCP just records the
@@ -1396,7 +1396,7 @@ where
     }
 
     /// Message IDs for reverse sub-operations; the SCP side of a C-GET owns
-    /// this sequence because it is the one issuing requests (§7.4).
+    /// this sequence because it is the one issuing requests (§11.4).
     fn next_reverse_message_id(&mut self) -> u16 {
         let id = self.reverse_message_id;
         self.reverse_message_id = if self.reverse_message_id == u16::MAX {
@@ -1413,7 +1413,7 @@ where
 /// PS3.5 §7.7 fixes every command element's VR in a table of its own, so the
 /// command set is encoded with explicit VRs: the receiver then never needs a
 /// dictionary entry for group 0000 (which the standard dictionary lacks).
-/// The command group length is recomputed and kept (§5.3).
+/// The command group length is recomputed and kept (§11.1).
 pub fn command_bytes(command: &Command) -> Result<Vec<u8>> {
     let dataset = command.to_dataset();
     let mut out = Vec::new();
@@ -1427,7 +1427,7 @@ pub fn command_bytes(command: &Command) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Parses a command set (§5.2), matching [`command_bytes`].
+/// Parses a command set (§11.2), matching [`command_bytes`].
 pub fn command_from_bytes(bytes: &[u8]) -> Result<Command> {
     let dataset = parse_command_dataset(bytes)?;
     Command::from_dataset(&dataset)
@@ -1444,7 +1444,7 @@ fn parse_command_dataset(bytes: &[u8]) -> Result<Dataset> {
         })
 }
 
-/// Sends a command-only message (§5.3).
+/// Sends a command-only message (§11.1).
 async fn send_command<S>(
     stream: &mut S,
     splitter: &PduSplitter,
@@ -1461,7 +1461,7 @@ where
     Ok(())
 }
 
-/// Client options (§9.1, reduced to what M5/M6 need).
+/// Client options (§11.4, reduced to what M5/M6 need).
 #[derive(Debug, Clone)]
 pub struct ClientOptions {
     pub max_pdu_length: u32,
@@ -1473,17 +1473,17 @@ pub struct ClientOptions {
     /// Maximum quiet time while waiting for a response to one DIMSE request.
     /// `None` keeps the request wait unbounded.
     pub request_timeout: Option<Duration>,
-    /// Socket options applied to the connected stream (§2.12).
+    /// Socket options applied to the connected stream.
     pub tcp: TcpOptions,
     /// How long a graceful release waits for the peer's A-RELEASE-RP before
     /// the association is reported as timed out (§9.3.6).
     pub release_timeout: Duration,
     /// User identity to offer; validated before the association is attempted
-    /// (§4.3).
+    /// (§11.2).
     pub user_identity: Option<crate::pdu::UserIdentity>,
-    /// SOP Class Extended Negotiation items to offer (§4.3).
+    /// SOP Class Extended Negotiation items to offer (§11.2).
     pub extended_negotiations: Vec<crate::pdu::ExtendedNegotiation>,
-    /// Role selection items to propose (§4.1).
+    /// Role selection items to propose (§11.2).
     ///
     /// A peer may only send C-STORE requests to this side when the SCP role for
     /// that storage class was proposed here and granted in the accept
@@ -1513,7 +1513,7 @@ impl Default for ClientOptions {
     }
 }
 
-/// The client-side stream: plain TCP or TLS over TCP (§2.4).
+/// The client-side stream: plain TCP or TLS over TCP.
 ///
 /// An enum keeps [`Association`] non-generic while still letting TLS share the
 /// whole protocol path.
@@ -1573,28 +1573,28 @@ impl tokio::io::AsyncWrite for ClientStream {
     }
 }
 
-/// An open association from the SCU side (§9.2 expert layer).
+/// An open association from the SCU side (§11.4 expert layer).
 pub struct Association {
     stream: ClientStream,
     contexts: AcceptedContexts,
     splitter: PduSplitter,
     assembler: PdvAssembler,
     /// Requests this side sent and whose response is still outstanding; the
-    /// allocator skips their message IDs (§5.2).
+    /// allocator skips their message IDs (§11.2).
     pending: crate::engine::PendingTable,
     /// How long [`Self::release`] waits for the peer's A-RELEASE-RP.
     release_timeout: Duration,
     /// Maximum quiet time while waiting for a DIMSE response.
     request_timeout: Option<Duration>,
-    /// Answers reverse C-STORE sub-operations; required for C-GET (§7.4).
+    /// Answers reverse C-STORE sub-operations; required for C-GET (§11.4).
     reverse_store: Option<ReverseStoreHandler>,
-    /// What the peer granted in SOP Class Extended Negotiation (§4.3).
+    /// What the peer granted in SOP Class Extended Negotiation (§11.2).
     peer_extended: Vec<crate::pdu::ExtendedNegotiation>,
-    /// The peer's user identity response (§4.3).
+    /// The peer's user identity response (§11.2).
     peer_identity_response: Option<Vec<u8>>,
 }
 
-/// The SCU-side answer to a reverse C-STORE (§7.4).
+/// The SCU-side answer to a reverse C-STORE (§11.4).
 pub type ReverseStoreHandler = Arc<
     dyn Fn(&crate::services::CStoreRequest) -> Result<crate::services::CStoreResponse>
         + Send
@@ -1611,7 +1611,7 @@ impl std::fmt::Debug for Association {
 }
 
 impl Association {
-    /// Opens a connection and negotiates an association (§9.1).
+    /// Opens a connection and negotiates an association (§11.4).
     pub async fn open(
         addr: impl tokio::net::ToSocketAddrs,
         calling_ae: &str,
@@ -1620,7 +1620,7 @@ impl Association {
         options: ClientOptions,
     ) -> Result<Self> {
         // validate before touching the network: a bad identity must not
-        // depend on whether the peer happens to be reachable (§4.3)
+        // depend on whether the peer happens to be reachable (§11.2)
         if let Some(identity) = &options.user_identity {
             identity.validate()?;
         }
@@ -1707,7 +1707,7 @@ impl Association {
                         }
                     })
                     .collect();
-                // the peer's advertised maximum caps what we may send (§5.3);
+                // the peer's advertised maximum caps what we may send (§11.1);
                 // 0 means "unlimited", so fall back to our own value
                 let peer = accept.user_information.max_pdu_length;
                 let cap = if peer == 0 {
@@ -1734,7 +1734,7 @@ impl Association {
         };
 
         // A positive identity response was required but the peer sent none:
-        // silently continuing would authenticate nobody (§9.1).
+        // silently continuing would authenticate nobody (§11.4).
         if let Some(identity) = &options.user_identity {
             if identity.positive_response_requested && peer_identity_response.is_none() {
                 return Err(NetworkError::protocol(
@@ -1757,17 +1757,17 @@ impl Association {
         })
     }
 
-    /// The extended negotiation items the peer accepted (§4.3).
+    /// The extended negotiation items the peer accepted (§11.2).
     pub fn accepted_extended_negotiations(&self) -> &[crate::pdu::ExtendedNegotiation] {
         &self.peer_extended
     }
 
-    /// The peer's user identity response, when it sent one (§4.3).
+    /// The peer's user identity response, when it sent one (§11.2).
     pub fn user_identity_response(&self) -> Option<&[u8]> {
         self.peer_identity_response.as_deref()
     }
 
-    /// True when the peer granted `field` of `sop_class` (§4.3).
+    /// True when the peer granted `field` of `sop_class` (§11.2).
     ///
     /// A field the peer did not answer, or answered with 0, is not granted.
     pub fn extended_field(&self, sop_class: &str, field: u8) -> Option<&[u8]> {
@@ -1780,7 +1780,7 @@ impl Association {
             })
     }
 
-    /// Registers the reverse C-STORE handler (§7.4).
+    /// Registers the reverse C-STORE handler (§11.4).
     ///
     /// C-GET is impossible without one: the instances come back as C-STORE
     /// sub-operations that this side must answer, so [`Self::send_c_get`]
@@ -1805,7 +1805,7 @@ impl Association {
         &self.contexts
     }
 
-    /// Sends a C-ECHO and waits for its response (§7.1).
+    /// Sends a C-ECHO and waits for its response (§11.4).
     pub async fn send_c_echo(&mut self, abstract_syntax: &str) -> Result<CEchoResponse> {
         let context = self.contexts.pick(abstract_syntax, "")?;
         let context_id = context.id;
@@ -1831,11 +1831,11 @@ impl Association {
         CEchoResponse::from_command(&response?)
     }
 
-    /// Sends a C-STORE and waits for its response (§7.2).
+    /// Sends a C-STORE and waits for its response (§11.4).
     ///
     /// The dataset travels under the presentation context's accepted syntax;
     /// when that differs from the file's own syntax the dataset is transcoded
-    /// through the global codec registry (§5.3).
+    /// through the global codec registry (§11.1).
     pub async fn send_c_store(
         &mut self,
         file: &radicom::io::file::DicomFile,
@@ -1843,7 +1843,7 @@ impl Association {
         self.send_c_store_with_originator(file, None, None).await
     }
 
-    /// Sends a C-STORE carrying Move Originator information (§7.5).
+    /// Sends a C-STORE carrying Move Originator information (§11.4).
     ///
     /// The SCP of a C-MOVE uses this when pushing instances to the destination
     /// so the destination can attribute the sub-operation (divergence D5: the
@@ -1920,7 +1920,7 @@ impl Association {
         })
     }
 
-    /// Runs a C-FIND and returns every match plus the terminal response (§7.3).
+    /// Runs a C-FIND and returns every match plus the terminal response (§11.4).
     ///
     /// Matches are collected because each response carries a full Identifier;
     /// a caller that needs incremental delivery can drive [`Self::send_c_find_stream`].
@@ -2026,7 +2026,7 @@ impl Association {
     }
 
     /// Runs a C-MOVE and collects every progress plus the terminal response
-    /// (§7.5).
+    /// (§11.4).
     pub async fn send_c_move(
         &mut self,
         request: &crate::cmove::CMoveRequest,
@@ -2043,7 +2043,7 @@ impl Association {
     /// Runs a C-MOVE, handing each response to `on_response` as it arrives.
     ///
     /// A C-MOVE response never carries a dataset: the instances travel on the
-    /// SCP's own outbound association (§7.5).
+    /// SCP's own outbound association (§11.4).
     pub async fn send_c_move_stream<F>(
         &mut self,
         request: &crate::cmove::CMoveRequest,
@@ -2106,7 +2106,7 @@ impl Association {
         }
     }
 
-    /// Runs a C-GET, collecting every response (§7.4).
+    /// Runs a C-GET, collecting every response (§11.4).
     ///
     /// Instances arrive as reverse C-STORE sub-operations, so a handler must be
     /// registered first; see [`Self::set_reverse_store_handler`].
@@ -2252,7 +2252,7 @@ impl Association {
         }
     }
 
-    /// Reads PDUs until the response for `message_id` arrives (§5.2).
+    /// Reads PDUs until the response for `message_id` arrives (§11.2).
     async fn read_request_pdu(&mut self, message_id: u16) -> Result<Option<Pdu>> {
         match self.request_timeout {
             Some(timeout) => tokio::time::timeout(timeout, read_pdu(&mut self.stream))
@@ -2262,7 +2262,7 @@ impl Association {
         }
     }
 
-    /// Reads PDUs until the response for `message_id` arrives (§5.2).
+    /// Reads PDUs until the response for `message_id` arrives (§11.2).
     async fn await_response(&mut self, message_id: u16, expected: CommandField) -> Result<Command> {
         loop {
             let Some(pdu) = self.read_request_pdu(message_id).await? else {
@@ -2297,8 +2297,8 @@ impl Association {
         }
     }
 
-    /// Releases the association gracefully (§5.5).
-    /// Sends a C-CANCEL-RQ (0x0FFF) for an in-flight request (§7.6, SRV-08).
+    /// Releases the association gracefully (§11.1).
+    /// Sends a C-CANCEL-RQ (0x0FFF) for an in-flight request (§11.4, SRV-08).
     ///
     /// The command carries the target `message_id` in
     /// `(0000,0120) MessageIDBeingRespondedTo`, matching fo-dicom's
@@ -2318,7 +2318,7 @@ impl Association {
         Ok(())
     }
 
-    /// Sends an N-service request and returns its response (§7.6, SRV-07).
+    /// Sends an N-service request and returns its response (§11.4, SRV-07).
     ///
     /// The presentation context is chosen from the request's SOP class. The
     /// Requested/Affected tags follow the command field (PS3.7 §10.1). A
@@ -2443,7 +2443,7 @@ impl Association {
         }
     }
 
-    /// Aborts the association (§3.3).
+    /// Aborts the association (§11.2).
     pub async fn abort(mut self, reason: u8) -> Result<()> {
         let abort = Abort {
             source: AbortSource::User,
@@ -2452,7 +2452,7 @@ impl Association {
         write_pdu(&mut self.stream, &Pdu::Abort(abort)).await
     }
 
-    /// Allocates a message ID for a request this side sends (§5.2).
+    /// Allocates a message ID for a request this side sends (§11.2).
     ///
     /// IDs still awaiting a response are skipped, so the wrap at 65535 can
     /// never hand an in-flight ID to a new request.
@@ -2704,7 +2704,7 @@ mod tests {
         .await
         .unwrap();
         association.abort(0).await.unwrap();
-        // §2.16: a peer abort is not a clean close, so the server reports it
+        // a peer abort is not a clean close, so the server reports it
         match handle.await.unwrap() {
             Err(NetworkError::Abort {
                 source_code,
@@ -2722,7 +2722,7 @@ mod tests {
     /// A provider that records every stored instance.
     struct RecordingProvider {
         stored: std::sync::Mutex<Vec<String>>,
-        /// `(originator AE, originator message ID)` per C-STORE (§7.5, D5).
+        /// `(originator AE, originator message ID)` per C-STORE (§11.4, D5).
         origins: std::sync::Mutex<Vec<(Option<String>, Option<u16>)>>,
     }
 
@@ -2951,7 +2951,7 @@ mod tests {
             crate::dimse::StatusState::Failure,
             "C-STORE rejected"
         );
-        // the connection survives a rejected instance (§5.2)
+        // the connection survives a rejected instance (§11.2)
         let echo = association
             .send_c_echo(sop_class::VERIFICATION)
             .await
@@ -3633,7 +3633,7 @@ mod tests {
     impl ServiceProvider for GetProvider {
         fn supported_sop_classes(&self) -> Vec<String> {
             // the retrieve model plus the storage class the sub-operations
-            // travel on (§7.4)
+            // travel on (§11.4)
             vec![
                 sop_class::STUDY_ROOT_QR_GET.to_string(),
                 "1.2.840.10008.5.1.4.1.1.7".to_string(),
@@ -4468,7 +4468,7 @@ mod tests {
         .unwrap();
 
         // no handler registered: the caller learns immediately, before any
-        // sub-operation is attempted (§7.4)
+        // sub-operation is attempted (§11.4)
         match association
             .send_c_get(&crate::cget::CGetRequest::study("1.2.3.4", 1))
             .await
@@ -4700,7 +4700,7 @@ mod tests {
             user_identity: Some(crate::pdu::UserIdentity {
                 identity_type: 1,
                 primary: b"user".to_vec(),
-                // a passcode without type 2 is invalid (§4.3)
+                // a passcode without type 2 is invalid (§11.2)
                 secondary: b"pass".to_vec(),
                 positive_response_requested: false,
             }),
@@ -4724,7 +4724,7 @@ mod tests {
 
     #[tokio::test]
     async fn loopback_honours_a_small_peer_max_pdu() {
-        // §4.5: the old test only asserted that C-ECHO succeeded, so any
+        // the old test only asserted that C-ECHO succeeded, so any
         // implementation passed. A 64-byte maximum must actually split the
         // command set over several P-DATA PDUs, so a fake peer reads the real
         // wire frames and checks each body length against the negotiated max.
@@ -5086,7 +5086,7 @@ mod tests {
     }
 
     /// Drives one N-service request/response pair through a real association:
-    /// one success and one failure status (§4.7).
+    /// one success and one failure status.
     async fn assert_n_service_round_trip(
         request_field: CommandField,
         response_field: CommandField,
@@ -5166,7 +5166,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_stores_complete_through_the_blocking_spool() {
-        // §3.2/§4.7: the default sink spools through spawn_blocking, so several
+        // §11.2/the default sink spools through spawn_blocking, so several
         // concurrent C-STOREs must still all succeed and leave the client with
         // an ordinary response.
         struct StoreOk;
@@ -5803,7 +5803,7 @@ mod tests {
     async fn c_get_reports_the_remaining_sub_operations() {
         // PS3.7 §9.1.3: (0000,1020) counts the sub-operations still to be
         // performed including the current one, so three instances report
-        // 3, 2, 1 and only the terminal response reports 0 (§4.6).
+        // 3, 2, 1 and only the terminal response reports 0.
         let provider = Arc::new(GetProvider {
             instances: vec![
                 instance_with_uid("1.2.3.4.5.1"),
@@ -5827,7 +5827,7 @@ mod tests {
         .await
         .unwrap();
         // the reverse C-STORE message IDs must be distinct, or the SCU cannot
-        // match its responses (§4.6)
+        // match its responses
         let stored = Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = stored.clone();
         association.set_reverse_store_handler(Arc::new(move |request: &CStoreRequest| {
@@ -5868,7 +5868,7 @@ mod tests {
 
     #[tokio::test]
     async fn c_get_records_an_undeliverable_instance_and_carries_on() {
-        // §2.10: an instance the SCP cannot address is one failed
+        // an instance the SCP cannot address is one failed
         // sub-operation; the instances after it still have to arrive.
         let mut broken = instance_with_uid("1.2.3.4.5.1");
         broken.dataset.remove(Tag::SOP_INSTANCE_UID);
@@ -5963,7 +5963,7 @@ mod tests {
 
     #[tokio::test]
     async fn release_reports_a_peer_abort_instead_of_success() {
-        // §2.13: the peer must answer A-RELEASE-RQ with A-RELEASE-RP
+        // the peer must answer A-RELEASE-RQ with A-RELEASE-RP
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let peer = tokio::spawn(async move {

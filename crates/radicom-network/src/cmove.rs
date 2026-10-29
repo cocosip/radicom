@@ -15,7 +15,7 @@ use radicom::model::dataset::Dataset;
 use radicom::model::tag::Tag;
 use radicom::model::vr::Vr;
 
-/// Sub-operation counters shared by the retrieve services (§7.4, §7.5).
+/// Sub-operation counters shared by the retrieve services (§11.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SubOperationSummary {
     pub completed: u16,
@@ -62,7 +62,7 @@ impl SubOperationSummary {
     }
 }
 
-/// A C-MOVE request (§7.5).
+/// A C-MOVE request (§11.4).
 #[derive(Debug, Clone)]
 pub struct CMoveRequest {
     pub message_id: u16,
@@ -194,7 +194,7 @@ impl CMoveRequest {
     }
 }
 
-/// A C-MOVE response (§7.5).
+/// A C-MOVE response (§11.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CMoveResponse {
     pub message_id_being_responded_to: u16,
@@ -288,7 +288,7 @@ impl CMoveResponse {
     }
 }
 
-/// Sends instances to `destination` as C-MOVE sub-operations (§7.5).
+/// Sends instances to `destination` as C-MOVE sub-operations (§11.4).
 ///
 /// The SCP owns the AE→address mapping; this helper takes the resolved address.
 /// Every instance is pushed with the Move Originator AE title and message ID set

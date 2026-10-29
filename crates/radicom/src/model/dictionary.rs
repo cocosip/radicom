@@ -30,7 +30,7 @@ pub struct DictionaryEntry {
 
 impl DictionaryEntry {
     /// Fallback entry for tags unknown to the dictionary: accepts any VR,
-    /// VM 1-n (spec §5.2 step 4).
+    /// VM 1-n (spec §2 step 4).
     pub fn unknown(tag: Tag) -> Arc<DictionaryEntry> {
         static ALL_VRS: Lazy<Box<[Vr]>> = Lazy::new(|| {
             Box::from([
@@ -241,7 +241,7 @@ impl Dictionary {
         Ok(dict)
     }
 
-    /// Interns a creator string so equal names share one instance (§6.4).
+    /// Interns a creator string so equal names share one instance (§3).
     pub fn intern_creator(&self, name: &str) -> Arc<PrivateCreator> {
         let mut creators = self.creators.lock().expect("creator lock");
         creators

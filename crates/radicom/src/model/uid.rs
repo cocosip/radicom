@@ -59,7 +59,7 @@ impl std::fmt::Debug for Uid {
 }
 
 impl PartialEq for Uid {
-    /// UIDs compare by their value string only (spec §3.1).
+    /// UIDs compare by their value string only (spec §2).
     fn eq(&self, other: &Self) -> bool {
         self.value == other.value
     }
@@ -308,7 +308,7 @@ impl Uid {
         self.storage_category() == StorageCategory::Volume
     }
 
-    // -- validity (VAL UI rules, spec §9.2) -------------------------------
+    // -- validity (VAL UI rules, spec §5) -------------------------------
 
     /// UI validity: ≤64 chars, digits and dots only, no empty components,
     /// no component starting with `'0'` (a bare zero is invalid too,

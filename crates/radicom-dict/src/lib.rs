@@ -70,7 +70,7 @@ mod tests {
 
     #[test]
     fn lookups_return_usable_entries_not_just_counts() {
-        // §4.2(d): the shape tests only prove the table length. These assert the
+        // §2(d): the shape tests only prove the table length. These assert the
         // table is actually usable for lookups a caller depends on.
         let exact = crate::generated::dict::DICTIONARY;
         let modality = exact

@@ -16,7 +16,7 @@ use radicom::model::dataset::Dataset;
 use radicom::model::tag::Tag;
 use radicom::model::vr::Vr;
 
-/// A C-GET request (§7.4).
+/// A C-GET request (§11.4).
 #[derive(Debug, Clone)]
 pub struct CGetRequest {
     pub message_id: u16,
@@ -127,7 +127,7 @@ impl CGetRequest {
     }
 }
 
-/// A C-GET response (§7.4).
+/// A C-GET response (§11.4).
 ///
 /// A C-GET response never carries a dataset: the instances arrive as reverse
 /// C-STORE sub-operations.
@@ -220,7 +220,7 @@ impl CGetResponse {
     }
 }
 
-/// What a C-GET provider yields (§7.4).
+/// What a C-GET provider yields (§11.4).
 ///
 /// The engine owns the socket, so the provider cannot send a C-STORE itself:
 /// it hands the instance over and the engine performs the sub-operation. A

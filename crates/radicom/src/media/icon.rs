@@ -18,7 +18,7 @@ use crate::model::tag::Tag;
 use crate::model::vr::Vr;
 use crate::pixel::PixelDataRef;
 
-/// The largest icon dimension DICOM allows (§3.4, PS3.3 C.7.6.1.1.6).
+/// The largest icon dimension DICOM allows (§12.2, PS3.3 C.7.6.1.1.6).
 pub const MAX_ICON_SIZE: u32 = 128;
 
 /// Builds an icon dataset for a source image, or `None` when unsupported.
@@ -39,7 +39,7 @@ pub trait IconGenerator {
     }
 }
 
-/// The built-in generator: ≤128×128, 8-bit MONOCHROME2 (§3.4).
+/// The built-in generator: ≤128×128, 8-bit MONOCHROME2 (§12.2).
 #[derive(Debug, Clone, Default)]
 pub struct BasicIconGenerator;
 
@@ -159,7 +159,7 @@ fn icon_dimensions(width: u32, height: u32) -> (u32, u32) {
     (w, h)
 }
 
-/// Box-averages the source into the target size (§3.4, a simple downscale).
+/// Box-averages the source into the target size (§12.2, a simple downscale).
 fn downsample(
     samples: &[u16],
     width: u32,
@@ -195,7 +195,7 @@ fn downsample(
     out
 }
 
-/// Assembles the icon dataset: 8-bit MONOCHROME2, one frame (§3.4).
+/// Assembles the icon dataset: 8-bit MONOCHROME2, one frame (§12.2).
 fn icon_dataset(
     _src_w: u32,
     _src_h: u32,

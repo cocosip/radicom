@@ -11,7 +11,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// The 6-byte PDU header: type, reserved, length.
 pub const HEADER_LEN: usize = 6;
 
-/// Options applied to a TCP connection (§2).
+/// Options applied to a TCP connection (§11.2).
 #[derive(Debug, Clone)]
 pub struct TcpOptions {
     /// Disable Nagle's algorithm (default on).
@@ -32,10 +32,10 @@ impl Default for TcpOptions {
     }
 }
 
-/// Reads one PDU frame from an async stream (§3.1).
+/// Reads one PDU frame from an async stream (§11.2).
 ///
 /// Returns `Ok(None)` on a clean end of stream before any header byte, which
-/// the engine treats as a peer close (§5.1).
+/// the engine treats as a peer close (§11.1).
 pub async fn read_pdu<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Pdu>> {
     let mut header = [0u8; HEADER_LEN];
     // a clean EOF before the first byte is a normal close
@@ -56,7 +56,7 @@ pub async fn read_pdu<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Pdu
         ));
     }
     // One allocation sized from the validated length field, then read the body
-    // straight into it: no intermediate zero-initialised copy (§3.1). The
+    // straight into it: no intermediate zero-initialised copy (§11.2). The
     // MAX_PDU_SIZE check above keeps a peer from requesting a huge allocation.
     let mut frame = vec![0u8; HEADER_LEN + length as usize];
     frame[..HEADER_LEN].copy_from_slice(&header);
@@ -65,7 +65,7 @@ pub async fn read_pdu<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Pdu
         .await
         .map_err(NetworkError::Io)?;
 
-    // Hand the frame over as `Bytes` so PDVs share it instead of copying (§3.4).
+    // Hand the frame over as `Bytes` so PDVs share it instead of copying.
     pdu::decode_bytes(bytes::Bytes::from(frame)).map(Some)
 }
 
@@ -87,7 +87,7 @@ impl PduReader {
         }
     }
 
-    /// Reads one PDU, buffering across cancellation (§3.1, review #13).
+    /// Reads one PDU, buffering across cancellation (§11.2, review #13).
     pub async fn read_pdu<R: AsyncRead + Unpin>(&mut self, reader: &mut R) -> Result<Option<Pdu>> {
         loop {
             if let Some(pdu) = self.take_frame()? {
@@ -144,7 +144,7 @@ pub async fn write_pdu<W: AsyncWrite + Unpin>(writer: &mut W, pdu: &Pdu) -> Resu
     Ok(())
 }
 
-/// Writes several PDU frames, flushing once (§3.2).
+/// Writes several PDU frames, flushing once (§11.2).
 ///
 /// P-DATA frames are written straight from their `Bytes` slices with vectored
 /// writes, so a C-STORE message does not copy its whole dataset into an encode
@@ -227,7 +227,7 @@ async fn write_all_vectored<W: AsyncWrite + Unpin>(
 ///
 /// Socket buffer sizing is advisory — the kernel may round the value up or cap
 /// it — so a refused request is not fatal. It is at least *attempted*: the
-/// fields would otherwise be a promise the transport never keeps (§2.12).
+/// fields would otherwise be a promise the transport never keeps.
 pub fn apply_options(stream: &tokio::net::TcpStream, options: &TcpOptions) -> Result<()> {
     stream
         .set_nodelay(options.nodelay)
@@ -244,20 +244,20 @@ pub fn apply_options(stream: &tokio::net::TcpStream, options: &TcpOptions) -> Re
     Ok(())
 }
 
-/// Derives a DICOM UID from the primary MAC address (UID-05, §2).
+/// Derives a DICOM UID from the primary MAC address (UID-05, §11.2).
 ///
 /// Machine identity, mirroring fo-dicom `TryGetNetworkIdentifier`. Purely a
 /// utility: nothing in the engine depends on it.
 pub fn network_identifier() -> Option<String> {
     // Read the environment / MAC once: the value is constant for the process,
-    // so callers do not pay the lookup on every call (§3.7).
+    // so callers do not pay the lookup on every call.
     static IDENTIFIER: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     IDENTIFIER
         .get_or_init(|| {
             // One identity source for the whole crate: append the host MAC to
             // the implementation class UID, as fo-dicom's
             // NetworkManager.TryGetNetworkIdentifier does. (The old hostname
-            // hash here disagreed with print_sop's MAC form, §1/§3.7.)
+            // hash here disagreed with print_sop's MAC form, §11.1/§3.7.)
             crate::print_sop::try_get_network_identifier(crate::server::IMPLEMENTATION_CLASS_UID)
         })
         .clone()
@@ -499,7 +499,7 @@ mod tests {
 
     #[tokio::test]
     async fn absurd_length_field_is_rejected_before_allocating() {
-        // §3.5: a peer-declared 4 GiB body must be rejected by the MAX_PDU_SIZE
+        // a peer-declared 4 GiB body must be rejected by the MAX_PDU_SIZE
         // gate before any buffer is sized from it, not allocated then filled.
         let (mut client, mut server) = duplex(64);
         client
@@ -524,7 +524,7 @@ mod tests {
 
     #[tokio::test]
     async fn socket_buffer_sizes_reach_the_socket() {
-        // §2.12: the options used to be dropped on the floor. Read the values
+        // the options used to be dropped on the floor. Read the values
         // back from the descriptor itself: shrink by a factor the kernel cannot
         // round back up to the default, so an ignored request is visible.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -555,7 +555,7 @@ mod tests {
 
     #[test]
     fn network_identifier_is_stable_across_calls() {
-        // §3.7: the value is process-constant, so caching it must not change it.
+        // the value is process-constant, so caching it must not change it.
         assert_eq!(network_identifier(), network_identifier());
     }
 

@@ -91,7 +91,7 @@ macro_rules! pixel_read_methods {
             &*self.dataset
         }
 
-        // -- properties backed by tags (§1.2) -----------------------------------
+        // -- properties backed by tags (§9.1) -----------------------------------
 
         pub fn width(&self) -> u32 {
             self.dataset.get_or(COLUMNS, 0u32)
@@ -151,7 +151,7 @@ macro_rules! pixel_read_methods {
             self.dataset.transfer_syntax()
         }
 
-        // -- frame size (PIX-03, §1.6) ------------------------------------------
+        // -- frame size (PIX-03, §9.1) ------------------------------------------
 
         /// Size of one frame once decoded.
         pub fn uncompressed_frame_size(&self) -> Result<u64, Error> {
@@ -172,7 +172,7 @@ macro_rules! pixel_read_methods {
             if bits == 1 {
                 // Single-bit samples pack continuously, least-significant bit first;
                 // row boundaries do not force byte alignment. Only the whole frame
-                // rounds up to a byte (§1.6, review #5).
+                // rounds up to a byte (§9.1, review #5).
                 return Ok((columns * rows * samples.max(1)).div_ceil(8));
             }
             if pi.is_some_and(|p| p.is_subsampled()) {
@@ -190,9 +190,9 @@ macro_rules! pixel_read_methods {
             Ok(columns * rows * samples * bytes_per_sample)
         }
 
-        // -- frames (PIX-02, §1.4) ----------------------------------------------
+        // -- frames (PIX-02, §9.1) ----------------------------------------------
 
-        /// One frame's bytes, endianness-normalized (§1.2 guarantee).
+        /// One frame's bytes, endianness-normalized (§9.1 guarantee).
         pub fn get_frame(&self, index: u32) -> Result<SharedBuffer, Error> {
             match self.kind {
                 PixelDataKind::Encapsulated => self.encapsulated_frame(index),
@@ -254,7 +254,7 @@ macro_rules! pixel_read_methods {
             Ok(window)
         }
 
-        /// Encapsulated frame per the §1.4 decision list.
+        /// Encapsulated frame per the §9.1 decision list.
         fn encapsulated_frame(&self, index: u32) -> Result<SharedBuffer, Error> {
             let Some(DicomItem::Fragments(f)) = self.dataset.item(&PIXEL_DATA) else {
                 return Err(pixel_err("dataset has no encapsulated pixel data"));
@@ -358,11 +358,11 @@ macro_rules! pixel_read_methods {
         // In-memory pixel buffers are always host byte order: the reader normalises
         // binary VRs on read (`io::reader`), `add_frame` stores host order and the
         // writer swaps to the target transfer syntax on write. `get_frame` must not
-        // re-apply the file's endianness (§1.2, review #3).
+        // re-apply the file's endianness (§9.1, review #3).
 
         // -- palette (PIX-04) ---------------------------------------------------
 
-        /// Resolves `PALETTE COLOR` LUTs into colour tables (§1.2).
+        /// Resolves `PALETTE COLOR` LUTs into colour tables (§9.1).
         ///
         /// Returns `None` when the LUT is missing or fails validation; use
         /// [`palette_color_lut_checked`](Self::palette_color_lut_checked) to surface
@@ -372,7 +372,7 @@ macro_rules! pixel_read_methods {
         }
 
         /// Resolves `PALETTE COLOR` LUTs, validating each descriptor and data length
-        /// (§2.3 / PS3.3 C.7.6.3.1.5) instead of fabricating zero entries.
+        /// (/ PS3.3 C.7.6.3.1.5) instead of fabricating zero entries.
         pub fn palette_color_lut_checked(&self) -> Result<Vec<Color32>, Error> {
             if self.photometric_interpretation() != Some(PhotometricInterpretation::PaletteColor) {
                 return Err(pixel_err(
@@ -409,7 +409,7 @@ macro_rules! pixel_read_methods {
         }
 
         /// One LUT channel: descriptor-driven 8-bit expansion, validated against the
-        /// descriptor entry count and the stored data length (§2.3).
+        /// descriptor entry count and the stored data length.
         ///
         /// The LUT Descriptor (PS3.3 C.7.6.3.1.5) is three US values: `[0]` number of
         /// entries (0 ⇒ 65536), `[1]` first mapped pixel value, `[2]` bits per entry.
@@ -492,7 +492,7 @@ pub struct PixelDataRef<'a> {
 
 impl<'a> PixelData<'a> {
     /// Chooses the storage kind for a dataset that is about to receive pixel
-    /// data (§1.3).
+    /// data (§9.1).
     pub fn create_new(ds: &'a mut Dataset) -> Result<Self, Error> {
         let syntax = ds.transfer_syntax();
         let bits = ds.get_or(BITS_ALLOCATED, 8u16);
@@ -521,12 +521,12 @@ impl<'a> PixelData<'a> {
         self.dataset
     }
 
-    /// Appends a frame, returning its index (§1.5).
+    /// Appends a frame, returning its index (§9.1).
     ///
     /// Encapsulated fragments are padded individually. Native frames are
     /// concatenated with no per-frame padding: only the whole Pixel Data value
     /// is kept to an even length, and a pad left by the previous append is
-    /// dropped first (§1.5, review #4).
+    /// dropped first (§9.1, review #4).
     pub fn add_frame(&mut self, data: impl AsRef<[u8]>) -> Result<u32, Error> {
         // the index comes from the frames actually stored, not from
         // `(0028,0008)`, which reads as 1 when absent

@@ -116,7 +116,7 @@ impl Vr {
         )
     }
 
-    /// Affected by Specific Character Set (spec §2.2 "charset-sensitive").
+    /// Affected by Specific Character Set (spec §2 "charset-sensitive").
     pub const fn is_character_encoded(self) -> bool {
         matches!(
             self,
@@ -149,7 +149,7 @@ impl Vr {
         self.is_string() && !matches!(self, Vr::Lt | Vr::St | Vr::Ur | Vr::Ut)
     }
 
-    /// Value padding byte (spec §2.2 "pad").
+    /// Value padding byte (spec §2 "pad").
     pub const fn padding(self) -> u8 {
         if matches!(self, Vr::Ui) {
             0x00
@@ -160,7 +160,7 @@ impl Vr {
         }
     }
 
-    /// Maximum encoded length per value; 0 = unlimited (spec §2.2 "max len").
+    /// Maximum encoded length per value; 0 = unlimited (spec §2 "max len").
     pub const fn max_value_length(self) -> u32 {
         match self {
             Vr::Ae | Vr::Cs | Vr::Ds | Vr::Sh => 16,
@@ -185,7 +185,7 @@ impl Vr {
         }
     }
 
-    /// Byte size of one value unit (spec §2.2 "unit"); 0 for SQ and the
+    /// Byte size of one value unit (spec §2 "unit"); 0 for SQ and the
     /// internal VRs.
     pub const fn unit_size(self) -> usize {
         match self {
@@ -201,7 +201,7 @@ impl Vr {
         }
     }
 
-    /// Unit size used for endianness conversion (spec §2.2 "swap"): AT
+    /// Unit size used for endianness conversion (spec §2 "swap"): AT
     /// swaps its two 2-byte components; everything else matches
     /// [`Vr::unit_size`].
     pub const fn byte_swap_size(self) -> usize {

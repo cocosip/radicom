@@ -7,20 +7,20 @@
 use crate::error::{NetworkError, Result};
 use crate::pdu::{PData, Pdv};
 
-/// Which stream a PDV belongs to (§5.2).
+/// Which stream a PDV belongs to (§11.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Stream {
     Command,
     Data,
 }
 
-/// Reassembles PDVs into complete message units (§5.2).
+/// Reassembles PDVs into complete message units (§11.2).
 ///
 /// A unit is complete when a PDV with the `last` bit arrives. Buffers are keyed
 /// by `(presentation context, stream)`: two requests may interleave their PDVs
 /// (an asynchronous operation window above 1 is negotiable, and a C-GET SCP
 /// talks on two contexts at once), so one command and one dataset buffer per
-/// connection would splice unrelated messages together (§2.11).
+/// connection would splice unrelated messages together.
 #[derive(Debug, Clone, Default)]
 pub struct PdvAssembler {
     /// Half-assembled message per `(context id, stream)`.
@@ -100,7 +100,7 @@ impl PdvAssembler {
     }
 }
 
-/// Splits outgoing message bytes into P-DATA-TF PDUs (§5.3).
+/// Splits outgoing message bytes into P-DATA-TF PDUs (§11.1).
 ///
 /// The command stream always travels in its own P-DATA-TF, before the dataset
 /// stream. Each PDV value is even-padded and no PDU exceeds the negotiated
@@ -131,7 +131,7 @@ impl PduSplitter {
         ((self.max_pdu as usize).saturating_sub(6)) & !1
     }
 
-    /// Splits one message stream into PDUs (§5.3).
+    /// Splits one message stream into PDUs (§11.1).
     ///
     /// Borrowed form: copies `data` into the PDV buffers. Callers that already
     /// own the encoded bytes use [`Self::split_bytes`] to skip that copy.
@@ -140,7 +140,7 @@ impl PduSplitter {
     }
 
     /// Splits an owned message into PDUs without copying its bytes: every PDV
-    /// is a `Bytes::slice` of `data` (§3.3).
+    /// is a `Bytes::slice` of `data` (§11.2).
     pub fn split_bytes(
         &self,
         context_id: u8,
@@ -210,7 +210,7 @@ impl PduSplitter {
         Ok(pdus)
     }
 
-    /// Splits a command followed by an optional dataset (§5.3: the command
+    /// Splits a command followed by an optional dataset (§11.1: the command
     /// stream is always its own P-DATA-TF).
     pub fn split_message(
         &self,
@@ -377,7 +377,7 @@ mod tests {
 
     #[test]
     fn interleaved_contexts_do_not_corrupt_each_other() {
-        // §2.11: two messages on two presentation contexts may interleave PDV
+        // two messages on two presentation contexts may interleave PDV
         // by PDV; each must reassemble from its own buffer, not from a shared
         // one that splices the two together.
         let mut assembler = PdvAssembler::new();
@@ -493,7 +493,7 @@ mod tests {
 
     #[test]
     fn split_bytes_matches_split_without_copying() {
-        // §3.3: the owned-bytes path must produce byte-identical PDUs to the
+        // §11.2: the owned-bytes path must produce byte-identical PDUs to the
         // borrowed path; it only avoids the per-PDV copy.
         let splitter = PduSplitter::new(24, 4);
         let data: Vec<u8> = (0..80u8).collect();

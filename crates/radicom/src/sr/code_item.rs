@@ -12,7 +12,7 @@ use crate::model::dataset::Dataset;
 use crate::model::tag::Tag;
 use crate::model::vr::Vr;
 
-/// A coded entry: value + coding scheme (+ optional meaning/version) (§4.2).
+/// A coded entry: value + coding scheme (+ optional meaning/version) (§12.3).
 ///
 /// Equality is derived, so it compares all four fields **including the meaning
 /// text**; fo-dicom's `DicomCodeItem.Equals` compares only value, scheme and
@@ -58,7 +58,7 @@ impl CodeItem {
     }
 
     /// Writes this code into `dataset`, choosing the value slot by the code
-    /// value's length and form (§4.2).
+    /// value's length and form (§12.3).
     pub fn write_into(&self, dataset: &mut Dataset) {
         let (value_tag, value_vr) = value_slot(&self.value);
         dataset.insert_str(value_tag, value_vr, self.value.clone());
@@ -77,7 +77,7 @@ impl CodeItem {
         }
     }
 
-    /// Reads a code from the item's value slot (§4.2).
+    /// Reads a code from the item's value slot (§12.3).
     pub fn read_from(dataset: &Dataset) -> Result<Self, Error> {
         let value = [Tag::CODE_VALUE, Tag::LONG_CODE_VALUE, Tag::URN_CODE_VALUE]
             .into_iter()
@@ -113,7 +113,7 @@ impl CodeItem {
     }
 }
 
-/// The value slot for `value` (§4.2, PS3.3 §8.8).
+/// The value slot for `value` (§12.3, PS3.3 §8.8).
 ///
 /// A URN goes in `URNCodeValue` (UR); any other value longer than SH's 16
 /// bytes cannot live in `CodeValue` (SH) and uses `LongCodeValue` (UC).

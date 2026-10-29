@@ -19,7 +19,7 @@ use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// The 11 de-identification options, in CSV column order (§6.1).
+/// The 11 de-identification options, in CSV column order (§12.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnonOption {
     BasicProfile = 0,
@@ -51,7 +51,7 @@ impl AnonOption {
     ];
 }
 
-/// One de-identification action (§6.1).
+/// One de-identification action (§12.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     /// D: replace with a non-zero dummy consistent with the VR.
@@ -87,7 +87,7 @@ impl Action {
     }
 }
 
-/// A compiled tag pattern: literal hex + classes + `{n}` repetition (§6.1).
+/// A compiled tag pattern: literal hex + classes + `{n}` repetition (§12.5).
 #[derive(Debug, Clone)]
 pub struct TagPattern {
     text: String,
@@ -229,7 +229,7 @@ fn tag_key(text: &str) -> Option<u32> {
     Some(u32::from(group) << 16 | u32::from(element))
 }
 
-/// One profile row: a tag pattern and its per-option action (§6.1).
+/// One profile row: a tag pattern and its per-option action (§12.5).
 #[derive(Debug, Clone)]
 pub struct ProfileRow {
     pub pattern: TagPattern,
@@ -244,7 +244,7 @@ impl ProfileRow {
     }
 }
 
-/// A parsed de-identification profile (§6.1).
+/// A parsed de-identification profile (§12.5).
 ///
 /// Cloning is cheap: the rows and their lookup index are shared behind an
 /// `Arc`, so [`SecurityProfile::basic`] can hand out the one parsed table.
@@ -308,7 +308,7 @@ impl SecurityProfile {
         Ok(Self::indexed(rows))
     }
 
-    /// Builds the exact-tag index over the parsed rows (§3.2).
+    /// Builds the exact-tag index over the parsed rows.
     ///
     /// For each option the rows are replayed in order: a literal row claims its
     /// own tag, and a wildcard row claims the literal tags below it that it
@@ -358,7 +358,7 @@ impl SecurityProfile {
         }
     }
 
-    /// The action for `tag` under `option` (§6.2).
+    /// The action for `tag` under `option` (§12.5).
     ///
     /// fo-dicom builds one table per option and inserts a row only when that
     /// option's cell is filled, so a row whose cell is empty for the selected
@@ -378,7 +378,7 @@ impl SecurityProfile {
     /// The action for a typed [`Tag`] under `option`.
     ///
     /// Literal tags resolve from the key directly, so the anonymizer does not
-    /// format every element's tag into a `String` and parse it back (§3.2).
+    /// format every element's tag into a `String` and parse it back.
     pub fn action_for_tag(&self, tag: &Tag, option: AnonOption) -> Option<Action> {
         if let Some(action) = self.inner.exact[option as usize].get(&tag.to_u32()) {
             return Some(*action);

@@ -33,7 +33,7 @@ pub struct OverlayData {
 }
 
 impl OverlayData {
-    /// Every qualifying overlay group in the dataset (§1.7).
+    /// Every qualifying overlay group in the dataset (§9.1).
     pub fn from_dataset(ds: &Dataset) -> Vec<OverlayData> {
         let mut out = Vec::new();
         let mut group = *OVERLAY_GROUPS.start();
@@ -134,7 +134,7 @@ impl OverlayData {
     }
 
     /// Resolves the overlay bytes, extracting an embedded bit plane when
-    /// `(60xx,3000)` is absent (§1.7 rules 1 and 2). Embedded planes are taken
+    /// `(60xx,3000)` is absent (§9.1 rules 1 and 2). Embedded planes are taken
     /// from frame 0; use [`OverlayData::load_frame`] for multi-frame images.
     pub fn load(&self, ds: &Dataset) -> Result<SharedBuffer, Error> {
         self.load_frame(ds, 0)
@@ -247,7 +247,7 @@ impl OverlayData {
                 let value = if unit == 1 {
                     frame_bytes[idx] as u16
                 } else {
-                    // in-memory pixel buffers are host byte order (§1.2)
+                    // in-memory pixel buffers are host byte order (§9.1)
                     u16::from_ne_bytes([frame_bytes[idx], frame_bytes[idx + 1]])
                 };
                 if (value >> bit_position) & 1 == 1 {
@@ -260,7 +260,7 @@ impl OverlayData {
     }
 
     /// Writes the overlay back as a standalone `(60xx,3000)` element and
-    /// normalizes bits allocated / bit position (§5.4).
+    /// normalizes bits allocated / bit position (§9.1).
     pub fn store(&self, ds: &mut Dataset, data: SharedBuffer) -> Result<(), Error> {
         let group = self.group;
         let vr = if self.bits_allocated <= 8 {
@@ -278,7 +278,7 @@ impl OverlayData {
 }
 
 /// Extracts every embedded overlay into a standalone `(60xx,3000)`
-/// element (§5.4). Datasets without overlays are left untouched.
+/// element (§9.1). Datasets without overlays are left untouched.
 pub fn extract_overlays(ds: &mut Dataset) -> Result<usize, Error> {
     let groups: Vec<u16> = OverlayData::from_dataset(ds)
         .into_iter()

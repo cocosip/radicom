@@ -33,7 +33,7 @@ pub struct Transcoder {
 }
 
 impl Transcoder {
-    /// Builds a transcoder; codecs are resolved lazily at use time (§5.1).
+    /// Builds a transcoder; codecs are resolved lazily at use time (§9.1).
     pub fn new(
         from: Arc<TransferSyntax>,
         to: Arc<TransferSyntax>,
@@ -56,7 +56,7 @@ impl Transcoder {
         &self.to
     }
 
-    /// Transcodes a dataset, returning a new one (§5.2 decision table).
+    /// Transcodes a dataset, returning a new one (§9.1 decision table).
     ///
     /// The input is never mutated: every path works on a clone.
     pub fn transcode_dataset(&self, ds: &Dataset) -> Result<Dataset, Error> {
@@ -67,7 +67,7 @@ impl Transcoder {
             return Ok(out);
         }
         // embedded overlays must be extracted while the pixel data is still
-        // uncompressed, before `out` claims the target syntax (§5.4)
+        // uncompressed, before `out` claims the target syntax (§9.1)
         extract_overlays(&mut out)?;
         out.set_transfer_syntax(self.to.clone());
 
@@ -134,7 +134,7 @@ impl Transcoder {
         Ok(out)
     }
 
-    /// Decodes one frame without mutating the source (TR-02, §5.6).
+    /// Decodes one frame without mutating the source (TR-02, §9.1).
     pub fn decode_frame(
         &self,
         ds: &Dataset,
@@ -246,7 +246,7 @@ impl Transcoder {
         Ok(out)
     }
 
-    /// §5.3 bookkeeping: encapsulated VR semantics and overlay extraction.
+    /// §9.1 bookkeeping: encapsulated VR semantics and overlay extraction.
     fn finish(&self, out: &mut Dataset) -> Result<(), Error> {
         // encapsulated output always stores pixel data as OB
         if self.to.is_encapsulated() {
@@ -265,7 +265,7 @@ impl Transcoder {
         Ok(())
     }
 
-    /// Records lossy compression on `out` (§5.3), given the original and
+    /// Records lossy compression on `out` (§9.1), given the original and
     /// encoded first-frame sizes.
     pub fn mark_lossy(out: &mut Dataset, method: &str, original_bytes: u64, encoded_bytes: u64) {
         out.insert_str(LOSSY_IMAGE_COMPRESSION, Vr::Cs, "01");
@@ -300,7 +300,7 @@ fn split_multi(value: &str) -> Vec<String> {
         .collect()
 }
 
-/// Ensures the output syntax has a codec, failing fast otherwise (§3).
+/// Ensures the output syntax has a codec, failing fast otherwise (§9.1).
 pub fn require_codec(syntax: &TransferSyntax) -> Result<(), Error> {
     if syntax.is_encapsulated() && !codec_registry().has_codec(syntax) {
         return Err(Error::Codec(CodecError::NotRegistered(
@@ -654,7 +654,7 @@ mod tests {
 
     #[test]
     fn transcoding_to_a_lossy_syntax_marks_the_output() {
-        // §4.4: verify the flag on the transcoded dataset, not just that a
+        // verify the flag on the transcoded dataset, not just that a
         // helper exists. JPEG Baseline is ISO_10918_1 lossy.
         let _guard = crate::pixel::codec::lock_registry();
         set_codec_registry(Arc::new(MockRegistry {

@@ -15,7 +15,7 @@ use radicom::model::vr::Vr;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-/// Command set tags (§6.1).
+/// Command set tags (§11.3).
 pub mod tag {
     use radicom::model::tag::Tag;
 
@@ -44,7 +44,7 @@ pub mod tag {
     pub const MOVE_ORIGINATOR_MESSAGE_ID: Tag = Tag::MOVE_ORIGINATOR_MESSAGE_ID;
 }
 
-/// `(0000,0800)` value meaning "no dataset follows" (§5.2).
+/// `(0000,0800)` value meaning "no dataset follows" (§11.2).
 pub const NO_DATA_SET: u16 = 0x0101;
 
 /// Priority element values (PS3.7 Table E.1-1): `MEDIUM = 0`, `HIGH = 1`,
@@ -78,7 +78,7 @@ impl Priority {
     }
 }
 
-/// The 22 command fields (§6.1), requests `bit15 = 0`, responses `bit15 = 1`.
+/// The 22 command fields (§11.3), requests `bit15 = 0`, responses `bit15 = 1`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandField {
     CStoreRq,
@@ -178,7 +178,7 @@ impl CommandField {
     }
 }
 
-/// A DIMSE command message: the typed view of a command dataset (§6.1).
+/// A DIMSE command message: the typed view of a command dataset (§11.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Command {
     pub field: CommandField,
@@ -253,7 +253,7 @@ impl Command {
         Some(out)
     }
 
-    /// Builds the command dataset, recomputing `(0000,0000)` (§5.3).
+    /// Builds the command dataset, recomputing `(0000,0000)` (§11.1).
     pub fn to_dataset(&self) -> Dataset {
         let mut ds = Dataset::new();
         // required ordering: group length first, then ascending tags
@@ -350,7 +350,7 @@ impl Command {
         ds
     }
 
-    /// Parses a command dataset (§5.2: always Implicit VR Little Endian).
+    /// Parses a command dataset (§11.2: always Implicit VR Little Endian).
     pub fn from_dataset(ds: &Dataset) -> Result<Self> {
         let code: u16 = ds
             .get(tag::COMMAND_FIELD)
@@ -472,7 +472,7 @@ fn insert_ul(ds: &mut Dataset, tag: Tag, value: u32) -> &mut Dataset {
         Arc::new(MemoryBuffer::from(value.to_le_bytes().to_vec())),
     )))
 }
-/// Truncates an error comment to the LO length limit of 64 bytes (§7.2).
+/// Truncates an error comment to the LO length limit of 64 bytes (§11.4).
 pub fn truncate_lo(comment: &str) -> String {
     const LIMIT: usize = 64;
     if comment.len() <= LIMIT {
@@ -486,7 +486,7 @@ pub fn truncate_lo(comment: &str) -> String {
     comment[..end].to_string()
 }
 
-/// Classification of a status code (§6.2).
+/// Classification of a status code (§11.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusState {
     Success,
@@ -515,7 +515,7 @@ pub enum StatusServiceClass {
     QueryRetrieve,
 }
 
-/// A status code with its classification and optional comment (§6.2).
+/// A status code with its classification and optional comment (§11.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
     pub code: u16,
@@ -667,7 +667,7 @@ pub fn status_description_for_service_class(
     }
 }
 
-/// Classifies a status code, resolving mask classes best-match (§6.2).
+/// Classifies a status code, resolving mask classes best-match (§11.3).
 pub fn classify(code: u16) -> StatusState {
     // exact matches first
     if let Some(state) = exact_state(code) {
@@ -696,7 +696,7 @@ fn exact_state(code: u16) -> Option<StatusState> {
     })
 }
 
-/// The generic status codes (§6.2 / PS3.7 Annex C), usable as constants.
+/// The generic status codes (§11.3 / PS3.7 Annex C), usable as constants.
 ///
 /// A few numeric codes carry a service-class-specific name: `0xA900` is
 /// "Identifier does not match SOP Class" in Query/Retrieve and "Data Set does

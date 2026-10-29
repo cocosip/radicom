@@ -2,7 +2,7 @@
 //!
 //! A `StructuredReport` wraps a `DicomFile` whose dataset holds the SR content
 //! tree. `open` reads a file, `save` writes it with explicit-length sequences,
-//! matching fo-dicom's behaviour (§4.3).
+//! matching fo-dicom's behaviour (§12.3).
 
 use crate::error::Error;
 use crate::io::file::DicomFile;
@@ -16,7 +16,7 @@ use std::path::Path;
 /// Basic Text SR Storage, the SOP class a `StructuredReport` document is.
 pub const BASIC_TEXT_SR_STORAGE: &str = "1.2.840.10008.5.1.4.1.1.88.11";
 
-/// A structured report document (§4.3).
+/// A structured report document (§12.3).
 #[derive(Debug, Clone)]
 pub struct StructuredReport {
     file: DicomFile,
@@ -28,7 +28,7 @@ impl StructuredReport {
         StructuredReport { file }
     }
 
-    /// Wraps a dataset in a minimal SR file (§4.3).
+    /// Wraps a dataset in a minimal SR file (§12.3).
     ///
     /// The document's own identity is filled in when the dataset does not carry
     /// it: a Basic Text SR instance must name its SOP class, and the file meta
@@ -49,7 +49,7 @@ impl StructuredReport {
         }
     }
 
-    /// Opens an SR from a file (§4.3).
+    /// Opens an SR from a file (§12.3).
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         Ok(StructuredReport {
             file: DicomFile::open(path)?,
@@ -80,7 +80,7 @@ impl StructuredReport {
         &self.file.dataset
     }
 
-    /// The root content items: the (0040,A730) ContentSequence at top level (§4.1).
+    /// The root content items: the (0040,A730) ContentSequence at top level (§12.3).
     ///
     /// A conformant SR has exactly one CONTAINER root; this returns every item
     /// so malformed reports stay inspectable.
@@ -108,12 +108,12 @@ impl StructuredReport {
         self
     }
 
-    /// The value type of the single root container, when present (§4.1).
+    /// The value type of the single root container, when present (§12.3).
     pub fn root_value_type(&self) -> Option<ValueType> {
         self.root_items().first().and_then(|item| item.value_type())
     }
 
-    /// Validates that the top level is a single CONTAINER root (§4.1).
+    /// Validates that the top level is a single CONTAINER root (§12.3).
     pub fn validate(&self) -> Result<(), Error> {
         let roots = self.root_items();
         if roots.len() != 1 {
@@ -132,7 +132,7 @@ impl StructuredReport {
         Ok(())
     }
 
-    /// The write options matching fo-dicom's SR behaviour (§4.3).
+    /// The write options matching fo-dicom's SR behaviour (§12.3).
     fn write_options() -> WriteOptions {
         WriteOptions {
             explicit_length_sequences: true,
@@ -142,7 +142,7 @@ impl StructuredReport {
         }
     }
 
-    /// Saves with explicit-length sequences/items (§4.3, fo-dicom behaviour).
+    /// Saves with explicit-length sequences/items (§12.3, fo-dicom behaviour).
     pub fn save(&self, path: impl AsRef<Path>) -> Result<(), Error> {
         let bytes = self.file.to_bytes(&Self::write_options())?;
         std::fs::write(path, bytes)

@@ -113,7 +113,7 @@ async fn self_interop_c_store_real_file_round_trips() {
     let stored = provider.files.lock().unwrap();
     assert_eq!(stored.len(), 1, "the SCP captured exactly one instance");
 
-    // §4 semantic tolerance: the writer recomputes/strips redundant (gggg,0000)
+    // §11.2 semantic tolerance: the writer recomputes/strips redundant (gggg,0000)
     // group-length elements, so strip them from both sides before comparing.
     let mut original = file.dataset.clone();
     let mut received = stored[0].dataset.clone();

@@ -11,7 +11,7 @@ use crate::model::dataset::Dataset;
 use crate::model::vr::Vr;
 use crate::sr::code_item::CodeItem;
 
-/// Tags used by a content item (§4.1).
+/// Tags used by a content item (§12.3).
 pub mod tags {
     use crate::model::tag::Tag;
 
@@ -53,7 +53,7 @@ pub mod tags {
     pub const CONTINUITY_OF_CONTENT: Tag = Tag::CONTINUITY_OF_CONTENT;
 }
 
-/// The 15 SR value types (§4.1, PS3.3 C.18.1).
+/// The 15 SR value types (§12.3, PS3.3 C.18.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueType {
     Container,
@@ -116,7 +116,7 @@ impl ValueType {
     }
 }
 
-/// The 7 relationship types (§4.1, PS3.3 C.18.1), plus root.
+/// The 7 relationship types (§12.3, PS3.3 C.18.1), plus root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Relationship {
     Contains,
@@ -155,7 +155,7 @@ impl Relationship {
     }
 }
 
-/// A NUM measured value: a numeric value plus its measurement units (§4.2).
+/// A NUM measured value: a numeric value plus its measurement units (§12.3).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MeasuredValue {
     pub value: f64,
@@ -194,7 +194,7 @@ impl MeasuredValue {
         Ok(())
     }
 
-    /// Reads a measured value from a MeasuredValueSequence item (§4.2).
+    /// Reads a measured value from a MeasuredValueSequence item (§12.3).
     pub fn read_from(dataset: &Dataset) -> Result<Self, Error> {
         let text = dataset.try_get_str(tags::NUMERIC_VALUE).ok_or_else(|| {
             Error::Data(DataError::Other {
@@ -226,7 +226,7 @@ fn no_ds_form(value: f64, why: &str) -> Error {
     })
 }
 
-/// A reference to a SOP instance (COMPOSITE / IMAGE content items, §4.2).
+/// A reference to a SOP instance (COMPOSITE / IMAGE content items, §12.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReferencedSop {
     pub class_uid: String,
@@ -256,7 +256,7 @@ impl ReferencedSop {
         );
     }
 
-    /// Reads a reference from a ReferencedSOPSequence item (§4.2).
+    /// Reads a reference from a ReferencedSOPSequence item (§12.3).
     pub fn read_from(dataset: &Dataset) -> Result<Self, Error> {
         let class_uid = dataset
             .try_get_str(tags::REFERENCED_SOP_CLASS_UID)
@@ -279,14 +279,14 @@ impl ReferencedSop {
     }
 }
 
-/// One content item: the tagged dataset plus its typed value (§4.1).
+/// One content item: the tagged dataset plus its typed value (§12.3).
 #[derive(Debug, Clone)]
 pub struct ContentItem {
     dataset: Dataset,
 }
 
 impl ContentItem {
-    /// Starts a container with a concept name (§4.1).
+    /// Starts a container with a concept name (§12.3).
     pub fn container(
         concept_name: CodeItem,
         relationship: Option<Relationship>,
@@ -300,7 +300,7 @@ impl ContentItem {
         item
     }
 
-    /// A TEXT value (§4.1).
+    /// A TEXT value (§12.3).
     pub fn text(
         concept_name: CodeItem,
         relationship: Relationship,
@@ -311,7 +311,7 @@ impl ContentItem {
         item
     }
 
-    /// A CODE value: the code is written as a ConceptCodeSequence item (§4.1).
+    /// A CODE value: the code is written as a ConceptCodeSequence item (§12.3).
     pub fn code(concept_name: CodeItem, relationship: Relationship, code: CodeItem) -> Self {
         let mut item = Self::base(concept_name, ValueType::Code, Some(relationship));
         let mut coded = Dataset::new();
@@ -322,7 +322,7 @@ impl ContentItem {
         item
     }
 
-    /// A PNAME value (§4.1).
+    /// A PNAME value (§12.3).
     pub fn person_name(
         concept_name: CodeItem,
         relationship: Relationship,
@@ -333,7 +333,7 @@ impl ContentItem {
         item
     }
 
-    /// A DATETIME value (§4.1).
+    /// A DATETIME value (§12.3).
     pub fn date_time(
         concept_name: CodeItem,
         relationship: Relationship,
@@ -344,7 +344,7 @@ impl ContentItem {
         item
     }
 
-    /// A DATE value (§4.1).
+    /// A DATE value (§12.3).
     pub fn date(
         concept_name: CodeItem,
         relationship: Relationship,
@@ -355,7 +355,7 @@ impl ContentItem {
         item
     }
 
-    /// A TIME value (§4.1).
+    /// A TIME value (§12.3).
     pub fn time(
         concept_name: CodeItem,
         relationship: Relationship,
@@ -366,7 +366,7 @@ impl ContentItem {
         item
     }
 
-    /// A UIDREF value (§4.1).
+    /// A UIDREF value (§12.3).
     pub fn uid_ref(
         concept_name: CodeItem,
         relationship: Relationship,
@@ -377,7 +377,7 @@ impl ContentItem {
         item
     }
 
-    /// A NUM value: one MeasuredValueSequence item (§4.1).
+    /// A NUM value: one MeasuredValueSequence item (§12.3).
     ///
     /// Fails when the value has no legal DS form (see
     /// [`MeasuredValue::numeric_value_text`]).
@@ -395,7 +395,7 @@ impl ContentItem {
         Ok(item)
     }
 
-    /// A COMPOSITE/IMAGE value: ReferencedSOPSequence items (§4.1).
+    /// A COMPOSITE/IMAGE value: ReferencedSOPSequence items (§12.3).
     pub fn referenced_sop(
         concept_name: CodeItem,
         relationship: Relationship,
@@ -453,7 +453,7 @@ impl ContentItem {
         self.dataset.try_get_str(tags::TEXT_VALUE)
     }
 
-    /// The measured value, if this is a NUM item (§4.1).
+    /// The measured value, if this is a NUM item (§12.3).
     pub fn measured_value(&self) -> Option<MeasuredValue> {
         self.dataset
             .try_get_sequence(tags::MEASURED_VALUE_SEQUENCE)
@@ -461,7 +461,7 @@ impl ContentItem {
             .and_then(|item| MeasuredValue::read_from(item).ok())
     }
 
-    /// The referenced SOP instances of a COMPOSITE/IMAGE item (§4.1).
+    /// The referenced SOP instances of a COMPOSITE/IMAGE item (§12.3).
     pub fn referenced_sops(&self) -> Vec<ReferencedSop> {
         self.dataset
             .try_get_sequence(tags::REFERENCED_SOP_SEQUENCE)
@@ -475,7 +475,7 @@ impl ContentItem {
             .unwrap_or_default()
     }
 
-    /// The children of a container, read from ContentSequence (§4.1).
+    /// The children of a container, read from ContentSequence (§12.3).
     pub fn children(&self) -> Vec<ContentItem> {
         self.dataset
             .try_get_sequence(tags::CONTENT_SEQUENCE)
@@ -491,7 +491,7 @@ impl ContentItem {
             .unwrap_or_default()
     }
 
-    /// Appends a child item to a container's ContentSequence (§4.1).
+    /// Appends a child item to a container's ContentSequence (§12.3).
     ///
     /// `insert_sequence` replaces, so the existing items are moved into the
     /// new sequence first.
@@ -509,7 +509,7 @@ impl ContentItem {
         self
     }
 
-    /// The shared header: concept name, value type and relationship (§4.1).
+    /// The shared header: concept name, value type and relationship (§12.3).
     fn base(
         concept_name: CodeItem,
         value_type: ValueType,

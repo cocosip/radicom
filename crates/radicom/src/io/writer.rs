@@ -173,7 +173,7 @@ impl DicomWriter {
         out: &mut ByteTargetWriter<W>,
     ) -> Result<u64, Error> {
         let body = self.sequence_body_len(seq, syntax, charset)?;
-        // private SQs are always explicit-length (fo-dicom rule, §5.2)
+        // private SQs are always explicit-length (fo-dicom rule, §8)
         let defined = self.options.explicit_length_sequences || seq.tag().is_private();
         let len = if defined { Some(body) } else { None };
         let mut written = self.write_header(seq.tag(), Vr::Sq, len, syntax, out)?;

@@ -427,7 +427,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_then_start_serves_again() {
-        // §4.7: stop must clear the listening/addr pair, and a later start must
+        // stop must clear the listening/addr pair, and a later start must
         // bind and accept connections again (there was no restart test).
         let server = HostedDicomServer::new(
             HostedServerConfig {

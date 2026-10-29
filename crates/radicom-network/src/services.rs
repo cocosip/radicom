@@ -9,7 +9,7 @@ use crate::error::{NetworkError, Result};
 use async_trait::async_trait;
 use radicom::io::file::DicomFile;
 
-/// A C-ECHO request (§7.1).
+/// A C-ECHO request (§11.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CEchoRequest {
     pub message_id: u16,
@@ -38,7 +38,7 @@ impl CEchoRequest {
     }
 }
 
-/// A C-ECHO response (§7.1).
+/// A C-ECHO response (§11.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CEchoResponse {
     pub message_id_being_responded_to: u16,
@@ -89,7 +89,7 @@ impl CEchoResponse {
     }
 }
 
-/// A C-STORE request (§7.2).
+/// A C-STORE request (§11.4).
 #[derive(Debug, Clone)]
 pub struct CStoreRequest {
     pub message_id: u16,
@@ -97,7 +97,7 @@ pub struct CStoreRequest {
     pub affected_sop_instance_uid: String,
     pub priority: crate::dimse::Priority,
     pub file: DicomFile,
-    /// Set when the SCP is receiving a C-MOVE sub-operation (§7.5).
+    /// Set when the SCP is receiving a C-MOVE sub-operation (§11.4).
     pub move_originator_ae_title: Option<String>,
     pub move_originator_message_id: Option<u16>,
 }
@@ -121,7 +121,7 @@ impl CStoreRequest {
     }
 }
 
-/// A C-STORE response (§7.2).
+/// A C-STORE response (§11.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CStoreResponse {
     pub message_id_being_responded_to: u16,
@@ -142,7 +142,7 @@ impl CStoreResponse {
         }
     }
 
-    /// A failure whose comment is truncated to the LO limit (§7.2).
+    /// A failure whose comment is truncated to the LO limit (§11.4).
     pub fn failure(request: &CStoreRequest, code: u16, comment: impl Into<String>) -> Self {
         CStoreResponse {
             message_id_being_responded_to: request.message_id,
@@ -186,14 +186,14 @@ impl CStoreResponse {
     }
 }
 
-/// The SCP-side hook set (§7).
+/// The SCP-side hook set (§11.4).
 #[async_trait]
 pub trait ServiceProvider: Send + Sync {
-    /// Abstract syntaxes this provider serves; drives PC negotiation (§7.1).
+    /// Abstract syntaxes this provider serves; drives PC negotiation (§11.4).
     ///
     /// A C-GET provider must also list the storage classes it will push back,
     /// because those presentation contexts are what the reverse C-STORE
-    /// sub-operations travel on (§7.4).
+    /// sub-operations travel on (§11.4).
     fn supported_sop_classes(&self) -> Vec<String>;
 
     /// Answers C-ECHO.
@@ -212,7 +212,7 @@ pub trait ServiceProvider: Send + Sync {
     }
 
     /// Answers a C-FIND with a stream of Pending items and one terminal
-    /// response (§7.3). The default refuses, so a provider opts in explicitly.
+    /// response (§11.4). The default refuses, so a provider opts in explicitly.
     fn on_c_find<'a>(
         &'a self,
         request: &'a crate::cfind::CFindRequest,
@@ -226,7 +226,7 @@ pub trait ServiceProvider: Send + Sync {
     }
 
     /// Answers a C-MOVE with a stream of Pending progress and one terminal
-    /// response (§7.5).
+    /// response (§11.4).
     ///
     /// The provider resolves the destination AE title and pushes the instances
     /// itself with [`crate::cmove::store_to_destination`]; the engine only
@@ -243,7 +243,7 @@ pub trait ServiceProvider: Send + Sync {
         }))
     }
 
-    /// Answers a C-GET (§7.4).
+    /// Answers a C-GET (§11.4).
     ///
     /// The provider yields instances; the engine turns each into a reverse
     /// C-STORE sub-operation on the same association, so a provider never
@@ -262,7 +262,7 @@ pub trait ServiceProvider: Send + Sync {
         }))
     }
 
-    /// Answers an N-EVENT-REPORT (§7.6). Defaults to unsupported.
+    /// Answers an N-EVENT-REPORT (§11.4). Defaults to unsupported.
     async fn on_n_event_report(
         &self,
         _request: &crate::nservice::NServiceRequest,
@@ -272,7 +272,7 @@ pub trait ServiceProvider: Send + Sync {
         ))
     }
 
-    /// Answers an N-GET (§7.6). Defaults to unsupported.
+    /// Answers an N-GET (§11.4). Defaults to unsupported.
     async fn on_n_get(
         &self,
         _request: &crate::nservice::NServiceRequest,
@@ -282,7 +282,7 @@ pub trait ServiceProvider: Send + Sync {
         ))
     }
 
-    /// Answers an N-SET (§7.6). Defaults to unsupported.
+    /// Answers an N-SET (§11.4). Defaults to unsupported.
     async fn on_n_set(
         &self,
         _request: &crate::nservice::NServiceRequest,
@@ -292,7 +292,7 @@ pub trait ServiceProvider: Send + Sync {
         ))
     }
 
-    /// Answers an N-ACTION (§7.6). Defaults to unsupported.
+    /// Answers an N-ACTION (§11.4). Defaults to unsupported.
     async fn on_n_action(
         &self,
         _request: &crate::nservice::NServiceRequest,
@@ -302,7 +302,7 @@ pub trait ServiceProvider: Send + Sync {
         ))
     }
 
-    /// Answers an N-CREATE (§7.6). Defaults to unsupported.
+    /// Answers an N-CREATE (§11.4). Defaults to unsupported.
     async fn on_n_create(
         &self,
         _request: &crate::nservice::NServiceRequest,
@@ -312,7 +312,7 @@ pub trait ServiceProvider: Send + Sync {
         ))
     }
 
-    /// Answers an N-DELETE (§7.6). Defaults to unsupported.
+    /// Answers an N-DELETE (§11.4). Defaults to unsupported.
     async fn on_n_delete(
         &self,
         _request: &crate::nservice::NServiceRequest,
@@ -323,7 +323,7 @@ pub trait ServiceProvider: Send + Sync {
     }
 }
 
-/// The built-in Verification SCP: answers C-ECHO with Success (§7.1).
+/// The built-in Verification SCP: answers C-ECHO with Success (§11.4).
 #[derive(Debug, Clone, Default)]
 pub struct VerificationProvider;
 
@@ -345,7 +345,7 @@ impl ServiceProvider for VerificationProvider {
     }
 }
 
-/// Transfer syntaxes a C-STORE request offers (§4.2).
+/// Transfer syntaxes a C-STORE request offers (§11.2).
 ///
 /// The instance's own syntax plus any additional ones, with Implicit VR LE
 /// force-included unless the caller opts out.

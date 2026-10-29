@@ -16,7 +16,7 @@ use tokio_rustls::rustls::server::WebPkiClientVerifier;
 use tokio_rustls::rustls::version::{TLS12, TLS13};
 use tokio_rustls::rustls::{ClientConfig, RootCertStore, ServerConfig, SupportedProtocolVersion};
 
-/// The lowest TLS version this endpoint negotiates (§2.13).
+/// The lowest TLS version this endpoint negotiates.
 ///
 /// fo-dicom pins `Tls12 | Tls13` explicitly; rustls only implements those two,
 /// so a TLS 1.0/1.1 peer cannot be negotiated with at all.
@@ -39,7 +39,7 @@ impl TlsVersion {
     }
 }
 
-/// TLS material and policy for one endpoint (§2.4).
+/// TLS material and policy for one endpoint.
 #[derive(Debug, Clone, Default)]
 pub struct TlsOptions {
     /// PEM certificate chain to present (server) or to trust (client CA bundle).
@@ -51,14 +51,14 @@ pub struct TlsOptions {
     /// PEM private key matching `client_cert_file`.
     pub client_key_file: Option<std::path::PathBuf>,
     /// PEM CA bundle the *server* verifies client certificates against.
-    /// Setting it makes client certificates mandatory (mutual TLS, §2.13).
+    /// Setting it makes client certificates mandatory (mutual TLS).
     pub client_ca_file: Option<std::path::PathBuf>,
     /// Skip certificate verification (client only, testing).
     pub accept_any: bool,
     /// Override the SNI/verification name (client only). When unset the peer's
-    /// address is used, never a hardcoded name (§2.14).
+    /// address is used, never a hardcoded name.
     pub server_name: Option<String>,
-    /// Lowest protocol version to negotiate (§2.13).
+    /// Lowest protocol version to negotiate.
     pub min_version: TlsVersion,
 }
 
@@ -84,7 +84,7 @@ impl TlsOptions {
         }
     }
 
-    /// Builds the server configuration (§2.4).
+    /// Builds the server configuration.
     pub fn server_config(&self) -> Result<Arc<ServerConfig>> {
         let cert_path = self.cert_file.as_ref().ok_or(NetworkError::protocol(
             "TLS server needs a certificate file",
@@ -120,7 +120,7 @@ impl TlsOptions {
         Ok(Arc::new(config))
     }
 
-    /// Builds the client configuration (§2.4).
+    /// Builds the client configuration.
     pub fn client_config(&self) -> Result<Arc<ClientConfig>> {
         let mut roots = RootCertStore::empty();
         if let Some(ca) = &self.cert_file {
@@ -154,7 +154,7 @@ impl TlsOptions {
         Ok(Arc::new(config))
     }
 
-    /// The configured verification name, when one was set (§2.14).
+    /// The configured verification name, when one was set.
     pub fn server_name(&self) -> Option<&str> {
         self.server_name.as_deref()
     }
@@ -164,7 +164,7 @@ impl TlsOptions {
     /// A DICOM TLS client knows the peer's address but not always its DNS name:
     /// an explicit `server_name` wins, otherwise the connected peer's IP is
     /// verified. Defaulting to `"localhost"` would accept any certificate
-    /// issued for `localhost` (§2.14).
+    /// issued for `localhost`.
     fn verify_name(&self, peer: std::net::IpAddr) -> Result<ServerName<'static>> {
         match &self.server_name {
             Some(name) => ServerName::try_from(name.clone())
@@ -173,7 +173,7 @@ impl TlsOptions {
         }
     }
 
-    /// Performs the server handshake over an accepted TCP stream (§2.4).
+    /// Performs the server handshake over an accepted TCP stream.
     pub async fn accept(
         &self,
         stream: tokio::net::TcpStream,
@@ -183,7 +183,7 @@ impl TlsOptions {
         acceptor.accept(stream).await.map_err(tls_err)
     }
 
-    /// Performs the client handshake over a connected TCP stream (§2.4).
+    /// Performs the client handshake over a connected TCP stream.
     pub async fn connect(
         &self,
         stream: tokio::net::TcpStream,
@@ -236,7 +236,7 @@ fn load_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
     ))
 }
 
-/// Test-only verifier that accepts any certificate (§2.4).
+/// Test-only verifier that accepts any certificate.
 #[derive(Debug)]
 struct NoVerification;
 
@@ -547,7 +547,7 @@ mod tests {
     }
     #[test]
     fn there_is_no_hardcoded_server_name() {
-        // §2.14: defaulting to "localhost" verified the wrong name; an unset
+        // defaulting to "localhost" verified the wrong name; an unset
         // name means "verify the peer address we actually connected to"
         assert_eq!(TlsOptions::default().server_name(), None);
         let named = TlsOptions {
@@ -636,7 +636,7 @@ mod tests {
     async fn an_unset_server_name_verifies_the_peer_address() {
         use crate::server::{Association, ClientOptions};
 
-        // §2.14: without a configured name the client used to verify
+        // without a configured name the client used to verify
         // "localhost", which this certificate satisfies — even though the peer
         // is 127.0.0.1 and the certificate says nothing about it.
         let (cert, key) = self_signed("bare-ip");
@@ -658,7 +658,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_tls13_floor_refuses_a_tls12_only_client() {
-        // §2.13: the floor is explicit, so a peer that can only speak 1.2 must
+        // the floor is explicit, so a peer that can only speak 1.2 must
         // be turned away by a 1.3-only endpoint
         let (cert, key) = self_signed("floor");
         let (addr, handle) = tls_server(TlsOptions {

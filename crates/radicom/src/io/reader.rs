@@ -397,7 +397,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         tag
     }
 
-    /// VR determination (§3.2) with T1/T2 fallbacks; returns the VR and
+    /// VR determination (§7) with T1/T2 fallbacks; returns the VR and
     /// whether the element turned out explicit.
     fn parse_vr(&mut self, tag: &Tag, at: u64) -> Result<(Vr, bool), Error> {
         if self.explicit_vr {
@@ -422,7 +422,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         Ok((self.dictionary_vr(tag), false))
     }
 
-    /// Length field per VR/syntax (§3.3).
+    /// Length field per VR/syntax (§7).
     fn parse_length(&mut self, vr: Vr, explicit: bool, at: u64) -> Result<u32, Error> {
         if explicit && vr.is_16bit_length() {
             let v = self.source.read_u16().map_err(|e| io_err_need(e, at, 2))?;
@@ -671,7 +671,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         Ok(EmptyBuffer::shared())
     }
 
-    /// Fragment sequences (§3.4): fragment 0 is the basic offset table in
+    /// Fragment sequences (§7): fragment 0 is the basic offset table in
     /// 4-byte units; the terminator is `FFFE,E0DD`; EOF is tolerated (T6).
     fn parse_fragment_sequence(
         &mut self,

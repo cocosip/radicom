@@ -15,7 +15,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Where an incoming instance is put before the provider sees it (§5.2).
+/// Where an incoming instance is put before the provider sees it (§11.2).
 ///
 /// The default parses the already-buffered bytes directly: the C-STORE receiver
 /// has the whole dataset in memory before the sink is consulted, so writing a
@@ -151,7 +151,7 @@ fn uuid_like() -> String {
     format!("{nanos:x}-{n:x}")
 }
 
-/// Builds the [`CStoreRequest`] from a received command and its dataset (§7.2).
+/// Builds the [`CStoreRequest`] from a received command and its dataset (§11.4).
 pub fn c_store_request_from_message(
     command: &Command,
     instance: ReceivedInstance,
@@ -184,7 +184,7 @@ pub fn c_store_request_from_message(
     })
 }
 
-/// Maps a provider failure onto a C-STORE response (§7.2).
+/// Maps a provider failure onto a C-STORE response (§11.4).
 ///
 /// The connection survives: a rejected instance becomes a failure status with
 /// a truncated comment, never a disconnect.

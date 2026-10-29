@@ -216,7 +216,7 @@ impl Canvas {
         let dst_h = ((patch.height() as f64 * scale).round() as i64).max(1);
 
         // Resample the BGRA patch directly into one full-image buffer, then copy
-        // its rows into the canvas — no RGB round trip and no per-pixel set (§3.7).
+        // its rows into the canvas — no RGB round trip and no per-pixel set.
         let rescaled = if magnification.is_some_and(|value| value.eq_ignore_ascii_case("REPLICATE"))
         {
             nearest_bgra32(
@@ -593,7 +593,7 @@ mod tests {
 
     #[test]
     fn blit_scaled_matches_the_previous_rgb_round_trip_bytes() {
-        // §3.7: the new direct-BGRA blit must produce the same canvas bytes as the
+        // the new direct-BGRA blit must produce the same canvas bytes as the
         // old to_rgb24 → bilinear_color24 → per-pixel set path (incl. clipping).
         let patch = RawImage::new(
             3,

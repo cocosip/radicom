@@ -105,7 +105,7 @@ pub fn register_charset(term: &str, encoding_name: &str) -> Result<(), Error> {
 
 /// Resolves a Specific Character Set term to an encoding; unknown terms
 /// fall back to windows-1252 (encoding_rs's ASCII superset — callers warn,
-/// spec §8.1).
+/// spec §4).
 ///
 /// ponytail: every call takes the registry read lock. Parsing only pays this on
 /// a charset switch (the builder caches), so the cost is confined to the write
@@ -263,7 +263,7 @@ fn escape_sequence_len(bytes: &[u8], i: usize) -> Option<usize> {
     }
 }
 
-/// Maps an ISO 2022 designator to its encoding (spec §8.2 mapping table).
+/// Maps an ISO 2022 designator to its encoding (spec §4 mapping table).
 fn encoding_for_escape(seq: &[u8]) -> Option<&'static Encoding> {
     if seq.first() != Some(&0x1B) {
         return None;
@@ -380,7 +380,7 @@ fn segment_can_encode(enc: &'static Encoding, segment: &str) -> bool {
     !had_errors
 }
 
-/// The ISO 2022 escape prefix switching into `enc` (spec §8.3 table).
+/// The ISO 2022 escape prefix switching into `enc` (spec §4 table).
 fn escape_for_encoding(enc: &'static Encoding) -> Option<&'static [u8]> {
     match enc.name() {
         "windows-1252" => Some(b"\x1B-A"),
@@ -408,7 +408,7 @@ mod tests {
 
     #[test]
     fn ascii_text_is_returned_without_the_segment_scan() {
-        // §3.9: the ASCII fast path must agree with the general path for plain
+        // the ASCII fast path must agree with the general path for plain
         // text, including PN delimiters and resets.
         for text in [
             "",

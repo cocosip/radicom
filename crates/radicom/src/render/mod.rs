@@ -210,7 +210,7 @@ fn element_bytes(dataset: &Dataset, tag: Tag) -> Option<Vec<u8>> {
     }
 }
 
-/// VOI LUT function selector (docs §3, §4).
+/// VOI LUT function selector (docs §3, §10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoiFunction {
     /// DICOM C.11.2.1.3.1 — `((v - (c - 0.5)) / (w - 1) + 0.5) * 255`.
@@ -234,7 +234,7 @@ pub struct GrayscaleRenderOptions {
     pub use_voi_lut: bool,
     /// Parsed first VOI LUT item, applied in place of the window function when
     /// `use_voi_lut` is set (PS3.3 C.11.2.1.1). Shared behind `Arc` so a
-    /// `DicomImage` parses it once and reuses it across frames (§3.3).
+    /// `DicomImage` parses it once and reuses it across frames (§10).
     pub voi_lut: Option<Arc<VoiLut>>,
     /// Parsed first modality LUT item `(0028,3000)`; when present it replaces the
     /// rescale slope/intercept at the modality stage (docs §4).
@@ -262,7 +262,7 @@ impl GrayscaleRenderOptions {
 
     /// Builds options for `frame` from already-parsed LUT tables. `DicomImage`
     /// parses `voi_lut`/`modality_lut` once at construction and passes them here
-    /// per frame, so a multi-frame render never re-parses the LUT (§3.3). The
+    /// per frame, so a multi-frame render never re-parses the LUT (§10). The
     /// window is still resolved per frame (a per-frame window depends on it).
     fn from_dataset_frame_parts(
         dataset: &Dataset,
@@ -335,7 +335,7 @@ impl GrayscaleRenderOptions {
     /// follow the same rules as `from_dataset`.
     pub fn from_histogram(dataset: &Dataset, frame: u32, percent: i32) -> Result<Self, Error> {
         // Two streaming passes over the sample buffer: one for the bin range, one
-        // to fill the histogram. Never materialises the frame as a `Vec` (§3.9).
+        // to fill the histogram. Never materialises the frame as a `Vec` (§10).
         // Padding is excluded from the bin range (and cleared below) so a large
         // 0x0000/0xFFFF spike cannot stretch or dominate the derived window.
         let pad = first_number(dataset, Tag::PIXEL_PADDING_VALUE);
@@ -387,7 +387,7 @@ impl GrayscaleRenderOptions {
         let mut base = GrayscaleRenderOptions::from_window_level(0.0, 1.0);
         base.apply_dataset_modality_and_invert(dataset);
 
-        // Stream the non-padding min/max in one pass; no whole-frame `Vec` (§3.9).
+        // Stream the non-padding min/max in one pass; no whole-frame `Vec` (§10).
         let pad = first_number(dataset, Tag::PIXEL_PADDING_VALUE);
         let mut range: Option<(f64, f64)> = None;
         visit_frame_stored_values(dataset, frame, |v| {
@@ -682,7 +682,7 @@ fn first_number(dataset: &Dataset, tag: Tag) -> Option<f64> {
 /// Reads a frame through the read-only [`PixelDataRef`] view, so the caller's
 /// dataset is borrowed, not cloned.
 /// read-only pixel accessor in `pixel/` would remove that clone, but it is out
-/// of this module's scope (§3.4 ceiling, documented at `render_grayscale_with_options`).
+/// of this module's scope (§10 ceiling, documented at `render_grayscale_with_options`).
 fn frame_sample_buffer(
     dataset: &Dataset,
     frame: u32,
@@ -711,7 +711,7 @@ fn frame_sample_buffer(
 }
 
 /// Calls `f` once per stored sample of a native 1/8/16/32-bit frame, without
-/// ever materialising the frame as a `Vec` (§3.9). Values are normalised and
+/// ever materialising the frame as a `Vec` (§10). Values are normalised and
 /// sign-extended from the stored depth, matching the previous whole-frame
 /// `Vec<f64>` result exactly.
 fn visit_frame_stored_values(
@@ -1122,7 +1122,7 @@ pub fn render_grayscale_frame(dataset: &Dataset, frame: u32) -> Result<RawImage,
 }
 
 /// Pixels below this count render on one thread; spawning bands for a small
-/// frame costs more than the loop itself (§3.1).
+/// frame costs more than the loop itself (§10).
 const PARALLEL_MIN_PIXELS: usize = 1 << 17;
 
 /// Renders a grayscale frame with pre-resolved options (lets `DicomImage` apply
@@ -1144,7 +1144,7 @@ fn render_grayscale_with_threshold(
     options: &GrayscaleRenderOptions,
     parallel_min_pixels: usize,
 ) -> Result<RawImage, Error> {
-    // Render reads through PixelDataRef, so the dataset is only borrowed (02 §3.4).
+    // Render reads through PixelDataRef, so the dataset is only borrowed (02 §10).
     let pixel = PixelDataRef::from_dataset(dataset)?;
     if pixel.samples_per_pixel() != 1 {
         return Err(unsupported("only single-sample grayscale can be rendered"));
@@ -1205,7 +1205,7 @@ fn render_grayscale_with_threshold(
     // The table spans only the range that
     // actually occurs, so a 12-bit frame builds 4096 entries, not 65536.
     // Two streaming passes over the sample bytes find min/max and emit output,
-    // instead of holding the whole frame in a `Vec<u16>` (§3.9).
+    // instead of holding the whole frame in a `Vec<u16>` (§10).
     let (mut min, mut max) = (u16::MAX, 0u16);
     for i in 0..count {
         let v = frame_sample_at(raw, i, depth);
@@ -1311,7 +1311,7 @@ fn emit_rows(
 }
 
 /// Renders the pixel rows into a BGRA buffer, splitting the image into per-core
-/// row bands with `std::thread::scope` when it is large enough (§3.1). Each band
+/// row bands with `std::thread::scope` when it is large enough (§10). Each band
 /// writes a disjoint slice, so the result is byte-identical to the serial path.
 fn render_pixel_rows(
     raw: &[u8],
@@ -1457,12 +1457,12 @@ pub struct DicomImage {
     overlay_color: crate::pixel::Color32,
     scale: f64,
     transform: SpatialTransform,
-    /// Geometry cached at construction so the accessors never re-clone (§3.5).
+    /// Geometry cached at construction so the accessors never re-clone (§10).
     width: u32,
     height: u32,
     number_of_frames: u32,
     samples_per_pixel: u16,
-    /// LUT tables parsed once at construction and reused for every frame (§3.3).
+    /// LUT tables parsed once at construction and reused for every frame (§10).
     voi_lut: Option<Arc<VoiLut>>,
     modality_lut: Option<Arc<ModalityLut>>,
 }
@@ -1476,7 +1476,7 @@ impl DicomImage {
     /// Wraps a dataset at a specific frame, verifying pixel data is readable.
     pub fn from_dataset_frame(dataset: &Dataset, frame: u32) -> Result<Self, Error> {
         // One clone: validate and read the geometry from it, then keep it as the
-        // owned dataset (the previous code cloned twice, §3.5).
+        // owned dataset (the previous code cloned twice, §10).
         let owned = dataset.clone();
         let (width, height, number_of_frames, samples_per_pixel) = {
             let pixel = PixelDataRef::from_dataset(&owned)?;
@@ -1607,7 +1607,7 @@ impl DicomImage {
         let grayscale = matches!(pi, Pi::Monochrome1 | Pi::Monochrome2);
 
         let mut image = if grayscale {
-            // Reuse the LUT tables parsed once at construction (§3.3); only the
+            // Reuse the LUT tables parsed once at construction (§10); only the
             // window is resolved per frame.
             let mut options = GrayscaleRenderOptions::from_dataset_frame_parts(
                 &self.dataset,
@@ -1952,7 +1952,7 @@ mod tests {
 
     #[test]
     fn monochrome1_renders_inverted_relative_to_monochrome2() {
-        // Same pixels + window, differing PI: MONOCHROME1 must invert (docs §184).
+        // Same pixels + window, differing PI: MONOCHROME1 must invert (docs/01-architecture.md §10).
         let m2 = gray_image(1, 2, 8, &[0, 255], Some(127.5), Some(255.0));
         let mut m1 = m2.clone();
         m1.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME1");
@@ -2614,7 +2614,7 @@ mod tests {
 
     #[test]
     fn from_min_max_streams_a_known_sixteen_bit_frame_window() {
-        // §3.9: the min/max window is derived without materialising a Vec<f64>.
+        // §10: the min/max window is derived without materialising a Vec<f64>.
         // Known samples 7..65535 → centre (7+65535)/2 = 32771, width 65528.
         let samples = [7u16, 100, 4096, 40000, 65535];
         let ds = gray_image(5, 1, 16, &samples, None, None);
@@ -2683,7 +2683,7 @@ mod tests {
     #[test]
     fn per_frame_functional_window_renders_each_frame_differently() {
         // Two frames with the SAME stored value (100) but each carrying its own
-        // window: only a per-frame end-to-end render can honour that (§190).
+        // window: only a per-frame end-to-end render can honour that (§10).
         let mut ds = gray_image(1, 1, 8, &[100, 100], None, None);
         ds.insert_str(Tag::NUMBER_OF_FRAMES, Vr::Is, "2"); // NumberOfFrames
         put_per_frame_windows(&mut ds, &[(100.0, 2.0), (0.0, 400.0)]);
@@ -3217,7 +3217,7 @@ mod tests {
 
     #[test]
     fn dicom_image_geometry_matches_the_dataset_attributes() {
-        // §3.5: the cached accessors must agree with the dataset's own tags.
+        // §10: the cached accessors must agree with the dataset's own tags.
         let ds = gray_image(
             3,
             2,
@@ -3238,7 +3238,7 @@ mod tests {
 
     #[test]
     fn rendering_the_same_dataset_twice_yields_identical_bytes() {
-        // §3.4: with the dataset borrowed (cloned per render for now) a second
+        // §10: with the dataset borrowed (cloned per render for now) a second
         // render of the same frame must be byte-identical — no state leaks.
         let ds = gray_image(
             4,
@@ -3263,7 +3263,7 @@ mod tests {
 
     #[test]
     fn dicom_image_renders_multiple_frames_with_a_voi_lut() {
-        // §3.3: the VOI LUT is parsed once per DicomImage; every frame must still
+        // §10: the VOI LUT is parsed once per DicomImage; every frame must still
         // render exactly like the free renderer, which re-parses each call.
         let mut ds = gray_image(2, 1, 8, &[10, 11, 20, 21], None, None);
         ds.insert_str(Tag::NUMBER_OF_FRAMES, Vr::Is, "2");
@@ -3893,7 +3893,7 @@ mod tests {
 
     #[test]
     fn the_precalculated_window_matches_per_pixel_mapping() {
-        // §3.2: the renderer evaluates the window once per distinct stored value.
+        // §10: the renderer evaluates the window once per distinct stored value.
         // It must agree exactly with applying the mapping to every pixel, for
         // unsigned and signed data and for an inverted window.
         for (bits, signed, samples) in [

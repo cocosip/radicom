@@ -6,7 +6,7 @@
 //! `OffsetOfReferencedLowerLevelDirectoryEntity` (0004,1420) the first child,
 //! and `OffsetOfFirstRootDirectoryRecord` (0004,1200) the first root record.
 //!
-//! Writing uses the two-pass scheme from §3.3: every record's encoded size is
+//! Writing uses the two-pass scheme from §12.2: every record's encoded size is
 //! measured with the writer's length calculator, offsets are derived from the
 //! running total, the links are patched, and only then is the file serialized.
 
@@ -28,7 +28,7 @@ pub use scanner::{
     ScanErrorPolicy, ScanEvent, ScanOptions, ScanSummary, ScanVisitor,
 };
 
-/// Tags of the media storage directory (§3.1, §3.2).
+/// Tags of the media storage directory (§12.2).
 pub mod tags {
     use crate::model::tag::Tag;
 
@@ -75,10 +75,10 @@ pub mod tags {
     pub const SOP_INSTANCE_UID: Tag = Tag::SOP_INSTANCE_UID;
 }
 
-/// The SOP class of a media storage directory (§3.1).
+/// The SOP class of a media storage directory (§12.2).
 pub const MEDIA_STORAGE_DIRECTORY_SOP_CLASS: &str = "1.2.840.10008.1.3.10";
 
-/// Directory record types recognised at the leaf level (§3.1, PS3.3 F.5.1).
+/// Directory record types recognised at the leaf level (§12.2, PS3.3 F.5.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordType {
     Patient,
@@ -117,7 +117,7 @@ impl RecordType {
     }
 }
 
-/// The storage categories a leaf record can index (§3.4).
+/// The storage categories a leaf record can index (§12.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageCategory {
     Image,
@@ -126,7 +126,7 @@ pub enum StorageCategory {
 }
 
 impl StorageCategory {
-    /// Maps a file's SOP class to the record type that indexes it (§3.4).
+    /// Maps a file's SOP class to the record type that indexes it (§12.2).
     pub fn of_sop_class(sop_class: &str) -> StorageCategory {
         match sop_class.trim() {
             // Basic/Enhanced/Comprehensive SR, Comprehensive 3D SR, Mammography CAD SR,
@@ -156,7 +156,7 @@ impl StorageCategory {
     }
 }
 
-/// One directory record, plus the parent the tree view uses (§3.2).
+/// One directory record, plus the parent the tree view uses (§12.2).
 #[derive(Debug, Clone)]
 pub struct DirectoryRecord {
     pub dataset: Dataset,
@@ -231,7 +231,7 @@ pub struct DicomDirectoryEntry {
     pub instance: usize,
 }
 
-/// A media storage directory: the file plus its record list (§3.1).
+/// A media storage directory: the file plus its record list (§12.2).
 ///
 /// Records are stored in the order they appear in the sequence; `parent`
 /// carries the hierarchy, so sibling order is the order of insertion.
@@ -243,7 +243,7 @@ pub struct DicomDirectory {
 }
 
 impl DicomDirectory {
-    /// Creates an empty directory with `file_set_id` (§3.3 step 3).
+    /// Creates an empty directory with `file_set_id` (§12.2 step 3).
     pub fn new(file_set_id: impl Into<String>) -> Self {
         Self::try_new(file_set_id).expect("DICOMDIR FileSetID must not be empty")
     }
@@ -284,7 +284,7 @@ impl DicomDirectory {
         })
     }
 
-    /// Opens and stitches an existing DICOMDIR (§3.2).
+    /// Opens and stitches an existing DICOMDIR (§12.2).
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         let path = path.as_ref();
         let bytes = std::fs::read(path)
@@ -292,7 +292,7 @@ impl DicomDirectory {
         Self::from_bytes(&bytes)
     }
 
-    /// Parses a DICOMDIR from bytes (§3.2).
+    /// Parses a DICOMDIR from bytes (§12.2).
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         let file = DicomFile::from_bytes(bytes, &ReadOptions::default())?;
         let (records, roots) = stitch(bytes, &file.dataset);
@@ -320,14 +320,14 @@ impl DicomDirectory {
         trimmed(&self.file.dataset, tags::FILE_SET_ID)
     }
 
-    /// Direct children of `index`, in sibling order (§3.2).
+    /// Direct children of `index`, in sibling order (§12.2).
     pub fn children(&self, index: usize) -> Vec<usize> {
         (0..self.records.len())
             .filter(|i| self.records[*i].parent == Some(index))
             .collect()
     }
 
-    /// Every record in depth-first order with its depth (§3.2).
+    /// Every record in depth-first order with its depth (§12.2).
     ///
     /// A corrupt directory whose offset links form a cycle is walked safely
     /// (each record is emitted at most once) instead of recursing forever.
@@ -357,7 +357,7 @@ impl DicomDirectory {
         }
     }
 
-    /// Validates the record tree (§3.2): a non-empty FileSetID, every
+    /// Validates the record tree (§12.2): a non-empty FileSetID, every
     /// parent/root index in range, roots without a parent, no cycles, and no
     /// record unreachable from a root. A DICOMDIR parsed from untrusted bytes
     /// can violate any of these.
@@ -430,7 +430,7 @@ impl DicomDirectory {
         })
     }
 
-    /// Adds `file` to the hierarchy under `referenced_file_id` (§3.4).
+    /// Adds `file` to the hierarchy under `referenced_file_id` (§12.2).
     ///
     /// The PATIENT, STUDY and SERIES records are found by key or created, then
     /// the leaf record is appended with its `(0004,1510..1512)` references.
@@ -453,7 +453,7 @@ impl DicomDirectory {
     }
 
     /// Like [`add_file`](Self::add_file) but also attaches an icon built by
-    /// `generator` as `(0088,0200) IconImageSequence` (§3.4, MEDIA-02).
+    /// `generator` as `(0088,0200) IconImageSequence` (§12.2, MEDIA-02).
     pub fn add_file_with_icon(
         &mut self,
         file: &DicomFile,
@@ -590,7 +590,7 @@ impl DicomDirectory {
         index
     }
 
-    /// Computes offsets, then fills them into the already-built sequence (§3.3).
+    /// Computes offsets, then fills them into the already-built sequence (§12.2).
     ///
     /// PS3.3 F.2.2: every offset is an **absolute byte position in the file**.
     /// One write with placeholder offsets fixes every element width (offsets are
@@ -669,7 +669,7 @@ impl DicomDirectory {
     }
 
     /// Absolute byte position of every record item in the file about to be
-    /// written (§3.3).
+    /// written (§12.2).
     ///
     /// The positions follow from the encoded layout — preamble, file meta, the
     /// elements ahead of `(0004,1220)`, the sequence header, then one item per
@@ -768,7 +768,7 @@ impl DicomDirectory {
         Ok(())
     }
 
-    /// The next record sharing this record's parent (§3.1).
+    /// The next record sharing this record's parent (§12.2).
     fn next_sibling(&self, index: usize) -> Option<usize> {
         let siblings = match self.records.get(index)?.parent {
             Some(parent) => self.children(parent),
@@ -778,14 +778,14 @@ impl DicomDirectory {
         siblings.get(position + 1).copied()
     }
 
-    /// Saves the directory, rebuilding the offsets first (§3.3).
+    /// Saves the directory, rebuilding the offsets first (§12.2).
     pub fn save(&mut self, path: impl AsRef<Path>) -> Result<(), Error> {
         let bytes = self.to_bytes()?;
         std::fs::write(path, bytes)
             .map_err(|e| Error::File(FileError::Other(format!("write: {e}"))))
     }
 
-    /// Serializes the directory, rebuilding the offsets first (§3.3).
+    /// Serializes the directory, rebuilding the offsets first (§12.2).
     pub fn to_bytes(&mut self) -> Result<Vec<u8>, Error> {
         self.rebuild()?;
         self.file.to_bytes(&WriteOptions::default())
@@ -810,7 +810,7 @@ fn level_record(kind: RecordType, source: &Dataset) -> DirectoryRecord {
     }
 }
 
-/// Attributes copied from the file into a level record (§3.4).
+/// Attributes copied from the file into a level record (§12.2).
 fn identifying_attributes(kind: &RecordType) -> &'static [(Tag, Vr)] {
     const PATIENT: &[(Tag, Vr)] = &[(tags::PATIENT_NAME, Vr::Pn)];
     const STUDY: &[(Tag, Vr)] = &[
@@ -840,7 +840,7 @@ fn required(dataset: &Dataset, tag: Tag, what: &str) -> Result<String, Error> {
         .ok_or_else(|| record_error(format!("{what} is required for a directory record")))
 }
 
-/// `\`-separated file ID from a path (§3.4).
+/// `\`-separated file ID from a path (§12.2).
 fn path_to_file_id(path: &Path) -> String {
     path.iter()
         .filter_map(|part| part.to_str())
@@ -852,13 +852,13 @@ fn record_error(message: impl Into<String>) -> Error {
     Error::File(FileError::Other(message.into()))
 }
 
-/// Rebuilds the hierarchy from the record offsets (§3.2).
+/// Rebuilds the hierarchy from the record offsets (§12.2).
 ///
 /// Offsets are byte positions inside the file, so the tree is stitched from
 /// the positions the records actually occupy in `bytes`. The stored links are
 /// `parent → child`; inverting them gives the tree view. A link that names an
 /// unknown offset is ignored rather than failing the load, which keeps dirty
-/// DICOMDIRs readable (§3.2 tolerance).
+/// DICOMDIRs readable (§12.2 tolerance).
 fn stitch(bytes: &[u8], dataset: &Dataset) -> (Vec<DirectoryRecord>, Vec<usize>) {
     let items: Vec<Dataset> = dataset
         .try_get_sequence(tags::DIR_RECORD_SEQUENCE)
@@ -881,7 +881,7 @@ fn stitch(bytes: &[u8], dataset: &Dataset) -> (Vec<DirectoryRecord>, Vec<usize>)
     };
 
     // The hierarchy is the sibling chain (next) rooted at each parent's first
-    // child (lower) (§3.1). Walk it once from every offset that no other
+    // child (lower) (§12.2). Walk it once from every offset that no other
     // record points at, which yields parent links and roots together.
     let mut parents: Vec<Option<usize>> = vec![None; items.len()];
     let pointed: Vec<bool> = {
@@ -946,7 +946,7 @@ fn stitch(bytes: &[u8], dataset: &Dataset) -> (Vec<DirectoryRecord>, Vec<usize>)
     (records, roots)
 }
 
-/// Positions of the record items in `bytes`, in sequence order (§3.2).
+/// Positions of the record items in `bytes`, in sequence order (§12.2).
 ///
 /// A scan for item headers (`FFFE,E000`) also finds the items nested inside a
 /// record — an `IconImageSequence (0088,0200)` adds one per leaf — so the scan
@@ -1642,7 +1642,7 @@ mod tests {
 
     #[test]
     fn written_offsets_point_at_the_next_sibling_and_first_child() {
-        // §4.2(b): asserting `offset != 0` proves a number was written, not that
+        // §12.3(b): asserting `offset != 0` proves a number was written, not that
         // it names the right record. Compare against item positions recovered
         // independently from the record-type values.
         let mut dir = DicomDirectory::new("MYFS");
@@ -1835,7 +1835,7 @@ mod tests {
 
     #[test]
     fn a_corrupt_lower_offset_is_tolerated() {
-        // a dirty DICOMDIR names an offset that does not exist (§3.2 tolerance)
+        // a dirty DICOMDIR names an offset that does not exist (§12.2 tolerance)
         let mut dir = DicomDirectory::new("MYFS");
         dir.add_file(&instance("P1", "1.2.3", "1.2.3.4", CT, "1.2.3.4.5"), "A")
             .unwrap();

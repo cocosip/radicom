@@ -117,7 +117,7 @@ fn write_values(out: &mut String, element: &DicomElement, depth: usize) -> Resul
     Ok(())
 }
 
-/// The text of every value component, `\`-joined (§2).
+/// The text of every value component, `\`-joined (§12.1).
 fn text_form(element: &DicomElement, vr: Vr) -> Result<String, Error> {
     if let Some(raw) = element.value().as_buffer() {
         // parsed binary VRs: render each unit as text so XML stays readable
@@ -170,7 +170,7 @@ fn raw_units_text(raw: &radicom::model::buffer::SharedBuffer, vr: Vr) -> Result<
     Ok(parts.join("\\"))
 }
 
-/// Writes PN as the Native DICOM Model shape (§2, PS3.19 / PS3.18 F.3.1):
+/// Writes PN as the Native DICOM Model shape (§12.1, PS3.19 / PS3.18 F.3.1):
 /// one `<PersonName number="n">` per value (VM `\`-separated), each carrying
 /// `<Alphabetic>`/`<Ideographic>`/`<Phonetic>` groups of named component
 /// elements `<FamilyName>`/`<GivenName>`/`<MiddleName>`/`<NamePrefix>`/`<NameSuffix>`.
@@ -235,7 +235,7 @@ fn write_inline_binary(
     Ok(())
 }
 
-/// Writes a sequence attribute with its items nested as `<Item>` (§2).
+/// Writes a sequence attribute with its items nested as `<Item>` (§12.1).
 fn write_sequence(out: &mut String, sequence: &DicomSequence, depth: usize) -> Result<(), Error> {
     indent(out, depth);
     write_attribute_open(out, sequence.tag(), Vr::Sq);
@@ -253,7 +253,7 @@ fn write_sequence(out: &mut String, sequence: &DicomSequence, depth: usize) -> R
 }
 
 /// Fragment sequences are not representable; render what the bytes carry so
-/// the export does not silently drop it (§1.1 rejects them on the JSON side).
+/// the export does not silently drop it (§12.1 rejects them on the JSON side).
 fn write_fragments(
     out: &mut String,
     tag: &Tag,
@@ -274,7 +274,7 @@ fn write_fragments(
     Ok(())
 }
 
-/// Binary VRs carried as base64 (§2).
+/// Binary VRs carried as base64 (§12.1).
 fn is_binary(vr: Vr) -> bool {
     matches!(
         vr,

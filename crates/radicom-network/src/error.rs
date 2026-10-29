@@ -8,7 +8,7 @@ use std::io;
 /// Result alias for the network crate.
 pub type Result<T> = std::result::Result<T, NetworkError>;
 
-/// Association rejection reasons, split by source (§3.3).
+/// Association rejection reasons, split by source (§11.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RejectResult {
     Permanent,
@@ -119,7 +119,7 @@ pub enum NetworkError {
     /// A request needs a presentation context the peer did not accept.
     #[error("SOP class {sop_class} is not supported by the association")]
     SopClassNotSupported { sop_class: String },
-    /// The peer did not grant this side the SCU role for the class (§4.1).
+    /// The peer did not grant this side the SCU role for the class (§11.2).
     #[error("SOP class {sop_class}: the peer did not grant this side the SCU role")]
     ScuRoleNotNegotiated { sop_class: String },
     /// TLS setup failed (bad PEM, unusable key, handshake configuration).

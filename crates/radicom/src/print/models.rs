@@ -12,7 +12,7 @@ use crate::model::vr::Vr;
 use crate::print::layout::{FilmSize, ImageDisplayFormat, LayoutCell};
 use crate::print::presentation_lut::{PresentationLut, PresentationLutShape};
 
-/// Tags used by the print data model (§5).
+/// Tags used by the print data model (§12.4).
 pub mod tags {
     use crate::model::tag::Tag;
 
@@ -64,7 +64,7 @@ pub mod tags {
     pub const LUT_DATA: Tag = Tag::LUT_DATA;
 }
 
-/// A print film session (§5): film destination/label/medium/priority/copies.
+/// A print film session (§12.4): film destination/label/medium/priority/copies.
 #[derive(Debug, Clone)]
 pub struct FilmSession {
     dataset: Dataset,
@@ -144,7 +144,7 @@ impl Default for FilmSession {
     }
 }
 
-/// A film box (§5): one film's display format and print attributes.
+/// A film box (§12.4): one film's display format and print attributes.
 #[derive(Debug, Clone)]
 pub struct FilmBox {
     dataset: Dataset,
@@ -169,7 +169,7 @@ impl FilmBox {
         self.dataset
     }
 
-    /// Sets the display format string and validates it parses (§5).
+    /// Sets the display format string and validates it parses (§12.4).
     pub fn set_image_display_format(
         &mut self,
         format: impl Into<String>,
@@ -188,7 +188,7 @@ impl FilmBox {
             .and_then(|text| ImageDisplayFormat::parse(&text).ok())
     }
 
-    /// Sets the film size string and validates it parses (§5).
+    /// Sets the film size string and validates it parses (§12.4).
     pub fn set_film_size(&mut self, size: impl Into<String>) -> Result<&mut Self, Error> {
         let text = size.into();
         if FilmSize::parse(&text).is_none() {
@@ -213,7 +213,7 @@ impl FilmBox {
         self.dataset.try_get_str(tags::TRIM).as_deref() == Some("YES")
     }
 
-    /// Lays out this film's image cells, inset by `margin` mm (§5).
+    /// Lays out this film's image cells, inset by `margin` mm (§12.4).
     ///
     /// Returns an empty vector when the display format or film size is missing
     /// or unparseable, rather than guessing a grid.
@@ -225,7 +225,7 @@ impl FilmBox {
     }
 
     /// Initialises the ReferencedImageBoxSequence with `count` image boxes,
-    /// numbering positions 1..=count (§5, `initialize()`).
+    /// numbering positions 1..=count (§12.4, `initialize`).
     pub fn initialize_image_boxes(&mut self, count: u32) -> &mut Self {
         let sequence = self
             .dataset
@@ -283,7 +283,7 @@ impl Default for FilmBox {
     }
 }
 
-/// An image box (§5): a cell's position, polarity and image payload.
+/// An image box (§12.4): a cell's position, polarity and image payload.
 #[derive(Debug, Clone)]
 pub struct ImageBox {
     dataset: Dataset,
@@ -307,7 +307,7 @@ impl ImageBox {
         self
     }
 
-    /// Polarity `NORMAL` (default) or `REVERSE` (§5).
+    /// Polarity `NORMAL` (default) or `REVERSE` (§12.4).
     pub fn polarity(&self) -> bool {
         // true = reversed
         self.dataset.try_get_str(tags::POLARITY).as_deref() == Some("REVERSE")
