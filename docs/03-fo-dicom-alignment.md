@@ -81,10 +81,10 @@ cargo xtask coverage          # production line coverage, 95% floor
 
 ## Current Test Baseline
 
-14 test targets green: **1,341 tests, 1 ignored, 0 failures**; clippy and rustdoc clean; production
-line coverage **95.91%** (core 95.97%, json 97.14%, network 95.60%). Breakdown: core lib 801, dump
-binary 5, cli_dump 1, corpus 7, core fuzz 3, core goldens 1, radicom-dict 5, radicom-json lib 75, JSON
-goldens 1, radicom-network lib 428, network fuzz 2, network goldens 3, interop 2 run + 1 ignored,
+14 test targets green: **1,366 tests, 1 ignored, 0 failures**; clippy and rustdoc clean; production
+line coverage **95.62%** (core 95.69%, json 96.03%, network 95.38%). Breakdown: core lib 820, dump
+binary 5, cli_dump 1, corpus 7, core fuzz 3, core goldens 1, radicom-dict 5, radicom-json lib 76, JSON
+goldens 1, radicom-network lib 431, network fuzz 2, network goldens 3, interop 2 run + 1 ignored,
 xtask 6, peer_interop example 1.
 
 > Caveat: this audit checks feature presence and code paths. It is **not** an adversarial correctness
