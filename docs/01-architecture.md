@@ -301,9 +301,12 @@ client/server. One tokio task per association. Locks must not be held across `.a
   writes result = 0; only the AC carries a real result. **Writing the result at offset 1 instead of 2
   turns every rejection into an acceptance in both directions.**
 - A C-STORE dataset is streamed, not buffered: `message::write_message_streamed` runs the writer on a
-  blocking thread into a bounded channel that the association task writes out, so memory is O(PDU). Each
-  streamed PDU carries one PDV; the final PDV ("last" bit) is only known at the end, so the tail is held
-  back until the writer finishes.
+  blocking thread into a bounded channel that the association task writes out. Peak memory is O(max_pdu
+  + `large_object_size` + a couple of PDUs), independent of the instance size. Both the SCU C-STORE and
+  the C-MOVE push and C-GET reverse-store push use it; a transcoded store still materialises its output,
+  which is inherent. Each streamed PDU carries one PDV; the final PDV ("last" bit) is only known at the
+  end, so the tail is held back until the writer finishes. A failure mid-stream sends A-ABORT, so the
+  association must be dropped afterwards.
 - An A-ASSOCIATE-AC echoes only `result` plus **one** accepted transfer syntax per context — no abstract
   syntax; the client refills the abstract syntax from its RQ by context id.
 - User-information sub-items:

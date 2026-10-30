@@ -101,8 +101,13 @@ pub struct PduFramer<F: FnMut(bytes::Bytes) -> std::io::Result<()>> {
 
 impl<F: FnMut(bytes::Bytes) -> std::io::Result<()>> PduFramer<F> {
     /// `max_pdv_value` comes from [`crate::assembler::PduSplitter::max_pdv_value`].
+    ///
+    /// `room` is forced even: a PDV value is even-padded on the wire and the
+    /// receiver keeps the pad byte, so an odd `room` would splice pad bytes into
+    /// the dataset and corrupt it.
     pub fn new(context_id: u8, max_pdv_value: usize, emit: F) -> Self {
-        let room = max_pdv_value.max(2);
+        let room = (max_pdv_value & !1).max(2);
+        debug_assert_eq!(room % 2, 0, "a PDV value must be even");
         PduFramer {
             context_id,
             room,
@@ -172,13 +177,50 @@ impl<F: FnMut(bytes::Bytes) -> std::io::Result<()>> std::io::Write for PduFramer
 }
 
 /// Sends a command and a dataset as one DIMSE message, streaming the dataset
-/// (NET-13): the command goes out first in its own P-DATA-TF, then the dataset
-/// is encoded on a blocking thread into a bounded channel that this task writes
-/// out, so peak memory is O(PDU) regardless of the dataset size.
+/// (NET-13). The command goes out first in its own P-DATA-TF; the dataset is then
+/// encoded on a blocking thread into a bounded channel that this task writes out.
+///
+/// Peak memory is O(max_pdu + large_object_size + a few PDUs), independent of the
+/// instance size: the framer holds at most one PDV value, the channel holds two
+/// encoded PDUs, and the writer's own scratch buffer is `large_object_size`.
 ///
 /// `dataset` is moved so the encoder can run off-thread; a `Dataset` clone is
 /// cheap because its buffers are shared (`Arc`).
+///
+/// On any failure once the command PDUs are on the wire the peer holds a partial
+/// message, so this sends A-ABORT (§9.3.4) and returns a fatal error: the
+/// association must be dropped, not reused.
 pub async fn write_message_streamed<W>(
+    stream: &mut W,
+    context_id: u8,
+    command: bytes::Bytes,
+    dataset: Dataset,
+    syntax: std::sync::Arc<TransferSyntax>,
+    max_pdu: u32,
+    max_pdvs_per_pdu: usize,
+) -> Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let result = write_streamed_inner(
+        stream,
+        context_id,
+        command,
+        dataset,
+        syntax,
+        max_pdu,
+        max_pdvs_per_pdu,
+    )
+    .await;
+    if result.is_err() {
+        // Best effort: the stream may already be broken, which is why we abort.
+        let _ = abort(stream).await;
+    }
+    result
+}
+
+/// Encodes the command, then streams the dataset; see [`write_message_streamed`].
+async fn write_streamed_inner<W>(
     stream: &mut W,
     context_id: u8,
     command: bytes::Bytes,
@@ -201,10 +243,10 @@ where
     }
 
     let pdv_value = splitter.max_pdv_value();
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(2);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(2);
     let encoder = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        let mut framer = PduFramer::new(context_id, pdv_value, |bytes: bytes::Bytes| {
-            tx.blocking_send(bytes.to_vec())
+        let mut framer = PduFramer::new(context_id, pdv_value, |frame: bytes::Bytes| {
+            tx.blocking_send(frame)
                 .map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))
         });
         let options = WriteOptions {
@@ -217,8 +259,8 @@ where
         framer.finish()
     });
 
-    while let Some(bytes) = rx.recv().await {
-        stream.write_all(&bytes).await.map_err(NetworkError::Io)?;
+    while let Some(frame) = rx.recv().await {
+        stream.write_all(&frame).await.map_err(NetworkError::Io)?;
     }
     stream.flush().await.map_err(NetworkError::Io)?;
     match encoder.await {
@@ -233,6 +275,23 @@ where
     }
 }
 
+/// Sends A-ABORT (source: service-user) so a peer that saw a partial message
+/// discards it instead of waiting for the rest (§9.3.4).
+async fn abort<W>(stream: &mut W) -> std::io::Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt as _;
+    let abort = crate::pdu::Abort {
+        source: crate::error::AbortSource::Provider,
+        reason: 0,
+    };
+    let mut frame = Vec::new();
+    crate::pdu::encode_into(&crate::pdu::Pdu::Abort(abort), &mut frame)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    stream.write_all(&frame).await?;
+    stream.flush().await
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +309,7 @@ mod tests {
     #[test]
     fn the_framer_holds_at_most_one_pdu_and_marks_the_last_pdv() {
         use std::io::Write as _;
+        // an odd max_pdv_value must be rounded down to an even room
         let room = 100usize;
         let mut frames: Vec<bytes::Bytes> = Vec::new();
         let mut framer = PduFramer::new(3, room, |frame| {
@@ -265,12 +325,19 @@ mod tests {
 
         assert!(
             framer.max_buffered() <= room,
-            "held {} bytes, more than one PDU ({room})",
+            "held {} bytes, more than one PDV value ({room})",
             framer.max_buffered()
         );
 
         let mut joined = Vec::new();
         for (index, frame) in frames.iter().enumerate() {
+            // 6-byte PDU header + 6-byte PDV header + the value
+            assert!(
+                frame.len() <= room + 12,
+                "a frame ({}) exceeded one PDU ({} max)",
+                frame.len(),
+                room + 12
+            );
             let crate::pdu::Pdu::PData(pdata) = crate::pdu::decode(frame).unwrap() else {
                 panic!("the framer emits only P-DATA")
             };
@@ -282,6 +349,10 @@ mod tests {
                     index + 1 == frames.len(),
                     "only the final PDV is marked last"
                 );
+                assert!(
+                    pdv.data.len() % 2 == 0,
+                    "a PDV value must stay even so no pad byte is spliced in"
+                );
                 joined.extend_from_slice(&pdv.data);
             }
         }
@@ -289,8 +360,117 @@ mod tests {
         assert!(frames.len() > 5, "the payload really was split");
     }
 
+    #[test]
+    fn an_odd_max_pdv_value_is_rounded_down_to_an_even_room() {
+        use std::io::Write as _;
+        let mut frames: Vec<bytes::Bytes> = Vec::new();
+        let mut framer = PduFramer::new(1, 101, |frame| {
+            frames.push(frame);
+            Ok(())
+        });
+        framer.write_all(&[0xABu8; 400]).unwrap();
+        framer.finish().unwrap();
+        assert_eq!(framer.max_buffered(), 100, "101 rounds down to an even 100");
+        for frame in &frames {
+            assert!(frame.len() <= 100 + 12);
+        }
+    }
+
+    /// An `AsyncWrite` that fails once, after `fail_at` bytes, then accepts
+    /// everything (so the A-ABORT that follows the failure is still recorded).
+    struct FailOnce {
+        buf: Vec<u8>,
+        fail_at: usize,
+        failed: bool,
+    }
+
+    impl tokio::io::AsyncWrite for FailOnce {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            data: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            let this = self.get_mut();
+            if !this.failed && this.buf.len() >= this.fail_at {
+                this.failed = true;
+                return std::task::Poll::Ready(Err(std::io::Error::other("boom")));
+            }
+            this.buf.extend_from_slice(data);
+            std::task::Poll::Ready(Ok(data.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
     #[tokio::test]
-    async fn a_streamed_message_matches_the_buffered_bytes_on_the_wire() {
+    async fn a_mid_stream_failure_sends_an_abort() {
+        let mut sink = FailOnce {
+            buf: Vec::new(),
+            fail_at: 1,
+            failed: false,
+        };
+        let error = write_message_streamed(
+            &mut sink,
+            1,
+            bytes::Bytes::from_static(b"cmd"),
+            sample_dataset(),
+            syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+            256,
+            16,
+        )
+        .await;
+        assert!(error.is_err(), "a write failure is reported");
+
+        let mut last = None;
+        let mut offset = 0usize;
+        while offset + 6 <= sink.buf.len() {
+            let len = u32::from_be_bytes([
+                sink.buf[offset + 2],
+                sink.buf[offset + 3],
+                sink.buf[offset + 4],
+                sink.buf[offset + 5],
+            ]) as usize;
+            let end = offset + 6 + len;
+            last = Some(crate::pdu::decode(&sink.buf[offset..end]).unwrap());
+            offset = end;
+        }
+        assert!(
+            matches!(last, Some(crate::pdu::Pdu::Abort(_))),
+            "a partial message is followed by A-ABORT, got {last:?}"
+        );
+    }
+
+    #[test]
+    fn an_empty_dataset_still_emits_one_last_pdv() {
+        let mut frames: Vec<bytes::Bytes> = Vec::new();
+        let mut framer = PduFramer::new(2, 64, |frame| {
+            frames.push(frame);
+            Ok(())
+        });
+        framer.finish().unwrap();
+        assert_eq!(frames.len(), 1, "even an empty message needs a last PDV");
+        let crate::pdu::Pdu::PData(pdata) = crate::pdu::decode(&frames[0]).unwrap() else {
+            panic!("expected P-DATA")
+        };
+        assert_eq!(pdata.pdvs.len(), 1);
+        assert!(pdata.pdvs[0].is_last);
+        assert!(pdata.pdvs[0].data.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_streamed_message_reassembles_to_the_buffered_message() {
         use crate::assembler::PdvAssembler;
         use tokio::io::AsyncWriteExt as _;
 
@@ -355,6 +535,11 @@ mod tests {
                 wire[offset + 5],
             ]) as usize;
             let end = offset + 6 + len;
+            assert!(
+                end - offset <= 128,
+                "a streamed frame ({}) exceeded the negotiated max_pdu (128)",
+                end - offset
+            );
             streamed_frames.push(bytes::Bytes::copy_from_slice(&wire[offset..end]));
             offset = end;
         }

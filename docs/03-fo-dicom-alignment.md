@@ -68,7 +68,7 @@ These are deliberate, tested differences rather than missing features.
 | Area | Divergence | Why |
 |---|---|---|
 | JSON `NumberMode` default | `JsonOptions::default()` uses `PreferablyAsNumber`, not fo-dicom's `AsNumber`. An IS/DS value is written as a JSON number only when the number's own text form is identical, so `"0001"` stays a string. | fo-dicom writes `1`, which loses the stored text; `NumberMode::AsNumber` reproduces fo-dicom exactly when byte-compatible output is required. |
-| Streaming C-STORE dataset | The dataset is streamed through the writer as P-DATA PDUs (one PDV per PDU) instead of one buffered `Vec<u8>`; a transcoded C-STORE still materialises its output. | O(PDU) memory for a multi-GB instance; the wire bytes are the same message, only the PDV batching differs. |
+| Streaming C-STORE dataset | The dataset is streamed through the writer as P-DATA PDUs (one PDV per PDU) instead of one buffered `Vec<u8>`; a transcoded C-STORE still materialises its output. | Peak memory is O(max_pdu + `large_object_size` + a couple of PDUs), independent of instance size; the reassembled DIMSE message and stream bytes are identical, only the PDU framing differs. |
 | JSON `BulkDataURI` for deferred buffers | A deferred value (`FileWindow`/`StreamWindow`/`TempFileSpill`) is written as `BulkDataURI` only when `JsonOptions::bulk_data_uri` names one; otherwise it is materialised and base64-encoded. A URI parsed from JSON is still echoed unchanged. | Naming a URI means hosting the bytes somewhere, which is the caller's job; the default keeps output byte-compatible with the previous release and with fo-dicom's converter. |
 
 ## Reproducing
@@ -81,10 +81,10 @@ cargo xtask coverage          # production line coverage, 95% floor
 
 ## Current Test Baseline
 
-14 test targets green: **1,366 tests, 1 ignored, 0 failures**; clippy and rustdoc clean; production
-line coverage **95.62%** (core 95.69%, json 96.03%, network 95.38%). Breakdown: core lib 820, dump
+14 test targets green: **1,369 tests, 1 ignored, 0 failures**; clippy and rustdoc clean; production
+line coverage **95.57%** (core 95.69%, json 96.03%, network 95.20%). Breakdown: core lib 820, dump
 binary 5, cli_dump 1, corpus 7, core fuzz 3, core goldens 1, radicom-dict 5, radicom-json lib 76, JSON
-goldens 1, radicom-network lib 431, network fuzz 2, network goldens 3, interop 2 run + 1 ignored,
+goldens 1, radicom-network lib 434, network fuzz 2, network goldens 3, interop 2 run + 1 ignored,
 xtask 6, peer_interop example 1.
 
 > Caveat: this audit checks feature presence and code paths. It is **not** an adversarial correctness

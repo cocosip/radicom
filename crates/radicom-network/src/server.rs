@@ -1484,8 +1484,22 @@ where
         request.affected_sop_instance_uid = Some(sop_instance);
         request.no_dataset = false;
 
-        let payload = if source_syntax.uid() == target.uid() {
-            crate::message::encode_dataset(dataset, &target)?
+        let command = bytes::Bytes::from(command_bytes(&request)?);
+        // Stream when no transcode is needed (NET-13); a transcode materialises
+        // its output by nature, so that branch stays buffered.
+        if source_syntax.uid() == target.uid() {
+            let max_pdu = self.splitter.max_pdu();
+            let max_pdvs = self.splitter.max_pdvs_per_pdu();
+            crate::message::write_message_streamed(
+                self.stream,
+                context_id,
+                command,
+                dataset.clone(),
+                target.clone(),
+                max_pdu,
+                max_pdvs,
+            )
+            .await?;
         } else {
             let transcoder = transcoder_for(&mut self.transcoder_cache, &source_syntax, &target);
             let transcoded = transcoder.transcode_dataset(dataset).map_err(|e| {
@@ -1494,16 +1508,13 @@ where
                     e.to_string(),
                 ))
             })?;
-            crate::message::encode_dataset(&transcoded, &target)?
-        };
-
-        let command = bytes::Bytes::from(command_bytes(&request)?);
-        let payload = bytes::Bytes::from(payload);
-        // one vectored write for the whole sub-operation (NET-12)
-        let pdus = self
-            .splitter
-            .split_message_bytes(context_id, command, Some(payload))?;
-        write_pdata_batch(self.stream, pdus).await?;
+            let payload = bytes::Bytes::from(crate::message::encode_dataset(&transcoded, &target)?);
+            // one vectored write for the whole sub-operation (NET-12)
+            let pdus = self
+                .splitter
+                .split_message_bytes(context_id, command, Some(payload))?;
+            write_pdata_batch(self.stream, pdus).await?;
+        }
 
         let (response, cancelled) = self
             .await_store_response(message_id, operation_context_id, operation_message_id)

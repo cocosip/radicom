@@ -8,18 +8,21 @@ and the acceptance test for the day it is implemented.
 ## 1. Streaming datasets (network) — done (2026-10-30)
 
 - **Shipped:** `message::write_message_streamed` sends the command, then encodes the dataset on a
-  blocking thread into a bounded channel (capacity 2) that the association task writes out, so peak
-  memory is O(PDU) no matter the instance size. `PduFramer` frames the writer's output into P-DATA PDUs
-  one PDV at a time and holds back the tail so the final PDV carries the "last" bit. The C-STORE send
-  path uses it whenever no transcode is needed.
+  blocking thread into a bounded channel (capacity 2) that the association task writes out. Peak memory
+  is O(max_pdu + `large_object_size` + a couple of PDUs), independent of the instance size.
+  `PduFramer` frames the writer's output into P-DATA PDUs one PDV at a time and holds back the tail so
+  the final PDV carries the "last" bit. Used by the SCU C-STORE, the C-MOVE push and the C-GET
+  reverse-store push whenever no transcode is needed; a mid-stream failure sends A-ABORT.
 - **Reference:** PS3.8 §9.3 P-DATA fragmentation; fo-dicom `DicomService`/`PDataTFStream`.
-- **Library choices:** one PDV per PDU (the buffered splitter packs several) — more PDUs, same bytes;
-  a transcoded C-STORE still materialises its transcoded output, which is inherent to transcoding.
-- **Tests:** `the_framer_holds_at_most_one_pdu_and_marks_the_last_pdv` (asserts `max_buffered()` never
-  exceeds one PDV), `a_streamed_message_matches_the_buffered_bytes_on_the_wire` and
-  `a_large_dataset_streams_through_many_pdus_intact` (2 MiB over max_pdu 1024, reassembled
-  byte-for-byte) in `crates/radicom-network/src/message.rs`; the loopback C-STORE interop test now
-  exercises the streamed path.
+- **Library choices:** one PDV per PDU (the buffered splitter packs several) — more PDUs, the same
+  reassembled bytes; a transcoded store still materialises its transcoded output, inherent to
+  transcoding.
+- **Tests:** in `crates/radicom-network/src/message.rs`:
+  `the_framer_holds_at_most_one_pdu_and_marks_the_last_pdv` (bounds `max_buffered()`, the frame length,
+  the last bit and even PDVs), `an_odd_max_pdv_value_is_rounded_down_to_an_even_room`,
+  `an_empty_dataset_still_emits_one_last_pdv`, `a_streamed_message_reassembles_to_the_buffered_message`
+  (each frame within `max_pdu`) and `a_large_dataset_streams_through_many_pdus_intact` (2 MiB over
+  max_pdu 1024, byte-for-byte); the loopback C-STORE interop test exercises the streamed path.
 
 ## 2. TLS system trust store and host-name verification — done (2026-10-30)
 
