@@ -77,10 +77,12 @@ impl TlsOptions {
 
     /// Client material trusting the given CA bundle.
     ///
-    /// Without a CA bundle the configuration is rejected: an empty root store
-    /// can verify nothing, so failing at configuration time is clearer than
-    /// failing later with "unknown issuer". For a test peer, set
-    /// [`TlsOptions::accept_any`] instead (NET-17).
+    /// Without a CA bundle the client trusts the platform root store (Windows
+    /// certificate store, macOS keychain, OpenSSL's default paths), which is what
+    /// fo-dicom's `X509Store` does, so a public-CA server connects with no
+    /// configuration. A bundle pins the trust anchors to exactly those
+    /// certificates instead. For a test peer, set [`TlsOptions::accept_any`]
+    /// (NET-17).
     pub fn client(ca_file: Option<impl Into<std::path::PathBuf>>) -> Self {
         TlsOptions {
             cert_file: ca_file.map(Into::into),
@@ -126,26 +128,28 @@ impl TlsOptions {
     }
 
     /// Builds the client configuration.
+    ///
+    /// The trust anchors come from the CA bundle when one is configured, and from
+    /// the platform root store otherwise (NET-17).
     pub fn client_config(&self) -> Result<Arc<ClientConfig>> {
         let mut roots = RootCertStore::empty();
-        if let Some(ca) = &self.cert_file {
-            for cert in load_certs(ca)? {
-                roots
-                    .add(cert)
-                    .map_err(|e| NetworkError::protocol_tls(e.to_string()))?;
+        match &self.cert_file {
+            Some(ca) => {
+                for cert in load_certs(ca)? {
+                    roots
+                        .add(cert)
+                        .map_err(|e| NetworkError::protocol_tls(e.to_string()))?;
+                }
             }
-        }
-
-        if roots.is_empty() && !self.accept_any {
-            return Err(NetworkError::protocol_tls(
-                "client TLS has no trusted CA: set cert_file to a CA bundle or accept_any \
-                 for a test peer",
-            ));
+            // accept_any replaces the verifier, so no anchors are needed
+            None if self.accept_any => {}
+            None => roots = load_system_roots()?,
         }
 
         let builder = ClientConfig::builder_with_protocol_versions(self.min_version.versions());
         let builder = if self.accept_any {
             // testing only: accept any server certificate
+            tracing::warn!("TLS client built with accept_any: the peer is not authenticated");
             builder
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(NoVerification))
@@ -206,6 +210,36 @@ impl TlsOptions {
         let name = self.verify_name(peer)?;
         connector.connect(name, stream).await.map_err(tls_err)
     }
+}
+
+/// Loads the platform root store (Windows certificate store, macOS keychain,
+/// OpenSSL's default paths), like fo-dicom's `X509Store` (NET-17).
+///
+/// A single unreadable platform certificate is skipped: the store as a whole is
+/// what has to work, and an unparseable entry must not take the others down.
+fn load_system_roots() -> Result<RootCertStore> {
+    let native = rustls_native_certs::load_native_certs();
+    let mut roots = RootCertStore::empty();
+    let mut rejected = 0usize;
+    for cert in native.certs {
+        if roots.add(cert).is_err() {
+            rejected += 1;
+        }
+    }
+    if roots.is_empty() {
+        return Err(NetworkError::protocol_tls(format!(
+            "the platform trust store is empty ({} unreadable, {rejected} rejected entries); \
+             set cert_file to a CA bundle instead",
+            native.errors.len()
+        )));
+    }
+    if rejected > 0 {
+        tracing::debug!(
+            rejected,
+            "platform trust store: skipped unusable certificates"
+        );
+    }
+    Ok(roots)
 }
 
 /// Maps a handshake failure onto a TLS error.
@@ -337,20 +371,29 @@ mod tests {
     }
 
     #[test]
-    fn a_client_without_a_trust_anchor_is_rejected_at_config_time() {
-        // NET-17: an empty root store verifies nothing, so the configuration
-        // itself fails instead of every handshake doing so
-        let error = TlsOptions::default()
+    fn a_ca_less_client_uses_the_platform_trust_store() {
+        // NET-17: no CA bundle means the OS root store, like fo-dicom's
+        // X509Store, so the configuration builds without any CA file.
+        let config = TlsOptions::default()
             .client_config()
-            .expect_err("no CA bundle and no accept_any");
-        assert!(
-            error.to_string().contains("no trusted CA"),
-            "unexpected error: {error}"
-        );
-        let error = TlsOptions::client(None::<std::path::PathBuf>)
-            .client_config()
-            .expect_err("a CA-less client cannot verify");
-        assert!(error.to_string().contains("no trusted CA"), "got {error}");
+            .expect("the platform trust store provides the anchors");
+        drop(config);
+        let trusting = TlsOptions::client(None::<std::path::PathBuf>);
+        assert!(trusting.cert_file.is_none());
+        assert!(!trusting.accept_any, "a CA-less client still verifies");
+    }
+
+    #[test]
+    fn the_platform_trust_store_is_loaded_or_reported() {
+        // A host without a platform store reports it instead of silently
+        // verifying nothing (the check that used to reject a CA-less client).
+        match load_system_roots() {
+            Ok(roots) => assert!(!roots.is_empty(), "a loaded store is never empty"),
+            Err(error) => assert!(
+                error.to_string().contains("platform trust store"),
+                "unexpected error: {error}"
+            ),
+        }
     }
 
     #[test]
@@ -461,9 +504,9 @@ ZfpRQ7oSMvyXNqCGkIuXOez3UtiQ5pUwnznzQF4hBfzAlhysk9/VTzgwbQxMCjDOEd6m
         };
         assert!(options.client_config().is_ok());
     }
-    /// Writes a self-signed certificate and key, returning their paths.
-    fn self_signed(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+    /// Writes a self-signed certificate for `name` and key, returning their paths.
+    fn self_signed_for(tag: &str, name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let cert = rcgen::generate_simple_self_signed(vec![name.to_string()]).unwrap();
         let dir = std::env::temp_dir().join(format!("radicom-tls-{}-{tag}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let cert_path = dir.join("cert.pem");
@@ -471,6 +514,11 @@ ZfpRQ7oSMvyXNqCGkIuXOez3UtiQ5pUwnznzQF4hBfzAlhysk9/VTzgwbQxMCjDOEd6m
         std::fs::write(&cert_path, cert.cert.pem()).unwrap();
         std::fs::write(&key_path, cert.key_pair.serialize_pem()).unwrap();
         (cert_path, key_path)
+    }
+
+    /// Writes a self-signed certificate for `localhost` and its key.
+    fn self_signed(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        self_signed_for(tag, "localhost")
     }
 
     #[tokio::test]
@@ -557,6 +605,83 @@ ZfpRQ7oSMvyXNqCGkIuXOez3UtiQ5pUwnznzQF4hBfzAlhysk9/VTzgwbQxMCjDOEd6m
         let result = Association::open(addr, "SCU", "SCP", contexts, client_options).await;
         assert!(result.is_err(), "an untrusted certificate is rejected");
         let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn a_dns_certificate_is_verified_against_the_supplied_server_name() {
+        // NET-17: the certificate names a DNS name, not the loopback address, so
+        // verification only succeeds when the caller supplies that name.
+        use crate::association::sop_class;
+        use crate::pdu::PresentationContext;
+        use crate::server::{Association, ClientOptions, DicomServer, ServerOptions};
+        use crate::services::VerificationProvider;
+
+        // Returns the client result and the server task: the server only finishes
+        // once the association is released, so the caller drives both.
+        let open = |cert: std::path::PathBuf, key: std::path::PathBuf, tls: TlsOptions| async move {
+            let server = DicomServer::bind(
+                "127.0.0.1:0",
+                Arc::new(VerificationProvider),
+                ServerOptions {
+                    tls: Some(TlsOptions::server(cert, key)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let addr = server.local_addr();
+            let handle = tokio::spawn(async move { server.accept_one().await });
+            let contexts = vec![PresentationContext::new(
+                1,
+                sop_class::VERIFICATION,
+                vec!["1.2.840.10008.1.2".to_string()],
+            )];
+            let result = Association::open(
+                addr,
+                "SCU",
+                "SCP",
+                contexts,
+                ClientOptions {
+                    tls: Some(tls),
+                    ..Default::default()
+                },
+            )
+            .await;
+            (result, handle)
+        };
+
+        let (cert, key) = self_signed_for("dns", "radicom.test");
+        // trusting the certificate but verifying the peer IP must fail: the
+        // certificate has no iPAddress subject alternative name
+        let (by_ip, handle) = open(
+            cert.clone(),
+            key.clone(),
+            TlsOptions {
+                cert_file: Some(cert.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(
+            by_ip.is_err(),
+            "a DNS-only certificate cannot verify against the peer address"
+        );
+        let _ = handle.await;
+
+        // with the DNS name supplied, the same certificate verifies
+        let (by_name, handle) = open(
+            cert.clone(),
+            key,
+            TlsOptions {
+                cert_file: Some(cert),
+                server_name: Some("radicom.test".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let association = by_name.expect("the DNS name in the certificate verifies");
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
     }
 
     #[tokio::test]

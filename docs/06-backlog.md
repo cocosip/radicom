@@ -17,17 +17,22 @@ and the acceptance test for the day it is implemented.
 - **Acceptance:** C-STORE of a multi-GB instance runs in O(PDU) memory; a benchmark asserts peak
   allocation under a bound; wire bytes unchanged (goldens pass).
 
-## 2. TLS system trust store and host-name verification
+## 2. TLS system trust store and host-name verification — done (2026-10-30)
 
-- **Current:** TLS needs an explicit CA bundle; a missing CA file yields an empty root store that only
-  fails at handshake. The default identity is the peer IP, so DNS-name certificates fail unless
-  `server_name` is set. `accept_any` is available without a guardrail. (Config-time guardrails and
-  clearer key-parse errors are fixed in the defect round; the trust-store integration is not.)
-- **Reference:** fo-dicom `Tls/DefaultTlsInitiator` uses the platform trust store and verifies the
-  connected host name.
-- **Why deferred:** needs a new optional dependency (`rustls-native-certs`-style) and platform testing.
-- **Acceptance:** with no CA configured, a public-CA server connects; verification uses the DNS name
-  when supplied; `accept_any` requires an explicit opt-in; tests use a generated CA on loopback.
+- **Shipped:** with no CA bundle the client now trusts the platform root store (Windows certificate
+  store, macOS keychain, OpenSSL default paths) via `rustls-native-certs`, so a public-CA server
+  connects with no configuration. A configured bundle pins the anchors to exactly those certificates.
+  Verification uses `server_name` when supplied and the peer address otherwise; `accept_any` logs a
+  warning and still needs an explicit opt-in. An empty platform store is reported instead of silently
+  verifying nothing.
+- **Reference:** PS3.8 §9.3 TLS; fo-dicom `Tls/DefaultTlsInitiator` (`X509Store` + host-name check).
+- **Library choice:** the trust source is platform-first, bundle-second — a bundle narrows trust rather
+  than adding to it, matching a pinned-CA deployment.
+- **Tests:** `a_ca_less_client_uses_the_platform_trust_store`,
+  `the_platform_trust_store_is_loaded_or_reported` and
+  `a_dns_certificate_is_verified_against_the_supplied_server_name` (a generated rcgen certificate on
+  loopback: rejected against the IP, accepted once the DNS name is supplied) in
+  `crates/radicom-network/src/tls.rs`.
 
 ## 3. JSON `BulkDataURI` for deferred buffers — done (2026-10-30)
 

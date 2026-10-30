@@ -60,7 +60,7 @@ verified by a test that would have failed before that review.
 | `image` crate backend | Optional | The dependency was **not** added; PNG/BMP export is covered by the hand-written encoders (`to_png`/`to_bmp`), so no export capability is missing |
 | `IPixelData`/`Image` traits, `InvertLut`/`PaddingLut`/`CompositeLut`/`PrecalculatedLut`, `CacheType` | Shape | Single-implementation / no-outer-consumer abstractions from fo-dicom's internal architecture; Rust already has concrete equivalents (`RawImage`/`BitDepth`/`ColorTable`), and empty trait shells were deliberately not created |
 | Additional OBS integrations | Not needed | Covered by OBS-01 (`MetricsCollector`) plus OBS-02 (`TracingMetrics` under the `otel` feature, emitted through `tracing` field conventions, **no `opentelemetry` dependency**) |
-| Streaming datasets, TLS system trust store | Feature (backlog) | Tracked with acceptance criteria in [06-backlog.md](06-backlog.md); current behaviour is documented and tested |
+| Streaming datasets | Feature (backlog) | Tracked with acceptance criteria in [06-backlog.md](06-backlog.md); current behaviour is documented and tested |
 
 ## Documented divergences from fo-dicom
 

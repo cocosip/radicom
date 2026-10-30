@@ -18,13 +18,14 @@ async-trait.workspace = true
 tracing.workspace = true
 tokio-rustls = { workspace = true, optional = true }
 rustls-pemfile = { workspace = true, optional = true }
+rustls-native-certs = { workspace = true, optional = true }
 # SO_SNDBUF/SO_RCVBUF: tokio exposes no setter, socket2 reaches the same
 # descriptor (already in the graph as a tokio dependency)
 socket2 = "0.6"
 
 [features]
 default = []
-tls = ["dep:tokio-rustls", "dep:rustls-pemfile"]
+tls = ["dep:tokio-rustls", "dep:rustls-pemfile", "dep:rustls-native-certs"]
 # OBS-02: TracingMetrics emits fo-dicom-aligned metrics via `tracing` field
 # conventions (no `opentelemetry` dependency; downstream bridges to OTel).
 otel = []

@@ -332,6 +332,10 @@ client/server. One tokio task per association. Locks must not be held across `.a
   failed C-MOVE report success.
 - `max_clients` must actually be enforced (a semaphore or equivalent); a config field that no code path
   reads is a bug. The same applies to `association_timeout` on the server side.
+- TLS client trust is platform-first: with no CA bundle the client trusts the OS root store
+  (`rustls-native-certs`), and a bundle pins the anchors instead of extending them. The certificate is
+  verified against `server_name` when set, otherwise the peer address; `accept_any` skips verification
+  and is only for tests (PS3.8 §9.3).
 
 ---
 
