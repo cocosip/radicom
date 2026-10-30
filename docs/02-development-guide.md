@@ -372,7 +372,7 @@ different code path.
 | fuzz | local/manual | both fuzz targets |
 | interop | local / self-hosted | DCMTK / fo-dicom matrix |
 | bench | local/manual | `cargo bench` against a baseline |
-| coverage | push to `master`/`main`, pull request, `workflow_dispatch` | `cargo xtask coverage` (runs `cargo llvm-cov`; production lines only — test/bench/example targets and inline `#[cfg(test)]` modules are excluded) with a **95% floor**. `cargo xtask` is the local alias; CI runs `cargo run --package xtask -- coverage`. Current measured numbers are in [05-code-review-2026-10-29.md](05-code-review-2026-10-29.md). |
+| coverage | push to `master`/`main`, pull request, `workflow_dispatch` | `cargo xtask coverage` (runs `cargo llvm-cov`; production lines only — test/bench/example targets and inline `#[cfg(test)]` modules are excluded) with a **95% floor**. `cargo xtask` is the repository alias in `.cargo/config.toml`; CI runs `cargo run --package xtask -- coverage`. Current measured numbers are in [05-code-review-2026-10-29.md](05-code-review-2026-10-29.md). |
 
 ### 5.10 Conventions
 

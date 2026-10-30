@@ -575,18 +575,14 @@ cargo llvm-cov --workspace --all-features
 Tag, UID and private dictionary tables are generated from the pinned fo-dicom dictionary XML under `crates/radicom-dict/dictionaries/`:
 
 ```bash
-cargo xtask generate
+cargo xtask gen-dict
 ```
 
-`cargo xtask` is a local alias: `.cargo/` is gitignored (it holds machine
-specific settings), so add it to your own `.cargo/config.toml`:
-
-```toml
-[alias]
-xtask = "run -p xtask --"
-```
-
-Without the alias the task still runs as `cargo run -p xtask -- generate`.
+`cargo xtask` is a repository alias defined in `.cargo/config.toml`
+(`xtask = "run -p xtask --"`), so it works on a fresh checkout; the long form
+`cargo run -p xtask -- gen-dict` is equivalent. Machine-specific cargo settings
+still belong in your own `.cargo/config.toml`, which is gitignored apart from
+that alias file.
 
 To move to a newer dictionary baseline, replace both XML files, run the generator, and commit the XML plus all regenerated outputs together.
 
