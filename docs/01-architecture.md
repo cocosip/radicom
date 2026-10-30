@@ -366,8 +366,9 @@ client/server. One tokio task per association. Locks must not be held across `.a
 ### 12.4 Printing (PRINT-01/02)
 
 - Film Session / Film Box / Image Box / Presentation LUT are dataset-backed models.
-- Layout rendering reuses the render pipeline (EmptyImageDensity background, Trim border, per-cell
-  aspect-fit, Polarity REVERSE).
+- Layout rendering reuses the render pipeline (BorderDensity film area, EmptyImageDensity image box
+  area, Trim border, per-cell aspect-fit, Polarity REVERSE, the MinDensity/MaxDensity window and the
+  SmoothingType filter).
 - Verify every tag against PS3.3 before use: `(2010,0120)` is MinDensity, `(2010,0500)` is
   ReferencedFilmSessionSequence, and `(2010,0510)` is ReferencedImageBoxSequence.
 

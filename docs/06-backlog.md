@@ -51,14 +51,20 @@ and the acceptance test for the day it is implemented.
 - **Acceptance:** all 15 value types buildable and readable; an SR missing CompletionFlag, a child
   RelationshipType or a value tag fails `validate()`; round-trip tests for SCOORD/SCOORD3D/TCOORD.
 
-## 5. Print `SmoothingType` and `BorderDensity`
+## 5. Print `SmoothingType` and `BorderDensity` — done (2026-10-30)
 
-- **Current:** `FilmOrientation` LANDSCAPE and the `[MinDensity, MaxDensity]` range are honoured after
-  the defect round. `SmoothingType` and `BorderDensity` are still ignored (trim border is a fixed 2 mm
-  band).
-- **Reference:** PS3.3 C.13.3.3 (Border Density), C.13.3.5 (Smoothing Type).
-- **Why deferred:** the DICOM attributes do not prescribe an algorithm; this is a feature choice.
-- **Acceptance:** a test pins the chosen smoothing filter and border fill for both densities.
+- **Shipped:** `FilmBox::smoothing_type`/`border_density`/`min_density`/`max_density` plus the
+  image-box `smoothing_type` override. `render_to_image` paints the film area with BorderDensity, each
+  image box area with the empty-image density, and filters each cell with the SmoothingType.
+- **Reference:** PS3.3 Table C.13-3 (Border Density, Smoothing Type, Min/Max Density are all Film Box
+  attributes) and Table C.13-5 (an image box Smoothing Type overrides the film box value).
+- **Library choices** (the standard leaves them open): the recognised smoothing values are `SMOOTH`
+  (3×3 box blur), `MEDIUM` (3×3 binomial) and `SHARP` (3×3 unsharp); Smoothing Type is defined only for
+  `MagnificationType` CUBIC, which this renderer does not implement, so the filter is applied as a
+  print-time enhancement. A numeric BorderDensity is hundredths of optical density (`150` = 1.5 OD).
+- **Tests:** `a_density_string_parses_into_the_printed_grey`,
+  `border_density_paints_the_film_area_between_images`, `smoothing_type_reaches_the_rendered_cell` and
+  `smoothing_applies_the_documented_filter` in `crates/radicom/src/print/render.rs`.
 
 ## 6. Out of this repository (scope / platform / environment)
 

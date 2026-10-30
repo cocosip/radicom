@@ -257,6 +257,47 @@ impl FilmBox {
         self.dataset.try_get_str(tags::TRIM).as_deref() == Some("YES")
     }
 
+    /// Sets `(2010,0080)` Smoothing Type (Table C.13-3). The standard leaves the
+    /// values to the Conformance Statement; the renderer recognises `SMOOTH`,
+    /// `MEDIUM` and `SHARP` and prints anything else unfiltered. An image box
+    /// value overrides this one (Table C.13-5).
+    pub fn set_smoothing_type(&mut self, value: impl Into<String>) {
+        self.dataset.insert_str(tags::SMOOTHING_TYPE, Vr::Cs, value);
+    }
+
+    pub fn smoothing_type(&self) -> Option<String> {
+        self.dataset.try_get_str(tags::SMOOTHING_TYPE)
+    }
+
+    /// Sets `(2010,0100)` Border Density (Table C.13-3): the density of the film
+    /// areas surrounding and between images. `BLACK`, `WHITE` or hundredths of
+    /// optical density; absent leaves those areas at the empty-image density.
+    pub fn set_border_density(&mut self, value: impl Into<String>) {
+        self.dataset.insert_str(tags::BORDER_DENSITY, Vr::Cs, value);
+    }
+
+    pub fn border_density(&self) -> Option<String> {
+        self.dataset.try_get_str(tags::BORDER_DENSITY)
+    }
+
+    /// Sets `(2010,0120)` Min Density (hundredths of optical density).
+    pub fn set_min_density(&mut self, value: u16) {
+        self.dataset.insert_value(tags::MIN_DENSITY, value);
+    }
+
+    pub fn min_density(&self) -> Option<u16> {
+        self.dataset.try_get(tags::MIN_DENSITY)
+    }
+
+    /// Sets `(2010,0130)` Max Density (hundredths of optical density).
+    pub fn set_max_density(&mut self, value: u16) {
+        self.dataset.insert_value(tags::MAX_DENSITY, value);
+    }
+
+    pub fn max_density(&self) -> Option<u16> {
+        self.dataset.try_get(tags::MAX_DENSITY)
+    }
+
     /// Lays out this film's image cells, inset by `margin` mm (§12.4).
     ///
     /// Returns an empty vector when the display format or film size is missing
@@ -372,30 +413,14 @@ impl ImageBox {
         self.dataset.try_get_str(tags::MAGNIFICATION_TYPE)
     }
 
-    /// Sets `(2010,0080)`; the renderer does not apply smoothing (see
-    /// `docs/06-backlog.md`).
+    /// Sets `(2010,0080)` on this image box, overriding the film box value
+    /// (Table C.13-5). See [`FilmBox::set_smoothing_type`] for the values.
     pub fn set_smoothing_type(&mut self, value: impl Into<String>) {
         self.dataset.insert_str(tags::SMOOTHING_TYPE, Vr::Cs, value);
     }
 
     pub fn smoothing_type(&self) -> Option<String> {
         self.dataset.try_get_str(tags::SMOOTHING_TYPE)
-    }
-
-    pub fn set_min_density(&mut self, value: u16) {
-        self.dataset.insert_value(tags::MIN_DENSITY, value);
-    }
-
-    pub fn min_density(&self) -> Option<u16> {
-        self.dataset.try_get(tags::MIN_DENSITY)
-    }
-
-    pub fn set_max_density(&mut self, value: u16) {
-        self.dataset.insert_value(tags::MAX_DENSITY, value);
-    }
-
-    pub fn max_density(&self) -> Option<u16> {
-        self.dataset.try_get(tags::MAX_DENSITY)
     }
 
     pub fn set_requested_image_size(&mut self, value: f64) {
@@ -555,6 +580,32 @@ mod tests {
     }
 
     #[test]
+    fn the_film_box_carries_the_presentation_densities() {
+        // Table C.13-3: these are Film Box attributes, not Image Box ones.
+        let mut film = FilmBox::new();
+        assert_eq!(film.border_density(), None);
+        assert_eq!(film.smoothing_type(), None);
+        assert_eq!(film.min_density(), None);
+        assert_eq!(film.max_density(), None);
+
+        film.set_border_density("WHITE");
+        film.set_smoothing_type("SMOOTH");
+        film.set_min_density(10);
+        film.set_max_density(200);
+        assert_eq!(film.border_density().as_deref(), Some("WHITE"));
+        assert_eq!(film.smoothing_type().as_deref(), Some("SMOOTH"));
+        assert_eq!(film.min_density(), Some(10));
+        assert_eq!(film.max_density(), Some(200));
+        // and they land on the PS3.6 tags, not on some neighbour
+        assert_eq!(
+            film.dataset().try_get_str(tags::BORDER_DENSITY).as_deref(),
+            Some("WHITE")
+        );
+        assert_eq!(film.dataset().try_get::<u16>(tags::MIN_DENSITY), Some(10));
+        assert_eq!(film.dataset().try_get::<u16>(tags::MAX_DENSITY), Some(200));
+    }
+
+    #[test]
     fn an_image_box_reports_position_polarity_and_images() {
         let mut image_box = ImageBox::from_dataset(Dataset::new());
         image_box.set_position(2);
@@ -564,13 +615,9 @@ mod tests {
 
         image_box.set_magnification_type("REPLICATE");
         image_box.set_smoothing_type("MEDIUM");
-        image_box.set_min_density(10);
-        image_box.set_max_density(200);
         image_box.set_requested_image_size(25.5);
         assert_eq!(image_box.magnification_type().as_deref(), Some("REPLICATE"));
         assert_eq!(image_box.smoothing_type().as_deref(), Some("MEDIUM"));
-        assert_eq!(image_box.min_density(), Some(10));
-        assert_eq!(image_box.max_density(), Some(200));
         assert_eq!(image_box.requested_image_size(), Some(25.5));
 
         image_box.push_image(Dataset::new());

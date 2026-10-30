@@ -31,39 +31,60 @@ impl Default for RenderScale {
     }
 }
 
-/// Empty-image density (2010,0110): BLACK, WHITE or an optical-density string.
+/// A printed density. `EmptyImageDensity` (2010,0110) uses all three forms;
+/// `BorderDensity` (2010,0100) is defined as `BLACK`/`WHITE`, and a numeric
+/// value is accepted there as hundredths of optical density as well.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum EmptyDensity {
+pub enum PrintDensity {
     Black,
     White,
     /// An optical-density value in `[0, 2]`; 0 = white, ≥2 = black.
     Optical(f64),
 }
 
-impl EmptyDensity {
-    /// The background grey level this density maps to.
+impl PrintDensity {
+    /// The grey level this density prints as.
     pub fn background(self) -> Color32 {
         let level = match self {
-            EmptyDensity::Black => 0u8,
-            EmptyDensity::White => 255,
-            EmptyDensity::Optical(od) => (255.0 * (1.0 - od.clamp(0.0, 2.0) / 2.0)) as u8,
+            PrintDensity::Black => 0u8,
+            PrintDensity::White => 255,
+            PrintDensity::Optical(od) => (255.0 * (1.0 - od.clamp(0.0, 2.0) / 2.0)) as u8,
         };
         Color32::new(level, level, level)
+    }
+
+    /// Parses an optical-density attribute value (`BLACK`, `WHITE` or a
+    /// hundredths-of-OD number). `None` for anything else, so an unknown value
+    /// falls back to "not printed" instead of guessing.
+    pub fn parse(value: &str) -> Option<PrintDensity> {
+        let value = value.trim();
+        if value.eq_ignore_ascii_case("BLACK") {
+            return Some(PrintDensity::Black);
+        }
+        if value.eq_ignore_ascii_case("WHITE") {
+            return Some(PrintDensity::White);
+        }
+        value
+            .parse::<f64>()
+            .ok()
+            .map(|hundredths| PrintDensity::Optical(hundredths / 100.0))
     }
 }
 
 impl FilmBox {
     /// Renders the film to an 8-bit [`RawImage`] (PRINT-02).
     ///
-    /// `FilmOrientation` LANDSCAPE swaps the canvas and the cell grid (PS3.3
-    /// C.13.3.1), and each image box's `[MinDensity, MaxDensity]` window maps the
-    /// rendered greys (C.13.3.2). `SmoothingType` and `BorderDensity` are not
-    /// applied (see `docs/06-backlog.md`).
+    /// `FilmOrientation` LANDSCAPE swaps the canvas and the cell grid, the film
+    /// box's `[MinDensity, MaxDensity]` window maps the rendered greys, and
+    /// `SmoothingType` selects the per-cell filter (Table C.13-3/C.13-5).
+    /// `BorderDensity` paints the film areas surrounding and between images;
+    /// `empty_density` paints the image box areas that contain no image, and is
+    /// also the fallback for the film area when no BorderDensity is present.
     pub fn render_to_image(
         &self,
         margins: f64,
         scale: RenderScale,
-        empty_density: EmptyDensity,
+        empty_density: PrintDensity,
     ) -> Result<RawImage, Error> {
         let film = self.effective_film_size().ok_or_else(|| {
             Error::Data(DataError::Other {
@@ -73,7 +94,12 @@ impl FilmBox {
 
         let canvas_w = ((film.width_mm * scale.pixels_per_mm).round() as u32).max(1);
         let canvas_h = ((film.height_mm * scale.pixels_per_mm).round() as u32).max(1);
-        let mut canvas = Canvas::filled(canvas_w, canvas_h, empty_density.background());
+        let border = self
+            .border_density()
+            .as_deref()
+            .and_then(PrintDensity::parse)
+            .unwrap_or(empty_density);
+        let mut canvas = Canvas::filled(canvas_w, canvas_h, border.background());
 
         if self.trim() {
             // Trim box border ≈ 2 mm (fo-dicom ImageBox BORDER = 100*2/25.4 in
@@ -88,6 +114,9 @@ impl FilmBox {
         let cells = self.layout(margins);
         let boxes = self.image_boxes();
         for (index, cell) in cells.iter().enumerate() {
+            // Table C.13-3: an image box area with no image is painted with the
+            // empty-image density, so paint the cell before it gets an image.
+            canvas.fill_cell(cell, empty_density.background(), scale.pixels_per_mm);
             // PS3.3 C.11.1: ImageBoxPosition selects the cell (1-based). Fall back
             // to list order when a box omits the attribute.
             let position = (index + 1) as u16;
@@ -118,7 +147,10 @@ impl FilmBox {
             if image_box.polarity() {
                 invert(&mut patch);
             }
-            apply_density_range(&mut patch, image_box.min_density(), image_box.max_density());
+            apply_density_range(&mut patch, self.min_density(), self.max_density());
+            // Table C.13-5: an image box SmoothingType overrides the film box one.
+            let smoothing = image_box.smoothing_type().or_else(|| self.smoothing_type());
+            apply_smoothing(&mut patch, smoothing.as_deref());
             canvas.blit_scaled(
                 cell,
                 &patch,
@@ -140,6 +172,106 @@ fn apply_lut(image: &mut RawImage, table: &PresentationLutTable) {
         px[0] = out;
         px[1] = out;
         px[2] = out;
+    }
+}
+
+/// Applies the Smoothing Type filter (PS3.3 Table C.13-3/C.13-5).
+///
+/// The standard defines the values in the Conformance Statement and applies them
+/// only for `MagnificationType` CUBIC, which this renderer does not implement, so
+/// the recognised values are this library's: `SMOOTH` is a 3×3 box blur,
+/// `MEDIUM` a 3×3 binomial (1-2-1 separable) blur, `SHARP` a 3×3 unsharp kernel
+/// (centre 5, four-neighbour −1), and `NONE` or an unknown value prints the
+/// rendered pixels unchanged.
+fn apply_smoothing(image: &mut RawImage, smoothing: Option<&str>) {
+    let Some(smoothing) = smoothing else {
+        return;
+    };
+    let value = smoothing.trim().to_ascii_uppercase();
+    match value.as_str() {
+        "SMOOTH" => blur(image, [1, 1, 1]),
+        "MEDIUM" => blur(image, [1, 2, 1]),
+        "SHARP" => sharpen(image),
+        "NONE" => {}
+        other => {
+            // like the rest of the print path, an unsupported value is a warning
+            // rather than a failed film
+            tracing::warn!(
+                smoothing = other,
+                "unknown SmoothingType; printed unfiltered"
+            );
+        }
+    }
+}
+
+/// A separable 3-tap blur over the colour channels, edge-clamped and rounded.
+fn blur(image: &mut RawImage, weights: [u32; 3]) {
+    let width = image.width() as usize;
+    let height = image.height() as usize;
+    if width == 0 || height == 0 {
+        return;
+    }
+    let sum: u32 = weights.iter().sum();
+    let half = sum / 2;
+    // one scratch buffer: horizontal pass image → scratch, vertical scratch → image
+    let mut scratch = vec![0u8; image.as_bytes().len()];
+
+    {
+        let source = image.as_bytes();
+        for y in 0..height {
+            for x in 0..width {
+                for channel in 0..3 {
+                    let mut acc = 0u32;
+                    for (tap, weight) in weights.iter().enumerate() {
+                        let sx = (x + tap).saturating_sub(1).min(width - 1);
+                        acc += source[(y * width + sx) * 4 + channel] as u32 * weight;
+                    }
+                    scratch[(y * width + x) * 4 + channel] = ((acc + half) / sum) as u8;
+                }
+                scratch[(y * width + x) * 4 + 3] = source[(y * width + x) * 4 + 3];
+            }
+        }
+    }
+    // vertical pass: scratch → image
+    let target = image.as_bytes_mut();
+    for y in 0..height {
+        for x in 0..width {
+            for channel in 0..3 {
+                let mut acc = 0u32;
+                for (tap, weight) in weights.iter().enumerate() {
+                    let sy = (y + tap).saturating_sub(1).min(height - 1);
+                    acc += scratch[(sy * width + x) * 4 + channel] as u32 * weight;
+                }
+                target[(y * width + x) * 4 + channel] = ((acc + half) / sum) as u8;
+            }
+        }
+    }
+}
+
+/// A 3×3 unsharp kernel: centre 5, four-neighbour −1. A flat area is unchanged
+/// (the weights sum to 1); an edge overshoots, which is what "sharp" means here.
+fn sharpen(image: &mut RawImage) {
+    let width = image.width() as usize;
+    let height = image.height() as usize;
+    if width == 0 || height == 0 {
+        return;
+    }
+    let source = image.as_bytes().to_vec();
+    let at = |x: usize, y: usize, channel: usize| -> i32 {
+        source[(y.min(height - 1) * width + x.min(width - 1)) * 4 + channel] as i32
+    };
+    for y in 0..height {
+        for x in 0..width {
+            for channel in 0..3 {
+                let centre = at(x, y, channel);
+                let cross = at(x.saturating_sub(1), y, channel)
+                    + at(x + 1, y, channel)
+                    + at(x, y.saturating_sub(1), channel)
+                    + at(x, y + 1, channel);
+                let value = (5 * centre - cross).clamp(0, 255) as u8;
+                image.as_bytes_mut()[(y * width + x) * 4 + channel] = value;
+            }
+        }
     }
 }
 
@@ -197,18 +329,45 @@ impl Canvas {
 
     fn draw_border(&mut self, color: Color32, thickness: i64) {
         let (w, h) = (self.width as i64, self.height as i64);
+        self.draw_rect_border(0, 0, w - 1, h - 1, color, thickness);
+    }
+
+    /// Fills `cell` with `color` (the empty-image density of the cell area).
+    fn fill_cell(&mut self, cell: &LayoutCell, color: Color32, px_per_mm: f64) {
+        let x0 = (cell.x * px_per_mm).round() as i64;
+        let y0 = (cell.y * px_per_mm).round() as i64;
+        let x1 = x0 + (cell.width * px_per_mm).round() as i64;
+        let y1 = y0 + (cell.height * px_per_mm).round() as i64;
+        for y in y0.max(0)..y1.min(self.height as i64) {
+            for x in x0.max(0)..x1.min(self.width as i64) {
+                self.set(x, y, color);
+            }
+        }
+    }
+
+    /// Draws a `thickness`-pixel frame on the rectangle's inside edge; pixels
+    /// outside the canvas are ignored, so a cell on the film edge is clipped.
+    fn draw_rect_border(
+        &mut self,
+        x0: i64,
+        y0: i64,
+        x1: i64,
+        y1: i64,
+        color: Color32,
+        thickness: i64,
+    ) {
         for t in 0..thickness {
-            let (x0, y0, x1, y1) = (t, t, w - 1 - t, h - 1 - t);
-            if x1 < x0 || y1 < y0 {
+            let (ax, ay, bx, by) = (x0 + t, y0 + t, x1 - t, y1 - t);
+            if bx < ax || by < ay {
                 break;
             }
-            for x in x0..=x1 {
-                self.set(x, y0, color);
-                self.set(x, y1, color);
+            for x in ax..=bx {
+                self.set(x, ay, color);
+                self.set(x, by, color);
             }
-            for y in y0..=y1 {
-                self.set(x0, y, color);
-                self.set(x1, y, color);
+            for y in ay..=by {
+                self.set(ax, y, color);
+                self.set(bx, y, color);
             }
         }
     }
@@ -337,7 +496,7 @@ mod tests {
     use crate::model::tag::Tag;
     use crate::model::vr::Vr;
 
-    fn grayscale_image(fill: u8) -> Dataset {
+    fn grayscale_image(values: &[u8]) -> Dataset {
         let mut ds = Dataset::new();
         ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16);
         ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
@@ -353,7 +512,7 @@ mod tests {
             crate::model::element::DicomElement::new_bytes(
                 Tag::PIXEL_DATA,
                 Vr::Ob,
-                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![fill; 16])),
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(values.to_vec())),
             ),
         ));
         ds.set_transfer_syntax(
@@ -367,6 +526,11 @@ mod tests {
     /// The tags are the PS3.6 numbers rather than `print::models::tags`, so a
     /// wrong constant in the model cannot make this test agree with itself.
     fn film_with_one_box(polarity: &str, fill: u8) -> FilmBox {
+        film_with_patch(polarity, &[fill; 16])
+    }
+
+    /// A film box whose single image box holds a 4x4 patch with `values`.
+    fn film_with_patch(polarity: &str, values: &[u8]) -> FilmBox {
         let image_display_format = Tag::new(0x2010, 0x0010);
         let film_size_id = Tag::new(0x2010, 0x0050);
         let referenced_image_box_sequence = Tag::new(0x2010, 0x0510);
@@ -380,7 +544,7 @@ mod tests {
         }
         boxed
             .insert_sequence(Tag::BASIC_GRAYSCALE_IMAGE_SEQUENCE)
-            .push(grayscale_image(fill));
+            .push(grayscale_image(values));
 
         let mut film = Dataset::new();
         film.insert_str(image_display_format, Vr::Cs, "STANDARD\\1,1");
@@ -402,7 +566,7 @@ mod tests {
             .render_to_image(
                 10.0,
                 RenderScale { pixels_per_mm: 1.0 },
-                EmptyDensity::Black,
+                PrintDensity::Black,
             )
             .unwrap();
         assert_eq!(image.width(), 210); // A4 width mm at 1 px/mm
@@ -418,15 +582,10 @@ mod tests {
 
     /// A film box with one image box carrying explicit density bounds.
     fn film_with_densities(min: u16, max: u16) -> FilmBox {
-        let film = film_with_one_box("", 128);
-        let mut dataset = film.into_dataset();
-        let sequence = dataset
-            .sequence_mut(Tag::new(0x2010, 0x0510))
-            .expect("image box sequence");
-        let boxed = &mut sequence.items_mut()[0];
-        boxed.insert_value(Tag::new(0x2010, 0x0120), min); // MinDensity
-        boxed.insert_value(Tag::new(0x2010, 0x0130), max); // MaxDensity
-        FilmBox::from_dataset(dataset)
+        let mut film = film_with_one_box("", 128);
+        film.set_min_density(min);
+        film.set_max_density(max);
+        film
     }
 
     #[test]
@@ -436,7 +595,7 @@ mod tests {
             .render_to_image(
                 10.0,
                 RenderScale { pixels_per_mm: 1.0 },
-                EmptyDensity::Black,
+                PrintDensity::Black,
             )
             .unwrap();
         assert_eq!((portrait.width(), portrait.height()), (210, 297));
@@ -447,7 +606,7 @@ mod tests {
             .render_to_image(
                 10.0,
                 RenderScale { pixels_per_mm: 1.0 },
-                EmptyDensity::Black,
+                PrintDensity::Black,
             )
             .unwrap();
         assert_eq!(
@@ -467,7 +626,7 @@ mod tests {
             .render_to_image(
                 10.0,
                 RenderScale { pixels_per_mm: 1.0 },
-                EmptyDensity::Black,
+                PrintDensity::Black,
             )
             .unwrap();
         assert_eq!(grey_at(&plain, 105, 148), 128);
@@ -477,7 +636,7 @@ mod tests {
             .render_to_image(
                 10.0,
                 RenderScale { pixels_per_mm: 1.0 },
-                EmptyDensity::Black,
+                PrintDensity::Black,
             )
             .unwrap();
         assert_eq!(
@@ -494,7 +653,7 @@ mod tests {
             .render_to_image(
                 10.0,
                 RenderScale { pixels_per_mm: 1.0 },
-                EmptyDensity::White,
+                PrintDensity::White,
             )
             .unwrap();
         // every corner is the white background
@@ -515,6 +674,202 @@ mod tests {
     }
 
     #[test]
+    fn smoothing_applies_the_documented_filter() {
+        // A 3x3 image with a single lit centre: every 3x3 window covers the
+        // whole image, so the blurred result is uniform and exact.
+        let lit = [0, 0, 0, 0, 255, 0, 0, 0, 0];
+
+        let mut none = grey_image(3, &lit);
+        apply_smoothing(&mut none, None);
+        assert_eq!(grey_at(&none, 1, 1), 255, "no smoothing keeps the pixel");
+
+        let mut smooth = grey_image(3, &lit);
+        apply_smoothing(&mut smooth, Some("SMOOTH"));
+        for y in 0..3 {
+            for x in 0..3 {
+                // 3x3 box: 255 / 9 = 28 (two rounded passes: 85, then 28)
+                assert_eq!(grey_at(&smooth, x, y), 28, "SMOOTH at ({x},{y})");
+            }
+        }
+
+        let mut medium = grey_image(3, &lit);
+        apply_smoothing(&mut medium, Some("medium"));
+        // binomial 1-2-1 on a single lit centre: 16 32 16 / 32 64 32 / 16 32 16
+        let expected = [16u8, 32, 16, 32, 64, 32, 16, 32, 16];
+        for (index, expected) in expected.iter().enumerate() {
+            let (x, y) = ((index % 3) as u32, (index / 3) as u32);
+            assert_eq!(grey_at(&medium, x, y), *expected, "MEDIUM at ({x},{y})");
+        }
+
+        // SHARP is an unsharp kernel: beside a bright step the dark side
+        // undershoots (and clamps) while the bright side clips
+        let step = [100, 100, 200, 100, 100, 200, 100, 100, 200];
+        let mut sharp = grey_image(3, &step);
+        apply_smoothing(&mut sharp, Some("SHARP"));
+        assert!(
+            grey_at(&sharp, 1, 1) < 100,
+            "the dark side of the step undershoots: {}",
+            grey_at(&sharp, 1, 1)
+        );
+        assert_eq!(grey_at(&sharp, 2, 1), 255, "the bright side clips");
+
+        // an unknown value prints unfiltered rather than failing the film
+        let mut unknown = grey_image(3, &step);
+        apply_smoothing(&mut unknown, Some("HEAVY"));
+        assert_eq!(unknown.as_bytes(), grey_image(3, &step).as_bytes());
+    }
+
+    /// A grey BGRA image built from `greys` (row-major).
+    fn grey_image(width: u32, greys: &[u8]) -> RawImage {
+        let mut bytes = Vec::with_capacity(greys.len() * 4);
+        for &grey in greys {
+            bytes.extend_from_slice(&[grey, grey, grey, 0xFF]);
+        }
+        RawImage::new(width, greys.len() as u32 / width, bytes)
+    }
+
+    /// A film box carrying a BorderDensity (Table C.13-3).
+    fn film_with_border(density: &str) -> FilmBox {
+        let mut film = film_with_one_box("", 128);
+        film.set_border_density(density);
+        film
+    }
+
+    /// A film box whose single image box carries no image.
+    fn film_with_empty_box() -> FilmBox {
+        let mut film = FilmBox::from_dataset(Dataset::new());
+        film.set_image_display_format("STANDARD\\1,1").unwrap();
+        film.set_film_size("A4").unwrap();
+        film.initialize_image_boxes(1);
+        film
+    }
+
+    #[test]
+    fn a_density_string_parses_into_the_printed_grey() {
+        assert_eq!(PrintDensity::parse("black"), Some(PrintDensity::Black));
+        assert_eq!(PrintDensity::parse(" White "), Some(PrintDensity::White));
+        // Table C.13-3: a number is hundredths of optical density
+        assert_eq!(PrintDensity::parse("150"), Some(PrintDensity::Optical(1.5)));
+        assert_eq!(PrintDensity::parse("0"), Some(PrintDensity::Optical(0.0)));
+        assert_eq!(PrintDensity::parse("GRAY"), None);
+        assert_eq!(PrintDensity::parse(""), None);
+        // 0 OD prints white, ≥2 OD prints black
+        assert_eq!(
+            PrintDensity::Optical(0.0).background(),
+            Color32::new(255, 255, 255)
+        );
+        assert_eq!(
+            PrintDensity::Optical(2.5).background(),
+            Color32::new(0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn border_density_paints_the_film_area_between_images() {
+        // Table C.13-3: BorderDensity is "the density of the film areas
+        // surrounding and between images", so it paints the film, not the image.
+        let scale = RenderScale { pixels_per_mm: 1.0 };
+        let white = film_with_border("WHITE")
+            .render_to_image(10.0, scale, PrintDensity::Black)
+            .unwrap();
+        assert_eq!(
+            grey_at(&white, 2, 2),
+            255,
+            "the margin is the border density"
+        );
+        assert_eq!(grey_at(&white, 105, 148), 128, "the image is untouched");
+
+        // without the attribute the film area keeps the empty-image density
+        let none = film_with_one_box("", 128)
+            .render_to_image(10.0, scale, PrintDensity::Black)
+            .unwrap();
+        assert_eq!(
+            grey_at(&none, 2, 2),
+            0,
+            "no BorderDensity means the empty density"
+        );
+
+        // 150 hundredths = 1.5 OD → 63/255
+        let grey = film_with_border("150")
+            .render_to_image(10.0, scale, PrintDensity::Black)
+            .unwrap();
+        assert_eq!(grey_at(&grey, 2, 2), 63, "150 means 1.5 OD");
+
+        // an unknown value falls back instead of guessing
+        let unknown = film_with_border("GRAYISH")
+            .render_to_image(10.0, scale, PrintDensity::Black)
+            .unwrap();
+        assert_eq!(
+            grey_at(&unknown, 2, 2),
+            0,
+            "an unknown density prints nothing"
+        );
+
+        // Table C.13-3 separates the two densities: the film area takes the
+        // border density, an image box without an image takes the empty one.
+        let mut empty_cell = film_with_empty_box();
+        empty_cell.set_border_density("WHITE");
+        let empty = empty_cell
+            .render_to_image(10.0, scale, PrintDensity::Black)
+            .unwrap();
+        assert_eq!(grey_at(&empty, 2, 2), 255, "the film area is the border");
+        assert_eq!(
+            grey_at(&empty, 105, 148),
+            0,
+            "an image box with no image is the empty density"
+        );
+    }
+
+    #[test]
+    fn smoothing_type_reaches_the_rendered_cell() {
+        // A hard step in the patch, so the filter has something to change even
+        // after the cell is scaled.
+        let mut values = [0u8; 16];
+        for (index, value) in values.iter_mut().enumerate() {
+            *value = if index % 4 < 2 { 0 } else { 255 };
+        }
+        let scale = RenderScale { pixels_per_mm: 1.0 };
+        let plain = film_with_patch("", &values)
+            .render_to_image(10.0, scale, PrintDensity::Black)
+            .unwrap();
+
+        // the film box value applies to every box
+        let mut smoothed = film_with_patch("", &values);
+        smoothed.set_smoothing_type("SMOOTH");
+        let smoothed = smoothed
+            .render_to_image(10.0, scale, PrintDensity::Black)
+            .unwrap();
+        assert_ne!(
+            plain.as_bytes(),
+            smoothed.as_bytes(),
+            "SMOOTH must change the rendered cell"
+        );
+        assert_eq!(
+            grey_at(&plain, 2, 2),
+            grey_at(&smoothed, 2, 2),
+            "the film margin is not filtered"
+        );
+
+        // Table C.13-5: an image box value overrides the film box one
+        let mut overridden = film_with_patch("", &values);
+        overridden.set_smoothing_type("SMOOTH");
+        let mut dataset = overridden.into_dataset();
+        dataset
+            .sequence_mut(Tag::new(0x2010, 0x0510))
+            .expect("image box sequence")
+            .items_mut()[0]
+            .insert_str(Tag::new(0x2010, 0x0080), Vr::Cs, "NONE");
+        let overridden = FilmBox::from_dataset(dataset)
+            .render_to_image(10.0, scale, PrintDensity::Black)
+            .unwrap();
+        assert_eq!(
+            plain.as_bytes(),
+            overridden.as_bytes(),
+            "the image box NONE overrides the film box SMOOTH"
+        );
+    }
+
+    #[test]
     fn trim_draws_a_border() {
         let mut film = film_with_one_box("", 128);
         film.set_trim(true);
@@ -523,7 +878,7 @@ mod tests {
             .render_to_image(
                 10.0,
                 RenderScale { pixels_per_mm: 2.0 },
-                EmptyDensity::White,
+                PrintDensity::White,
             )
             .unwrap();
         for i in 0..4 {
@@ -562,7 +917,7 @@ mod tests {
             boxed.insert_value(image_box_position.clone(), position);
             boxed
                 .insert_sequence(Tag::BASIC_GRAYSCALE_IMAGE_SEQUENCE)
-                .push(grayscale_image(fill));
+                .push(grayscale_image(&[fill; 16]));
             boxed
         };
         let mut film = Dataset::new();
@@ -582,7 +937,7 @@ mod tests {
             .render_to_image(
                 10.0,
                 RenderScale { pixels_per_mm: 2.0 },
-                EmptyDensity::Black,
+                PrintDensity::Black,
             )
             .unwrap();
         let centre = |cell: &LayoutCell| {
@@ -610,7 +965,7 @@ mod tests {
             .render_to_image(
                 10.0,
                 RenderScale { pixels_per_mm: 2.0 },
-                EmptyDensity::Black,
+                PrintDensity::Black,
             )
             .unwrap();
         let cx = image.width() / 2;
@@ -630,7 +985,7 @@ mod tests {
             .render_to_image(
                 10.0,
                 RenderScale { pixels_per_mm: 2.0 },
-                EmptyDensity::Black,
+                PrintDensity::Black,
             )
             .unwrap();
         let cx = image.width() / 2;
@@ -657,7 +1012,7 @@ mod tests {
             .render_to_image(
                 10.0,
                 RenderScale { pixels_per_mm: 2.0 },
-                EmptyDensity::Black,
+                PrintDensity::Black,
             )
             .unwrap();
 
@@ -667,7 +1022,7 @@ mod tests {
             .render_to_image(
                 10.0,
                 RenderScale { pixels_per_mm: 2.0 },
-                EmptyDensity::Black,
+                PrintDensity::Black,
             )
             .unwrap();
 
@@ -683,7 +1038,7 @@ mod tests {
         let mut film = FilmBox::new();
         film.set_image_display_format("STANDARD\\1,1").unwrap();
         assert!(film
-            .render_to_image(10.0, RenderScale::default(), EmptyDensity::Black)
+            .render_to_image(10.0, RenderScale::default(), PrintDensity::Black)
             .is_err());
     }
 
@@ -819,10 +1174,10 @@ mod tests {
 
     #[test]
     fn optical_empty_density_maps_density_to_grey() {
-        assert_eq!(EmptyDensity::Optical(0.0).background().r, 255);
-        assert_eq!(EmptyDensity::Optical(1.0).background().r, 127);
+        assert_eq!(PrintDensity::Optical(0.0).background().r, 255);
+        assert_eq!(PrintDensity::Optical(1.0).background().r, 127);
         assert_eq!(
-            EmptyDensity::Optical(99.0).background().r,
+            PrintDensity::Optical(99.0).background().r,
             0,
             "clamped to maximum density"
         );
@@ -841,7 +1196,7 @@ mod tests {
         first.insert_value(image_box_position, 2u16);
         first
             .insert_sequence(Tag::BASIC_GRAYSCALE_IMAGE_SEQUENCE)
-            .push(grayscale_image(200));
+            .push(grayscale_image(&[200; 16]));
         let empty = Dataset::new();
 
         let mut film = Dataset::new();
@@ -852,7 +1207,7 @@ mod tests {
         seq.push(empty);
         let film = FilmBox::from_dataset(film);
         let image = film
-            .render_to_image(5.0, RenderScale { pixels_per_mm: 1.0 }, EmptyDensity::White)
+            .render_to_image(5.0, RenderScale { pixels_per_mm: 1.0 }, PrintDensity::White)
             .unwrap();
         let lit = image
             .as_bytes()
@@ -867,7 +1222,7 @@ mod tests {
     #[test]
     fn an_unrenderable_cell_stays_background() {
         // HSV is not a supported render photometric: the cell is skipped, not fatal
-        let mut broken = grayscale_image(255);
+        let mut broken = grayscale_image(&[255; 16]);
         broken.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "HSV");
         let image_display_format = Tag::new(0x2010, 0x0010);
         let film_size_id = Tag::new(0x2010, 0x0050);
@@ -885,7 +1240,7 @@ mod tests {
         film.insert_sequence(referenced_image_box_sequence)
             .push(boxed);
         let image = FilmBox::from_dataset(film)
-            .render_to_image(0.0, RenderScale { pixels_per_mm: 0.1 }, EmptyDensity::White)
+            .render_to_image(0.0, RenderScale { pixels_per_mm: 0.1 }, PrintDensity::White)
             .unwrap();
         assert!(image.as_bytes().chunks(4).all(|pixel| pixel[0] == 255));
     }
@@ -919,7 +1274,7 @@ mod tests {
             .push(item);
         film = FilmBox::from_dataset(dataset);
         let image = film
-            .render_to_image(0.0, RenderScale { pixels_per_mm: 0.2 }, EmptyDensity::White)
+            .render_to_image(0.0, RenderScale { pixels_per_mm: 0.2 }, PrintDensity::White)
             .unwrap();
         let mapped = image
             .as_bytes()
@@ -941,7 +1296,7 @@ mod tests {
                 RenderScale {
                     pixels_per_mm: 0.05,
                 },
-                EmptyDensity::Black,
+                PrintDensity::Black,
             )
             .unwrap();
         assert_eq!(&image.as_bytes()[0..3], &[0, 0, 0], "border is black");
