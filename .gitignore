@@ -21,7 +21,6 @@ Thumbs.db
 # specific, so it stays out of the repository. The exception is config.toml,
 # which carries the shared `xtask` alias the docs and CI invoke.
 .cargo/*
-!.cargo/config.toml
 
 # Profiling / coverage output
 *.profraw

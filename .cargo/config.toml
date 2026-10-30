@@ -1,6 +1,0 @@
-# Shared cargo aliases. The documentation and CI refer to `cargo xtask <task>`;
-# this file ships so a fresh checkout can run exactly those commands.
-# Machine-specific settings (build target-dir, personal aliases) stay out of the
-# repository — see .gitignore.
-[alias]
-xtask = "run -p xtask --"
