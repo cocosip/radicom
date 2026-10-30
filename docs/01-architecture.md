@@ -341,7 +341,8 @@ client/server. One tokio task per association. Locks must not be held across `.a
 
 - Tag keys are 8 hex digits `GGGGEEEE`.
 - A value lives in exactly one of `Value` (array), `InlineBinary` (base64) or `BulkDataURI`.
-
+- A deferred value (a `FileWindow`/`StreamWindow`/`TempFileSpill`) is written as `BulkDataURI` when
+  `JsonOptions::bulk_data_uri` names one, and is then never materialised; otherwise it is base64-encoded.
 - PN uses the three groups (Alphabetic / Ideographic / Phonetic).
 - Numeric mode is configurable (AsNumber / AsString / PreferablyAsNumber); DS keeps trailing zeros.
 - **Group length elements `(gggg,0000)` must be stripped at every level of the tree.**

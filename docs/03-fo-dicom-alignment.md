@@ -60,7 +60,7 @@ verified by a test that would have failed before that review.
 | `image` crate backend | Optional | The dependency was **not** added; PNG/BMP export is covered by the hand-written encoders (`to_png`/`to_bmp`), so no export capability is missing |
 | `IPixelData`/`Image` traits, `InvertLut`/`PaddingLut`/`CompositeLut`/`PrecalculatedLut`, `CacheType` | Shape | Single-implementation / no-outer-consumer abstractions from fo-dicom's internal architecture; Rust already has concrete equivalents (`RawImage`/`BitDepth`/`ColorTable`), and empty trait shells were deliberately not created |
 | Additional OBS integrations | Not needed | Covered by OBS-01 (`MetricsCollector`) plus OBS-02 (`TracingMetrics` under the `otel` feature, emitted through `tracing` field conventions, **no `opentelemetry` dependency**) |
-| Streaming datasets, TLS system trust store, JSON `BulkDataURI` for deferred buffers | Feature (backlog) | Tracked with acceptance criteria in [06-backlog.md](06-backlog.md); current behaviour is documented and tested |
+| Streaming datasets, TLS system trust store | Feature (backlog) | Tracked with acceptance criteria in [06-backlog.md](06-backlog.md); current behaviour is documented and tested |
 
 ## Documented divergences from fo-dicom
 
@@ -69,7 +69,7 @@ These are deliberate, tested differences rather than missing features.
 | Area | Divergence | Why |
 |---|---|---|
 | JSON `NumberMode` default | `JsonOptions::default()` uses `PreferablyAsNumber`, not fo-dicom's `AsNumber`. An IS/DS value is written as a JSON number only when the number's own text form is identical, so `"0001"` stays a string. | fo-dicom writes `1`, which loses the stored text; `NumberMode::AsNumber` reproduces fo-dicom exactly when byte-compatible output is required. |
-| JSON `BulkDataURI` for deferred buffers | A value backed by `FileWindow`/`StreamWindow` is materialised and base64-encoded; `BulkDataURI` is only echoed when the buffer already carries a URI. A URI-provider callback is in `docs/06-backlog.md`. | Output is valid PS3.18 JSON; emitting a URI for a buffer with no URI requires a bundle/resolver this crate does not have. |
+| JSON `BulkDataURI` for deferred buffers | A deferred value (`FileWindow`/`StreamWindow`/`TempFileSpill`) is written as `BulkDataURI` only when `JsonOptions::bulk_data_uri` names one; otherwise it is materialised and base64-encoded. A URI parsed from JSON is still echoed unchanged. | Naming a URI means hosting the bytes somewhere, which is the caller's job; the default keeps output byte-compatible with the previous release and with fo-dicom's converter. |
 
 ## Reproducing
 

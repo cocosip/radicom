@@ -70,8 +70,16 @@ pub enum NumberMode {
     PreferablyAsNumber,
 }
 
+/// Names a `BulkDataURI` for a deferred value (PS3.18 Annex F).
+///
+/// Called for a non-empty binary element whose buffer is not in memory (a
+/// `FileWindow`, `StreamWindow` or `TempFileSpill`), with the element's tag and
+/// buffer. Returning a non-blank URI writes `{"BulkDataURI": …}` and never
+/// materialises the value; `None` or a blank URI falls back to `InlineBinary`.
+pub type BulkDataUriProvider = dyn Fn(&Tag, &SharedBuffer) -> Option<String> + Send + Sync;
+
 /// Serialization options (§12.1).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct JsonOptions {
     /// Non-standard: use attribute keywords instead of tags as keys. Only
     /// affects writing, and only when the dictionary knows the tag.
@@ -82,6 +90,23 @@ pub struct JsonOptions {
     pub validate_on_read: bool,
     pub numbers: NumberMode,
     pub format_indented: bool,
+    /// Names a URI for deferred values instead of materialising them
+    /// (PS3.18 Annex F `BulkDataURI`). Only non-memory buffers are offered, so
+    /// an in-memory value always becomes `InlineBinary` and the output of an
+    /// unconfigured writer does not change.
+    pub bulk_data_uri: Option<Arc<BulkDataUriProvider>>,
+}
+
+impl std::fmt::Debug for JsonOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JsonOptions")
+            .field("tags_as_keywords", &self.tags_as_keywords)
+            .field("validate_on_read", &self.validate_on_read)
+            .field("numbers", &self.numbers)
+            .field("format_indented", &self.format_indented)
+            .field("bulk_data_uri", &self.bulk_data_uri.is_some())
+            .finish()
+    }
 }
 
 impl Default for JsonOptions {
@@ -91,6 +116,7 @@ impl Default for JsonOptions {
             validate_on_read: false,
             numbers: NumberMode::PreferablyAsNumber,
             format_indented: false,
+            bulk_data_uri: None,
         }
     }
 }
@@ -202,6 +228,20 @@ fn element_to_value(element: &DicomElement, options: &JsonOptions) -> Result<Val
             if let Some(uri) = buffer.bulk_uri() {
                 object.insert("BulkDataURI".to_string(), Value::String(uri.to_string()));
                 return Ok(Value::Object(object));
+            }
+            // a deferred value goes out as a URI when the caller names one, and
+            // is never materialised for it (§12.1). An empty value has nothing to
+            // defer and a blank URI is not a carrier, so both fall through.
+            if buffer.size() > 0 && !buffer.is_memory() {
+                let uri = options
+                    .bulk_data_uri
+                    .as_ref()
+                    .and_then(|provider| provider(element.tag(), buffer))
+                    .filter(|uri| !uri.trim().is_empty());
+                if let Some(uri) = uri {
+                    object.insert("BulkDataURI".to_string(), Value::String(uri));
+                    return Ok(Value::Object(object));
+                }
             }
             // an empty binary value carries no carrier at all (§12.1)
             if buffer.size() > 0 {
@@ -1134,6 +1174,132 @@ mod tests {
             value["7FE00010"].get("InlineBinary").is_none(),
             "no bytes were materialized"
         );
+    }
+
+    /// A deferred buffer whose bytes are never read: `data()` panics, so a write
+    /// that materialises it fails loudly instead of passing silently.
+    #[derive(Debug)]
+    struct UnreadableDeferred(usize);
+
+    impl radicom::model::buffer::ByteBuffer for UnreadableDeferred {
+        fn size(&self) -> u64 {
+            self.0 as u64
+        }
+
+        fn is_memory(&self) -> bool {
+            false
+        }
+
+        fn data(&self) -> std::io::Result<std::borrow::Cow<'_, [u8]>> {
+            panic!("a deferred value was materialised");
+        }
+    }
+
+    /// A deferred buffer that can produce its bytes, for the fallback cases.
+    #[derive(Debug)]
+    struct DeferredBytes(Vec<u8>);
+
+    impl radicom::model::buffer::ByteBuffer for DeferredBytes {
+        fn size(&self) -> u64 {
+            self.0.len() as u64
+        }
+
+        fn is_memory(&self) -> bool {
+            false
+        }
+
+        fn data(&self) -> std::io::Result<std::borrow::Cow<'_, [u8]>> {
+            Ok(std::borrow::Cow::Borrowed(&self.0))
+        }
+    }
+
+    #[test]
+    fn a_deferred_value_is_written_as_a_bulk_data_uri_without_materialising_it() {
+        use radicom::model::buffer::{BulkDataUri, ByteBuffer as _};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let window: SharedBuffer = Arc::new(UnreadableDeferred(4));
+        assert!(!window.is_memory(), "the fixture is a deferred value");
+
+        let mut dataset = Dataset::new();
+        dataset.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::PIXEL_DATA,
+            Vr::Ob,
+            window,
+        )));
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let options = JsonOptions {
+            bulk_data_uri: Some(Arc::new(move |tag: &Tag, buffer: &SharedBuffer| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                (!buffer.is_memory())
+                    .then(|| format!("file:///bulk/{}/{}", tag.to_json_string(), buffer.size()))
+            })),
+            ..Default::default()
+        };
+        let json = dataset_to_json(&dataset, &options).unwrap();
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["7FE00010"]["BulkDataURI"], "file:///bulk/7FE00010/4");
+        assert!(
+            value["7FE00010"].get("InlineBinary").is_none(),
+            "the deferred value was never base64-encoded"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "one provider call");
+
+        // an in-memory value is not offered to the provider
+        let mut memory = Dataset::new();
+        memory.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::PIXEL_DATA,
+            Vr::Ob,
+            Arc::new(MemoryBuffer::from(vec![1u8, 2, 3, 4])),
+        )));
+        let json = dataset_to_json(&memory, &options).unwrap();
+        assert!(json.contains("InlineBinary"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "no call for memory");
+
+        // a provider that declines (or names a blank URI) falls back to the bytes
+        let mut fallback = Dataset::new();
+        fallback.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::PIXEL_DATA,
+            Vr::Ob,
+            Arc::new(DeferredBytes(vec![1u8, 2, 3, 4])),
+        )));
+        let declining = JsonOptions {
+            bulk_data_uri: Some(Arc::new(|_: &Tag, _: &SharedBuffer| None)),
+            ..Default::default()
+        };
+        let json = dataset_to_json(&fallback, &declining).unwrap();
+        assert!(
+            json.contains(r#""InlineBinary":"AQIDBA==""#),
+            "no URI means InlineBinary, got {json}"
+        );
+
+        let blank = JsonOptions {
+            bulk_data_uri: Some(Arc::new(|_: &Tag, _: &SharedBuffer| Some("  ".into()))),
+            ..Default::default()
+        };
+        let json = dataset_to_json(&fallback, &blank).unwrap();
+        assert!(
+            json.contains(r#""InlineBinary":"AQIDBA==""#) && !json.contains("BulkDataURI"),
+            "a blank URI is not a carrier, got {json}"
+        );
+
+        // the URI comes back as a deferred buffer, and resolving it yields the
+        // original bytes — the round trip a resolver performs
+        let parsed = json_to_dataset(
+            &serde_json::json!({"7FE00010": {"vr": "OB", "BulkDataURI": "file:///bulk/7FE00010/4"}})
+                .to_string(),
+            &JsonOptions::default(),
+        )
+        .unwrap();
+        let element = parsed.get_element(Tag::PIXEL_DATA).unwrap();
+        let deferred = element.value().as_buffer().unwrap();
+        assert_eq!(deferred.bulk_uri(), Some("file:///bulk/7FE00010/4"));
+        assert!(!deferred.is_memory(), "still unresolved");
+        let resolved = BulkDataUri::with_data("file:///bulk/7FE00010/4", vec![1u8, 2, 3, 4]);
+        assert_eq!(resolved.data().unwrap().as_ref(), &[1u8, 2, 3, 4]);
+        assert_eq!(resolved.bulk_uri(), Some("file:///bulk/7FE00010/4"));
     }
 
     #[test]

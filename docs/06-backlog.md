@@ -29,16 +29,18 @@ and the acceptance test for the day it is implemented.
 - **Acceptance:** with no CA configured, a public-CA server connects; verification uses the DNS name
   when supplied; `accept_any` requires an explicit opt-in; tests use a generated CA on loopback.
 
-## 3. JSON `BulkDataURI` for deferred buffers
+## 3. JSON `BulkDataURI` for deferred buffers — done (2026-10-30)
 
-- **Current:** an OW/OB stored as `FileWindow`/`StreamWindow` is materialised and base64-encoded for
-  JSON (≈1.37× bytes plus the string). `BulkDataURI` is only emitted when the buffer already carries a
-  URI (e.g. parsed from JSON).
-- **Reference:** fo-dicom `JsonDicomConverter` + `BulkDataUriByteBuffer` (PS3.18 Annex F).
-- **Why deferred:** needs a URI-provider callback in `JsonOptions` and a bundle writer; the current
-  output is valid JSON, just memory-hungry for large on-demand values.
-- **Acceptance:** with a URI provider configured, a `FileWindow` element serializes as
-  `{"BulkDataURI": …}` without calling `data()`; a round-trip through a resolver still works.
+- **Shipped:** `JsonOptions::bulk_data_uri` takes a `BulkDataUriProvider`
+  (`Fn(&Tag, &SharedBuffer) -> Option<String>`). It is consulted for binary elements whose buffer is
+  not in memory, and a returned URI is written as `{"BulkDataURI": …}` without calling `data()`; an
+  in-memory value still becomes `InlineBinary`, and a `None` falls back to it.
+- **Reference:** PS3.18 Annex F; fo-dicom `JsonDicomConverter` + `BulkDataUriByteBuffer`.
+- **Library choice:** the provider is asked only for deferred buffers, so existing output is unchanged
+  until a caller opts in. Writing the referenced files is the caller's job (the URI is opaque here).
+- **Tests:** `a_deferred_value_is_written_as_a_bulk_data_uri_without_materialising_it` in
+  `crates/radicom-json/src/lib.rs` (one provider call, no `InlineBinary`, and a resolver-style
+  round-trip through `BulkDataUri::with_data`).
 
 ## 4. Structured-report builders, typed readers and full validation — done (2026-10-30)
 
