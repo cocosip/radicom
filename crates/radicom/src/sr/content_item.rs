@@ -329,6 +329,12 @@ fn unsigned<T: TryFrom<u32>>(value: f64) -> Option<T> {
     }
 }
 
+/// Whether a coordinate survives the f32 round trip the FL writer performs. A
+/// value that overflows f32, or is NaN/infinity, has no FL form.
+fn fits_f32(value: f64) -> bool {
+    (value as f32).is_finite()
+}
+
 /// Checks a point count against the type's requirement.
 fn check_count(kind: &str, count: usize, (min, max): (usize, Option<usize>)) -> Result<(), Error> {
     let fits = count >= min && max.is_none_or(|max| count <= max);
@@ -357,9 +363,11 @@ impl SpatialCoordinates {
     /// form for NaN or infinity (C.18.6.1.2).
     pub fn new(graphic_type: GraphicType, points: &[(f64, f64)]) -> Result<Self, Error> {
         check_count("SCOORD", points.len(), graphic_type.point_range())?;
+        // FL cannot hold a value that overflows f32, nor NaN/infinity, so reject
+        // a coordinate the writer would silently turn into infinity (C.18.6.1.2)
         if points
             .iter()
-            .any(|(column, row)| !column.is_finite() || !row.is_finite())
+            .any(|(column, row)| !fits_f32(*column) || !fits_f32(*row))
         {
             return Err(Error::Data(DataError::Other {
                 message: "SCOORD coordinates must be finite".into(),
@@ -393,7 +401,7 @@ impl SpatialCoordinates3D {
         check_count("SCOORD3D", points.len(), graphic_type.point_range())?;
         if points
             .iter()
-            .any(|(x, y, z)| !x.is_finite() || !y.is_finite() || !z.is_finite())
+            .any(|(x, y, z)| !fits_f32(*x) || !fits_f32(*y) || !fits_f32(*z))
         {
             return Err(Error::Data(DataError::Other {
                 message: "SCOORD3D coordinates must be finite".into(),
@@ -986,6 +994,11 @@ impl ContentItem {
     pub fn scoord_value(&self) -> Option<SpatialCoordinates> {
         let graphic_type = GraphicType::parse(&self.dataset.try_get_str(tags::GRAPHIC_TYPE)?)?;
         let values = self.numbers(tags::GRAPHIC_DATA)?;
+        // a trailing half-pair is corrupt data: refusing it beats silently
+        // dropping the last coordinate
+        if !values.len().is_multiple_of(2) {
+            return None;
+        }
         Some(SpatialCoordinates {
             graphic_type,
             points: values
@@ -1001,6 +1014,11 @@ impl ContentItem {
     pub fn scoord3d_value(&self) -> Option<SpatialCoordinates3D> {
         let graphic_type = GraphicType3D::parse(&self.dataset.try_get_str(tags::GRAPHIC_TYPE)?)?;
         let values = self.numbers(tags::GRAPHIC_DATA)?;
+        // a trailing partial triplet is corrupt data: refuse it rather than
+        // dropping the last point
+        if !values.len().is_multiple_of(3) {
+            return None;
+        }
         Some(SpatialCoordinates3D {
             graphic_type,
             points: values
@@ -1057,6 +1075,10 @@ impl ContentItem {
     pub fn waveform_channels(&self) -> Vec<(u16, u16)> {
         self.numbers(tags::REFERENCED_WAVEFORM_CHANNELS)
             .and_then(|values| {
+                // an odd count cannot be (group, channel) pairs
+                if !values.len().is_multiple_of(2) {
+                    return None;
+                }
                 values
                     .as_chunks::<2>()
                     .0
@@ -1225,6 +1247,66 @@ pub fn content_item_from_dataset(dataset: Dataset) -> Result<ContentItem, Error>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_coordinate_beyond_f32_has_no_fl_form() {
+        // FL would store 1e40 as infinity, so construction rejects it
+        assert!(SpatialCoordinates::new(GraphicType::Point, &[(1e40, 0.0)]).is_err());
+        assert!(SpatialCoordinates::new(GraphicType::Point, &[(f64::NAN, 0.0)]).is_err());
+        assert!(
+            SpatialCoordinates3D::new(GraphicType3D::Point, &[(0.0, 0.0, 1e40)], "1.2.3").is_err()
+        );
+        // an ordinary value is fine
+        assert!(SpatialCoordinates::new(GraphicType::Point, &[(1.0, 2.0)]).is_ok());
+    }
+
+    #[test]
+    fn truncated_graphic_data_reads_as_none_instead_of_dropping_a_point() {
+        // a 2D value needs pairs: one trailing float is corrupt, not a point
+        let item = ContentItem::scoord(
+            CodeItem::new("111030", "DCM"),
+            Relationship::Contains,
+            SpatialCoordinates::new(GraphicType::Point, &[(1.0, 2.0)]).unwrap(),
+        );
+        let mut dataset = item.into_dataset();
+        insert_bytes(&mut dataset, tags::GRAPHIC_DATA, Vr::Fl, vec![0u8; 4]);
+        assert!(
+            ContentItem::from_dataset(dataset).scoord_value().is_none(),
+            "a half pair is rejected, not silently truncated"
+        );
+
+        // a 3D value needs triplets: two trailing floats are corrupt too
+        let item = ContentItem::scoord3d(
+            CodeItem::new("111030", "DCM"),
+            Relationship::Contains,
+            SpatialCoordinates3D::new(GraphicType3D::Point, &[(1.0, 2.0, 3.0)], "1.2.3").unwrap(),
+        );
+        let mut dataset = item.into_dataset();
+        insert_bytes(&mut dataset, tags::GRAPHIC_DATA, Vr::Fl, vec![0u8; 8]);
+        assert!(ContentItem::from_dataset(dataset)
+            .scoord3d_value()
+            .is_none());
+    }
+
+    #[test]
+    fn an_odd_waveform_channel_list_reads_as_empty() {
+        let mut item = ContentItem::waveform(
+            CodeItem::new("111030", "DCM"),
+            Relationship::Contains,
+            &[],
+            &[(1, 2)],
+        );
+        let mut dataset = item.clone().into_dataset();
+        // one US value cannot be a (group, channel) pair
+        insert_bytes(
+            &mut dataset,
+            tags::REFERENCED_WAVEFORM_CHANNELS,
+            Vr::Us,
+            vec![0u8; 2],
+        );
+        item = ContentItem::from_dataset(dataset);
+        assert!(item.waveform_channels().is_empty());
+    }
 
     fn concept() -> CodeItem {
         CodeItem::new("121071", "DCM").with_meaning("Finding")

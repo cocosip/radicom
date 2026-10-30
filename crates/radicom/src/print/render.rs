@@ -275,7 +275,7 @@ fn sharpen(image: &mut RawImage) {
     }
 }
 
-/// Maps the rendered greys into the image box's density window (PS3.3
+/// Maps the rendered greys into the film box's density window (PS3.3
 /// C.13.3.2). Densities are hundredths of optical density, so `[0, 500]` spans
 /// the 8-bit output range: the defaults are an identity mapping. An explicit
 /// window compresses the greys into `[min, max]`, e.g. `[0, 250]` halves every

@@ -87,6 +87,10 @@ and the acceptance test for the day it is implemented.
   (3×3 box blur), `MEDIUM` (3×3 binomial) and `SHARP` (3×3 unsharp); Smoothing Type is defined only for
   `MagnificationType` CUBIC, which this renderer does not implement, so the filter is applied as a
   print-time enhancement. A numeric BorderDensity is hundredths of optical density (`150` = 1.5 OD).
+- **API move (breaking):** `ImageBox::min_density`/`max_density`/`set_min_density`/`set_max_density`
+  were removed; Min Density and Max Density are Film Box attributes (Table C.13-3), so they now live on
+  `FilmBox`. The old placement read tags a conformant SCU never sets on the image box, so the density
+  window was silently a no-op.
 - **Tests:** `a_density_string_parses_into_the_printed_grey`,
   `border_density_paints_the_film_area_between_images`, `smoothing_type_reaches_the_rendered_cell` and
   `smoothing_applies_the_documented_filter` in `crates/radicom/src/print/render.rs`.

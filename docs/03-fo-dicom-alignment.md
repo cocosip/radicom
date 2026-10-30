@@ -81,8 +81,8 @@ cargo xtask coverage          # production line coverage, 95% floor
 
 ## Current Test Baseline
 
-14 test targets green: **1,369 tests, 1 ignored, 0 failures**; clippy and rustdoc clean; production
-line coverage **95.57%** (core 95.69%, json 96.03%, network 95.20%). Breakdown: core lib 820, dump
+14 test targets green: **1,372 tests, 1 ignored, 0 failures**; clippy and rustdoc clean; production
+line coverage **95.62%** (core 95.76%, json 96.03%, network 95.23%). Breakdown: core lib 823, dump
 binary 5, cli_dump 1, corpus 7, core fuzz 3, core goldens 1, radicom-dict 5, radicom-json lib 76, JSON
 goldens 1, radicom-network lib 434, network fuzz 2, network goldens 3, interop 2 run + 1 ignored,
 xtask 6, peer_interop example 1.

@@ -275,15 +275,16 @@ where
     }
 }
 
-/// Sends A-ABORT (source: service-user) so a peer that saw a partial message
-/// discards it instead of waiting for the rest (§9.3.4).
+/// Sends A-ABORT (source: service-user, i.e. this application) so a peer that
+/// saw a partial message discards it instead of waiting for the rest (§9.3.4).
 async fn abort<W>(stream: &mut W) -> std::io::Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
     use tokio::io::AsyncWriteExt as _;
+    // a local encode/write failure is the service user's, not the provider's
     let abort = crate::pdu::Abort {
-        source: crate::error::AbortSource::Provider,
+        source: crate::error::AbortSource::User,
         reason: 0,
     };
     let mut frame = Vec::new();
@@ -446,10 +447,14 @@ mod tests {
             last = Some(crate::pdu::decode(&sink.buf[offset..end]).unwrap());
             offset = end;
         }
-        assert!(
-            matches!(last, Some(crate::pdu::Pdu::Abort(_))),
-            "a partial message is followed by A-ABORT, got {last:?}"
-        );
+        match last {
+            Some(crate::pdu::Pdu::Abort(abort)) => assert_eq!(
+                abort.source.code(),
+                0,
+                "a local failure aborts with source service-user"
+            ),
+            other => panic!("a partial message is followed by A-ABORT, got {other:?}"),
+        }
     }
 
     #[test]
