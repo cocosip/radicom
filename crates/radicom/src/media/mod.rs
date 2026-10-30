@@ -128,9 +128,13 @@ pub enum StorageCategory {
 impl StorageCategory {
     /// Maps a file's SOP class to the record type that indexes it (§12.2).
     ///
-    /// The SR document and presentation-state classes come from the generated
-    /// UID table so every registered class is classified, not just the ones a
-    /// hand-written list happened to name (FEAT-13).
+    /// The UID *constants* below come from the generated table, so they cannot
+    /// drift, but the list of SR and presentation-state classes is maintained by
+    /// hand (the dictionary has no DICOMDIR record-type column). A class this
+    /// match does not name falls back to [`StorageCategory::Image`], which is
+    /// the DICOMDIR default for an instance without a dedicated record type —
+    /// so adding a new SR or presentation-state SOP class means adding it here
+    /// (FEAT-13).
     pub fn of_sop_class(sop_class: &str) -> StorageCategory {
         use crate::uids;
         match sop_class.trim() {
