@@ -212,6 +212,22 @@ mod tests {
     use crate::test_wire::{command_bytes, element_text, element_value};
 
     #[test]
+    fn a_response_without_a_status_is_not_a_success() {
+        // PS3.7: Status is mandatory in a response. A peer that omits it must
+        // not be read as a completed operation (NET-08); every service defaults
+        // the missing status to ProcessingFailure.
+        let request = NServiceRequest::new(CommandField::NGetRq, 3).to_command();
+        let mut response = Command::response(&request, status::SUCCESS).expect("an N-GET response");
+        response.status = None;
+        let parsed = NServiceResponse::from_command(&response, None);
+        assert_eq!(
+            parsed.status,
+            status::PROCESSING_FAILURE,
+            "a response with no Status is a failure"
+        );
+    }
+
+    #[test]
     fn every_n_request_field_is_recognised() {
         for field in N_REQUEST_FIELDS {
             assert!(is_n_request(field));

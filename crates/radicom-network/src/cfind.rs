@@ -331,6 +331,62 @@ mod tests {
     use futures::StreamExt;
 
     #[test]
+    fn a_query_response_without_a_status_is_not_a_success() {
+        // PS3.7: Status is mandatory in a response; a peer that omits it must
+        // not be read as a completed operation (NET-08). C-FIND, C-GET and
+        // C-MOVE share the same parser shape, so all three are checked.
+        for (request_field, response_field) in [
+            (CommandField::CFindRq, CommandField::CFindRsp),
+            (CommandField::CGetRq, CommandField::CGetRsp),
+            (CommandField::CMoveRq, CommandField::CMoveRsp),
+        ] {
+            let mut request = Command::request(request_field, 5);
+            request.affected_sop_class_uid = Some(sop_class::STUDY_ROOT_QR_FIND.into());
+            let mut response = Command::response(&request, status::SUCCESS).expect("a response");
+            assert_eq!(response.field, response_field);
+
+            let parsed = match response_field {
+                CommandField::CGetRsp => {
+                    crate::cget::CGetResponse::from_command(&response)
+                        .unwrap()
+                        .status
+                }
+                CommandField::CMoveRsp => {
+                    crate::cmove::CMoveResponse::from_command(&response)
+                        .unwrap()
+                        .status
+                }
+                _ => CFindResponse::from_command(&response, None).unwrap().status,
+            };
+            assert_eq!(
+                parsed,
+                status::SUCCESS,
+                "{response_field:?} reads the status it was sent"
+            );
+
+            response.status = None;
+            let missing = match response_field {
+                CommandField::CGetRsp => {
+                    crate::cget::CGetResponse::from_command(&response)
+                        .unwrap()
+                        .status
+                }
+                CommandField::CMoveRsp => {
+                    crate::cmove::CMoveResponse::from_command(&response)
+                        .unwrap()
+                        .status
+                }
+                _ => CFindResponse::from_command(&response, None).unwrap().status,
+            };
+            assert_eq!(
+                missing,
+                status::PROCESSING_FAILURE,
+                "{response_field:?} without Status must not read as success"
+            );
+        }
+    }
+
+    #[test]
     fn levels_map_to_the_standard_sop_classes() {
         assert_eq!(
             QueryRetrieveLevel::Study.sop_class(QueryRoot::Study),

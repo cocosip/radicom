@@ -383,6 +383,50 @@ mod tests {
     }
 
     #[test]
+    fn a_large_on_demand_value_is_previewed_not_materialised() {
+        // CORE-09: dumping used to call `data()` on the whole value. A large
+        // on-demand window must read only `max_binary_bytes` and report the real
+        // size, so the dump stays bounded (the old code rendered all 256 KiB).
+        let path = std::env::temp_dir().join(format!(
+            "radicom-dump-large-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let payload = vec![0xABu8; 256 * 1024];
+        std::fs::write(&path, &payload).unwrap();
+
+        let mut ds = Dataset::new();
+        let window =
+            crate::model::buffer::FileWindow::open(&path, 0, payload.len() as u64).unwrap();
+        ds.insert_or_update(crate::model::element::DicomElement::new_bytes(
+            Tag::new(0x0009, 0x1001),
+            Vr::Ob,
+            Arc::new(window),
+        ));
+
+        let options = DumpOptions {
+            max_binary_bytes: 8,
+            ..DumpOptions::default()
+        };
+        let out = dump_dataset(&ds, &options);
+        std::fs::remove_file(&path).ok();
+
+        assert!(out.contains("AB AB AB AB AB AB AB AB"), "{out}");
+        assert!(
+            out.contains("(262144 bytes)"),
+            "the real size is still reported: {out}"
+        );
+        assert!(
+            out.len() < 4096,
+            "the dump must stay bounded, got {} chars",
+            out.len()
+        );
+    }
+
+    #[test]
     fn a_non_image_dataset_has_no_pixel_summary() {
         assert!(pixel_summary(&sample_dataset()).is_none());
     }

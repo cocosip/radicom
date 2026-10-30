@@ -342,8 +342,8 @@ impl DicomClient {
             1,
             sop_class.clone(),
             vec![
-                "1.2.840.10008.1.2".to_string(),
-                "1.2.840.10008.1.2.1".to_string(),
+                crate::association::transfer_syntax::IMPLICIT_VR_LITTLE_ENDIAN.to_string(),
+                crate::association::transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN.to_string(),
             ],
         );
         let (context_id, response) = {
@@ -401,8 +401,8 @@ impl DicomClient {
             1,
             request.sop_class_uid.clone(),
             vec![
-                "1.2.840.10008.1.2".to_string(),
-                "1.2.840.10008.1.2.1".to_string(),
+                crate::association::transfer_syntax::IMPLICIT_VR_LITTLE_ENDIAN.to_string(),
+                crate::association::transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN.to_string(),
             ],
         );
         let (context_id, result) = {
@@ -429,8 +429,8 @@ impl DicomClient {
             1,
             request.sop_class_uid.clone(),
             vec![
-                "1.2.840.10008.1.2".to_string(),
-                "1.2.840.10008.1.2.1".to_string(),
+                crate::association::transfer_syntax::IMPLICIT_VR_LITTLE_ENDIAN.to_string(),
+                crate::association::transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN.to_string(),
             ],
         );
         let (context_id, result) = {
@@ -470,8 +470,8 @@ impl DicomClient {
         // 128 available contexts gets an error instead of a wrapped ID that
         // collides with an existing context (NET-22).
         let syntaxes = vec![
-            "1.2.840.10008.1.2".to_string(),
-            "1.2.840.10008.1.2.1".to_string(),
+            crate::association::transfer_syntax::IMPLICIT_VR_LITTLE_ENDIAN.to_string(),
+            crate::association::transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN.to_string(),
         ];
         let mut context_set = crate::association::ContextSetBuilder::new();
         context_set.add(request.sop_class_uid.clone(), syntaxes.clone())?;

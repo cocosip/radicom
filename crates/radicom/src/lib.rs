@@ -66,27 +66,86 @@ pub mod syntaxes {
 
 #[cfg(test)]
 mod uid_literals {
-    /// FEAT-26 guard: production code must use the generated `crate::uids`
-    /// constants, not hard-coded `1.2.840.10008…` strings (which drift and are
-    /// invisible to UID-based tooling). Test modules are allowed to spell tags
-    /// and UIDs out.
+    use std::path::{Path, PathBuf};
+
+    /// Files whose job is to *define* UID constants. Everything else must
+    /// reference them; the generated tables are skipped wholesale.
+    const DEFINITION_SITES: &[&str] = &[
+        "crates/radicom/src/model/uid.rs",
+        "crates/radicom/src/model/transfer_syntax.rs",
+        "crates/radicom-network/src/association.rs",
+        "crates/radicom-network/src/pdu.rs",
+        "crates/radicom-network/src/print_sop.rs",
+    ];
+
+    /// FEAT-26 guard: production code in every crate must use the generated
+    /// `crate::uids` constants, not hard-coded `1.2.840.10008…` strings (which
+    /// drift and are invisible to UID-based tooling).
+    ///
+    /// The whole workspace is scanned, so the rule holds outside the crate that
+    /// owns the constants. Test modules are allowed to spell UIDs out; only the
+    /// text before the first `#[cfg(test)]` is inspected.
     #[test]
     fn production_sources_do_not_hard_code_dicom_uids() {
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        for relative in ["render/mod.rs", "media/mod.rs", "sr/structured_report.rs"] {
-            let path = src.join(relative);
-            let source = std::fs::read_to_string(&path).expect("read source");
-            let production = match source.find("#[cfg(test)]") {
-                Some(tests) => &source[..tests],
-                None => &source[..],
-            };
-            for (index, line) in production.lines().enumerate() {
-                assert!(
-                    !line.contains("\"1.2.840.10008"),
-                    "{relative}:{} hard-codes a DICOM UID; use crate::uids: {line}",
-                    index + 1
-                );
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace: PathBuf = manifest
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root")
+            .to_path_buf();
+
+        let mut scanned = 0usize;
+        if !workspace.join("crates").is_dir() {
+            // Running from a packaged crate: the sibling sources are not part of
+            // the tarball, so there is nothing to scan.
+            return;
+        }
+        for krate in ["radicom", "radicom-dict", "radicom-json", "radicom-network"] {
+            let src = workspace.join("crates").join(krate).join("src");
+            for path in rust_sources(&src) {
+                let relative = path
+                    .strip_prefix(&workspace)
+                    .expect("inside the workspace")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if relative.contains("/generated/") || DEFINITION_SITES.contains(&&*relative) {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("read source");
+                let production = match source.find("#[cfg(test)]") {
+                    Some(tests) => &source[..tests],
+                    None => &source[..],
+                };
+                for (index, line) in production.lines().enumerate() {
+                    assert!(
+                        !line.contains("\"1.2.840.10008"),
+                        "{relative}:{} hard-codes a DICOM UID; use the uids:: constants: {line}",
+                        index + 1
+                    );
+                }
+                scanned += 1;
             }
         }
+        assert!(scanned > 50, "the guard scanned only {scanned} files");
+    }
+
+    /// Every `.rs` file below `dir`, recursively.
+    fn rust_sources(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(next) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&next) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        out
     }
 }

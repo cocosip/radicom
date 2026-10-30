@@ -938,12 +938,17 @@ mod tests {
 
     #[test]
     fn read_file_meta_does_not_need_the_dataset() {
-        // FILE-04: only the header and group-0002 bytes are read; a dataset
-        // whose payload is not a valid element stream must not matter.
+        // FILE-04: only the header and group-0002 bytes are read. The dataset is
+        // a *truncated deflate stream*, which `open` rejects with a typed error:
+        // that is what separates this from reading the whole file (CORE-10).
         let mut file = sample_file();
         file.dataset
             .insert_str(Tag::STUDY_DESCRIPTION, Vr::Lo, "study");
+        file.dataset
+            .set_transfer_syntax(syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone());
         let bytes = file.to_bytes(&WriteOptions::default()).unwrap();
+        let bytes = &bytes[..bytes.len() - 4];
+
         let path = std::env::temp_dir().join(format!(
             "radicom-readmeta-{}-{}.dcm",
             std::process::id(),
@@ -952,12 +957,18 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        std::fs::write(&path, &bytes).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+
+        assert!(
+            DicomFile::open(&path).is_err(),
+            "the dataset body is deliberately unreadable"
+        );
         let meta = read_file_meta(&path).unwrap();
         std::fs::remove_file(&path).ok();
         assert_eq!(
             meta.get_str(Tag::TRANSFER_SYNTAX_UID).unwrap(),
-            "1.2.840.10008.1.2.1"
+            "1.2.840.10008.1.2.1.99",
+            "the meta group is read even when the dataset is not"
         );
         assert!(!meta.contains(&Tag::STUDY_DESCRIPTION));
     }
