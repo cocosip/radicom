@@ -205,6 +205,16 @@ impl PduSplitter {
         }
     }
 
+    /// The peer's maximum PDU length this splitter was built for.
+    pub fn max_pdu(&self) -> u32 {
+        self.max_pdu
+    }
+
+    /// How many PDVs this splitter may batch into one PDU.
+    pub fn max_pdvs_per_pdu(&self) -> usize {
+        self.max_pdvs_per_pdu
+    }
+
     /// The largest PDV value that fits in one PDU.
     ///
     /// The negotiated maximum counts the whole PDU including its 6-byte header

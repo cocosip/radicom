@@ -300,6 +300,10 @@ client/server. One tokio task per association. Locks must not be held across `.a
 - Presentation context layout is uniform: `id (1) + reserved (1) + result (1) + reserved (1)`. The RQ
   writes result = 0; only the AC carries a real result. **Writing the result at offset 1 instead of 2
   turns every rejection into an acceptance in both directions.**
+- A C-STORE dataset is streamed, not buffered: `message::write_message_streamed` runs the writer on a
+  blocking thread into a bounded channel that the association task writes out, so memory is O(PDU). Each
+  streamed PDU carries one PDV; the final PDV ("last" bit) is only known at the end, so the tail is held
+  back until the writer finishes.
 - An A-ASSOCIATE-AC echoes only `result` plus **one** accepted transfer syntax per context — no abstract
   syntax; the client refills the abstract syntax from its RQ by context id.
 - User-information sub-items:

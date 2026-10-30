@@ -2009,10 +2009,25 @@ impl Association {
         request.move_originator_message_id = originator_message_id;
         request.no_dataset = false;
 
-        // transcode when the accepted syntax differs from the instance's own
+        // Stream the dataset when no transcode is needed (NET-13): the writer
+        // frames PDUs through a bounded channel, so a multi-GB instance never
+        // sits in memory as one Vec. A transcode materialises its output by
+        // nature, so that branch keeps the buffered path.
+        let command = bytes::Bytes::from(command_bytes(&request)?);
         let source = dataset.transfer_syntax();
-        let payload = if source.uid() == target.uid() {
-            crate::message::encode_dataset(dataset, &target)?
+        if source.uid() == target.uid() {
+            let max_pdu = self.splitter.max_pdu();
+            let max_pdvs = self.splitter.max_pdvs_per_pdu();
+            crate::message::write_message_streamed(
+                &mut self.stream,
+                context_id,
+                command,
+                dataset.clone(),
+                target.clone(),
+                max_pdu,
+                max_pdvs,
+            )
+            .await?;
         } else {
             let transcoder = transcoder_for(&mut self.transcoder_cache, &source, &target);
             let transcoded = transcoder.transcode_dataset(dataset).map_err(|e| {
@@ -2021,15 +2036,12 @@ impl Association {
                     e.to_string(),
                 ))
             })?;
-            crate::message::encode_dataset(&transcoded, &target)?
-        };
-
-        let command = bytes::Bytes::from(command_bytes(&request)?);
-        let payload = bytes::Bytes::from(payload);
-        let pdus = self
-            .splitter
-            .split_message_bytes(context_id, command, Some(payload))?;
-        write_pdata_batch(&mut self.stream, pdus).await?;
+            let payload = bytes::Bytes::from(crate::message::encode_dataset(&transcoded, &target)?);
+            let pdus = self
+                .splitter
+                .split_message_bytes(context_id, command, Some(payload))?;
+            write_pdata_batch(&mut self.stream, pdus).await?;
+        }
 
         self.pending.insert(request.message_id);
         let response = self

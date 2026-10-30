@@ -80,6 +80,159 @@ pub fn starts_with_command(pdus: &[PData]) -> bool {
         .unwrap_or(false)
 }
 
+/// Frames a byte stream into P-DATA-TF PDUs as it is written (NET-13).
+///
+/// Each PDU carries one PDV, so the sink holds at most one PDU's payload plus the
+/// chunk being appended: a multi-GB dataset streams in O(PDU) memory instead of
+/// being encoded into one `Vec<u8>`. The tail is held back and emitted by
+/// [`Self::finish`] so the final PDV can carry the "last" bit (§11.1).
+///
+/// ponytail: one PDV per PDU (the buffered splitter packs several) — slightly
+/// more PDUs on the wire for the same bytes; pack harder only if a peer objects.
+pub struct PduFramer<F: FnMut(bytes::Bytes) -> std::io::Result<()>> {
+    context_id: u8,
+    /// largest PDV value that fits one PDU (even, per review #17)
+    room: usize,
+    pending: Vec<u8>,
+    emit: F,
+    max_buffered: usize,
+    finished: bool,
+}
+
+impl<F: FnMut(bytes::Bytes) -> std::io::Result<()>> PduFramer<F> {
+    /// `max_pdv_value` comes from [`crate::assembler::PduSplitter::max_pdv_value`].
+    pub fn new(context_id: u8, max_pdv_value: usize, emit: F) -> Self {
+        let room = max_pdv_value.max(2);
+        PduFramer {
+            context_id,
+            room,
+            pending: Vec::with_capacity(room),
+            emit,
+            max_buffered: 0,
+            finished: false,
+        }
+    }
+
+    /// The most payload bytes this framer ever held: the memory bound the
+    /// streamed path guarantees (never more than one PDV value).
+    pub fn max_buffered(&self) -> usize {
+        self.max_buffered
+    }
+
+    fn emit_pdu(&mut self, data: bytes::Bytes, is_last: bool) -> std::io::Result<()> {
+        let pdu = crate::pdu::Pdu::PData(PData {
+            pdvs: vec![Pdv {
+                context_id: self.context_id,
+                is_command: false,
+                is_last,
+                data,
+            }],
+        });
+        let mut encoded = Vec::new();
+        crate::pdu::encode_into(&pdu, &mut encoded)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        (self.emit)(encoded.into())
+    }
+
+    fn push(&mut self, mut input: &[u8]) -> std::io::Result<()> {
+        while !input.is_empty() {
+            if self.pending.len() == self.room {
+                let full = std::mem::take(&mut self.pending);
+                self.pending = Vec::with_capacity(self.room);
+                self.emit_pdu(full.into(), false)?;
+            }
+            let take = (self.room - self.pending.len()).min(input.len());
+            self.pending.extend_from_slice(&input[..take]);
+            self.max_buffered = self.max_buffered.max(self.pending.len());
+            input = &input[take..];
+        }
+        Ok(())
+    }
+
+    /// Emits the held tail as the last PDU of the message (§11.1). Idempotent.
+    pub fn finish(&mut self) -> std::io::Result<()> {
+        if self.finished {
+            return Ok(());
+        }
+        self.finished = true;
+        let tail = std::mem::take(&mut self.pending);
+        self.emit_pdu(tail.into(), true)
+    }
+}
+
+impl<F: FnMut(bytes::Bytes) -> std::io::Result<()>> std::io::Write for PduFramer<F> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.push(buf)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Sends a command and a dataset as one DIMSE message, streaming the dataset
+/// (NET-13): the command goes out first in its own P-DATA-TF, then the dataset
+/// is encoded on a blocking thread into a bounded channel that this task writes
+/// out, so peak memory is O(PDU) regardless of the dataset size.
+///
+/// `dataset` is moved so the encoder can run off-thread; a `Dataset` clone is
+/// cheap because its buffers are shared (`Arc`).
+pub async fn write_message_streamed<W>(
+    stream: &mut W,
+    context_id: u8,
+    command: bytes::Bytes,
+    dataset: Dataset,
+    syntax: std::sync::Arc<TransferSyntax>,
+    max_pdu: u32,
+    max_pdvs_per_pdu: usize,
+) -> Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt as _;
+
+    let splitter = crate::assembler::PduSplitter::new(max_pdu, max_pdvs_per_pdu);
+    // the command always fits one PDU in practice, but stay within the limit
+    for pdu in splitter.split_message_bytes(context_id, command, None)? {
+        let mut bytes = Vec::new();
+        crate::pdu::encode_into(&crate::pdu::Pdu::PData(pdu), &mut bytes)?;
+        stream.write_all(&bytes).await.map_err(NetworkError::Io)?;
+    }
+
+    let pdv_value = splitter.max_pdv_value();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(2);
+    let encoder = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let mut framer = PduFramer::new(context_id, pdv_value, |bytes: bytes::Bytes| {
+            tx.blocking_send(bytes.to_vec())
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+        });
+        let options = WriteOptions {
+            keep_group_lengths: false,
+            ..Default::default()
+        };
+        DicomWriter::new(options)
+            .write_dataset(&dataset, &syntax, &mut framer)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        framer.finish()
+    });
+
+    while let Some(bytes) = rx.recv().await {
+        stream.write_all(&bytes).await.map_err(NetworkError::Io)?;
+    }
+    stream.flush().await.map_err(NetworkError::Io)?;
+    match encoder.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(NetworkError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("dataset could not be encoded: {error}"),
+        ))),
+        Err(join) => Err(NetworkError::Io(std::io::Error::other(format!(
+            "dataset encoder task failed: {join}"
+        )))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +245,212 @@ mod tests {
         ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
         ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
         ds
+    }
+
+    #[test]
+    fn the_framer_holds_at_most_one_pdu_and_marks_the_last_pdv() {
+        use std::io::Write as _;
+        let room = 100usize;
+        let mut frames: Vec<bytes::Bytes> = Vec::new();
+        let mut framer = PduFramer::new(3, room, |frame| {
+            frames.push(frame);
+            Ok(())
+        });
+        let payload: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+        // odd chunk sizes, so a chunk straddles PDUs
+        for chunk in payload.chunks(37) {
+            framer.write_all(chunk).unwrap();
+        }
+        framer.finish().unwrap();
+
+        assert!(
+            framer.max_buffered() <= room,
+            "held {} bytes, more than one PDU ({room})",
+            framer.max_buffered()
+        );
+
+        let mut joined = Vec::new();
+        for (index, frame) in frames.iter().enumerate() {
+            let crate::pdu::Pdu::PData(pdata) = crate::pdu::decode(frame).unwrap() else {
+                panic!("the framer emits only P-DATA")
+            };
+            for pdv in &pdata.pdvs {
+                assert!(!pdv.is_command);
+                assert_eq!(pdv.context_id, 3);
+                assert_eq!(
+                    pdv.is_last,
+                    index + 1 == frames.len(),
+                    "only the final PDV is marked last"
+                );
+                joined.extend_from_slice(&pdv.data);
+            }
+        }
+        assert_eq!(joined, payload, "the framed bytes reassemble");
+        assert!(frames.len() > 5, "the payload really was split");
+    }
+
+    #[tokio::test]
+    async fn a_streamed_message_matches_the_buffered_bytes_on_the_wire() {
+        use crate::assembler::PdvAssembler;
+        use tokio::io::AsyncWriteExt as _;
+
+        let dataset = sample_dataset();
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let command = bytes::Bytes::from_static(b"command-bytes");
+
+        // a tiny duplex buffer forces backpressure through the bounded channel
+        let (mut client, mut server) = tokio::io::duplex(64);
+        let reader = tokio::spawn(async move {
+            let mut all = Vec::new();
+            let mut buf = [0u8; 64];
+            loop {
+                match tokio::io::AsyncReadExt::read(&mut server, &mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => all.extend_from_slice(&buf[..n]),
+                }
+            }
+            all
+        });
+        write_message_streamed(
+            &mut client,
+            5,
+            command.clone(),
+            dataset.clone(),
+            syntax.clone(),
+            128,
+            1,
+        )
+        .await
+        .unwrap();
+        client.shutdown().await.unwrap();
+        let wire = reader.await.unwrap();
+
+        // split the exchanged frames back into message units
+        let units_of = |frames: Vec<bytes::Bytes>| {
+            let mut assembler = PdvAssembler::new();
+            let mut command_bytes = Vec::new();
+            let mut dataset_bytes = Vec::new();
+            for frame in frames {
+                let crate::pdu::Pdu::PData(pdata) = crate::pdu::decode(&frame).unwrap() else {
+                    continue;
+                };
+                for unit in assembler.push_pdata(&pdata).unwrap() {
+                    if unit.stream == crate::assembler::Stream::Command {
+                        command_bytes.extend_from_slice(&unit.bytes);
+                    } else {
+                        dataset_bytes.extend_from_slice(&unit.bytes);
+                    }
+                }
+            }
+            (command_bytes, dataset_bytes)
+        };
+
+        let mut streamed_frames = Vec::new();
+        let mut offset = 0usize;
+        while offset + 6 <= wire.len() {
+            let len = u32::from_be_bytes([
+                wire[offset + 2],
+                wire[offset + 3],
+                wire[offset + 4],
+                wire[offset + 5],
+            ]) as usize;
+            let end = offset + 6 + len;
+            streamed_frames.push(bytes::Bytes::copy_from_slice(&wire[offset..end]));
+            offset = end;
+        }
+        let streamed = units_of(streamed_frames);
+
+        // the buffered splitter is the reference
+        let encoded = encode_dataset(&dataset, &syntax).unwrap();
+        let buffered = units_of(
+            split_message(5, &command, Some(&encoded), 128, 1)
+                .unwrap()
+                .into_iter()
+                .map(|pdu| {
+                    bytes::Bytes::from(crate::pdu::encode(&crate::pdu::Pdu::PData(pdu)).unwrap())
+                })
+                .collect(),
+        );
+
+        assert_eq!(streamed.0, buffered.0, "the command bytes are unchanged");
+        assert_eq!(
+            streamed.1, buffered.1,
+            "the streamed dataset reassembles to the buffered bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_large_dataset_streams_through_many_pdus_intact() {
+        use crate::assembler::{PdvAssembler, Stream};
+        use radicom::model::buffer::MemoryBuffer;
+        use radicom::model::element::DicomElement;
+
+        // 2 MiB of pixel data: far more than one PDU at max_pdu = 1024
+        let mut dataset = sample_dataset();
+        dataset.insert_or_update(radicom::model::item::DicomItem::Element(
+            DicomElement::new_bytes(
+                Tag::PIXEL_DATA,
+                Vr::Ob,
+                std::sync::Arc::new(MemoryBuffer::from(vec![0x5Au8; 2 * 1024 * 1024])),
+            ),
+        ));
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let command = bytes::Bytes::from_static(b"cmd");
+
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let reader = tokio::spawn(async move {
+            let mut all = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match tokio::io::AsyncReadExt::read(&mut server, &mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => all.extend_from_slice(&buf[..n]),
+                }
+            }
+            all
+        });
+        write_message_streamed(
+            &mut client,
+            7,
+            command,
+            dataset.clone(),
+            syntax.clone(),
+            1024,
+            1,
+        )
+        .await
+        .unwrap();
+        tokio::io::AsyncWriteExt::shutdown(&mut client)
+            .await
+            .unwrap();
+        let wire = reader.await.unwrap();
+
+        let mut assembler = PdvAssembler::new();
+        let mut dataset_bytes = Vec::new();
+        let mut offset = 0usize;
+        while offset + 6 <= wire.len() {
+            let len = u32::from_be_bytes([
+                wire[offset + 2],
+                wire[offset + 3],
+                wire[offset + 4],
+                wire[offset + 5],
+            ]) as usize;
+            let frame = bytes::Bytes::copy_from_slice(&wire[offset..offset + 6 + len]);
+            offset += 6 + len;
+            let crate::pdu::Pdu::PData(pdata) = crate::pdu::decode(&frame).unwrap() else {
+                continue;
+            };
+            for unit in assembler.push_pdata(&pdata).unwrap() {
+                if unit.stream == Stream::Data {
+                    dataset_bytes.extend_from_slice(&unit.bytes);
+                }
+            }
+        }
+        assert_eq!(
+            dataset_bytes,
+            encode_dataset(&dataset, &syntax).unwrap(),
+            "2 MiB survives many PDUs byte-for-byte"
+        );
     }
 
     #[test]

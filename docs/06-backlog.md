@@ -5,17 +5,21 @@ environment/scope work**, not confirmed defects; the defect findings from that r
 Nothing here is a silent gap: each item names the current behaviour, the fo-dicom/standard reference,
 and the acceptance test for the day it is implemented.
 
-## 1. Streaming datasets (network)
+## 1. Streaming datasets (network) — done (2026-10-30)
 
-- **Current:** a C-STORE/C-GET/C-MOVE message encodes the whole dataset into one `Vec<u8>` before the
-  first P-DATA PDU (`message.rs::encode_dataset`); a transcoded reverse store holds the transcoded
-  dataset *and* its encoded copy.
-- **Reference:** fo-dicom `DicomService`/`PDataTFStream` streams the dataset through the writer; PS3.8
-  P-DATA fragmentation does not require the whole dataset in memory.
-- **Why deferred:** it changes the writer/splitter contract and needs back-pressure; it is not a
-  correctness defect.
-- **Acceptance:** C-STORE of a multi-GB instance runs in O(PDU) memory; a benchmark asserts peak
-  allocation under a bound; wire bytes unchanged (goldens pass).
+- **Shipped:** `message::write_message_streamed` sends the command, then encodes the dataset on a
+  blocking thread into a bounded channel (capacity 2) that the association task writes out, so peak
+  memory is O(PDU) no matter the instance size. `PduFramer` frames the writer's output into P-DATA PDUs
+  one PDV at a time and holds back the tail so the final PDV carries the "last" bit. The C-STORE send
+  path uses it whenever no transcode is needed.
+- **Reference:** PS3.8 §9.3 P-DATA fragmentation; fo-dicom `DicomService`/`PDataTFStream`.
+- **Library choices:** one PDV per PDU (the buffered splitter packs several) — more PDUs, same bytes;
+  a transcoded C-STORE still materialises its transcoded output, which is inherent to transcoding.
+- **Tests:** `the_framer_holds_at_most_one_pdu_and_marks_the_last_pdv` (asserts `max_buffered()` never
+  exceeds one PDV), `a_streamed_message_matches_the_buffered_bytes_on_the_wire` and
+  `a_large_dataset_streams_through_many_pdus_intact` (2 MiB over max_pdu 1024, reassembled
+  byte-for-byte) in `crates/radicom-network/src/message.rs`; the loopback C-STORE interop test now
+  exercises the streamed path.
 
 ## 2. TLS system trust store and host-name verification — done (2026-10-30)
 
