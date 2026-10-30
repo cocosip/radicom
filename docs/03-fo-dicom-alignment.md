@@ -61,7 +61,6 @@ verified by a test that would have failed before that review.
 | `IPixelData`/`Image` traits, `InvertLut`/`PaddingLut`/`CompositeLut`/`PrecalculatedLut`, `CacheType` | Shape | Single-implementation / no-outer-consumer abstractions from fo-dicom's internal architecture; Rust already has concrete equivalents (`RawImage`/`BitDepth`/`ColorTable`), and empty trait shells were deliberately not created |
 | Additional OBS integrations | Not needed | Covered by OBS-01 (`MetricsCollector`) plus OBS-02 (`TracingMetrics` under the `otel` feature, emitted through `tracing` field conventions, **no `opentelemetry` dependency**) |
 | Streaming datasets, TLS system trust store, JSON `BulkDataURI` for deferred buffers | Feature (backlog) | Tracked with acceptance criteria in [06-backlog.md](06-backlog.md); current behaviour is documented and tested |
-| SR builders for SCOORD/SCOORD3D/TCOORD/WAVEFORM and full SR-IOD validation; print `SmoothingType`/`BorderDensity` | Feature (backlog) | Same backlog document; the shipped SR/print surface is tested |
 
 ## Documented divergences from fo-dicom
 

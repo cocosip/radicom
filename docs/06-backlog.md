@@ -40,16 +40,27 @@ and the acceptance test for the day it is implemented.
 - **Acceptance:** with a URI provider configured, a `FileWindow` element serializes as
   `{"BulkDataURI": …}` without calling `data()`; a round-trip through a resolver still works.
 
-## 4. Structured-report builders, typed readers and full validation
+## 4. Structured-report builders, typed readers and full validation — done (2026-10-30)
 
-- **Current:** CONTAINER/TEXT/CODE/NUM/PNAME/DATE/TIME/DATETIME/UIDREF/COMPOSITE/IMAGE content items
-  can be built; SCOORD, SCOORD3D, TCOORD and WAVEFORM cannot. Typed readers exist for text, measured
-  value, referenced SOPs, concept name and children only. `StructuredReport::validate` checks the
-  single-CONTAINER-root rule but not the SR IOD required attributes or per-item ValueType/value tag.
-- **Reference:** PS3.3 C.18.1–C.18.8, C.17.3; fo-dicom `StructuredReport/DicomContentItem`.
-- **Why deferred:** new API surface (builders + validation rules), not a defect in the shipped surface.
-- **Acceptance:** all 15 value types buildable and readable; an SR missing CompletionFlag, a child
-  RelationshipType or a value tag fails `validate()`; round-trip tests for SCOORD/SCOORD3D/TCOORD.
+- **Shipped:** SCOORD, SCOORD3D, TCOORD and WAVEFORM builders (`ContentItem::scoord`,
+  `scoord3d`, `tcoord`, `waveform`) with their macro attributes and construction-time checks; typed
+  readers for all 15 value types (`ContentItem::value` returning `ContentValue`, plus the per-type
+  accessors); `StructuredReport::validate` now checks the SR IOD Type 1 attributes and every content
+  item.
+- **Root model fixed with it:** the document dataset *is* the root content item (PS3.3 C.17.2), so
+  `root_items`/`set_root_items` became `content_items`/`set_content_items` (the root container's
+  children) and `set_root` hoists a root container's ValueType, document title and ContinuityOfContent
+  into the dataset. A by-reference target (0040,DB73) carries no ValueType.
+- **Reference:** PS3.3 C.17.2/C.17.3 (document content), C.18.1–C.18.9 (value macros); fo-dicom
+  `StructuredReport`/`DicomContentItem`.
+- **Library choices:** `SpatialCoordinates3D` requires the Type 1 `ReferencedFrameOfReferenceUID` and a
+  closed POLYGON (C.18.9.1.2); point counts, finite coordinates and a parseable DT are rejected at
+  construction rather than at write time.
+- **Tests:** `every_value_type_builds_and_reads_back`, `graphic_values_reject_the_wrong_point_count`,
+  `a_polygon_must_close_and_a_scoord3d_needs_a_frame_of_reference`,
+  `temporal_coordinates_check_their_range_type`, `graphic_and_temporal_values_survive_a_write_and_read`,
+  `graphic_and_temporal_values_survive_a_big_endian_round_trip`, `a_real_sr_document_validates` (the
+  DCMTK reference SR validates) and the validation tests in `crates/radicom/src/sr/`.
 
 ## 5. Print `SmoothingType` and `BorderDensity` — done (2026-10-30)
 

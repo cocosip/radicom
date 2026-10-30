@@ -341,6 +341,7 @@ client/server. One tokio task per association. Locks must not be held across `.a
 
 - Tag keys are 8 hex digits `GGGGEEEE`.
 - A value lives in exactly one of `Value` (array), `InlineBinary` (base64) or `BulkDataURI`.
+
 - PN uses the three groups (Alphabetic / Ideographic / Phonetic).
 - Numeric mode is configurable (AsNumber / AsString / PreferablyAsNumber); DS keeps trailing zeros.
 - **Group length elements `(gggg,0000)` must be stripped at every level of the tree.**
@@ -362,6 +363,19 @@ client/server. One tokio task per association. Locks must not be held across `.a
   `CodeValue (0008,0100, SH)`, `LongCodeValue (0008,0119, UC)`, `URNCodeValue (0008,0120, UR)`. Scheme,
   meaning and version are `(0008,0102)`, `(0008,0104)` and `(0008,0103)`.
 - Content items form a tree; preserve it.
+- The document dataset **is** the root content item (PS3.3 C.17.2): ValueType CONTAINER, the document
+  title in ConceptNameCodeSequence and ContinuityOfContent live at the top level, and every item of the
+  top-level ContentSequence is a child with a RelationshipType. `StructuredReport::set_root` hoists a
+  root container into the dataset; `content_items`/`set_content_items` read and replace its children.
+  A by-reference relationship target carries only (0040,DB73) and no ValueType.
+- All 15 value types are buildable and readable: `ContentItem::value()` returns a `ContentValue`, and
+  SCOORD/SCOORD3D/TCOORD/WAVEFORM carry their macro attributes (`GraphicData` FL pairs/triplets,
+  `ReferencedFrameOfReferenceUID` for SCOORD3D, one of the three temporal reference lists, the
+  waveform channels). Point counts and the closed POLYGON are checked at construction (C.18.6–C.18.9).
+- `StructuredReport::validate` checks the document's Type 1 attributes (SOP identity, ValueType
+  CONTAINER, document title, ContinuityOfContent, CompletionFlag) and every item: known ValueType,
+  the conditional concept name (C.17-5), RelationshipType, the value its type requires, and
+  ContinuityOfContent for a CONTAINER.
 
 ### 12.4 Printing (PRINT-01/02)
 

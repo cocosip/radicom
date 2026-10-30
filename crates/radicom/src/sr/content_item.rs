@@ -49,8 +49,31 @@ pub mod tags {
     pub const REFERENCED_SOP_CLASS_UID: Tag = Tag::REFERENCED_SOP_CLASS_UID;
     /// (0008,1155) ReferencedSOPInstanceUID.
     pub const REFERENCED_SOP_INSTANCE_UID: Tag = Tag::REFERENCED_SOP_INSTANCE_UID;
-    /// (0040,A730) also the sequence a container's children live in.
+    /// (0040,A050) ContinuityOfContent of a CONTAINER item.
     pub const CONTINUITY_OF_CONTENT: Tag = Tag::CONTINUITY_OF_CONTENT;
+    /// (0070,0022) GraphicData: the 2D pairs or 3D triplets of a SCOORD item.
+    pub const GRAPHIC_DATA: Tag = Tag::GRAPHIC_DATA;
+    /// (0070,0023) GraphicType: shared by SCOORD and SCOORD3D.
+    pub const GRAPHIC_TYPE: Tag = Tag::GRAPHIC_TYPE;
+    /// (3006,0024) ReferencedFrameOfReferenceUID: Type 1 for SCOORD3D.
+    pub const REFERENCED_FRAME_OF_REFERENCE_UID: Tag = Tag::REFERENCED_FRAME_OF_REFERENCE_UID;
+    /// (0040,A130) TemporalRangeType of a TCOORD item.
+    pub const TEMPORAL_RANGE_TYPE: Tag = Tag::TEMPORAL_RANGE_TYPE;
+    /// (0040,A132) ReferencedSamplePositions (UL).
+    pub const REFERENCED_SAMPLE_POSITIONS: Tag = Tag::REFERENCED_SAMPLE_POSITIONS;
+    /// (0040,A138) ReferencedTimeOffsets (DS).
+    pub const REFERENCED_TIME_OFFSETS: Tag = Tag::REFERENCED_TIME_OFFSETS;
+    /// (0040,A13A) ReferencedDateTime (DT).
+    pub const REFERENCED_DATE_TIME: Tag = Tag::REFERENCED_DATE_TIME;
+    /// (0040,A0B0) ReferencedWaveformChannels (US, 2-2n).
+    pub const REFERENCED_WAVEFORM_CHANNELS: Tag = Tag::REFERENCED_WAVEFORM_CHANNELS;
+    /// (0040,A491) CompletionFlag of the SR document.
+    pub const COMPLETION_FLAG: Tag = Tag::COMPLETION_FLAG;
+    /// (0040,A493) VerificationFlag of the SR document.
+    pub const VERIFICATION_FLAG: Tag = Tag::VERIFICATION_FLAG;
+    /// (0040,DB73) ReferencedContentItemIdentifier: the target of a by-reference
+    /// relationship, which carries no ValueType (Table C.17-6).
+    pub const REFERENCED_CONTENT_ITEM_IDENTIFIER: Tag = Tag::REFERENCED_CONTENT_ITEM_IDENTIFIER;
 }
 
 /// The 15 SR value types (§12.3, PS3.3 C.18.1).
@@ -153,6 +176,337 @@ impl Relationship {
             _ => return None,
         })
     }
+}
+
+/// The 2D graphic types of a SCOORD item (PS3.3 C.18.6.1.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphicType {
+    Point,
+    Multipoint,
+    Polyline,
+    Circle,
+    Ellipse,
+}
+
+impl GraphicType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GraphicType::Point => "POINT",
+            GraphicType::Multipoint => "MULTIPOINT",
+            GraphicType::Polyline => "POLYLINE",
+            GraphicType::Circle => "CIRCLE",
+            GraphicType::Ellipse => "ELLIPSE",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<GraphicType> {
+        Some(match text.trim() {
+            "POINT" => GraphicType::Point,
+            "MULTIPOINT" => GraphicType::Multipoint,
+            "POLYLINE" => GraphicType::Polyline,
+            "CIRCLE" => GraphicType::Circle,
+            "ELLIPSE" => GraphicType::Ellipse,
+            _ => return None,
+        })
+    }
+
+    /// How many (column,row) pairs this type requires (C.18.6.1.2).
+    fn point_range(self) -> (usize, Option<usize>) {
+        match self {
+            GraphicType::Point => (1, Some(1)),
+            GraphicType::Multipoint => (1, None),
+            GraphicType::Polyline => (2, None),
+            GraphicType::Circle => (2, Some(2)),
+            GraphicType::Ellipse => (4, Some(4)),
+        }
+    }
+}
+
+/// The 3D graphic types of a SCOORD3D item (PS3.3 C.18.9.1.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphicType3D {
+    Point,
+    Multipoint,
+    Polyline,
+    Polygon,
+    Ellipse,
+    Ellipsoid,
+}
+
+impl GraphicType3D {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GraphicType3D::Point => "POINT",
+            GraphicType3D::Multipoint => "MULTIPOINT",
+            GraphicType3D::Polyline => "POLYLINE",
+            GraphicType3D::Polygon => "POLYGON",
+            GraphicType3D::Ellipse => "ELLIPSE",
+            GraphicType3D::Ellipsoid => "ELLIPSOID",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<GraphicType3D> {
+        Some(match text.trim() {
+            "POINT" => GraphicType3D::Point,
+            "MULTIPOINT" => GraphicType3D::Multipoint,
+            "POLYLINE" => GraphicType3D::Polyline,
+            "POLYGON" => GraphicType3D::Polygon,
+            "ELLIPSE" => GraphicType3D::Ellipse,
+            "ELLIPSOID" => GraphicType3D::Ellipsoid,
+            _ => return None,
+        })
+    }
+
+    /// How many (x,y,z) triplets this type requires (C.18.9.1.2).
+    fn point_range(self) -> (usize, Option<usize>) {
+        match self {
+            GraphicType3D::Point => (1, Some(1)),
+            GraphicType3D::Multipoint => (1, None),
+            GraphicType3D::Polyline => (2, None),
+            GraphicType3D::Polygon => (3, None),
+            GraphicType3D::Ellipse => (4, Some(4)),
+            GraphicType3D::Ellipsoid => (6, Some(6)),
+        }
+    }
+}
+
+/// The temporal extent of a TCOORD item (PS3.3 C.18.7.1.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemporalRangeType {
+    Point,
+    Multipoint,
+    Segment,
+    Multisegment,
+    Begin,
+    End,
+}
+
+impl TemporalRangeType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TemporalRangeType::Point => "POINT",
+            TemporalRangeType::Multipoint => "MULTIPOINT",
+            TemporalRangeType::Segment => "SEGMENT",
+            TemporalRangeType::Multisegment => "MULTISEGMENT",
+            TemporalRangeType::Begin => "BEGIN",
+            TemporalRangeType::End => "END",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<TemporalRangeType> {
+        Some(match text.trim() {
+            "POINT" => TemporalRangeType::Point,
+            "MULTIPOINT" => TemporalRangeType::Multipoint,
+            "SEGMENT" => TemporalRangeType::Segment,
+            "MULTISEGMENT" => TemporalRangeType::Multisegment,
+            "BEGIN" => TemporalRangeType::Begin,
+            "END" => TemporalRangeType::End,
+            _ => return None,
+        })
+    }
+
+    /// How many temporal points this range type requires (C.18.7.1.1).
+    fn point_range(self) -> (usize, Option<usize>) {
+        match self {
+            TemporalRangeType::Point | TemporalRangeType::Begin | TemporalRangeType::End => {
+                (1, Some(1))
+            }
+            TemporalRangeType::Segment => (2, Some(2)),
+            TemporalRangeType::Multipoint => (1, None),
+            TemporalRangeType::Multisegment => (2, None),
+        }
+    }
+}
+
+/// Narrows a numeric value read from a binary element to an unsigned integer.
+/// A non-integral, negative or out-of-range value is corrupt data, not a value
+/// to wrap.
+fn unsigned<T: TryFrom<u32>>(value: f64) -> Option<T> {
+    if value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value <= u32::MAX as f64 {
+        T::try_from(value as u32).ok()
+    } else {
+        None
+    }
+}
+
+/// Checks a point count against the type's requirement.
+fn check_count(kind: &str, count: usize, (min, max): (usize, Option<usize>)) -> Result<(), Error> {
+    let fits = count >= min && max.is_none_or(|max| count <= max);
+    if fits {
+        return Ok(());
+    }
+    let expected = match max {
+        Some(max) if max == min => format!("exactly {min}"),
+        Some(max) => format!("{min} to {max}"),
+        None => format!("at least {min}"),
+    };
+    Err(Error::Data(DataError::Other {
+        message: format!("{kind} needs {expected} points, got {count}"),
+    }))
+}
+
+/// A SCOORD value: the graphic type plus (column,row) pairs (PS3.3 C.18.6).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpatialCoordinates {
+    pub graphic_type: GraphicType,
+    pub points: Vec<(f64, f64)>,
+}
+
+impl SpatialCoordinates {
+    /// Validates the point count and that every coordinate is finite: FL has no
+    /// form for NaN or infinity (C.18.6.1.2).
+    pub fn new(graphic_type: GraphicType, points: &[(f64, f64)]) -> Result<Self, Error> {
+        check_count("SCOORD", points.len(), graphic_type.point_range())?;
+        if points
+            .iter()
+            .any(|(column, row)| !column.is_finite() || !row.is_finite())
+        {
+            return Err(Error::Data(DataError::Other {
+                message: "SCOORD coordinates must be finite".into(),
+            }));
+        }
+        Ok(SpatialCoordinates {
+            graphic_type,
+            points: points.to_vec(),
+        })
+    }
+}
+
+/// A SCOORD3D value: the graphic type, (x,y,z) triplets and their frame of
+/// reference (PS3.3 C.18.9).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpatialCoordinates3D {
+    pub graphic_type: GraphicType3D,
+    pub points: Vec<(f64, f64, f64)>,
+    /// (3006,0024) Referenced Frame of Reference UID, Type 1 in C.18.9.
+    pub frame_of_reference_uid: String,
+}
+
+impl SpatialCoordinates3D {
+    /// Validates the point count and, for POLYGON, that the first and last
+    /// vertices are the same (C.18.9.1.2).
+    pub fn new(
+        graphic_type: GraphicType3D,
+        points: &[(f64, f64, f64)],
+        frame_of_reference_uid: impl Into<String>,
+    ) -> Result<Self, Error> {
+        check_count("SCOORD3D", points.len(), graphic_type.point_range())?;
+        if points
+            .iter()
+            .any(|(x, y, z)| !x.is_finite() || !y.is_finite() || !z.is_finite())
+        {
+            return Err(Error::Data(DataError::Other {
+                message: "SCOORD3D coordinates must be finite".into(),
+            }));
+        }
+        let frame_of_reference_uid = frame_of_reference_uid.into();
+        if frame_of_reference_uid.trim().is_empty() {
+            return Err(Error::Data(DataError::Other {
+                message: "SCOORD3D needs a Referenced Frame of Reference UID".into(),
+            }));
+        }
+        if graphic_type == GraphicType3D::Polygon && points.first() != points.last() {
+            return Err(Error::Data(DataError::Other {
+                message: "SCOORD3D POLYGON needs the first and last vertices to be the same".into(),
+            }));
+        }
+        Ok(SpatialCoordinates3D {
+            graphic_type,
+            points: points.to_vec(),
+            frame_of_reference_uid,
+        })
+    }
+}
+
+/// The temporal points of a TCOORD item (PS3.3 C.18.7); exactly one form.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TemporalRange {
+    /// (0040,A132) ReferencedSamplePositions, 1-based.
+    SamplePositions(Vec<u32>),
+    /// (0040,A138) ReferencedTimeOffsets, seconds after the start of the data.
+    TimeOffsets(Vec<f64>),
+    /// (0040,A13A) ReferencedDateTime.
+    DateTimes(Vec<String>),
+}
+
+impl TemporalRange {
+    pub fn len(&self) -> usize {
+        match self {
+            TemporalRange::SamplePositions(values) => values.len(),
+            TemporalRange::TimeOffsets(values) => values.len(),
+            TemporalRange::DateTimes(values) => values.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// A TCOORD value: the temporal range type plus its points (PS3.3 C.18.7).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemporalCoordinates {
+    pub range_type: TemporalRangeType,
+    pub range: TemporalRange,
+}
+
+impl TemporalCoordinates {
+    /// Validates the point count, the even MULTISEGMENT count, finite time
+    /// offsets and the DT values.
+    pub fn new(range_type: TemporalRangeType, range: TemporalRange) -> Result<Self, Error> {
+        check_count("TCOORD", range.len(), range_type.point_range())?;
+        if range_type == TemporalRangeType::Multisegment && !range.len().is_multiple_of(2) {
+            return Err(Error::Data(DataError::Other {
+                message: format!(
+                    "TCOORD MULTISEGMENT needs an even number of points, got {}",
+                    range.len()
+                ),
+            }));
+        }
+        match &range {
+            // DS has no form for NaN or infinity
+            TemporalRange::TimeOffsets(values) => {
+                if values.iter().any(|value| !value.is_finite()) {
+                    return Err(Error::Data(DataError::Other {
+                        message: "TCOORD time offsets must be finite".into(),
+                    }));
+                }
+            }
+            TemporalRange::DateTimes(values) => {
+                for value in values {
+                    crate::model::dicom_datetime::parse_dt(value)?;
+                }
+            }
+            TemporalRange::SamplePositions(_) => {}
+        }
+        Ok(TemporalCoordinates { range_type, range })
+    }
+}
+
+/// The typed value of a content item (PS3.3 C.18.1): one variant per ValueType.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContentValue {
+    /// A CONTAINER item; read its children with [`ContentItem::children`].
+    Container,
+    Text(String),
+    Code(CodeItem),
+    Num(MeasuredValue),
+    PersonName(String),
+    Date(String),
+    Time(String),
+    DateTime(String),
+    UidRef(String),
+    /// COMPOSITE / IMAGE: the referenced SOP instances.
+    References(Vec<ReferencedSop>),
+    /// WAVEFORM: the referenced SOP instances and their (multiplex group,
+    /// channel) pairs; an empty list means every channel.
+    Waveform {
+        references: Vec<ReferencedSop>,
+        channels: Vec<(u16, u16)>,
+    },
+    Scoord(SpatialCoordinates),
+    Scoord3D(SpatialCoordinates3D),
+    Tcoord(TemporalCoordinates),
 }
 
 /// A NUM measured value: a numeric value plus its measurement units (§12.3).
@@ -287,16 +641,20 @@ pub struct ContentItem {
 
 impl ContentItem {
     /// Starts a container with a concept name (§12.3).
+    ///
+    /// ContinuityOfContent is Type 1 for a CONTAINER, so an absent value is
+    /// written as `SEPARATE` (fo-dicom's default) rather than left missing.
     pub fn container(
         concept_name: CodeItem,
         relationship: Option<Relationship>,
         continuity: Option<&str>,
     ) -> Self {
         let mut item = Self::base(concept_name, ValueType::Container, relationship);
-        if let Some(continuity) = continuity {
-            item.dataset
-                .insert_str(tags::CONTINUITY_OF_CONTENT, Vr::Cs, continuity);
-        }
+        item.dataset.insert_str(
+            tags::CONTINUITY_OF_CONTENT,
+            Vr::Cs,
+            continuity.unwrap_or("SEPARATE"),
+        );
         item
     }
 
@@ -417,6 +775,121 @@ impl ContentItem {
         &self.dataset
     }
 
+    /// A SCOORD value: GraphicType and GraphicData (PS3.3 C.18.6). The point
+    /// count is checked by [`SpatialCoordinates::new`].
+    pub fn scoord(
+        concept_name: CodeItem,
+        relationship: Relationship,
+        value: SpatialCoordinates,
+    ) -> Self {
+        let mut item = Self::base(concept_name, ValueType::Scoord, Some(relationship));
+        item.dataset
+            .insert_str(tags::GRAPHIC_TYPE, Vr::Cs, value.graphic_type.as_str());
+        let mut bytes = Vec::with_capacity(value.points.len() * 8);
+        for (column, row) in &value.points {
+            bytes.extend_from_slice(&(*column as f32).to_le_bytes());
+            bytes.extend_from_slice(&(*row as f32).to_le_bytes());
+        }
+        insert_bytes(&mut item.dataset, tags::GRAPHIC_DATA, Vr::Fl, bytes);
+        item
+    }
+
+    /// A SCOORD3D value: GraphicType, GraphicData triplets and the referenced
+    /// frame of reference (PS3.3 C.18.9).
+    pub fn scoord3d(
+        concept_name: CodeItem,
+        relationship: Relationship,
+        value: SpatialCoordinates3D,
+    ) -> Self {
+        let mut item = Self::base(concept_name, ValueType::Scoord3D, Some(relationship));
+        item.dataset
+            .insert_str(tags::GRAPHIC_TYPE, Vr::Cs, value.graphic_type.as_str());
+        item.dataset.insert_str(
+            tags::REFERENCED_FRAME_OF_REFERENCE_UID,
+            Vr::Ui,
+            value.frame_of_reference_uid.as_str(),
+        );
+        let mut bytes = Vec::with_capacity(value.points.len() * 12);
+        for (x, y, z) in &value.points {
+            bytes.extend_from_slice(&(*x as f32).to_le_bytes());
+            bytes.extend_from_slice(&(*y as f32).to_le_bytes());
+            bytes.extend_from_slice(&(*z as f32).to_le_bytes());
+        }
+        insert_bytes(&mut item.dataset, tags::GRAPHIC_DATA, Vr::Fl, bytes);
+        item
+    }
+
+    /// A TCOORD value: TemporalRangeType plus one of the three reference lists
+    /// (PS3.3 C.18.7).
+    pub fn tcoord(
+        concept_name: CodeItem,
+        relationship: Relationship,
+        value: TemporalCoordinates,
+    ) -> Self {
+        let mut item = Self::base(concept_name, ValueType::Tcoord, Some(relationship));
+        item.dataset
+            .insert_str(tags::TEMPORAL_RANGE_TYPE, Vr::Cs, value.range_type.as_str());
+        match &value.range {
+            TemporalRange::SamplePositions(values) => {
+                let mut bytes = Vec::with_capacity(values.len() * 4);
+                for value in values {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+                insert_bytes(
+                    &mut item.dataset,
+                    tags::REFERENCED_SAMPLE_POSITIONS,
+                    Vr::Ul,
+                    bytes,
+                );
+            }
+            TemporalRange::TimeOffsets(values) => {
+                let text = values
+                    .iter()
+                    .map(|value| crate::model::person_name::format_ds(*value))
+                    .collect::<Vec<_>>()
+                    .join("\\");
+                item.dataset
+                    .insert_str(tags::REFERENCED_TIME_OFFSETS, Vr::Ds, text);
+            }
+            TemporalRange::DateTimes(values) => {
+                item.dataset
+                    .insert_str(tags::REFERENCED_DATE_TIME, Vr::Dt, values.join("\\"));
+            }
+        }
+        item
+    }
+
+    /// A WAVEFORM value: the composite object reference plus the optional
+    /// (multiplex group, channel) pairs (PS3.3 C.18.5).
+    pub fn waveform(
+        concept_name: CodeItem,
+        relationship: Relationship,
+        references: &[ReferencedSop],
+        channels: &[(u16, u16)],
+    ) -> Self {
+        let mut item = Self::base(concept_name, ValueType::Waveform, Some(relationship));
+        let sequence = item.dataset.insert_sequence(tags::REFERENCED_SOP_SEQUENCE);
+        for reference in references {
+            let mut reference_item = Dataset::new();
+            reference.write_into(&mut reference_item);
+            sequence.push(reference_item);
+        }
+        if !channels.is_empty() {
+            let mut bytes = Vec::with_capacity(channels.len() * 4);
+            for (group, channel) in channels {
+                bytes.extend_from_slice(&group.to_le_bytes());
+                bytes.extend_from_slice(&channel.to_le_bytes());
+            }
+            insert_bytes(
+                &mut item.dataset,
+                tags::REFERENCED_WAVEFORM_CHANNELS,
+                Vr::Us,
+                bytes,
+            );
+        }
+        item
+    }
+
     /// Consumes the item, yielding its backing dataset.
     pub fn into_dataset(self) -> Dataset {
         self.dataset
@@ -475,6 +948,206 @@ impl ContentItem {
             .unwrap_or_default()
     }
 
+    /// The code value of a CODE item: ConceptCodeSequence (§12.3).
+    pub fn code_value(&self) -> Option<CodeItem> {
+        let sequence = self.dataset.try_get_sequence(tags::CONCEPT_CODE_SEQUENCE)?;
+        sequence
+            .items()
+            .first()
+            .and_then(|item| CodeItem::read_from(item).ok())
+    }
+
+    /// The PersonName of a PNAME item.
+    pub fn person_name_value(&self) -> Option<String> {
+        self.dataset.try_get_str(tags::PERSON_NAME)
+    }
+
+    /// The Date of a DATE item.
+    pub fn date_value(&self) -> Option<String> {
+        self.dataset.try_get_str(tags::DATE)
+    }
+
+    /// The Time of a TIME item.
+    pub fn time_value(&self) -> Option<String> {
+        self.dataset.try_get_str(tags::TIME)
+    }
+
+    /// The DateTime of a DATETIME item.
+    pub fn date_time_value(&self) -> Option<String> {
+        self.dataset.try_get_str(tags::DATE_TIME)
+    }
+
+    /// The UID of a UIDREF item.
+    pub fn uid_value(&self) -> Option<String> {
+        self.dataset.try_get_str(tags::UID)
+    }
+
+    /// The SCOORD value of a SCOORD item (PS3.3 C.18.6).
+    pub fn scoord_value(&self) -> Option<SpatialCoordinates> {
+        let graphic_type = GraphicType::parse(&self.dataset.try_get_str(tags::GRAPHIC_TYPE)?)?;
+        let values = self.numbers(tags::GRAPHIC_DATA)?;
+        Some(SpatialCoordinates {
+            graphic_type,
+            points: values
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| (pair[0], pair[1]))
+                .collect(),
+        })
+    }
+
+    /// The SCOORD3D value of a SCOORD3D item (PS3.3 C.18.9).
+    pub fn scoord3d_value(&self) -> Option<SpatialCoordinates3D> {
+        let graphic_type = GraphicType3D::parse(&self.dataset.try_get_str(tags::GRAPHIC_TYPE)?)?;
+        let values = self.numbers(tags::GRAPHIC_DATA)?;
+        Some(SpatialCoordinates3D {
+            graphic_type,
+            points: values
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|triplet| (triplet[0], triplet[1], triplet[2]))
+                .collect(),
+            frame_of_reference_uid: self
+                .dataset
+                .try_get_str(tags::REFERENCED_FRAME_OF_REFERENCE_UID)?,
+        })
+    }
+
+    /// The TCOORD value of a TCOORD item (PS3.3 C.18.7).
+    ///
+    /// Exactly one of the three reference lists is required, so an item carrying
+    /// two of them is malformed rather than ambiguously readable.
+    pub fn tcoord_value(&self) -> Option<TemporalCoordinates> {
+        let range_type =
+            TemporalRangeType::parse(&self.dataset.try_get_str(tags::TEMPORAL_RANGE_TYPE)?)?;
+        let present = [
+            tags::REFERENCED_SAMPLE_POSITIONS,
+            tags::REFERENCED_TIME_OFFSETS,
+            tags::REFERENCED_DATE_TIME,
+        ]
+        .into_iter()
+        .filter(|tag| self.dataset.contains(tag))
+        .count();
+        if present != 1 {
+            return None;
+        }
+        let range = if self.dataset.contains(&tags::REFERENCED_SAMPLE_POSITIONS) {
+            TemporalRange::SamplePositions(
+                self.numbers(tags::REFERENCED_SAMPLE_POSITIONS)?
+                    .into_iter()
+                    .map(unsigned::<u32>)
+                    .collect::<Option<Vec<u32>>>()?,
+            )
+        } else if let Some(text) = self.dataset.try_get_str(tags::REFERENCED_TIME_OFFSETS) {
+            let mut offsets = Vec::new();
+            for part in text.split('\\') {
+                offsets.push(crate::model::person_name::parse_ds(part).ok()?);
+            }
+            TemporalRange::TimeOffsets(offsets)
+        } else {
+            let text = self.dataset.try_get_str(tags::REFERENCED_DATE_TIME)?;
+            TemporalRange::DateTimes(text.split('\\').map(str::to_string).collect())
+        };
+        Some(TemporalCoordinates { range_type, range })
+    }
+
+    /// The (multiplex group, channel) pairs of a WAVEFORM item (PS3.3 C.18.5).
+    pub fn waveform_channels(&self) -> Vec<(u16, u16)> {
+        self.numbers(tags::REFERENCED_WAVEFORM_CHANNELS)
+            .and_then(|values| {
+                values
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| Some((unsigned::<u16>(pair[0])?, unsigned::<u16>(pair[1])?)))
+                    .collect::<Option<Vec<(u16, u16)>>>()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The item's typed value (PS3.3 C.18.1); `None` when the value tag is
+    /// missing or malformed.
+    pub fn value(&self) -> Option<ContentValue> {
+        Some(match self.value_type()? {
+            ValueType::Container => ContentValue::Container,
+            ValueType::Text => ContentValue::Text(self.text_value()?),
+            ValueType::Code => ContentValue::Code(self.code_value()?),
+            ValueType::Num => ContentValue::Num(self.measured_value()?),
+            ValueType::PersonName => ContentValue::PersonName(self.person_name_value()?),
+            ValueType::Date => ContentValue::Date(self.date_value()?),
+            ValueType::Time => ContentValue::Time(self.time_value()?),
+            ValueType::DateTime => ContentValue::DateTime(self.date_time_value()?),
+            ValueType::UidRef => ContentValue::UidRef(self.uid_value()?),
+            ValueType::Composite | ValueType::Image => {
+                ContentValue::References(self.referenced_sops())
+            }
+            ValueType::Waveform => ContentValue::Waveform {
+                references: self.referenced_sops(),
+                channels: self.waveform_channels(),
+            },
+            ValueType::Scoord => ContentValue::Scoord(self.scoord_value()?),
+            ValueType::Scoord3D => ContentValue::Scoord3D(self.scoord3d_value()?),
+            ValueType::Tcoord => ContentValue::Tcoord(self.tcoord_value()?),
+        })
+    }
+
+    /// Whether the item carries the value its ValueType requires (§12.3).
+    ///
+    /// A CONTAINER needs no value tag (children are optional), but every
+    /// sequence-valued item needs a non-empty sequence, since an empty one
+    /// carries nothing.
+    pub(crate) fn has_value(&self, value_type: ValueType) -> bool {
+        let has = |tag: crate::model::tag::Tag| self.dataset.contains(&tag);
+        let has_items = |tag: crate::model::tag::Tag| {
+            self.dataset.value_count(&tag).is_ok_and(|count| count > 0)
+        };
+        match value_type {
+            ValueType::Container => true,
+            ValueType::Text => has(tags::TEXT_VALUE),
+            ValueType::Code => has_items(tags::CONCEPT_CODE_SEQUENCE),
+            // Table C.18.1-1 makes MeasuredValueSequence Type 2: present, but
+            // legitimately empty when the value is unknown or a failure
+            ValueType::Num => has(tags::MEASURED_VALUE_SEQUENCE),
+            ValueType::PersonName => has(tags::PERSON_NAME),
+            ValueType::Date => has(tags::DATE),
+            ValueType::Time => has(tags::TIME),
+            ValueType::DateTime => has(tags::DATE_TIME),
+            ValueType::UidRef => has(tags::UID),
+            ValueType::Composite | ValueType::Image | ValueType::Waveform => {
+                has_items(tags::REFERENCED_SOP_SEQUENCE)
+            }
+            ValueType::Scoord => has(tags::GRAPHIC_DATA) && has(tags::GRAPHIC_TYPE),
+            ValueType::Scoord3D => {
+                has(tags::GRAPHIC_DATA)
+                    && has(tags::GRAPHIC_TYPE)
+                    && has(tags::REFERENCED_FRAME_OF_REFERENCE_UID)
+            }
+            ValueType::Tcoord => {
+                let lists = [
+                    tags::REFERENCED_SAMPLE_POSITIONS,
+                    tags::REFERENCED_TIME_OFFSETS,
+                    tags::REFERENCED_DATE_TIME,
+                ]
+                .into_iter()
+                .filter(|tag| self.dataset.contains(tag))
+                .count();
+                has(tags::TEMPORAL_RANGE_TYPE) && lists == 1
+            }
+        }
+    }
+
+    /// Every value of a numeric element as `f64` (FL/UL/US/...).
+    fn numbers(&self, tag: crate::model::tag::Tag) -> Option<Vec<f64>> {
+        let count = self.dataset.value_count(&tag).ok()?;
+        let mut values = Vec::with_capacity(count);
+        for index in 0..count {
+            values.push(self.dataset.get_at::<f64>(&tag, index).ok()?);
+        }
+        Some(values)
+    }
+
     /// The children of a container, read from ContentSequence (§12.3).
     pub fn children(&self) -> Vec<ContentItem> {
         self.dataset
@@ -524,6 +1197,18 @@ impl ContentItem {
         dataset.insert_sequence(tags::CONCEPT_NAME).push(concept);
         ContentItem { dataset }
     }
+}
+
+/// Writes a binary VR value from little-endian bytes (the in-memory order the
+/// writer swaps from, see `IntoElement` for the numeric types).
+fn insert_bytes(dataset: &mut Dataset, tag: crate::model::tag::Tag, vr: Vr, bytes: Vec<u8>) {
+    dataset.insert_or_update(crate::model::item::DicomItem::Element(
+        crate::model::element::DicomElement::new_bytes(
+            tag,
+            vr,
+            std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(bytes)),
+        ),
+    ));
 }
 
 /// Builds a ContentItem from an existing dataset, checking its value type.
@@ -821,5 +1506,337 @@ mod tests {
         let item = ContentItem::text(concept(), Relationship::Contains, "Mass");
         let rebuilt = content_item_from_dataset(item.dataset().clone()).unwrap();
         assert_eq!(rebuilt.value_type(), Some(ValueType::Text));
+    }
+
+    #[test]
+    fn a_scoord_item_writes_graphic_type_and_pairs() {
+        let value =
+            SpatialCoordinates::new(GraphicType::Polyline, &[(1.0, 2.0), (3.0, 4.5)]).unwrap();
+        let item = ContentItem::scoord(concept(), Relationship::Contains, value.clone());
+        assert_eq!(item.value_type(), Some(ValueType::Scoord));
+        assert_eq!(
+            item.dataset().try_get_str(tags::GRAPHIC_TYPE).as_deref(),
+            Some("POLYLINE")
+        );
+        // FL: two pairs = four 4-byte values, and the VR really is FL (an FD
+        // write would round-trip just as happily through value_count)
+        assert_eq!(
+            item.dataset().value_count(tags::GRAPHIC_DATA).unwrap(),
+            4,
+            "GraphicData holds one FL per coordinate"
+        );
+        assert_eq!(
+            item.dataset().get_element(tags::GRAPHIC_DATA).unwrap().vr(),
+            Vr::Fl,
+            "C.18.6.1 makes GraphicData FL"
+        );
+        assert_eq!(item.scoord_value(), Some(value.clone()));
+        assert_eq!(
+            item.value(),
+            Some(ContentValue::Scoord(value)),
+            "the typed reader agrees with the builder"
+        );
+    }
+
+    #[test]
+    fn a_scoord3d_item_carries_its_frame_of_reference() {
+        let value = SpatialCoordinates3D::new(
+            GraphicType3D::Ellipsoid,
+            &[
+                (0.0, 0.0, 0.0),
+                (1.0, 0.0, 0.0),
+                (0.0, 2.0, 0.0),
+                (0.0, 0.0, 2.0),
+                (0.0, 0.0, 0.0),
+                (0.0, 0.0, 3.0),
+            ],
+            "1.2.840.10008.1.2.3",
+        )
+        .unwrap();
+        let item = ContentItem::scoord3d(concept(), Relationship::Contains, value.clone());
+        assert_eq!(item.value_type(), Some(ValueType::Scoord3D));
+        assert_eq!(
+            item.dataset()
+                .try_get_str(tags::REFERENCED_FRAME_OF_REFERENCE_UID)
+                .as_deref(),
+            Some("1.2.840.10008.1.2.3")
+        );
+        assert_eq!(
+            item.dataset().value_count(tags::GRAPHIC_DATA).unwrap(),
+            18,
+            "six triplets are eighteen FL values"
+        );
+        assert_eq!(item.scoord3d_value(), Some(value));
+    }
+
+    #[test]
+    fn a_tcoord_item_writes_one_reference_list() {
+        let samples = TemporalCoordinates::new(
+            TemporalRangeType::Segment,
+            TemporalRange::SamplePositions(vec![1, 5]),
+        )
+        .unwrap();
+        let item = ContentItem::tcoord(concept(), Relationship::Contains, samples.clone());
+        assert_eq!(item.value_type(), Some(ValueType::Tcoord));
+        assert_eq!(
+            item.dataset()
+                .value_count(tags::REFERENCED_SAMPLE_POSITIONS)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            item.dataset()
+                .get_element(tags::REFERENCED_SAMPLE_POSITIONS)
+                .unwrap()
+                .vr(),
+            Vr::Ul,
+            "C.18.7.1 makes ReferencedSamplePositions UL"
+        );
+        assert_eq!(item.tcoord_value(), Some(samples));
+
+        let offsets = TemporalCoordinates::new(
+            TemporalRangeType::Point,
+            TemporalRange::TimeOffsets(vec![0.5]),
+        )
+        .unwrap();
+        let item = ContentItem::tcoord(concept(), Relationship::Contains, offsets.clone());
+        assert_eq!(
+            item.dataset()
+                .try_get_str(tags::REFERENCED_TIME_OFFSETS)
+                .as_deref(),
+            Some("0.5")
+        );
+        assert_eq!(item.tcoord_value(), Some(offsets));
+
+        let times = TemporalCoordinates::new(
+            TemporalRangeType::Begin,
+            TemporalRange::DateTimes(vec!["20260101120000".into()]),
+        )
+        .unwrap();
+        let item = ContentItem::tcoord(concept(), Relationship::Contains, times.clone());
+        assert_eq!(
+            item.dataset()
+                .try_get_str(tags::REFERENCED_DATE_TIME)
+                .as_deref(),
+            Some("20260101120000")
+        );
+        assert_eq!(item.tcoord_value(), Some(times));
+    }
+
+    #[test]
+    fn a_waveform_item_carries_references_and_channels() {
+        let reference = ReferencedSop::new("1.2.840.10008.5.1.4.1.1.9.1.1", "1.2.3");
+        let item = ContentItem::waveform(
+            concept(),
+            Relationship::Contains,
+            std::slice::from_ref(&reference),
+            &[(1, 0), (3, 2)],
+        );
+        assert_eq!(item.value_type(), Some(ValueType::Waveform));
+        assert_eq!(item.referenced_sops(), vec![reference.clone()]);
+        assert_eq!(item.waveform_channels(), vec![(1, 0), (3, 2)]);
+        assert_eq!(
+            item.dataset()
+                .get_element(tags::REFERENCED_WAVEFORM_CHANNELS)
+                .unwrap()
+                .vr(),
+            Vr::Us,
+            "C.18.5.1 makes ReferencedWaveformChannels US"
+        );
+        assert_eq!(
+            item.value(),
+            Some(ContentValue::Waveform {
+                references: vec![reference],
+                channels: vec![(1, 0), (3, 2)],
+            })
+        );
+    }
+
+    #[test]
+    fn graphic_values_reject_the_wrong_point_count() {
+        // POINT is exactly one pair, ELLIPSE exactly four (C.18.6.1.2)
+        assert!(SpatialCoordinates::new(GraphicType::Point, &[]).is_err());
+        assert!(SpatialCoordinates::new(GraphicType::Point, &[(1.0, 1.0), (2.0, 2.0)]).is_err());
+        assert!(SpatialCoordinates::new(GraphicType::Ellipse, &[(1.0, 1.0); 3]).is_err());
+        assert!(SpatialCoordinates::new(GraphicType::Ellipse, &[(1.0, 1.0); 4]).is_ok());
+        // POLYLINE needs at least two
+        assert!(SpatialCoordinates::new(GraphicType::Polyline, &[(1.0, 1.0)]).is_err());
+        // ELLIPSOID is exactly six triplets, POLYGON at least three
+        assert!(SpatialCoordinates3D::new(
+            GraphicType3D::Ellipsoid,
+            &[(0.0, 0.0, 0.0); 5],
+            "1.2.3"
+        )
+        .is_err());
+        assert!(
+            SpatialCoordinates3D::new(GraphicType3D::Polygon, &[(0.0, 0.0, 0.0); 2], "1.2.3")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_polygon_must_close_and_a_scoord3d_needs_a_frame_of_reference() {
+        let open = [
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (1.0, 1.0, 0.0),
+            (0.0, 1.0, 0.0),
+        ];
+        let error = SpatialCoordinates3D::new(GraphicType3D::Polygon, &open, "1.2.3")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("first and last"), "got {error}");
+
+        let mut closed = open.to_vec();
+        closed.push(open[0]);
+        assert!(SpatialCoordinates3D::new(GraphicType3D::Polygon, &closed, "1.2.3").is_ok());
+        assert!(SpatialCoordinates3D::new(GraphicType3D::Polygon, &closed, " ").is_err());
+    }
+
+    #[test]
+    fn temporal_coordinates_check_their_range_type() {
+        // SEGMENT is exactly two points, MULTISEGMENT an even number
+        assert!(TemporalCoordinates::new(
+            TemporalRangeType::Segment,
+            TemporalRange::SamplePositions(vec![1])
+        )
+        .is_err());
+        assert!(TemporalCoordinates::new(
+            TemporalRangeType::Multisegment,
+            TemporalRange::SamplePositions(vec![1, 2, 3])
+        )
+        .is_err());
+        assert!(TemporalCoordinates::new(
+            TemporalRangeType::Multisegment,
+            TemporalRange::SamplePositions(vec![1, 2, 3, 4])
+        )
+        .is_ok());
+        // a DT value must parse
+        assert!(TemporalCoordinates::new(
+            TemporalRangeType::Point,
+            TemporalRange::DateTimes(vec!["not a date".into()])
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn every_value_type_builds_and_reads_back() {
+        let name = concept();
+        let units = CodeItem::new("mm", "UCUM");
+        let reference = ReferencedSop::new("1.2.840.10008.5.1.4.1.1.2", "1.2.3");
+        let scoord =
+            SpatialCoordinates::new(GraphicType::Circle, &[(1.0, 1.0), (2.0, 2.0)]).unwrap();
+        let scoord3d = SpatialCoordinates3D::new(
+            GraphicType3D::Polyline,
+            &[(0.0, 0.0, 0.0), (1.0, 1.0, 1.0)],
+            "1.2.3",
+        )
+        .unwrap();
+        let tcoord = TemporalCoordinates::new(
+            TemporalRangeType::Point,
+            TemporalRange::SamplePositions(vec![7]),
+        )
+        .unwrap();
+
+        let items = vec![
+            (
+                ContentItem::container(
+                    name.clone(),
+                    Some(Relationship::Contains),
+                    Some("SEPARATE"),
+                ),
+                ContentValue::Container,
+            ),
+            (
+                ContentItem::text(name.clone(), Relationship::Contains, "t"),
+                ContentValue::Text("t".into()),
+            ),
+            (
+                ContentItem::code(name.clone(), Relationship::Contains, units.clone()),
+                ContentValue::Code(units.clone()),
+            ),
+            (
+                ContentItem::num(
+                    name.clone(),
+                    Relationship::Contains,
+                    MeasuredValue::new(12.5, units),
+                )
+                .unwrap(),
+                ContentValue::Num(MeasuredValue::new(12.5, CodeItem::new("mm", "UCUM"))),
+            ),
+            (
+                ContentItem::person_name(name.clone(), Relationship::Contains, "Doe^J"),
+                ContentValue::PersonName("Doe^J".into()),
+            ),
+            (
+                ContentItem::date(name.clone(), Relationship::Contains, "20260101"),
+                ContentValue::Date("20260101".into()),
+            ),
+            (
+                ContentItem::time(name.clone(), Relationship::Contains, "120000"),
+                ContentValue::Time("120000".into()),
+            ),
+            (
+                ContentItem::date_time(name.clone(), Relationship::Contains, "20260101120000"),
+                ContentValue::DateTime("20260101120000".into()),
+            ),
+            (
+                ContentItem::uid_ref(name.clone(), Relationship::Contains, "1.2.3"),
+                ContentValue::UidRef("1.2.3".into()),
+            ),
+            (
+                ContentItem::referenced_sop(
+                    name.clone(),
+                    Relationship::Contains,
+                    ValueType::Composite,
+                    std::slice::from_ref(&reference),
+                ),
+                ContentValue::References(vec![reference.clone()]),
+            ),
+            (
+                ContentItem::referenced_sop(
+                    name.clone(),
+                    Relationship::Contains,
+                    ValueType::Image,
+                    std::slice::from_ref(&reference),
+                ),
+                ContentValue::References(vec![reference.clone()]),
+            ),
+            (
+                ContentItem::waveform(
+                    name.clone(),
+                    Relationship::Contains,
+                    std::slice::from_ref(&reference),
+                    &[(1, 1)],
+                ),
+                ContentValue::Waveform {
+                    references: vec![reference],
+                    channels: vec![(1, 1)],
+                },
+            ),
+            (
+                ContentItem::scoord(name.clone(), Relationship::Contains, scoord.clone()),
+                ContentValue::Scoord(scoord),
+            ),
+            (
+                ContentItem::scoord3d(name.clone(), Relationship::Contains, scoord3d.clone()),
+                ContentValue::Scoord3D(scoord3d),
+            ),
+            (
+                ContentItem::tcoord(name, Relationship::Contains, tcoord.clone()),
+                ContentValue::Tcoord(tcoord),
+            ),
+        ];
+
+        // all 15 value types, each one readable through `value()`
+        assert_eq!(items.len(), 15);
+        for (item, expected) in &items {
+            assert_eq!(
+                item.value().as_ref(),
+                Some(expected),
+                "{:?}",
+                item.value_type()
+            );
+        }
     }
 }

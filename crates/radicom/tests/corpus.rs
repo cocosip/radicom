@@ -214,11 +214,11 @@ fn a_real_sr_document_walks_its_content_tree() {
 
     let bytes = std::fs::read(corpus_dir().join("sr/test_SR.dcm")).unwrap();
     let sr = StructuredReport::from_bytes(&bytes).unwrap();
-    let roots = sr.root_items();
+    let roots = sr.content_items();
     assert_eq!(
         roots.len(),
         5,
-        "the reference SR has five top-level content items"
+        "the reference SR root has five content items"
     );
     assert_eq!(count(&roots), 28, "the whole content tree has 28 nodes");
 

@@ -10,5 +10,9 @@ pub mod content_item;
 pub mod structured_report;
 
 pub use code_item::CodeItem;
-pub use content_item::{ContentItem, Relationship, ValueType};
+pub use content_item::{
+    ContentItem, ContentValue, GraphicType, GraphicType3D, MeasuredValue, ReferencedSop,
+    Relationship, SpatialCoordinates, SpatialCoordinates3D, TemporalCoordinates, TemporalRange,
+    TemporalRangeType, ValueType,
+};
 pub use structured_report::StructuredReport;
