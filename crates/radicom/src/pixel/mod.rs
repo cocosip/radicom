@@ -265,6 +265,11 @@ macro_rules! pixel_read_methods {
                 return Err(pixel_err("encapsulated pixel data holds no fragment bytes"));
             }
             let frames = self.number_of_frames();
+            if index >= frames {
+                return Err(pixel_err(format!(
+                    "frame {index} out of range (0..{frames})"
+                )));
+            }
             // rule 1: a single-frame image is the concatenation of its fragments
             // (fo-dicom `EncapsulatedPixelData.GetFrame`: one fragment returns
             // directly, several are composited)
@@ -559,6 +564,8 @@ impl<'a> PixelData<'a> {
     /// is kept to an even length, and a pad left by the previous append is
     /// dropped first (§9.1, review #4).
     pub fn add_frame(&mut self, data: impl AsRef<[u8]>) -> Result<u32, Error> {
+        // A codec may update allocation through dataset_mut before writing.
+        self.kind = PixelData::create_new(self.dataset)?.kind;
         // the index comes from the frames actually stored, not from
         // `(0028,0008)`, which reads as 1 when absent
         let index = self.stored_frame_count();
@@ -647,6 +654,7 @@ impl<'a> PixelData<'a> {
     /// This is the zero-copy path for transcoding, where frames are already
     /// shared windows over the source (PIX-02).
     pub fn add_frame_buffer(&mut self, frame: SharedBuffer) -> Result<u32, Error> {
+        self.kind = PixelData::create_new(self.dataset)?.kind;
         if !frame.size().is_multiple_of(2) {
             // odd frames need padding, which `add_frame` handles by copying
             return self.add_frame(frame.data()?);
@@ -1690,10 +1698,10 @@ mod tests {
         }
 
         // table shorter than the requested frame index
-        let mut ds = fragment_dataset(&[2, 2, 2], vec![0, 10, 20], 2);
+        let mut ds = fragment_dataset(&[2, 2, 2], vec![0, 10, 20], 4);
         let pd = PixelData::from_dataset(&mut ds).unwrap();
         assert!(pd
-            .get_frame(5)
+            .get_frame(3)
             .unwrap_err()
             .to_string()
             .contains("no entry"));

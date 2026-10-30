@@ -365,9 +365,9 @@ impl NegotiationPolicy {
             return;
         }
         for role in offered {
-            if let Some(context) = negotiated
+            for context in negotiated
                 .iter_mut()
-                .find(|c| c.is_accepted() && c.abstract_syntax == role.sop_class)
+                .filter(|c| c.is_accepted() && c.abstract_syntax == role.sop_class)
             {
                 context.roles.push(role.clone());
             }
@@ -394,6 +394,97 @@ impl AcceptedContexts {
 
     pub fn is_empty(&self) -> bool {
         self.contexts.is_empty()
+    }
+
+    /// Checks incoming service, SOP class and sender role against its actual context.
+    /// `requestor` identifies the association requestor, whose default role is SCU.
+    pub fn validate_request(
+        &self,
+        id: u8,
+        command: &crate::dimse::Command,
+        requestor: bool,
+    ) -> Result<()> {
+        use crate::dimse::CommandField;
+        let context = self.by_id(id).ok_or_else(|| {
+            NetworkError::protocol("request on an unaccepted presentation context")
+        })?;
+        if command.field == CommandField::CCancelRq {
+            return Ok(());
+        }
+        // A response has no service to dispatch; the caller diagnoses its unexpected field.
+        if crate::dimse::response_field(command.field).is_none() {
+            return Ok(());
+        }
+        let sop = if crate::nservice::uses_requested_uids(command.field) {
+            command.requested_sop_class_uid.as_deref()
+        } else {
+            command.affected_sop_class_uid.as_deref()
+        }
+        .ok_or_else(|| NetworkError::protocol("request has no SOP Class UID"))?;
+        let matches = sop == context.abstract_syntax
+            || (crate::nservice::is_n_request(command.field)
+                && crate::print_sop::MetaSopClasses::sub_sop_classes(&context.abstract_syntax)
+                    .is_some_and(|classes| classes.contains(&sop)));
+        if !matches {
+            return Err(NetworkError::protocol(
+                "request SOP Class does not match its presentation context",
+            ));
+        }
+        // N-EVENT-REPORT is initiated by the service-class SCP (PS3.7 §10.1).
+        let sender_scu_role = if command.field == CommandField::NEventReportRq {
+            !requestor
+        } else {
+            requestor
+        };
+        let allowed = if context.roles.is_empty() {
+            sender_scu_role
+        } else {
+            context.roles.iter().any(|role| {
+                if sender_scu_role {
+                    role.scu_role
+                } else {
+                    role.scp_role
+                }
+            })
+        };
+        if !allowed {
+            return Err(NetworkError::protocol(
+                "request sender has no negotiated role for this service",
+            ));
+        }
+        let valid_service = if sop == sop_class::VERIFICATION {
+            command.field == CommandField::CEchoRq
+        } else if [
+            sop_class::PATIENT_ROOT_QR_FIND,
+            sop_class::STUDY_ROOT_QR_FIND,
+            sop_class::MODALITY_WORKLIST_FIND,
+        ]
+        .contains(&sop)
+        {
+            command.field == CommandField::CFindRq
+        } else if [
+            sop_class::PATIENT_ROOT_QR_MOVE,
+            sop_class::STUDY_ROOT_QR_MOVE,
+        ]
+        .contains(&sop)
+        {
+            command.field == CommandField::CMoveRq
+        } else if [sop_class::PATIENT_ROOT_QR_GET, sop_class::STUDY_ROOT_QR_GET].contains(&sop) {
+            command.field == CommandField::CGetRq
+        } else if sop.starts_with("1.2.840.10008.5.1.4.1.1.") {
+            command.field == CommandField::CStoreRq
+        } else if sop.starts_with("1.2.840.10008.5.1.1.") {
+            crate::nservice::is_n_request(command.field)
+        } else {
+            // Providers may advertise private service classes.
+            command.field != CommandField::CEchoRq
+        };
+        if !valid_service {
+            return Err(NetworkError::protocol(
+                "request service is not valid for its SOP Class",
+            ));
+        }
+        Ok(())
     }
 
     /// The context for an exact (abstract, syntax) pair.
@@ -495,6 +586,142 @@ mod tests {
             abstract_syntax,
             syntaxes.iter().map(|s| s.to_string()).collect(),
         )
+    }
+
+    #[test]
+    fn dispatch_checks_service_and_roles_but_allows_print_meta_sop_members() {
+        use crate::dimse::{Command, CommandField};
+        let mut policy = NegotiationPolicy::new(vec![
+            sop_class::VERIFICATION.into(),
+            crate::print_sop::uids::BASIC_GRAYSCALE_PRINT_MANAGEMENT_META.into(),
+        ]);
+        policy.accept_roles = true;
+        let mut negotiated = policy.negotiate(&[
+            pc(
+                1,
+                sop_class::VERIFICATION,
+                &[transfer_syntax::IMPLICIT_VR_LITTLE_ENDIAN],
+            ),
+            pc(
+                3,
+                crate::print_sop::uids::BASIC_GRAYSCALE_PRINT_MANAGEMENT_META,
+                &[transfer_syntax::IMPLICIT_VR_LITTLE_ENDIAN],
+            ),
+        ]);
+        let mut command = Command::request(CommandField::CStoreRq, 1);
+        command.affected_sop_class_uid = Some(sop_class::VERIFICATION.into());
+        let accepted = AcceptedContexts::from_negotiated(negotiated.clone());
+        assert!(
+            accepted.validate_request(1, &command, true).is_err(),
+            "C-STORE is not Verification"
+        );
+        command.field = CommandField::CEchoRq;
+        assert!(accepted.validate_request(1, &command, true).is_ok());
+        command.field = CommandField::NDeleteRq;
+        command.requested_sop_class_uid = Some(sop_class::VERIFICATION.into());
+        assert!(
+            accepted.validate_request(1, &command, true).is_err(),
+            "Verification does not provide N-DELETE"
+        );
+        command.field = CommandField::CEchoRq;
+        assert!(
+            accepted.validate_request(1, &command, false).is_err(),
+            "the default acceptor role is SCP"
+        );
+        policy.negotiate_roles(
+            &mut negotiated,
+            &[RoleSelection {
+                sop_class: sop_class::VERIFICATION.into(),
+                scu_role: false,
+                scp_role: true,
+            }],
+        );
+        let accepted = AcceptedContexts::from_negotiated(negotiated);
+        assert!(
+            accepted.validate_request(1, &command, true).is_err(),
+            "SCU role was explicitly denied"
+        );
+        assert!(accepted.validate_request(1, &command, false).is_ok());
+        command.field = CommandField::NCreateRq;
+        command.affected_sop_class_uid = Some(crate::print_sop::uids::BASIC_FILM_BOX.into());
+        assert!(
+            accepted.validate_request(3, &command, true).is_ok(),
+            "the print meta-SOP includes Film Box"
+        );
+        command.field = CommandField::NGetRq;
+        command.requested_sop_class_uid = Some("9.9.9".into());
+        assert!(
+            accepted.validate_request(3, &command, true).is_err(),
+            "N-GET must validate Requested, not Affected, UID"
+        );
+    }
+
+    #[test]
+    fn event_reports_require_the_sender_scp_role_on_direct_and_meta_contexts() {
+        use crate::dimse::{Command, CommandField};
+        for abstract_syntax in [
+            crate::print_sop::uids::PRINTER,
+            crate::print_sop::uids::BASIC_GRAYSCALE_PRINT_MANAGEMENT_META,
+        ] {
+            let mut policy = NegotiationPolicy::new(vec![abstract_syntax.into()]);
+            policy.accept_roles = true;
+            let contexts = policy.negotiate(&[pc(
+                1,
+                abstract_syntax,
+                &[transfer_syntax::IMPLICIT_VR_LITTLE_ENDIAN],
+            )]);
+            let mut command = Command::request(CommandField::NEventReportRq, 1);
+            command.affected_sop_class_uid = Some(crate::print_sop::uids::PRINTER.into());
+            let accepted = AcceptedContexts::from_negotiated(contexts.clone());
+            assert!(
+                accepted.validate_request(1, &command, false).is_ok(),
+                "default acceptor SCP sends event reports"
+            );
+            assert!(
+                accepted.validate_request(1, &command, true).is_err(),
+                "default requestor SCU cannot send event reports"
+            );
+            for (scu_role, scp_role) in [(true, false), (false, true), (true, true), (false, false)]
+            {
+                let mut contexts = contexts.clone();
+                policy.negotiate_roles(
+                    &mut contexts,
+                    &[RoleSelection {
+                        sop_class: abstract_syntax.into(),
+                        scu_role,
+                        scp_role,
+                    }],
+                );
+                let accepted = AcceptedContexts::from_negotiated(contexts);
+                assert_eq!(
+                    accepted.validate_request(1, &command, true).is_ok(),
+                    scp_role
+                );
+                assert_eq!(
+                    accepted.validate_request(1, &command, false).is_ok(),
+                    scu_role
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn role_selection_applies_to_every_context_of_the_same_sop_class() {
+        let mut policy = NegotiationPolicy::new(vec!["A".into()]);
+        policy.accept_roles = true;
+        let mut negotiated = policy.negotiate(&[
+            pc(1, "A", &[transfer_syntax::IMPLICIT_VR_LITTLE_ENDIAN]),
+            pc(3, "A", &[transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN]),
+        ]);
+        let role = RoleSelection {
+            sop_class: "A".into(),
+            scu_role: false,
+            scp_role: true,
+        };
+        policy.negotiate_roles(&mut negotiated, std::slice::from_ref(&role));
+        assert!(negotiated
+            .iter()
+            .all(|context| context.roles == vec![role.clone()]));
     }
 
     #[test]

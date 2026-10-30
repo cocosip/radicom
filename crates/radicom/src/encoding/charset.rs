@@ -240,6 +240,16 @@ pub fn decode_multi_charset(bytes: &[u8], first: &'static Encoding, pn: bool) ->
                 continue;
             }
         }
+        // JIS graphic characters are byte pairs; their second byte may be a PN delimiter.
+        if current.name() == "ISO-2022-JP"
+            && (0x21..=0x7e).contains(&b)
+            && bytes
+                .get(i + 1)
+                .is_some_and(|trail| (0x21..=0x7e).contains(trail))
+        {
+            i += 2;
+            continue;
+        }
         let reset = (pn && (b == b'^' || b == b'=')) || matches!(b, b'\r' | b'\n' | b'\t' | 0x0C);
         if reset {
             flush(
@@ -558,7 +568,8 @@ fn escape_for_encoding(enc: &'static Encoding) -> Option<&'static [u8]> {
         "ISO-8859-9" => Some(b"\x1B-M"),
         "windows-874" => Some(b"\x1B-T"),
         "Shift_JIS" => Some(b"\x1B(J"),
-        "ISO-2022-JP" => Some(b"\x1B$B"),
+        // ISO-2022-JP emits its own switches, including any leading ASCII run.
+        "ISO-2022-JP" => None,
         "GBK" => Some(b"\x1B$)A"),
         "EUC-KR" => Some(b"\x1B$)C"),
         // CORE-26: no `UTF-8`/`ASCII` arm - neither is a valid ISO 2022
@@ -868,6 +879,54 @@ mod tests {
         // an unknown designator does not abort the decode
         let out = decode_multi_charset(b"a\x1BZYb", base, false);
         assert!(out.starts_with('a'), "{out}");
+    }
+
+    #[test]
+    fn malformed_jis_lead_does_not_consume_a_text_reset() {
+        let ascii = charset_encoding("ISO 2022 IR 6");
+        for control in [b'\r', b'\n', b'\t', 0x0c] {
+            let bytes = [b"\x1b$B$".as_slice(), &[control], b"ASCII"].concat();
+            assert_eq!(
+                decode_multi_charset(&bytes, ascii, true),
+                format!("\u{fffd}{}ASCII", control as char)
+            );
+        }
+    }
+
+    #[test]
+    fn review_jis_person_name_delimiter_bytes_round_trip() {
+        let first = charset_encoding("ISO 2022 IR 6");
+        let jis = charset_encoding("ISO 2022 IR 87");
+        for text in ["ま^太郎", "十^ま", "ま=ま^太郎", "ま\\太郎"] {
+            let bytes = encode_multi_charset(text, first, &[jis], true);
+            assert_eq!(
+                decode_multi_charset(&bytes, first, true),
+                text,
+                "{bytes:02x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_jis_person_name_survives_file_write_and_parse() {
+        use crate::io::file::{DicomFile, ReadOptions};
+        use crate::io::writer::WriteOptions;
+        use crate::model::{dataset::Dataset, tag::Tag, vr::Vr};
+
+        let mut dataset = Dataset::new();
+        dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3");
+        dataset.insert_str(
+            Tag::SPECIFIC_CHARACTER_SET,
+            Vr::Cs,
+            "ISO 2022 IR 6\\ISO 2022 IR 87",
+        );
+        dataset.insert_str(Tag::PATIENT_NAME, Vr::Pn, "ま^太郎");
+        let bytes = DicomFile::from_dataset(dataset)
+            .to_bytes(&WriteOptions::default())
+            .unwrap();
+        let back = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
+        assert_eq!(back.dataset.get_str(Tag::PATIENT_NAME).unwrap(), "ま^太郎");
     }
 
     #[test]

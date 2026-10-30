@@ -1,5 +1,8 @@
 # Architecture and Core Contracts
 
+> Current correction and evidence ledger: [07-review-fixes-2026-10-30.md](07-review-fixes-2026-10-30.md).
+> Earlier DONE / coverage statements describe an earlier checkpoint, not proof of complete parity.
+
 > This is the **only design reference** when changing code. It records the invariants and design
 > decisions you must not violate — it does not restate the implementation, which is the source of truth.
 > Feature IDs (`TAG-01`, `NET-06`, `T1`–`T10`, ...) are defined in [02-development-guide.md](02-development-guide.md) §2.
@@ -292,6 +295,7 @@ client/server. One tokio task per association. Locks must not be held across `.a
 ### 11.2 PDU and association
 
 - A PDU header is fixed 6 bytes: type (1) + reserved (1) + length (u32, big endian).
+  The negotiated Maximum Length applies to the P-DATA variable field (body); it excludes this header.
 - Sub-item headers are `type (1) + reserved (1) + length (u16)` — 4 bytes, big endian. Only the P-DATA
   PDV length is 32-bit.
 - Item values must have even length; pad odd values with a single `0x00` and strip trailing NUL/space on
@@ -384,10 +388,14 @@ client/server. One tokio task per association. Locks must not be held across `.a
   SCOORD/SCOORD3D/TCOORD/WAVEFORM carry their macro attributes (`GraphicData` FL pairs/triplets,
   `ReferencedFrameOfReferenceUID` for SCOORD3D, one of the three temporal reference lists, the
   waveform channels). Point counts and the closed POLYGON are checked at construction (C.18.6–C.18.9).
-- `StructuredReport::validate` checks the document's Type 1 attributes (SOP identity, ValueType
-  CONTAINER, document title, ContinuityOfContent, CompletionFlag) and every item: known ValueType,
-  the conditional concept name (C.17-5), RelationshipType, the value its type requires, and
-  ContinuityOfContent for a CONTAINER.
+- `StructuredReport::validate` checks common SR document attributes (identity, instance/content date/time,
+  study/series identity, Type 2 patient/study/equipment fields), completion/verification and the conditional
+  verifying observers. It rechecks imported value macros, coded-entry cardinality, finite spatial/temporal
+  data, reference identity and by-reference paths; legitimate empty Type 2 NUM values remain permitted.
+  It does not certify a clinical template (TID) or every SOP-specific relationship table.
+- WAVEFORM channel pairs live inside each ReferencedSOPSequence item (C.18.5).
+  `waveform_references()` preserves per-reference selections; the legacy common-channel `value()` view
+  returns None for references with different selections, rather than inventing associations.
 
 ### 12.4 Printing (PRINT-01/02)
 

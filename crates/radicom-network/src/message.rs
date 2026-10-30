@@ -42,10 +42,34 @@ pub fn encode_dataset(dataset: &Dataset, syntax: &TransferSyntax) -> Result<Vec<
         ..Default::default()
     };
     let mut out = Vec::new();
-    DicomWriter::new(options)
-        .write_dataset(dataset, syntax, &mut out)
-        .map_err(|_| NetworkError::protocol("dataset could not be encoded"))?;
+    write_dataset(dataset, syntax, options, &mut out).map_err(NetworkError::Io)?;
+    if out.len() % 2 == 1 {
+        out.push(0);
+    }
     Ok(out)
+}
+
+fn write_dataset<W: std::io::Write>(
+    dataset: &Dataset,
+    syntax: &TransferSyntax,
+    options: WriteOptions,
+    output: &mut W,
+) -> std::io::Result<()> {
+    let write = |mut output: &mut dyn std::io::Write| {
+        DicomWriter::new(options.clone())
+            .write_dataset(dataset, syntax, &mut output)
+            .map(|_| ())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+    };
+    if syntax.is_deflate() {
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(output, flate2::Compression::default());
+        write(&mut encoder)?;
+        encoder.finish()?;
+        Ok(())
+    } else {
+        write(output)
+    }
 }
 
 /// Decodes a dataset under the negotiated syntax (§11.2: validation off).
@@ -253,9 +277,7 @@ where
             keep_group_lengths: false,
             ..Default::default()
         };
-        DicomWriter::new(options)
-            .write_dataset(&dataset, &syntax, &mut framer)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        write_dataset(&dataset, &syntax, options, &mut framer)?;
         framer.finish()
     });
 
@@ -305,6 +327,54 @@ mod tests {
         ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
         ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
         ds
+    }
+
+    #[test]
+    fn deflated_buffered_dataset_round_trips_under_the_negotiated_syntax() {
+        let syntax = &syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN;
+        let encoded = encode_dataset(&sample_dataset(), syntax).unwrap();
+        let decoded = decode_dataset(&encoded, syntax).unwrap();
+        assert_eq!(decoded.get_str(Tag::PATIENT_NAME).unwrap(), "Doe^John");
+    }
+
+    #[tokio::test]
+    async fn deflated_stream_is_finished_before_the_last_pdv() {
+        let mut sink = FailOnce {
+            buf: Vec::new(),
+            fail_at: usize::MAX,
+            failed: false,
+        };
+        write_message_streamed(
+            &mut sink,
+            1,
+            bytes::Bytes::from_static(b"cmd"),
+            sample_dataset(),
+            syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+            32,
+            1,
+        )
+        .await
+        .unwrap();
+        let mut dataset = Vec::new();
+        let mut offset = 0;
+        while offset < sink.buf.len() {
+            let end = offset
+                + 6
+                + u32::from_be_bytes(sink.buf[offset + 2..offset + 6].try_into().unwrap()) as usize;
+            let crate::pdu::Pdu::PData(pdata) = crate::pdu::decode(&sink.buf[offset..end]).unwrap()
+            else {
+                panic!("expected P-DATA")
+            };
+            for pdv in pdata.pdvs {
+                if !pdv.is_command {
+                    dataset.extend_from_slice(&pdv.data);
+                }
+            }
+            offset = end;
+        }
+        let decoded =
+            decode_dataset(&dataset, &syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+        assert_eq!(decoded.get_str(Tag::PATIENT_NAME).unwrap(), "Doe^John");
     }
 
     #[test]

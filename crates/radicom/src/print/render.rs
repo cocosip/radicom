@@ -130,7 +130,7 @@ impl FilmBox {
             let position = (index + 1) as u16;
             let image_box = match boxes.iter().find(|b| b.position() == Some(position)) {
                 Some(b) => b,
-                None => match boxes.get(index) {
+                None => match boxes.get(index).filter(|b| b.position().is_none()) {
                     Some(b) => b,
                     None => continue,
                 },
@@ -1224,10 +1224,8 @@ mod tests {
         let image_display_format = Tag::new(0x2010, 0x0010);
         let film_size_id = Tag::new(0x2010, 0x0050);
         let referenced_image_box_sequence = Tag::new(0x2010, 0x0510);
-        let image_box_position = Tag::new(0x2020, 0x0010);
 
         let mut first = Dataset::new();
-        first.insert_value(image_box_position, 2u16);
         first
             .insert_sequence(Tag::BASIC_GRAYSCALE_IMAGE_SEQUENCE)
             .push(grayscale_image(&[200; 16]));
@@ -1251,6 +1249,25 @@ mod tests {
             .filter(|pixel| pixel[0] != 255)
             .count();
         assert!(lit > 0, "the fallback box is rendered");
+    }
+
+    #[test]
+    fn a_sparse_explicit_position_does_not_duplicate_the_image_in_an_empty_cell() {
+        use crate::{Dataset, Tag, Vr};
+        let mut boxed = Dataset::new();
+        boxed.insert_value(Tag::new(0x2020, 0x0010), 2u16);
+        boxed
+            .insert_sequence(Tag::BASIC_GRAYSCALE_IMAGE_SEQUENCE)
+            .push(grayscale_image(&[200; 16]));
+        let mut film = Dataset::new();
+        film.insert_str(Tag::new(0x2010, 0x0010), Vr::Cs, "STANDARD\\2,1");
+        film.insert_str(Tag::new(0x2010, 0x0050), Vr::Cs, "A4");
+        film.insert_sequence(Tag::new(0x2010, 0x0510)).push(boxed);
+        let image = FilmBox::from_dataset(film)
+            .render_to_image(0.0, RenderScale { pixels_per_mm: 1.0 }, PrintDensity::Black)
+            .unwrap();
+        assert_eq!(image.as_bytes()[((148 * 210 + 52) * 4) as usize], 0);
+        assert_eq!(image.as_bytes()[((148 * 210 + 157) * 4) as usize], 200);
     }
 
     #[test]

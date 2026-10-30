@@ -1468,12 +1468,21 @@ impl Dataset {
                     })
                 };
                 let bytes = t.as_bytes();
-                if t.len() != 5 || !matches!(bytes[0], b'+' | b'-') {
+                if t.len() != 5
+                    || !matches!(bytes[0], b'+' | b'-')
+                    || !bytes[1..].iter().all(u8::is_ascii_digit)
+                {
                     return Err(invalid());
                 }
                 let sign = if bytes[0] == b'-' { -1 } else { 1 };
                 let h: i32 = t[1..3].parse().map_err(|_| invalid())?;
                 let m: i32 = t[3..5].parse().map_err(|_| invalid())?;
+                if h > if sign > 0 { 14 } else { 12 }
+                    || m > 59
+                    || ((sign > 0 && h == 14) || (sign < 0 && h == 12)) && m != 0
+                {
+                    return Err(invalid());
+                }
                 let secs = sign * (h * 3600 + m * 60);
                 chrono::FixedOffset::east_opt(secs).ok_or_else(invalid)?
             }
@@ -1695,6 +1704,21 @@ mod derived_tests {
         let mut kind_b = Dataset::new();
         kind_b.insert_sequence(Tag::ROWS).push(Dataset::new());
         assert!(!kind_a.content_equals(&kind_b));
+    }
+
+    #[test]
+    fn review_non_ascii_timezone_returns_an_error() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::STUDY_DATE, Vr::Da, "20240101");
+        ds.insert_str(Tag::STUDY_TIME, Vr::Tm, "120000");
+        for value in ["+aéz", "+1260", "+1500", "-1300", "+1401", "-1201"] {
+            ds.insert_str(TIMEZONE_OFFSET_FROM_UTC, Vr::Sh, value);
+            assert!(
+                ds.get_datetime_with_offset(Tag::STUDY_DATE, Tag::STUDY_TIME)
+                    .is_err(),
+                "{value}"
+            );
+        }
     }
 
     #[test]

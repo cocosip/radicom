@@ -7,7 +7,7 @@
 use crate::error::{AbortSource, NetworkError, RejectResult, RejectSource, Result};
 use bytes::Bytes;
 
-/// Upper bound for a whole received PDU (§11.2).
+/// Upper bound for a received PDU's variable field, excluding its six-byte header.
 ///
 /// A peer may send a P-DATA-TF up to the Max-PDU-Length *we advertise*, so
 /// [`clamp_max_pdu_length`] clamps every advertised value to this constant: the
@@ -175,9 +175,32 @@ impl AsyncOperations {
         self.invoked == 1 && self.performed == 1
     }
 
-    // The engine is deliberately serial (one association operation at a time),
-    // so it always negotiates (1,1) and never advertises a window it would not
-    // honour. The type exists to decode and round-trip a peer's item.
+    /// Negotiates a requestor's offer against this acceptor's own capacities.
+    /// Zero is unlimited, so a finite capacity always wins over zero.
+    pub fn negotiate_as_acceptor(self, offered: Self) -> Self {
+        fn limit(a: u16, b: u16) -> u16 {
+            match (a, b) {
+                (0, other) | (other, 0) => other,
+                _ => a.min(b),
+            }
+        }
+        Self {
+            invoked: limit(offered.invoked, self.performed),
+            performed: limit(offered.performed, self.invoked),
+        }
+    }
+
+    /// Refuses an answer that grants more than the requestor offered.
+    pub fn validate_answer(self, answer: Self) -> Result<()> {
+        if (self.invoked != 0 && (answer.invoked == 0 || answer.invoked > self.invoked))
+            || (self.performed != 0 && (answer.performed == 0 || answer.performed > self.performed))
+        {
+            return Err(NetworkError::protocol(
+                "asynchronous-operation answer exceeds the offered window",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// User identity negotiation (§11.2).
@@ -1775,6 +1798,46 @@ mod tests {
 
         identity.identity_type = 6;
         assert!(identity.validate().is_err(), "type must be 1..=5");
+    }
+
+    #[test]
+    fn asynchronous_operation_answers_never_increase_finite_offers() {
+        let offer = AsyncOperations {
+            invoked: 2,
+            performed: 1,
+        };
+        assert!(offer
+            .validate_answer(AsyncOperations {
+                invoked: 3,
+                performed: 1
+            })
+            .is_err());
+        assert!(offer
+            .validate_answer(AsyncOperations {
+                invoked: 0,
+                performed: 1
+            })
+            .is_err());
+        assert!(offer
+            .validate_answer(AsyncOperations {
+                invoked: 1,
+                performed: 2
+            })
+            .is_err());
+        assert!(offer.validate_answer(AsyncOperations::default()).is_ok());
+        let unlimited = AsyncOperations {
+            invoked: 0,
+            performed: 0,
+        };
+        assert_eq!(unlimited.negotiate_as_acceptor(offer), offer);
+        assert_eq!(
+            offer.negotiate_as_acceptor(unlimited),
+            AsyncOperations {
+                invoked: 1,
+                performed: 2
+            }
+        );
+        assert_eq!(unlimited.negotiate_as_acceptor(unlimited), unlimited);
     }
 
     #[test]

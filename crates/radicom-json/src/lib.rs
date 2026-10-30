@@ -302,7 +302,7 @@ fn element_values(element: &DicomElement, vr: Vr, options: &JsonOptions) -> Resu
             .collect()),
         // a zero-length component is `null`, not `""` (§12.1, PS3.18 Annex F)
         _ => Ok(text
-            .split('\\')
+            .split(|c| c == '\\' && vr.is_multi_value())
             .map(|part| {
                 if part.is_empty() {
                     Value::Null
@@ -339,7 +339,7 @@ fn raw_value_array(raw: &SharedBuffer, vr: Vr, _tag: &Tag) -> Result<Vec<Value>>
             // a zero-length component is `null`, not `""` (§12.1, PS3.18 Annex
             // F), exactly like the Str-backed path above: dropping it would
             // silently change the element's VM
-            text.split('\\')
+            text.split(|c| c == '\\' && vr.is_multi_value())
                 .map(|part| {
                     if part.is_empty() {
                         Value::Null
@@ -399,7 +399,20 @@ fn binary_number(chunk: &[u8], vr: Vr) -> Option<Value> {
         ]),
         _ => return None,
     };
-    Number::from_f64(value).map(Value::Number)
+    Some(if value.is_finite() {
+        Value::Number(Number::from_f64(value).expect("finite float"))
+    } else {
+        Value::String(
+            if value.is_nan() {
+                "NaN"
+            } else if value.is_sign_positive() {
+                "Infinity"
+            } else {
+                "-Infinity"
+            }
+            .into(),
+        )
+    })
 }
 
 fn parse_int_value(part: &str, vr: Vr) -> Value {
@@ -817,6 +830,63 @@ mod tests {
         ds.insert_str(Tag::INSTANCE_NUMBER, Vr::Is, "42");
         ds.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
         ds
+    }
+
+    #[test]
+    fn review_binary_nonfinite_floats_keep_json_values() {
+        for vr in [Vr::Fl, Vr::Fd] {
+            let tag = Tag::new(0x0011, 0x1010);
+            let mut bytes = Vec::new();
+            for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                if vr == Vr::Fl {
+                    bytes.extend_from_slice(&(value as f32).to_le_bytes());
+                } else {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            let mut ds = Dataset::new();
+            ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+                tag.clone(),
+                vr,
+                Arc::new(MemoryBuffer::from(bytes)),
+            )));
+            let json = dataset_to_json(&ds, &JsonOptions::default()).unwrap();
+            let value: Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                value["00111010"]["Value"],
+                serde_json::json!(["NaN", "Infinity", "-Infinity"])
+            );
+            let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
+            let values = back.get::<Vec<f64>>(tag).unwrap();
+            assert_eq!(values.len(), 3);
+            assert!(values[0].is_nan());
+            assert_eq!(values[1], f64::INFINITY);
+            assert_eq!(values[2], f64::NEG_INFINITY);
+        }
+    }
+
+    #[test]
+    fn review_single_text_json_keeps_literal_backslashes() {
+        let tag = Tag::new(0x0011, 0x1010);
+        for vr in [Vr::Lt, Vr::St, Vr::Ut] {
+            for element in [
+                DicomElement::new_str(tag.clone(), vr, "A\\B\nC"),
+                DicomElement::new_bytes(
+                    tag.clone(),
+                    vr,
+                    Arc::new(MemoryBuffer::from(b"A\\B\nC".to_vec())),
+                ),
+            ] {
+                let mut ds = Dataset::new();
+                ds.insert_or_update(DicomItem::Element(element));
+                let json = dataset_to_json(&ds, &JsonOptions::default()).unwrap();
+                let value: Value = serde_json::from_str(&json).unwrap();
+                assert_eq!(value["00111010"]["Value"], serde_json::json!(["A\\B\nC"]));
+                let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
+                assert_eq!(back.get_str(&tag).unwrap(), "A\\B\nC");
+                back.validate().unwrap();
+            }
+        }
     }
 
     #[test]

@@ -373,15 +373,24 @@ mod tests {
 
     #[test]
     fn a_ca_less_client_uses_the_platform_trust_store() {
-        // NET-17: no CA bundle means the OS root store, like fo-dicom's
-        // X509Store, so the configuration builds without any CA file.
-        let config = TlsOptions::default()
-            .client_config()
-            .expect("the platform trust store provides the anchors");
-        drop(config);
         let trusting = TlsOptions::client(None::<std::path::PathBuf>);
         assert!(trusting.cert_file.is_none());
         assert!(!trusting.accept_any, "a CA-less client still verifies");
+        // Sandboxed hosts can have no readable roots; that must fail closed.
+        match trusting.client_config() {
+            Ok(_) => {}
+            Err(NetworkError::Tls(message)) => {
+                assert!(
+                    message.starts_with("the platform trust store is empty ("),
+                    "{message}"
+                );
+                assert!(
+                    message.contains("set cert_file to a CA bundle instead"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected platform roots or their TLS loading error, got {other:?}"),
+        }
     }
 
     #[test]
@@ -495,6 +504,22 @@ ZfpRQ7oSMvyXNqCGkIuXOez3UtiQ5pUwnznzQF4hBfzAlhysk9/VTzgwbQxMCjDOEd6m
             "unexpected error: {error}"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_client_rejects_an_empty_explicit_ca_bundle() {
+        let path =
+            std::env::temp_dir().join(format!("radicom-tls-empty-ca-{}.pem", std::process::id()));
+        std::fs::write(&path, "").unwrap();
+        let options = TlsOptions::client(Some(path.clone()));
+        assert!(!options.accept_any);
+        match options.client_config() {
+            Err(NetworkError::Tls(message)) => {
+                assert_eq!(message, "certificate file holds no certificate")
+            }
+            other => panic!("an empty bundle must not fall back to other trust anchors: {other:?}"),
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

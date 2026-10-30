@@ -120,7 +120,9 @@ impl DicomElement {
                 }
             }
             ElementValue::Bytes(b) => {
-                if self.vr.unit_size() == 0 {
+                if self.vr.is_string() && !self.vr.is_multi_value() {
+                    usize::from(b.size() > 0)
+                } else if self.vr.unit_size() == 0 {
                     0
                 } else {
                     (b.size() as usize) / self.vr.unit_size()
@@ -138,7 +140,9 @@ impl DicomElement {
     /// Splits a multi-value string into its `\`-separated parts.
     pub fn string_parts(&self) -> Vec<&str> {
         match &self.value {
-            ElementValue::Str(s) if !s.is_empty() => s.split('\\').collect(),
+            ElementValue::Str(s) if !s.is_empty() => {
+                s.split(|c| c == '\\' && self.vr.is_multi_value()).collect()
+            }
             _ => Vec::new(),
         }
     }
@@ -202,13 +206,17 @@ fn select(e: &DicomElement, index: Option<usize>) -> Result<String, Error> {
                     count: 0,
                 }));
             }
-            value.split('\\').nth(i).map(str::to_string).ok_or_else(|| {
-                Error::Data(DataError::IndexOutOfRange {
-                    tag: (&e.tag).into(),
-                    index: i,
-                    count: value.split('\\').count(),
+            value
+                .split(|c| c == '\\' && e.vr.is_multi_value())
+                .nth(i)
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    Error::Data(DataError::IndexOutOfRange {
+                        tag: (&e.tag).into(),
+                        index: i,
+                        count: value.split(|c| c == '\\' && e.vr.is_multi_value()).count(),
+                    })
                 })
-            })
         }
     }
 }
@@ -407,22 +415,21 @@ impl<T: FromElement> FromElement for Vec<T> {
         // Split a string value once and convert each part in place instead of
         // re-splitting the whole value per element (review CORE-12).
         if e.vr().is_string() {
-            if let ElementValue::Str(s) = e.value() {
-                if s.is_empty() {
-                    return Ok(Vec::new());
-                }
-                return s
-                    .split('\\')
-                    .map(|part| {
-                        let one = DicomElement {
-                            tag: e.tag.clone(),
-                            vr: e.vr(),
-                            value: ElementValue::Str(part.to_string()),
-                        };
-                        T::from_element(&one, None)
-                    })
-                    .collect();
+            let s = select(e, None)?;
+            if s.is_empty() {
+                return Ok(Vec::new());
             }
+            return s
+                .split(|c| c == '\\' && e.vr().is_multi_value())
+                .map(|part| {
+                    let one = DicomElement {
+                        tag: e.tag.clone(),
+                        vr: e.vr(),
+                        value: ElementValue::Str(part.to_string()),
+                    };
+                    T::from_element(&one, None)
+                })
+                .collect();
         }
         let count = e.count().max(1);
         (0..count).map(|i| T::from_element(e, Some(i))).collect()
@@ -455,6 +462,26 @@ mod tests {
 
     fn el(vr: Vr, text: &str) -> DicomElement {
         DicomElement::new_str(Tag::PATIENT_NAME, vr, text)
+    }
+
+    #[test]
+    fn review_single_text_values_keep_literal_backslashes() {
+        for vr in [Vr::Lt, Vr::St, Vr::Ut, Vr::Ur] {
+            let text = "A\\B";
+            let string = el(vr, text);
+            assert_eq!(string.string_parts(), [text]);
+            let bytes = DicomElement::new_bytes(
+                Tag::PATIENT_NAME,
+                vr,
+                Arc::new(MemoryBuffer::from(text.as_bytes().to_vec())),
+            );
+            for element in [string, bytes] {
+                assert_eq!(element.count(), 1);
+                assert_eq!(element.first::<String>().unwrap(), text);
+                assert_eq!(element.get::<Vec<String>>(None).unwrap(), [text]);
+                assert!(element.get::<String>(Some(1)).is_err());
+            }
+        }
     }
 
     #[test]

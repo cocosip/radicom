@@ -1,6 +1,6 @@
 # radicom Documentation
 
-Four documents, one per purpose. Start with the architecture document when changing code, and the
+The documents below separate architecture, development, interoperability and review evidence. Start with the architecture document when changing code, and the
 development guide when working out what is left.
 
 User-facing introduction and usage examples are in the root [README.md](../README.md).
@@ -13,6 +13,9 @@ User-facing introduction and usage examples are in the root [README.md](../READM
 | [02-development-guide.md](02-development-guide.md) | You need the feature list with stable IDs, milestone status, what is outstanding, risks, or the testing strategy |
 | [03-fo-dicom-alignment.md](03-fo-dicom-alignment.md) | You need the module-by-module fo-dicom parity verdict with code evidence |
 | [04-interop.md](04-interop.md) | You are testing against a real DICOM peer |
+| [05-code-review-2026-10-29.md](05-code-review-2026-10-29.md) | Earlier defect inventory |
+| [06-backlog.md](06-backlog.md) | Feature increments and known limits |
+| [07-review-fixes-2026-10-30.md](07-review-fixes-2026-10-30.md) | Current fixes, verification and parity limits |
 
 ```
 docs/
@@ -20,7 +23,10 @@ docs/
 ├── 01-architecture.md           ← what the code must obey
 ├── 02-development-guide.md      ← features, progress, risks, testing
 ├── 03-fo-dicom-alignment.md     ← parity audit verdict
-└── 04-interop.md                ← real-peer testing procedure
+├── 04-interop.md                ← real-peer testing procedure
+├── 05-code-review-2026-10-29.md  ← earlier findings
+├── 06-backlog.md                ← feature increments and limits
+└── 07-review-fixes-2026-10-30.md ← current repair and verification ledger
 ```
 
 ## Authority
@@ -55,7 +61,7 @@ workspace:
   external `fo-dicom.Codecs` package.
 
 **Codec implementations are explicitly out of scope for this repository** (zero built-in codecs —
-divergence D10). Everything else fo-dicom's platform packages offer is covered with a Rust-native shape:
+divergence D10). The following platform facilities have Rust implementations:
 server hosting helper (HOST-01), metrics emission (OBS-02), dump CLI (INF-07), print layout rendering
 (PRINT-02). Only .NET-specific packaging is not carried over (AspNetCore-style hosting packages, a
 Newtonsoft JSON backend, the WPF GUI, four imaging backends) — see divergences D7 and D10–D12 in

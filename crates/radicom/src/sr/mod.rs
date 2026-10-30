@@ -13,6 +13,6 @@ pub use code_item::CodeItem;
 pub use content_item::{
     ContentItem, ContentValue, GraphicType, GraphicType3D, MeasuredValue, ReferencedSop,
     Relationship, SpatialCoordinates, SpatialCoordinates3D, TemporalCoordinates, TemporalRange,
-    TemporalRangeType, ValueType,
+    TemporalRangeType, ValueType, WaveformReference,
 };
 pub use structured_report::StructuredReport;

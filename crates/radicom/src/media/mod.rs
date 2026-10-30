@@ -289,7 +289,7 @@ impl DicomDirectory {
         }
         let mut dataset = Dataset::new();
         dataset.insert_str(tags::FILE_SET_ID, Vr::Sh, file_set_id);
-        dataset.insert_value(tags::FILE_SET_CONSISTENCY_FLAG, 1u16);
+        dataset.insert_value(tags::FILE_SET_CONSISTENCY_FLAG, 0u16);
         // a DICOMDIR carries its own SOP Instance UID; setting it once keeps the
         // file identity (and thus every record offset) stable across re-serialisation
         dataset.insert_str(
@@ -688,8 +688,8 @@ impl DicomDirectory {
     /// the sequence items built by [`Self::write_layout`].
     fn patch_offsets(&mut self, links: &[(Option<usize>, Option<usize>)], positions: &[u32]) {
         for (index, record) in self.records.iter_mut().enumerate() {
-            record.dataset.remove(tags::OFFSET_NEXT);
-            record.dataset.remove(tags::OFFSET_LOWER);
+            record.dataset.insert_value(tags::OFFSET_NEXT, 0u32);
+            record.dataset.insert_value(tags::OFFSET_LOWER, 0u32);
             if let Some(next) = links[index].0 {
                 record
                     .dataset
@@ -703,8 +703,8 @@ impl DicomDirectory {
         }
         if let Some(sequence) = self.file.dataset.sequence_mut(tags::DIR_RECORD_SEQUENCE) {
             for (index, item) in sequence.items_mut().iter_mut().enumerate() {
-                item.remove(tags::OFFSET_NEXT);
-                item.remove(tags::OFFSET_LOWER);
+                item.insert_value(tags::OFFSET_NEXT, 0u32);
+                item.insert_value(tags::OFFSET_LOWER, 0u32);
                 if let Some(next) = links[index].0 {
                     item.insert_value(tags::OFFSET_NEXT, positions[next]);
                 }
@@ -720,7 +720,9 @@ impl DicomDirectory {
                     .insert_value(tags::OFFSET_FIRST_ROOT, positions[index]);
             }
             None => {
-                self.file.dataset.remove(tags::OFFSET_FIRST_ROOT);
+                self.file
+                    .dataset
+                    .insert_value(tags::OFFSET_FIRST_ROOT, 0u32);
             }
         }
         match self.roots.last().copied() {
@@ -730,7 +732,7 @@ impl DicomDirectory {
                     .insert_value(tags::OFFSET_LAST_ROOT, positions[index]);
             }
             None => {
-                self.file.dataset.remove(tags::OFFSET_LAST_ROOT);
+                self.file.dataset.insert_value(tags::OFFSET_LAST_ROOT, 0u32);
             }
         }
     }
@@ -791,8 +793,8 @@ impl DicomDirectory {
         positions: &[u32],
     ) -> Result<(), Error> {
         for (index, record) in self.records.iter_mut().enumerate() {
-            record.dataset.remove(tags::OFFSET_NEXT);
-            record.dataset.remove(tags::OFFSET_LOWER);
+            record.dataset.insert_value(tags::OFFSET_NEXT, 0u32);
+            record.dataset.insert_value(tags::OFFSET_LOWER, 0u32);
             if let Some(next) = links[index].0 {
                 record
                     .dataset
@@ -819,7 +821,9 @@ impl DicomDirectory {
                     .insert_value(tags::OFFSET_FIRST_ROOT, positions[index]);
             }
             None => {
-                self.file.dataset.remove(tags::OFFSET_FIRST_ROOT);
+                self.file
+                    .dataset
+                    .insert_value(tags::OFFSET_FIRST_ROOT, 0u32);
             }
         }
         match self.roots.last().copied() {
@@ -829,7 +833,7 @@ impl DicomDirectory {
                     .insert_value(tags::OFFSET_LAST_ROOT, positions[index]);
             }
             None => {
-                self.file.dataset.remove(tags::OFFSET_LAST_ROOT);
+                self.file.dataset.insert_value(tags::OFFSET_LAST_ROOT, 0u32);
             }
         }
         Ok(())
@@ -1839,12 +1843,14 @@ mod tests {
             patients[1],
             "the first patient links the second root"
         );
-        assert!(
-            records[3].dataset.get::<u32>(tags::OFFSET_LOWER).is_err(),
+        assert_eq!(
+            records[3].dataset.get::<u32>(tags::OFFSET_LOWER).unwrap(),
+            0,
             "the leaf has no children"
         );
-        assert!(
-            records[3].dataset.get::<u32>(tags::OFFSET_NEXT).is_err(),
+        assert_eq!(
+            records[3].dataset.get::<u32>(tags::OFFSET_NEXT).unwrap(),
+            0,
             "the leaf ends the chain"
         );
 
@@ -2083,17 +2089,16 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_directory_saves_without_root_offsets() {
+    fn an_empty_directory_saves_required_zero_root_offsets_and_consistency_flag() {
         let mut dir = DicomDirectory::new("MYFS");
         let bytes = dir.to_bytes().unwrap();
         let reopened = DicomDirectory::from_bytes(&bytes).unwrap();
         assert!(reopened.records().is_empty());
         assert!(reopened.roots().is_empty());
-        assert!(reopened
-            .file()
-            .dataset
-            .item(&tags::OFFSET_FIRST_ROOT)
-            .is_none());
+        let ds = &reopened.file().dataset;
+        assert_eq!(ds.get::<u16>(tags::FILE_SET_CONSISTENCY_FLAG).unwrap(), 0);
+        assert_eq!(ds.get::<u32>(tags::OFFSET_FIRST_ROOT).unwrap(), 0);
+        assert_eq!(ds.get::<u32>(tags::OFFSET_LAST_ROOT).unwrap(), 0);
     }
 
     #[test]

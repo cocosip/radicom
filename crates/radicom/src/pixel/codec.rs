@@ -178,13 +178,14 @@ pub trait Codec: Send + Sync {
     /// The transfer syntax this codec encodes to / decodes from.
     fn transfer_syntax(&self) -> &'static TransferSyntax;
 
+    /// Used by the transcoder when no explicit parameter set is supplied.
     fn default_params(&self) -> CodecParams {
         CodecParams::None
     }
 
     /// Encodes `src` frames into `dst`. Implementations must read every frame
     /// via `src.get_frame(i)`, write every frame via `dst.add_frame(...)`,
-    /// touch no dataset element outside the `PixelData` setters, and map all
+    /// update pixel metadata through `dst.dataset_mut()` as needed, and map all
     /// failures to [`Error::Codec`] without panicking.
     fn encode(
         &self,
@@ -252,7 +253,7 @@ pub(crate) fn lock_registry() -> std::sync::MutexGuard<'static, ()> {
 static REGISTRY: LazyLock<RwLock<Arc<dyn CodecRegistry>>> =
     LazyLock::new(|| RwLock::new(Arc::new(EmptyCodecRegistry)));
 
-/// Replaces the global registry; idempotent.
+/// Replaces the process-wide registry; the most recent registry is used.
 pub fn set_codec_registry(registry: Arc<dyn CodecRegistry>) {
     *REGISTRY.write().expect("registry lock") = registry;
 }

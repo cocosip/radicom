@@ -228,10 +228,7 @@ pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
             if content.chars().count() > 10240 {
                 return Err(fail(vr, content, "length exceeds 10240"));
             }
-            if !no_backslash(content) || has_control(content, true) {
-                return Err(fail(vr, content, "backslash or control character"));
-            }
-            Ok(())
+            validate_text_controls(vr, content)
         }
         Vr::Pn => {
             let groups: Vec<&str> = content.split('=').collect();
@@ -265,11 +262,9 @@ pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
             if content.chars().count() > 1024 {
                 return Err(fail(vr, content, "length exceeds 1024"));
             }
-            if !no_backslash(content) || has_control(content, true) {
-                return Err(fail(vr, content, "backslash or control character"));
-            }
-            Ok(())
+            validate_text_controls(vr, content)
         }
+        Vr::Ut => validate_text_controls(vr, content),
         Vr::Tm => parse_tm(content)
             .map(|_| ())
             .map_err(|_| fail(vr, content, "not a valid TM value or range")),
@@ -287,12 +282,21 @@ pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
     }
 }
 
-/// Validates every `\`-separated value of an element's string form.
+fn validate_text_controls(vr: Vr, content: &str) -> Result<(), String> {
+    if content.chars().any(|c| {
+        (c < '\u{20}' || c == '\u{7f}') && !matches!(c, '\r' | '\n' | '\t' | '\u{c}' | '\u{1b}')
+    }) {
+        return Err(fail(vr, content, "control character"));
+    }
+    Ok(())
+}
+
+/// Validates every value of an element's string form, respecting single-value VRs.
 pub fn validate_string(vr: Vr, value: &str) -> Result<(), String> {
     if value.is_empty() {
         return Ok(());
     }
-    for part in value.split('\\') {
+    for part in value.split(|c| c == '\\' && vr.is_multi_value()) {
         validate_single(vr, part)?;
     }
     Ok(())
@@ -328,7 +332,21 @@ pub fn validate_vm(element: &DicomElement) -> Result<(), String> {
 
 /// Full element validation: string rules (VAL-01) + VM rules (VAL-02).
 /// Returns a [`ValidationFailure`]-shaped error.
+/// Byte-backed strings are materialized so their values and VM are checked.
 pub fn validate_element(element: &DicomElement) -> Result<(), Error> {
+    if element.vr().is_string()
+        && matches!(
+            element.value(),
+            crate::model::element::ElementValue::Bytes(_)
+        )
+    {
+        let decoded = DicomElement::new_str(
+            element.tag().clone(),
+            element.vr(),
+            element.get::<String>(None)?,
+        );
+        return validate_element(&decoded);
+    }
     let tag_ref = TagRef(element.tag().group(), element.tag().element());
     if let crate::model::element::ElementValue::Str(s) = element.value() {
         validate_string(element.vr(), s).map_err(|reason| {
@@ -487,6 +505,87 @@ mod tests {
     }
 
     #[test]
+    fn review_single_text_accepts_formatting_and_checks_the_whole_value() {
+        for (vr, limit) in [(Vr::St, 1024), (Vr::Lt, 10240)] {
+            assert!(validate_single(vr, "A\\B\r\nC\tD\u{c}E\u{1b}").is_ok());
+            assert!(validate_string(vr, "A\\B\r\nC").is_ok());
+            for bad in ['\0', '\u{1}', '\u{7}', '\u{b}', '\u{1f}', '\u{7f}'] {
+                assert!(
+                    validate_single(vr, &format!("A{bad}B")).is_err(),
+                    "{vr:?} {bad:?}"
+                );
+            }
+            let oversized = format!("{}\\{}", "A".repeat(limit / 2), "B".repeat(limit / 2));
+            assert!(validate_string(vr, &oversized).is_err());
+        }
+    }
+
+    #[test]
+    fn byte_backed_text_rejects_the_same_controls_as_strings() {
+        for vr in [Vr::St, Vr::Lt, Vr::Ut] {
+            let tag = Tag::new(0x0029, 0x1001);
+            let string = DicomElement::new_str(tag.clone(), vr, "A\0B");
+            let bytes = DicomElement::new_bytes(
+                tag,
+                vr,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(b"A\0B".to_vec())),
+            );
+            assert!(validate_element(&string).is_err(), "{vr:?} string");
+            assert!(validate_element(&bytes).is_err(), "{vr:?} bytes");
+        }
+    }
+
+    #[test]
+    fn byte_backed_single_text_keeps_multiline_and_literal_backslashes() {
+        for vr in [Vr::St, Vr::Lt, Vr::Ut] {
+            let tag = Tag::new(0x0029, 0x1001);
+            let text = "A\\B\r\nC";
+            let string = DicomElement::new_str(tag.clone(), vr, text);
+            let bytes = DicomElement::new_bytes(
+                tag,
+                vr,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(
+                    text.as_bytes().to_vec(),
+                )),
+            );
+            assert!(validate_element(&string).is_ok(), "{vr:?} string");
+            assert!(validate_element(&bytes).is_ok(), "{vr:?} bytes");
+        }
+    }
+
+    #[test]
+    fn byte_backed_dates_use_decoded_values_for_rules_and_vm() {
+        for (text, valid) in [
+            ("20240305", true),
+            ("x", false),
+            ("20240305\\20240306", false),
+        ] {
+            let element = DicomElement::new_bytes(
+                Tag::PATIENT_BIRTH_DATE,
+                Vr::Da,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(
+                    text.as_bytes().to_vec(),
+                )),
+            );
+            assert_eq!(validate_element(&element).is_ok(), valid, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn byte_backed_string_validation_propagates_read_errors() {
+        let unreadable = crate::model::buffer::StreamWindow::new(
+            Box::new(std::io::Cursor::new(Vec::<u8>::new())),
+            1,
+        );
+        let element = DicomElement::new_bytes(
+            Tag::PATIENT_BIRTH_DATE,
+            Vr::Da,
+            std::sync::Arc::new(unreadable),
+        );
+        assert!(matches!(validate_element(&element), Err(Error::Io(_))));
+    }
+
+    #[test]
     fn text_length_rules() {
         let lo64 = "L".repeat(64);
         let lo65 = "L".repeat(65);
@@ -496,7 +595,7 @@ mod tests {
         assert!(validate_single(Vr::St, &"S".repeat(1025)).is_err());
         assert!(validate_single(Vr::Lt, &"L".repeat(10240)).is_ok());
         assert!(validate_single(Vr::Lt, &"L".repeat(10241)).is_err());
-        // backslash forbidden in LO/ST/LT but escape (0x1B) allowed
+        // LO forbids backslash but allows escape (0x1B).
         assert!(validate_single(Vr::Lo, "a\\b").is_err());
         assert!(validate_single(Vr::Lo, "a\u{1B}b").is_ok());
     }

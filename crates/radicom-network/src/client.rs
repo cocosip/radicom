@@ -87,6 +87,57 @@ pub enum ClientEvent {
     },
 }
 
+/// A cloneable signal for cancelling a currently active FIND, GET or MOVE.
+/// Obtain it before calling `send_*`; it can be used from another task.
+#[derive(Clone, Debug)]
+pub struct CancellationHandle {
+    signal: tokio::sync::watch::Sender<Option<u16>>,
+    active: Arc<std::sync::Mutex<Option<u16>>>,
+}
+
+impl Default for CancellationHandle {
+    fn default() -> Self {
+        Self {
+            signal: tokio::sync::watch::channel(None).0,
+            active: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+}
+
+impl CancellationHandle {
+    /// Signals the matching live request. Inactive IDs return false.
+    pub fn cancel(&self, message_id: u16) -> bool {
+        let active = self.active.lock().unwrap();
+        if *active != Some(message_id) {
+            return false;
+        }
+        self.signal.send_replace(Some(message_id));
+        true
+    }
+
+    fn register(&self, message_id: u16) -> ActiveRequest {
+        let mut active = self.active.lock().unwrap();
+        self.signal.send_replace(None);
+        *active = Some(message_id);
+        ActiveRequest(self.clone())
+    }
+
+    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<Option<u16>> {
+        let mut receiver = self.signal.subscribe();
+        if receiver.borrow().is_some() {
+            receiver.mark_changed();
+        }
+        receiver
+    }
+}
+
+struct ActiveRequest(CancellationHandle);
+impl Drop for ActiveRequest {
+    fn drop(&mut self) {
+        *self.0.active.lock().unwrap() = None;
+    }
+}
+
 /// The high-level client (§11.4).
 ///
 /// One `DicomClient` describes a destination; requests are sent with the
@@ -105,6 +156,7 @@ pub struct DicomClient {
     /// C-CANCEL travels on the context that request used.
     last_request: Option<(u16, u8)>,
     association: Option<Association>,
+    cancellation: CancellationHandle,
 }
 
 impl DicomClient {
@@ -124,7 +176,13 @@ impl DicomClient {
             sent_on_association: 0,
             last_request: None,
             association: None,
+            cancellation: CancellationHandle::default(),
         }
+    }
+
+    /// Independent cancellation control for a live FIND, GET or MOVE request.
+    pub fn cancellation_handle(&self) -> CancellationHandle {
+        self.cancellation.clone()
     }
 
     /// Overrides the tuning options.
@@ -405,6 +463,8 @@ impl DicomClient {
                 crate::association::transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN.to_string(),
             ],
         );
+        let cancellation = self.cancellation.clone();
+        let _active = cancellation.register(request.message_id);
         let (context_id, result) = {
             let association = self.ensure_association(vec![context]).await?;
             let context_id = association
@@ -412,6 +472,9 @@ impl DicomClient {
                 .pick(&request.sop_class_uid, "")
                 .map(|c| c.id)
                 .ok();
+            if let Some(context_id) = context_id {
+                association.set_request_cancellation(context_id, cancellation.subscribe());
+            }
             let result = association.send_c_find(request).await;
             (context_id, result)
         };
@@ -433,6 +496,8 @@ impl DicomClient {
                 crate::association::transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN.to_string(),
             ],
         );
+        let cancellation = self.cancellation.clone();
+        let _active = cancellation.register(request.message_id);
         let (context_id, result) = {
             let association = self.ensure_association(vec![context]).await?;
             let context_id = association
@@ -440,6 +505,9 @@ impl DicomClient {
                 .pick(&request.sop_class_uid, "")
                 .map(|c| c.id)
                 .ok();
+            if let Some(context_id) = context_id {
+                association.set_request_cancellation(context_id, cancellation.subscribe());
+            }
             let result = association.send_c_move(request).await;
             (context_id, result)
         };
@@ -494,6 +562,8 @@ impl DicomClient {
             context_set.add(sop_class.clone(), syntaxes.clone())?;
         }
         let contexts = context_set.to_wire();
+        let cancellation = self.cancellation.clone();
+        let _active = cancellation.register(request.message_id);
         let (context_id, result) = {
             let association = self.ensure_association_with_roles(contexts, roles).await?;
             let context_id = association
@@ -501,6 +571,9 @@ impl DicomClient {
                 .pick(&request.sop_class_uid, "")
                 .map(|c| c.id)
                 .ok();
+            if let Some(context_id) = context_id {
+                association.set_request_cancellation(context_id, cancellation.subscribe());
+            }
             let result = association.send_c_get(request).await;
             (context_id, result)
         };
@@ -512,7 +585,9 @@ impl DicomClient {
         Ok(responses)
     }
 
-    /// Sends a C-CANCEL (0x0FFF) for an in-flight request (§11.4, SRV-08).
+    /// Sends C-CANCEL explicitly on the most recently used request's context.
+    /// For cancellation during `send_*`, use [`Self::cancellation_handle`]
+    /// from another task instead (§11.4, SRV-08).
     ///
     /// `message_id` names the request to cancel, and the cancel travels on the
     /// presentation context that request used — a C-CANCEL sent on another
@@ -614,6 +689,146 @@ mod tests {
     use crate::server::{DicomServer, ServerOptions};
     use crate::services::{CStoreRequest, ServiceProvider, VerificationProvider};
     use crate::store::StoreSink;
+
+    #[tokio::test]
+    async fn independent_handle_cancels_a_live_high_level_find() {
+        struct PendingFind {
+            started: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait::async_trait]
+        impl ServiceProvider for PendingFind {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![sop_class::STUDY_ROOT_QR_FIND.into()]
+            }
+            fn on_c_find<'a>(
+                &'a self,
+                _request: &'a CFindRequest,
+            ) -> futures::stream::BoxStream<'a, Result<CFindResponse>> {
+                self.started.notify_one();
+                Box::pin(futures::stream::pending())
+            }
+        }
+        let started = Arc::new(tokio::sync::Notify::new());
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(PendingFind {
+                started: started.clone(),
+            }),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let serving = tokio::spawn(async move { server.accept_one().await });
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string());
+        let cancel = client.cancellation_handle();
+        assert!(!cancel.cancel(42), "no inactive request is cancelled");
+        let sending = tokio::spawn(async move {
+            let responses = client
+                .send_c_find(&CFindRequest::study_query(42))
+                .await
+                .unwrap();
+            client.release().await;
+            responses
+        });
+        started.notified().await;
+        assert!(!cancel.cancel(41), "another request ID is not cancelled");
+        assert!(cancel.cancel(42));
+        let responses = tokio::time::timeout(Duration::from_secs(2), sending)
+            .await
+            .expect("live C-CANCEL is sent without borrowing the client")
+            .unwrap();
+        assert_eq!(
+            responses.last().unwrap().status,
+            crate::dimse::status::CANCEL
+        );
+        assert!(
+            !cancel.cancel(42),
+            "completed requests are no longer active"
+        );
+        serving.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn independent_handle_cancels_live_get_and_move_requests() {
+        struct PendingRetrieve {
+            started: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait::async_trait]
+        impl ServiceProvider for PendingRetrieve {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![
+                    sop_class::STUDY_ROOT_QR_GET.into(),
+                    sop_class::STUDY_ROOT_QR_MOVE.into(),
+                ]
+            }
+            fn on_c_get<'a>(
+                &'a self,
+                _: &'a CGetRequest,
+            ) -> futures::stream::BoxStream<'a, Result<crate::cget::CGetEvent>> {
+                self.started.notify_one();
+                Box::pin(futures::stream::pending())
+            }
+            fn on_c_move<'a>(
+                &'a self,
+                _: &'a CMoveRequest,
+            ) -> futures::stream::BoxStream<'a, Result<CMoveResponse>> {
+                self.started.notify_one();
+                Box::pin(futures::stream::pending())
+            }
+        }
+        for get in [true, false] {
+            let started = Arc::new(tokio::sync::Notify::new());
+            let server = DicomServer::bind(
+                "127.0.0.1:0",
+                Arc::new(PendingRetrieve {
+                    started: started.clone(),
+                }),
+                ServerOptions::default(),
+            )
+            .await
+            .unwrap();
+            let addr = server.local_addr();
+            let serving = tokio::spawn(async move { server.accept_one().await });
+            let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
+                .with_reverse_store_handler(Arc::new(|request| {
+                    Ok(CStoreResponse::success(request))
+                }));
+            let cancel = client.cancellation_handle();
+            let sending = tokio::spawn(async move {
+                let terminal = if get {
+                    client
+                        .send_c_get(&CGetRequest::study("1.2.3", 42), &[])
+                        .await
+                        .unwrap()
+                        .last()
+                        .unwrap()
+                        .status
+                } else {
+                    client
+                        .send_c_move(&CMoveRequest::study("1.2.3", "DEST", 42))
+                        .await
+                        .unwrap()
+                        .last()
+                        .unwrap()
+                        .status
+                };
+                client.release().await;
+                terminal
+            });
+            started.notified().await;
+            assert!(cancel.cancel(42));
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), sending)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                crate::dimse::status::CANCEL
+            );
+            assert!(!cancel.cancel(42));
+            serving.await.unwrap().unwrap();
+        }
+    }
 
     #[test]
     fn default_options_match_section_9_1() {

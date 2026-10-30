@@ -35,6 +35,14 @@ pub struct ServerOptions {
     pub max_clients: usize,
     /// Peer maximum PDU length advertised in the association accept.
     pub max_pdu_length: u32,
+    /// Maximum simultaneous operations this endpoint invokes/performs. Zero
+    /// requests unlimited; accepted server windows and echo batches cap at 64.
+    pub async_operations: crate::pdu::AsyncOperations,
+    /// Transfer syntaxes accepted for every supported SOP class. Empty uses
+    /// the two uncompressed little-endian syntaxes for compatibility.
+    pub supported_transfer_syntaxes: Vec<String>,
+    /// Whether offered order or this server's order wins during negotiation.
+    pub syntax_priority: crate::association::SyntaxPriority,
     /// How long to wait for the peer's A-ASSOCIATE-RQ.
     pub association_timeout: Duration,
     /// How long the TLS handshake may take before the connection is dropped.
@@ -120,6 +128,12 @@ impl Default for ServerOptions {
             called_ae_title: None,
             max_clients: 0,
             max_pdu_length: 16384,
+            async_operations: crate::pdu::AsyncOperations::default(),
+            supported_transfer_syntaxes: vec![
+                syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.uid().to_string(),
+                syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.uid().to_string(),
+            ],
+            syntax_priority: crate::association::SyntaxPriority::Offered,
             association_timeout: Duration::from_secs(10),
             #[cfg(feature = "tls")]
             tls_handshake_timeout: Duration::from_secs(10),
@@ -149,8 +163,14 @@ impl<P: ServiceProvider + 'static> DicomServer<P> {
     pub async fn bind(
         addr: impl tokio::net::ToSocketAddrs,
         provider: Arc<P>,
-        options: ServerOptions,
+        mut options: ServerOptions,
     ) -> Result<Self> {
+        for syntax in &mut options.supported_transfer_syntaxes {
+            let known = radicom::model::transfer_syntax::query(syntax).ok_or_else(|| {
+                NetworkError::protocol("server policy contains an unknown transfer syntax")
+            })?;
+            *syntax = known.uid().to_string();
+        }
         let listener = TcpListener::bind(addr).await.map_err(NetworkError::Io)?;
         let local_addr = listener.local_addr().map_err(NetworkError::Io)?;
         let registration = crate::registry::DicomServerRegistry::register(local_addr)?;
@@ -374,6 +394,15 @@ where
     validate_proposed_contexts(&request.presentation_contexts)?;
 
     let mut policy = NegotiationPolicy::new(provider.supported_sop_classes());
+    policy.supported_syntaxes = if options.supported_transfer_syntaxes.is_empty() {
+        vec![
+            syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.uid().into(),
+            syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.uid().into(),
+        ]
+    } else {
+        options.supported_transfer_syntaxes.clone()
+    };
+    policy.priority = options.syntax_priority;
     // this SCP also acts as a Storage SCU during C-GET (reverse C-STORE), so it
     // grants the roles proposed for the classes it supports (review #16)
     policy.accept_roles = true;
@@ -401,6 +430,23 @@ where
         // the AC echoes exactly the roles granted above (§11.2, review #16)
         negotiated.iter().flat_map(|c| c.roles.clone()).collect(),
     );
+
+    // Bound both the negotiated queue and an unlimited configuration to 64.
+    let capacity = crate::pdu::AsyncOperations {
+        invoked: match options.async_operations.invoked {
+            0 => 64,
+            n => n.min(64),
+        },
+        performed: match options.async_operations.performed {
+            0 => 64,
+            n => n.min(64),
+        },
+    };
+    user.async_operations = request
+        .user_information
+        .async_operations
+        .map(|offered| capacity.negotiate_as_acceptor(offered));
+    let incoming_window = usize::from(user.async_operations.unwrap_or_default().invoked);
 
     // extended negotiation: the AC echoes one item per requested SOP class (§11.2)
     user.extended_negotiations = options
@@ -444,6 +490,9 @@ where
         options: &options,
         assembler: PdvAssembler::new(),
         pending_units: VecDeque::new(),
+        deferred_units: VecDeque::new(),
+        deferred_requests: 0,
+        incoming_window,
         accepted: &accepted,
         reverse_message_id: 1,
         transcoder_cache: std::collections::HashMap::new(),
@@ -470,6 +519,9 @@ where
                                 ));
                             }
                             let command = command_from_bytes(&unit.bytes)?;
+                            serving
+                                .accepted
+                                .validate_request(unit.context_id, &command, true)?;
                             // Only C-STORE, C-FIND, C-MOVE and C-GET carry a
                             // dataset (§7.2..§11.4). Any other request is
                             // answered at once: trusting the peer's
@@ -490,9 +542,14 @@ where
                             if expects_dataset {
                                 // the dataset arrives in later PDVs; keyed by
                                 // context so a second request cannot displace it
-                                awaiting_dataset.insert(unit.context_id, command);
+                                if awaiting_dataset.insert(unit.context_id, command).is_some() {
+                                    return Err(NetworkError::protocol(
+                                        "overlapping command/dataset pairs on one context",
+                                    ));
+                                }
                             } else {
                                 handle_command(&mut serving, unit.context_id, command).await?;
+                                serving.resume_deferred();
                             }
                         }
                         Stream::Data => {
@@ -521,6 +578,7 @@ where
                                 &syntax,
                             )
                             .await?;
+                            serving.resume_deferred();
                         }
                     }
                 }
@@ -815,6 +873,7 @@ where
     let mut summary = crate::cmove::SubOperationSummary::default();
     let mut provider_summary = None;
     let mut saw_instance = false;
+    let mut failed_uids = Vec::new();
     // A provider that reports its own progress owns (0000,1020): forwarding its
     // numbers is the only way to preserve the real remaining count while the
     // stream is consumed incrementally.
@@ -823,9 +882,8 @@ where
     loop {
         if let Some(unit) = serving.pending_units.pop_front() {
             if unit.stream != Stream::Command {
-                return Err(NetworkError::protocol(
-                    "unexpected dataset while C-GET is in flight",
-                ));
+                serving.defer(unit)?;
+                continue;
             }
             let cancel = command_from_bytes(&unit.bytes)?;
             if cancel.field == CommandField::CCancelRq {
@@ -843,14 +901,24 @@ where
                     } else {
                         provider_summary.unwrap_or(summary)
                     };
-                    serving.send(context_id, &response.to_command()).await?;
+                    response.failed_sop_instance_uids = failed_uids.clone();
+                    serving
+                        .send_with_dataset(
+                            context_id,
+                            &response.to_command(),
+                            response.identifier().as_ref(),
+                            syntax,
+                        )
+                        .await?;
                     return Ok(());
+                }
+                if serving.incoming_window > 1 {
+                    serving.defer(unit)?;
                 }
                 continue;
             }
-            return Err(NetworkError::protocol(
-                "unexpected command while C-GET is in flight",
-            ));
+            serving.defer(unit)?;
+            continue;
         }
 
         tokio::select! {
@@ -895,6 +963,9 @@ where
                             Err(error) if is_fatal(&error) => return Err(error),
                             Err(_) => (StatusState::Failure, false),
                         };
+                        if state == StatusState::Failure {
+                            if let Some(uid) = file.dataset.try_get_str(Tag::SOP_INSTANCE_UID) { failed_uids.push(uid.trim().to_string()); }
+                        }
                         summary.record(state);
                         saw_instance = true;
                         if cancelled {
@@ -905,7 +976,8 @@ where
                             );
                             response.remaining = remaining;
                             response.summary = summary;
-                            serving.send(context_id, &response.to_command()).await?;
+                            response.failed_sop_instance_uids = failed_uids.clone();
+                            serving.send_with_dataset(context_id, &response.to_command(), response.identifier().as_ref(), syntax).await?;
                             return Ok(());
                         }
                     }
@@ -917,14 +989,14 @@ where
                             if saw_instance {
                                 response.summary = summary;
                             }
-                            serving.send(context_id, &response.to_command()).await?;
+                            serving.send_with_dataset(context_id, &response.to_command(), response.identifier().as_ref(), syntax).await?;
                         } else {
                             terminated = true;
                             // Preserve provider failures/warnings even when they have
                             // no sub-operation counters. Once instances have been
                             // handed to the engine, its reverse-store outcomes are
                             // authoritative for the terminal counters.
-                            let terminal = if saw_instance {
+                            let mut terminal = if saw_instance {
                                 if response.state() == crate::dimse::StatusState::Success {
                                     crate::cget::CGetResponse::completed(&request, summary)
                                 } else {
@@ -946,7 +1018,8 @@ where
                                 }
                                 response
                             };
-                            serving.send(context_id, &terminal.to_command()).await?;
+                            terminal.failed_sop_instance_uids.extend(failed_uids.clone());
+        serving.send_with_dataset(context_id, &terminal.to_command(), terminal.identifier().as_ref(), syntax).await?;
                         }
                     }
                 }
@@ -966,7 +1039,7 @@ where
         // still gets its terminal built from the counters (documented above).
         // An empty stream is different: it means the provider did nothing, and
         // declaring "0 sub-operations, success" would hide that (NET-09).
-        let terminal = if summary.total() == 0 {
+        let mut terminal = if summary.total() == 0 {
             crate::cget::CGetResponse::failure(
                 &request,
                 crate::dimse::status::PROCESSING_FAILURE,
@@ -975,7 +1048,17 @@ where
         } else {
             crate::cget::CGetResponse::completed(&request, summary)
         };
-        serving.send(context_id, &terminal.to_command()).await?;
+        terminal
+            .failed_sop_instance_uids
+            .extend(failed_uids.clone());
+        serving
+            .send_with_dataset(
+                context_id,
+                &terminal.to_command(),
+                terminal.identifier().as_ref(),
+                syntax,
+            )
+            .await?;
     }
     Ok(())
 }
@@ -1011,7 +1094,14 @@ where
             crate::dimse::status::MOVE_DESTINATION_UNKNOWN,
             "C-MOVE request has no Move Destination",
         );
-        return serving.send(context_id, &response.to_command()).await;
+        return serving
+            .send_with_dataset(
+                context_id,
+                &response.to_command(),
+                response.identifier().as_ref(),
+                syntax,
+            )
+            .await;
     };
 
     let request = crate::cmove::CMoveRequest {
@@ -1034,9 +1124,8 @@ where
     loop {
         if let Some(unit) = serving.pending_units.pop_front() {
             if unit.stream != Stream::Command {
-                return Err(NetworkError::protocol(
-                    "unexpected dataset while C-MOVE is in flight",
-                ));
+                serving.defer(unit)?;
+                continue;
             }
             let cancel = command_from_bytes(&unit.bytes)?;
             if cancel.field == CommandField::CCancelRq {
@@ -1050,14 +1139,23 @@ where
                     );
                     response.remaining = remaining;
                     response.summary = summary;
-                    serving.send(context_id, &response.to_command()).await?;
+                    serving
+                        .send_with_dataset(
+                            context_id,
+                            &response.to_command(),
+                            response.identifier().as_ref(),
+                            syntax,
+                        )
+                        .await?;
                     return Ok(());
+                }
+                if serving.incoming_window > 1 {
+                    serving.defer(unit)?;
                 }
                 continue;
             }
-            return Err(NetworkError::protocol(
-                "unexpected command while C-MOVE is in flight",
-            ));
+            serving.defer(unit)?;
+            continue;
         }
 
         tokio::select! {
@@ -1095,7 +1193,7 @@ where
                 } else {
                     terminated = true;
                 }
-                serving.send(context_id, &response.to_command()).await?;
+                serving.send_with_dataset(context_id, &response.to_command(), response.identifier().as_ref(), syntax).await?;
                 if terminated {
                     break;
                 }
@@ -1115,7 +1213,14 @@ where
         } else {
             crate::cmove::CMoveResponse::completed(&request, summary)
         };
-        serving.send(context_id, &response.to_command()).await?;
+        serving
+            .send_with_dataset(
+                context_id,
+                &response.to_command(),
+                response.identifier().as_ref(),
+                syntax,
+            )
+            .await?;
     }
     Ok(())
 }
@@ -1154,9 +1259,8 @@ where
     loop {
         if let Some(unit) = serving.pending_units.pop_front() {
             if unit.stream != Stream::Command {
-                return Err(NetworkError::protocol(
-                    "unexpected dataset while C-FIND is in flight",
-                ));
+                serving.defer(unit)?;
+                continue;
             }
             let cancel = command_from_bytes(&unit.bytes)?;
             if cancel.field == CommandField::CCancelRq {
@@ -1171,11 +1275,13 @@ where
                     serving.send(context_id, &response.to_command()).await?;
                     return Ok(());
                 }
+                if serving.incoming_window > 1 {
+                    serving.defer(unit)?;
+                }
                 continue;
             }
-            return Err(NetworkError::protocol(
-                "unexpected command while C-FIND is in flight",
-            ));
+            serving.defer(unit)?;
+            continue;
         }
         tokio::select! {
             biased;
@@ -1311,6 +1417,9 @@ struct Serving<'a, P: ServiceProvider, S> {
     assembler: PdvAssembler,
     /// Completed units that arrived in the same P-DATA-TF as a dispatched request.
     pending_units: VecDeque<MessageUnit>,
+    deferred_units: VecDeque<MessageUnit>,
+    deferred_requests: usize,
+    incoming_window: usize,
     accepted: &'a AcceptedContexts,
     /// The next message ID for reverse sub-operations (§11.4).
     reverse_message_id: u16,
@@ -1330,6 +1439,48 @@ where
     /// Cancel-safe PDU read: buffered bytes live in `pdu_reader`, so a
     /// `select!` that drops this future keeps any half-read frame for the next
     /// call instead of resynchronising mid-frame (review #13).
+    /// Queues another negotiated request while a streaming service is active.
+    fn defer(&mut self, unit: MessageUnit) -> Result<()> {
+        if self.incoming_window <= 1 {
+            return Err(NetworkError::protocol(
+                "unexpected message while a request is in flight",
+            ));
+        }
+        if unit.stream == Stream::Command {
+            let command = command_from_bytes(&unit.bytes)?;
+            self.accepted
+                .validate_request(unit.context_id, &command, true)?;
+            if command.field != CommandField::CCancelRq {
+                if crate::dimse::response_field(command.field).is_none()
+                    || self.deferred_requests + 1 >= self.incoming_window
+                {
+                    return Err(NetworkError::protocol(
+                        "peer exceeded the negotiated asynchronous-operation window",
+                    ));
+                }
+                self.deferred_requests += 1;
+            }
+        }
+        let bytes: usize = self
+            .deferred_units
+            .iter()
+            .map(|unit| unit.bytes.len())
+            .sum();
+        if bytes.saturating_add(unit.bytes.len()) > PdvAssembler::DEFAULT_MAX_BUFFERED_BYTES {
+            return Err(NetworkError::protocol(
+                "queued DIMSE messages exceed the maximum size",
+            ));
+        }
+        self.deferred_units.push_back(unit);
+        Ok(())
+    }
+
+    fn resume_deferred(&mut self) {
+        self.deferred_units.append(&mut self.pending_units);
+        std::mem::swap(&mut self.pending_units, &mut self.deferred_units);
+        self.deferred_requests = 0;
+    }
+
     async fn next_pdu(&mut self) -> Result<Option<Pdu>> {
         self.pdu_reader.read_pdu(self.stream).await
     }
@@ -1383,12 +1534,12 @@ where
 
     /// Reads PDUs until the C-STORE response for `message_id` arrives (§11.4).
     ///
-    /// Only the reverse sub-operations of the running C-GET can arrive here:
-    /// the association is single-threaded, so the SCU has nothing else in
-    /// flight that this side must serve.
+    /// Cancellation uses the C-GET context; its C-STORE response must use the
+    /// storage context. Other negotiated incoming requests are deferred.
     async fn await_store_response(
         &mut self,
         message_id: u16,
+        storage_context_id: u8,
         operation_context_id: u8,
         operation_message_id: u16,
     ) -> Result<(Command, bool)> {
@@ -1396,6 +1547,9 @@ where
         loop {
             if let Some(unit) = self.pending_units.pop_front() {
                 if unit.stream != Stream::Command {
+                    if self.incoming_window > 1 {
+                        self.defer(unit)?;
+                    }
                     continue;
                 }
                 let command = command_from_bytes(&unit.bytes)?;
@@ -1409,7 +1563,15 @@ where
                 if command.field == CommandField::CStoreRsp
                     && command.message_id_being_responded_to == Some(message_id)
                 {
+                    if unit.context_id != storage_context_id {
+                        return Err(NetworkError::protocol(
+                            "reverse C-STORE response used the wrong presentation context",
+                        ));
+                    }
                     return Ok((command, cancelled));
+                }
+                if self.incoming_window > 1 {
+                    self.defer(unit)?;
                 }
                 continue;
             }
@@ -1471,9 +1633,8 @@ where
         // A peer that negotiated roles only accepts C-STORE from a side holding
         // the SCU role, which this side gets from the SCP role the peer was
         // granted; sending anyway would be a protocol violation (PS3.7 §7.4,
-        // review #16). Peers that never negotiated roles keep the old,
-        // unrestricted behaviour.
-        if self.accepted.negotiated_roles() && !self.accepted.peer_holds_scp_role(&sop_class) {
+        // review #16). Default roles do not grant the requestor Storage SCP.
+        if !self.accepted.peer_holds_scp_role(&sop_class) {
             return Err(NetworkError::ScuRoleNotNegotiated { sop_class });
         }
         let target = transfer_syntax_of(&context.transfer_syntax);
@@ -1517,8 +1678,29 @@ where
         }
 
         let (response, cancelled) = self
-            .await_store_response(message_id, operation_context_id, operation_message_id)
+            .await_store_response(
+                message_id,
+                context_id,
+                operation_context_id,
+                operation_message_id,
+            )
             .await?;
+        for (actual, expected) in [
+            (
+                &response.affected_sop_class_uid,
+                &request.affected_sop_class_uid,
+            ),
+            (
+                &response.affected_sop_instance_uid,
+                &request.affected_sop_instance_uid,
+            ),
+        ] {
+            if actual.is_some() && actual != expected {
+                return Err(NetworkError::protocol(
+                    "reverse C-STORE response SOP UID does not match its request",
+                ));
+            }
+        }
         Ok((
             crate::dimse::classify(
                 response
@@ -1587,6 +1769,9 @@ where
 #[derive(Debug, Clone)]
 pub struct ClientOptions {
     pub max_pdu_length: u32,
+    /// Maximum simultaneous operations this endpoint invokes/performs. Zero
+    /// requests unlimited; accepted server windows and echo batches cap at 64.
+    pub async_operations: crate::pdu::AsyncOperations,
     pub association_timeout: Duration,
     /// How long the TLS handshake may take before the connection attempt fails
     /// (review #14).
@@ -1620,6 +1805,7 @@ impl Default for ClientOptions {
     fn default() -> Self {
         ClientOptions {
             max_pdu_length: 16384,
+            async_operations: crate::pdu::AsyncOperations::default(),
             association_timeout: Duration::from_secs(5),
             #[cfg(feature = "tls")]
             tls_handshake_timeout: Duration::from_secs(10),
@@ -1704,6 +1890,7 @@ pub struct Association {
     /// Requests this side sent and whose response is still outstanding; the
     /// allocator skips their message IDs (§11.2).
     pending: crate::engine::PendingTable,
+    request_cancellation: Option<(u8, tokio::sync::watch::Receiver<Option<u16>>)>,
     /// How long [`Self::release`] waits for the peer's A-RELEASE-RP.
     release_timeout: Duration,
     /// Maximum quiet time while waiting for a DIMSE response.
@@ -1714,6 +1901,7 @@ pub struct Association {
     peer_extended: Vec<crate::pdu::ExtendedNegotiation>,
     /// The peer's user identity response (§11.2).
     peer_identity_response: Option<Vec<u8>>,
+    async_operations: crate::pdu::AsyncOperations,
     /// Cancel-safe framing for every association read (NET-14): a timed-out or
     /// dropped read keeps its half-frame here instead of resynchronising.
     pdu_reader: crate::transport::PduReader,
@@ -1748,6 +1936,8 @@ impl Association {
         presentation_contexts: Vec<PresentationContext>,
         options: ClientOptions,
     ) -> Result<Self> {
+        let mut options = options;
+        options.max_pdu_length = crate::pdu::clamp_max_pdu_length(options.max_pdu_length);
         // validate before touching the network: a bad identity must not
         // depend on whether the peer happens to be reachable (§11.2)
         if let Some(identity) = &options.user_identity {
@@ -1782,6 +1972,7 @@ impl Association {
             IMPLEMENTATION_VERSION_NAME,
             options.role_selections.clone(),
         );
+        user.async_operations = Some(options.async_operations);
         user.extended_negotiations = options.extended_negotiations.clone();
         user.user_identity = options.user_identity.clone();
         request.user_information = user;
@@ -1797,8 +1988,11 @@ impl Association {
         // filled from the AC; both stay empty on a rejection
         let peer_extended;
         let peer_identity_response;
+        let async_operations;
         let (accepted, peer_max_pdu) = match response {
             Some(Pdu::AssociateAc(accept)) => {
+                async_operations = accept.user_information.async_operations.unwrap_or_default();
+                options.async_operations.validate_answer(async_operations)?;
                 // the AC echoes the roles it granted; they apply to whichever
                 // context carries that abstract syntax (review #16)
                 let granted_roles = accept.user_information.role_selections;
@@ -1892,14 +2086,135 @@ impl Association {
             splitter: PduSplitter::new(peer_max_pdu, 16),
             assembler: PdvAssembler::new(),
             pending: crate::engine::PendingTable::new(),
+            request_cancellation: None,
             release_timeout: options.release_timeout,
             request_timeout: options.request_timeout,
             reverse_store: None,
             peer_extended,
             peer_identity_response,
+            async_operations,
             pdu_reader: crate::transport::PduReader::new(),
             transcoder_cache: std::collections::HashMap::new(),
         })
+    }
+
+    pub(crate) fn set_request_cancellation(
+        &mut self,
+        context_id: u8,
+        receiver: tokio::sync::watch::Receiver<Option<u16>>,
+    ) {
+        self.request_cancellation = Some((context_id, receiver));
+    }
+
+    /// Accepted asynchronous-operation limits, in the requestor's direction.
+    pub fn async_operations(&self) -> crate::pdu::AsyncOperations {
+        self.async_operations
+    }
+
+    /// Sends a batch of C-ECHO requests; responses are returned in request order.
+    /// At most 64 requests are outstanding even for an unlimited window.
+    /// Other DIMSE services remain sequential on this association.
+    pub async fn send_c_echo_batch(
+        &mut self,
+        requests: &[CEchoRequest],
+    ) -> Result<Vec<CEchoResponse>> {
+        let mut ids = std::collections::HashSet::new();
+        let mut context_ids = Vec::with_capacity(requests.len());
+        for request in requests {
+            if request.message_id == 0 || !ids.insert(request.message_id) {
+                return Err(NetworkError::protocol(
+                    "C-ECHO batch message IDs must be unique and nonzero",
+                ));
+            }
+            let context = self.contexts.pick(&request.affected_sop_class_uid, "")?;
+            self.contexts
+                .validate_request(context.id, &request.to_command(), true)?;
+            context_ids.push(context.id);
+        }
+        // Even a peer granting unlimited operations cannot grow this sender's
+        // outstanding table without bound. Other DIMSE service kinds stay serial.
+        let window = match self.async_operations.invoked {
+            0 => 64,
+            finite => usize::from(finite).min(64),
+        };
+        let mut inflight = std::collections::HashMap::new();
+        let mut responses = vec![None; requests.len()];
+        let mut next = 0;
+        let result = async {
+            while next < requests.len() || !inflight.is_empty() {
+                let mut outgoing = Vec::new();
+                while next < requests.len() && inflight.len() < window {
+                    let request = &requests[next];
+                    outgoing.extend(self.splitter.split_bytes(
+                        context_ids[next],
+                        true,
+                        bytes::Bytes::from(command_bytes(&request.to_command())?),
+                    )?);
+                    inflight.insert(request.message_id, next);
+                    self.pending.insert(request.message_id);
+                    next += 1;
+                }
+                if !outgoing.is_empty() {
+                    write_pdata_batch(&mut self.stream, outgoing).await?;
+                }
+                let message_id = *inflight
+                    .keys()
+                    .next()
+                    .expect("at least one request is pending");
+                let Some(pdu) = self.read_request_pdu(message_id).await? else {
+                    return Err(NetworkError::ClosedPrematurely { source: None });
+                };
+                match pdu {
+                    Pdu::PData(pdata) => {
+                        for unit in self.assembler.push_pdata(&pdata)? {
+                            if unit.stream != Stream::Command {
+                                return Err(NetworkError::protocol(
+                                    "C-ECHO response carries a dataset",
+                                ));
+                            }
+                            let command = command_from_bytes(&unit.bytes)?;
+                            let response = CEchoResponse::from_command(&command)?;
+                            let id = response.message_id_being_responded_to;
+                            let index = inflight.remove(&id).ok_or_else(|| {
+                                NetworkError::protocol(
+                                    "duplicate or unexpected C-ECHO batch response ID",
+                                )
+                            })?;
+                            if unit.context_id != context_ids[index]
+                                || !command.no_dataset
+                                || response.state() == StatusState::Pending
+                            {
+                                return Err(NetworkError::protocol(
+                                    "invalid C-ECHO batch response",
+                                ));
+                            }
+                            self.pending.remove(id);
+                            responses[index] = Some(response);
+                        }
+                    }
+                    Pdu::Abort(abort) => {
+                        return Err(NetworkError::Abort {
+                            source_code: abort.source.code(),
+                            reason: abort.reason,
+                        })
+                    }
+                    Pdu::ReleaseRq => {
+                        write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
+                        return Err(NetworkError::ClosedPrematurely { source: None });
+                    }
+                    _ => return Err(NetworkError::protocol("unexpected PDU during C-ECHO batch")),
+                }
+            }
+            Ok(responses
+                .into_iter()
+                .map(|response| response.expect("every request completed"))
+                .collect())
+        }
+        .await;
+        for id in inflight.keys() {
+            self.pending.remove(*id);
+        }
+        result
     }
 
     /// The extended negotiation items the peer accepted (§11.2).
@@ -2192,8 +2507,8 @@ impl Association {
 
     /// Runs a C-MOVE, handing each response to `on_response` as it arrives.
     ///
-    /// A C-MOVE response never carries a dataset: the instances travel on the
-    /// SCP's own outbound association (§11.4).
+    /// Instances travel on the SCP's outbound association; a terminal response
+    /// may carry the Failed SOP Instance UID List Identifier.
     pub async fn send_c_move_stream<F>(
         &mut self,
         request: &crate::cmove::CMoveRequest,
@@ -2217,6 +2532,7 @@ impl Association {
             .split_message_bytes(context_id, command, Some(identifier))?;
         write_pdata_batch(&mut self.stream, pdus).await?;
 
+        let mut awaiting_identifier: Option<crate::cmove::CMoveResponse> = None;
         loop {
             let Some(pdu) = self.read_request_pdu(message_id).await? else {
                 return Err(NetworkError::ClosedPrematurely { source: None });
@@ -2224,8 +2540,21 @@ impl Association {
             match pdu {
                 Pdu::PData(pdata) => {
                     for unit in self.assembler.push_pdata(&pdata)? {
-                        if unit.stream != Stream::Command {
-                            continue;
+                        if unit.context_id != context_id {
+                            return Err(NetworkError::protocol(
+                                "C-MOVE response on the wrong context",
+                            ));
+                        }
+                        if unit.stream == Stream::Data {
+                            let mut response = awaiting_identifier.take().ok_or_else(|| {
+                                NetworkError::protocol("C-MOVE Identifier without its response")
+                            })?;
+                            response.set_identifier(&crate::message::decode_dataset(
+                                &unit.bytes,
+                                &syntax,
+                            )?);
+                            on_response(response)?;
+                            return Ok(());
                         }
                         let command = command_from_bytes(&unit.bytes)?;
                         if command.field != CommandField::CMoveRsp
@@ -2235,6 +2564,15 @@ impl Association {
                         }
                         let response = crate::cmove::CMoveResponse::from_command(&command)?;
                         let terminal = !response.is_pending();
+                        if !command.no_dataset {
+                            if !terminal {
+                                return Err(NetworkError::protocol(
+                                    "Pending C-MOVE response has an Identifier",
+                                ));
+                            }
+                            awaiting_identifier = Some(response);
+                            continue;
+                        }
                         on_response(response)?;
                         if terminal {
                             return Ok(());
@@ -2301,7 +2639,8 @@ impl Association {
         write_pdata_batch(&mut self.stream, pdus).await?;
 
         // a reverse C-STORE request awaiting its dataset
-        let mut awaiting_store: Option<Command> = None;
+        let mut awaiting_store: Option<(u8, Command)> = None;
+        let mut awaiting_identifier: Option<crate::cget::CGetResponse> = None;
         loop {
             let Some(pdu) = self.read_request_pdu(message_id).await? else {
                 return Err(NetworkError::ClosedPrematurely { source: None });
@@ -2314,6 +2653,11 @@ impl Association {
                                 let command = command_from_bytes(&unit.bytes)?;
                                 match command.field {
                                     CommandField::CStoreRq => {
+                                        self.contexts.validate_request(
+                                            unit.context_id,
+                                            &command,
+                                            false,
+                                        )?;
                                         if command.no_dataset {
                                             // an instance without a dataset is unusable
                                             let Some(response) = Command::response(
@@ -2331,7 +2675,12 @@ impl Association {
                                                     .await?;
                                             }
                                         } else {
-                                            awaiting_store = Some(command);
+                                            if awaiting_store.is_some() {
+                                                return Err(NetworkError::protocol(
+                                                    "overlapping reverse C-STORE requests",
+                                                ));
+                                            }
+                                            awaiting_store = Some((unit.context_id, command));
                                         }
                                     }
                                     CommandField::CGetRsp => {
@@ -2341,7 +2690,21 @@ impl Association {
                                         }
                                         let response =
                                             crate::cget::CGetResponse::from_command(&command)?;
+                                        if unit.context_id != context_id {
+                                            return Err(NetworkError::protocol(
+                                                "C-GET response on the wrong context",
+                                            ));
+                                        }
                                         let terminal = !response.is_pending();
+                                        if !command.no_dataset {
+                                            if !terminal {
+                                                return Err(NetworkError::protocol(
+                                                    "Pending C-GET response has an Identifier",
+                                                ));
+                                            }
+                                            awaiting_identifier = Some(response);
+                                            continue;
+                                        }
                                         on_response(response)?;
                                         if terminal {
                                             return Ok(());
@@ -2351,9 +2714,31 @@ impl Association {
                                 }
                             }
                             Stream::Data => {
-                                let Some(store) = awaiting_store.take() else {
-                                    continue;
-                                };
+                                if unit.context_id == context_id {
+                                    let mut response =
+                                        awaiting_identifier.take().ok_or_else(|| {
+                                            NetworkError::protocol(
+                                                "C-GET Identifier without its response",
+                                            )
+                                        })?;
+                                    response.set_identifier(&crate::message::decode_dataset(
+                                        &unit.bytes,
+                                        &syntax,
+                                    )?);
+                                    on_response(response)?;
+                                    return Ok(());
+                                }
+                                let (store_context_id, store) =
+                                    awaiting_store.take().ok_or_else(|| {
+                                        NetworkError::protocol(
+                                            "reverse C-STORE dataset without a command",
+                                        )
+                                    })?;
+                                if unit.context_id != store_context_id {
+                                    return Err(NetworkError::protocol(
+                                        "reverse C-STORE dataset on the wrong context",
+                                    ));
+                                }
                                 // the reverse C-STORE dataset travels on the
                                 // storage context the SCP chose, which is not
                                 // the C-GET request's context: resolve the
@@ -2362,7 +2747,11 @@ impl Association {
                                     .contexts
                                     .by_id(unit.context_id)
                                     .map(|c| transfer_syntax_of(&c.transfer_syntax))
-                                    .unwrap_or_else(|| syntax.clone());
+                                    .ok_or_else(|| {
+                                        NetworkError::protocol(
+                                            "reverse C-STORE on an unaccepted context",
+                                        )
+                                    })?;
                                 let dataset =
                                     crate::message::decode_dataset(&unit.bytes, &store_syntax)?;
                                 let mut file = radicom::io::file::DicomFile::from_dataset(dataset);
@@ -2417,13 +2806,33 @@ impl Association {
     /// read future, and without the retained half-frame the next call would
     /// start in the middle of a PDU (NET-14).
     async fn read_request_pdu(&mut self, message_id: u16) -> Result<Option<Pdu>> {
-        match self.request_timeout {
-            Some(timeout) => {
-                tokio::time::timeout(timeout, self.pdu_reader.read_pdu(&mut self.stream))
-                    .await
-                    .map_err(|_| NetworkError::RequestTimedOut { message_id })?
+        let deadline = self
+            .request_timeout
+            .map(|timeout| tokio::time::Instant::now() + timeout);
+        let read = async {
+            loop {
+                let Some((context_id, cancellation)) = self.request_cancellation.as_mut() else {
+                    return self.pdu_reader.read_pdu(&mut self.stream).await;
+                };
+                let context_id = *context_id;
+                let cancelled = tokio::select! {
+                    pdu = self.pdu_reader.read_pdu(&mut self.stream) => return pdu,
+                    changed = cancellation.changed() => changed.is_ok() && *cancellation.borrow_and_update() == Some(message_id),
+                };
+                if cancelled {
+                    // Remove the signal after sending so duplicate cancellation cannot flood the peer.
+                    self.request_cancellation = None;
+                    self.send_c_cancel(context_id, message_id).await?;
+                } else {
+                    self.request_cancellation = None;
+                }
             }
-            None => self.pdu_reader.read_pdu(&mut self.stream).await,
+        };
+        match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, read)
+                .await
+                .map_err(|_| NetworkError::RequestTimedOut { message_id })?,
+            None => read.await,
         }
     }
 
@@ -2469,9 +2878,8 @@ impl Association {
     /// `(0000,0120) MessageIDBeingRespondedTo`, matching fo-dicom's
     /// `CCancelRequest = 0x0FFF`. It is sent on `context_id` (a proposed
     /// presentation context id). Note the SCP collects a query's matches before
-    /// The streaming C-FIND/C-MOVE handlers return a terminal `CANCEL`
-    /// response when this command names their in-flight request; C-GET still
-    /// consumes C-CANCEL without interrupting its provider stream.
+    /// The streaming FIND/MOVE/GET handlers return a terminal `CANCEL`
+    /// response when this command names their active request.
     pub async fn send_c_cancel(&mut self, context_id: u8, message_id: u16) -> Result<()> {
         let mut command = Command::request(CommandField::CCancelRq, message_id);
         // a C-CANCEL identifies the cancelled request in (0000,0120)
@@ -2636,6 +3044,17 @@ mod tests {
     use radicom::model::tag::Tag;
     use radicom::model::vr::Vr;
 
+    fn get_client_options() -> ClientOptions {
+        ClientOptions {
+            role_selections: vec![crate::pdu::RoleSelection {
+                sop_class: "1.2.840.10008.5.1.4.1.1.7".into(),
+                scu_role: false,
+                scp_role: true,
+            }],
+            ..Default::default()
+        }
+    }
+
     fn echo_context() -> PresentationContext {
         PresentationContext::new(
             1,
@@ -2710,6 +3129,447 @@ mod tests {
 
         association.release().await.unwrap();
         handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_policy_rejects_unknown_transfer_syntax_before_binding() {
+        assert!(DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(VerificationProvider),
+            ServerOptions {
+                supported_transfer_syntaxes: vec!["9.9.9".into()],
+                ..Default::default()
+            }
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn configured_server_syntax_policy_negotiates_deflated_storage() {
+        let provider = Arc::new(RecordingProvider::new());
+        let syntax = syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            provider.clone(),
+            ServerOptions {
+                supported_transfer_syntaxes: vec![syntax.uid().into()],
+                syntax_priority: crate::association::SyntaxPriority::Preferred,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let task = tokio::spawn(async move { server.accept_one().await });
+        let mut association = Association::open(
+            addr,
+            "SCU",
+            "SCP",
+            vec![PresentationContext::new(
+                1,
+                "1.2.840.10008.5.1.4.1.1.7",
+                vec![syntax.uid().into()],
+            )],
+            ClientOptions::default(),
+        )
+        .await
+        .unwrap();
+        let mut file = instance_file();
+        file.dataset.set_transfer_syntax(syntax);
+        assert_eq!(association.send_c_store(&file).await.unwrap().status, 0);
+        association.release().await.unwrap();
+        task.await.unwrap().unwrap();
+        assert_eq!(provider.instance_uids(), vec!["1.2.3.4.5.6"]);
+    }
+
+    #[tokio::test]
+    async fn echo_batch_pipelines_up_to_the_negotiated_window() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut tcp, _) = listener.accept().await.unwrap();
+            let Some(Pdu::AssociateRq(mut rq)) = read_pdu(&mut tcp).await.unwrap() else {
+                panic!("RQ")
+            };
+            rq.user_information.async_operations = Some(crate::pdu::AsyncOperations {
+                invoked: 2,
+                performed: 1,
+            });
+            for pc in &mut rq.presentation_contexts {
+                pc.transfer_syntaxes.truncate(1);
+            }
+            write_pdu(&mut tcp, &Pdu::AssociateAc(rq)).await.unwrap();
+            for batch_size in [2, 2, 1] {
+                let mut requests = Vec::new();
+                while requests.len() < batch_size {
+                    let Some(Pdu::PData(pdata)) = read_pdu(&mut tcp).await.unwrap() else {
+                        panic!("P-DATA")
+                    };
+                    for pdv in pdata.pdvs {
+                        requests.push(command_from_bytes(&pdv.data).unwrap());
+                    }
+                }
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(20), read_pdu(&mut tcp))
+                        .await
+                        .is_err(),
+                    "sender exceeded its negotiated in-flight limit"
+                );
+                for request in requests.into_iter().rev() {
+                    let response =
+                        CEchoResponse::success(&CEchoRequest::from_command(&request).unwrap());
+                    let data = pdata(1, true, command_bytes(&response.to_command()).unwrap());
+                    write_pdu(&mut tcp, &data).await.unwrap();
+                }
+            }
+            assert!(matches!(
+                read_pdu(&mut tcp).await.unwrap(),
+                Some(Pdu::ReleaseRq)
+            ));
+            write_pdu(&mut tcp, &Pdu::ReleaseRp).await.unwrap();
+        });
+        let mut association = Association::open(
+            addr,
+            "SCU",
+            "SCP",
+            vec![echo_context()],
+            ClientOptions {
+                async_operations: crate::pdu::AsyncOperations {
+                    invoked: 2,
+                    performed: 1,
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let requests: Vec<_> = (10..15)
+            .map(|id| CEchoRequest {
+                message_id: id,
+                affected_sop_class_uid: sop_class::VERIFICATION.into(),
+            })
+            .collect();
+        let responses = tokio::time::timeout(
+            Duration::from_secs(2),
+            association.send_c_echo_batch(&requests),
+        )
+        .await
+        .expect("two requests must be outstanding before the peer responds")
+        .unwrap();
+        assert_eq!(
+            responses
+                .iter()
+                .map(|r| r.message_id_being_responded_to)
+                .collect::<Vec<_>>(),
+            vec![10, 11, 12, 13, 14]
+        );
+        association.release().await.unwrap();
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_negotiated_window_queues_an_echo_while_find_is_pending() {
+        struct Gated {
+            done: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait::async_trait]
+        impl ServiceProvider for Gated {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![
+                    sop_class::VERIFICATION.into(),
+                    sop_class::STUDY_ROOT_QR_FIND.into(),
+                ]
+            }
+            async fn on_c_echo(&self, rq: &CEchoRequest) -> Result<CEchoResponse> {
+                Ok(CEchoResponse::success(rq))
+            }
+            fn on_c_find<'a>(
+                &'a self,
+                rq: &'a crate::cfind::CFindRequest,
+            ) -> futures::stream::BoxStream<'a, Result<crate::cfind::CFindResponse>> {
+                use futures::StreamExt;
+                Box::pin(
+                    futures::stream::once(async move {
+                        Ok(crate::cfind::CFindResponse::pending(rq, Dataset::new()))
+                    })
+                    .chain(futures::stream::once(async move {
+                        self.done.notified().await;
+                        Ok(crate::cfind::CFindResponse::success(rq, 0))
+                    })),
+                )
+            }
+        }
+        let done = Arc::new(tokio::sync::Notify::new());
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(Gated { done: done.clone() }),
+            ServerOptions {
+                async_operations: crate::pdu::AsyncOperations {
+                    invoked: 1,
+                    performed: 2,
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let serving = tokio::spawn(async move { server.accept_one().await });
+        let mut find = find_context();
+        find.id = 3;
+        let mut association = Association::open(
+            addr,
+            "SCU",
+            "SCP",
+            vec![echo_context(), find],
+            ClientOptions {
+                async_operations: crate::pdu::AsyncOperations {
+                    invoked: 2,
+                    performed: 1,
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let request = crate::cfind::CFindRequest::study_query(10);
+        let data = crate::message::encode_dataset(
+            &request.identifier,
+            &syntaxes::IMPLICIT_VR_LITTLE_ENDIAN,
+        )
+        .unwrap();
+        let mut pdus = association
+            .splitter
+            .split_message(
+                3,
+                &command_bytes(&request.to_command()).unwrap(),
+                Some(&data),
+            )
+            .unwrap();
+        let echo = CEchoRequest {
+            message_id: 11,
+            affected_sop_class_uid: sop_class::VERIFICATION.into(),
+        };
+        pdus.extend(
+            association
+                .splitter
+                .split_message(1, &command_bytes(&echo.to_command()).unwrap(), None)
+                .unwrap(),
+        );
+        write_pdata_batch(&mut association.stream, pdus)
+            .await
+            .unwrap();
+        assert_eq!(
+            association
+                .await_response(10, CommandField::CFindRsp)
+                .await
+                .unwrap()
+                .status,
+            Some(crate::dimse::status::PENDING)
+        );
+        // The pending Identifier must also be consumed before awaiting another command.
+        let pdu = association.read_request_pdu(10).await.unwrap().unwrap();
+        assert!(matches!(pdu, Pdu::PData(_)));
+        done.notify_one();
+        assert_eq!(
+            association
+                .await_response(10, CommandField::CFindRsp)
+                .await
+                .unwrap()
+                .status,
+            Some(0)
+        );
+        assert_eq!(
+            association
+                .await_response(11, CommandField::CEchoRsp)
+                .await
+                .unwrap()
+                .status,
+            Some(0)
+        );
+        association.release().await.unwrap();
+        serving.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn zero_and_finite_windows_negotiate_and_duplicate_echo_ids_are_refused() {
+        for offered in [0, 1, 4] {
+            let server = DicomServer::bind(
+                "127.0.0.1:0",
+                Arc::new(VerificationProvider),
+                ServerOptions {
+                    async_operations: crate::pdu::AsyncOperations {
+                        invoked: 1,
+                        performed: 2,
+                    },
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let addr = server.local_addr();
+            let serving = tokio::spawn(async move { server.accept_one().await });
+            let mut association = Association::open(
+                addr,
+                "SCU",
+                "SCP",
+                vec![echo_context()],
+                ClientOptions {
+                    async_operations: crate::pdu::AsyncOperations {
+                        invoked: offered,
+                        performed: 1,
+                    },
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                association.async_operations().invoked,
+                if offered == 1 { 1 } else { 2 }
+            );
+            let rq = CEchoRequest {
+                message_id: 9,
+                affected_sop_class_uid: sop_class::VERIFICATION.into(),
+            };
+            assert!(association
+                .send_c_echo_batch(&[rq.clone(), rq])
+                .await
+                .is_err());
+            assert!(association
+                .send_c_echo_batch(&[CEchoRequest {
+                    message_id: 0,
+                    affected_sop_class_uid: sop_class::VERIFICATION.into()
+                }])
+                .await
+                .is_err());
+            assert_eq!(
+                association
+                    .send_c_echo(sop_class::VERIFICATION)
+                    .await
+                    .unwrap()
+                    .status,
+                0
+            );
+            association.release().await.unwrap();
+            serving.await.unwrap().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_requests_are_bounded_by_the_accepted_window() {
+        let (_peer, mut io) = tokio::io::duplex(64);
+        let provider = Arc::new(VerificationProvider);
+        let options = ServerOptions::default();
+        let policy = NegotiationPolicy::new(provider.supported_sop_classes());
+        let accepted = AcceptedContexts::from_negotiated(policy.negotiate(&[echo_context()]));
+        let splitter = PduSplitter::new(16384, 16);
+        let mut serving = Serving {
+            stream: &mut io,
+            splitter: &splitter,
+            provider: &provider,
+            options: &options,
+            assembler: PdvAssembler::new(),
+            pending_units: VecDeque::new(),
+            deferred_units: VecDeque::new(),
+            deferred_requests: 0,
+            incoming_window: 2,
+            accepted: &accepted,
+            reverse_message_id: 1,
+            transcoder_cache: std::collections::HashMap::new(),
+            pdu_reader: crate::transport::PduReader::new(),
+        };
+        let request = CEchoRequest {
+            message_id: 2,
+            affected_sop_class_uid: sop_class::VERIFICATION.into(),
+        };
+        let unit = MessageUnit {
+            context_id: 1,
+            stream: Stream::Command,
+            bytes: command_bytes(&request.to_command()).unwrap().into(),
+        };
+        serving.defer(unit.clone()).unwrap();
+        assert!(serving
+            .defer(unit)
+            .unwrap_err()
+            .to_string()
+            .contains("window"));
+        serving.resume_deferred();
+        assert_eq!(serving.pending_units.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn zero_max_pdu_options_can_send_after_negotiation() {
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(VerificationProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let task = tokio::spawn(async move { server.accept_one().await });
+        let mut association = Association::open(
+            addr,
+            "SCU",
+            "SCP",
+            vec![echo_context()],
+            ClientOptions {
+                max_pdu_length: 0,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            association
+                .send_c_echo(sop_class::VERIFICATION)
+                .await
+                .unwrap()
+                .status,
+            0
+        );
+        association.release().await.unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_store_on_a_verification_context_never_reaches_the_provider() {
+        let provider = Arc::new(RecordingProvider::new());
+        let server = DicomServer::bind("127.0.0.1:0", provider.clone(), ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let task = tokio::spawn(async move { server.accept_one().await });
+        let mut tcp = TcpStream::connect(addr).await.unwrap();
+        let mut rq = Associate::new("SCP", "SCU");
+        rq.presentation_contexts = vec![echo_context()];
+        write_pdu(&mut tcp, &Pdu::AssociateRq(rq)).await.unwrap();
+        assert!(matches!(
+            read_pdu(&mut tcp).await.unwrap(),
+            Some(Pdu::AssociateAc(_))
+        ));
+        let mut command = Command::request(CommandField::CStoreRq, 7);
+        command.affected_sop_class_uid = Some("1.2.840.10008.5.1.4.1.1.7".into());
+        command.affected_sop_instance_uid = Some("1.2.3.4.5.6".into());
+        command.no_dataset = false;
+        let dataset = crate::message::encode_dataset(
+            &instance_file().dataset,
+            &syntaxes::IMPLICIT_VR_LITTLE_ENDIAN,
+        )
+        .unwrap();
+        let pdus = PduSplitter::new(16384, 1)
+            .split_message(1, &command_bytes(&command).unwrap(), Some(&dataset))
+            .unwrap();
+        write_pdata_batch(&mut tcp, pdus).await.unwrap();
+        let reply = read_pdu(&mut tcp).await.unwrap();
+        assert!(
+            matches!(reply, Some(Pdu::Abort(_))),
+            "unnegotiated SOP class must abort: {reply:?}"
+        );
+        assert!(provider.patient_names().is_empty());
+        assert!(task.await.unwrap().is_err());
     }
 
     #[tokio::test]
@@ -3191,7 +4051,8 @@ mod tests {
         );
 
         // the connection survives: a C-ECHO still gets an answer
-        let echo = Command::request(CommandField::CEchoRq, 6);
+        let mut echo = Command::request(CommandField::CEchoRq, 6);
+        echo.affected_sop_class_uid = Some(sop_class::VERIFICATION.into());
         tcp.write_all(&crate::pdu::encode(&pdata(1, true, command_bytes(&echo).unwrap())).unwrap())
             .await
             .unwrap();
@@ -3796,19 +4657,24 @@ mod tests {
             let originator_ae = originator.as_ref().map(|(ae, _)| ae.clone());
             let originator_id = originator.as_ref().map(|(_, id)| *id);
             Box::pin(futures::stream::once(async move {
-                let (summary, error) = crate::cmove::store_to_destination(
-                    destination,
-                    "MOVE-SCP",
-                    "STORE-SCP",
-                    &instances,
-                    originator_ae
-                        .as_deref()
-                        .map(|ae| (ae, originator_id.unwrap_or(0))),
-                    ClientOptions::default(),
-                )
-                .await?;
+                let (summary, failed_uids, error) =
+                    crate::cmove::store_to_destination_with_failures(
+                        destination,
+                        "MOVE-SCP",
+                        "STORE-SCP",
+                        &instances,
+                        originator_ae
+                            .as_deref()
+                            .map(|ae| (ae, originator_id.unwrap_or(0))),
+                        ClientOptions::default(),
+                    )
+                    .await?;
                 match error {
-                    None => Ok(crate::cmove::CMoveResponse::completed(request, summary)),
+                    None => {
+                        let mut response = crate::cmove::CMoveResponse::completed(request, summary);
+                        response.failed_sop_instance_uids = failed_uids;
+                        Ok(response)
+                    }
                     Some(error) => {
                         let mut response = crate::cmove::CMoveResponse::failure(
                             request,
@@ -3816,6 +4682,7 @@ mod tests {
                             error.to_string(),
                         );
                         response.summary = summary;
+                        response.failed_sop_instance_uids = failed_uids;
                         Ok(response)
                     }
                 }
@@ -3950,6 +4817,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0].failed_sop_instance_uids, vec!["1.2.3.4.5.6"]);
         assert_eq!(
             responses[0].state(),
             crate::dimse::StatusState::Failure,
@@ -4090,15 +4958,10 @@ mod tests {
                 vec!["1.2.840.10008.1.2".to_string()],
             ),
         ];
-        let mut association = Association::open(
-            addr,
-            "GET-SCU",
-            "GET-SCP",
-            contexts,
-            ClientOptions::default(),
-        )
-        .await
-        .unwrap();
+        let mut association =
+            Association::open(addr, "GET-SCU", "GET-SCP", contexts, get_client_options())
+                .await
+                .unwrap();
         let received = Arc::new(std::sync::Mutex::new(Vec::new()));
         association.collect_reverse_stores(received.clone());
 
@@ -4290,7 +5153,7 @@ mod tests {
             "SCU",
             "SCP",
             vec![get_context()],
-            ClientOptions::default(),
+            get_client_options(),
         )
         .await
         .unwrap();
@@ -4470,10 +5333,9 @@ mod tests {
                 vec!["1.2.840.10008.1.2".to_string()],
             ),
         ];
-        let mut association =
-            Association::open(addr, "SCU", "SCP", contexts, ClientOptions::default())
-                .await
-                .unwrap();
+        let mut association = Association::open(addr, "SCU", "SCP", contexts, get_client_options())
+            .await
+            .unwrap();
         let request = crate::cget::CGetRequest::study("1.2.3.4", 1);
         let get_context_id = association
             .contexts()
@@ -4569,7 +5431,7 @@ mod tests {
             "SCU",
             "SCP",
             vec![get_context()],
-            ClientOptions::default(),
+            get_client_options(),
         )
         .await
         .unwrap();
@@ -4629,7 +5491,7 @@ mod tests {
             "SCU",
             "SCP",
             vec![get_context()],
-            ClientOptions::default(),
+            get_client_options(),
         )
         .await
         .unwrap();
@@ -4685,7 +5547,7 @@ mod tests {
         let handle = tokio::spawn(async move { server.accept_one().await });
 
         let mut association =
-            Association::open(addr, "SCU", "SCP", get_contexts(), ClientOptions::default())
+            Association::open(addr, "SCU", "SCP", get_contexts(), get_client_options())
                 .await
                 .unwrap();
         association.set_reverse_store_handler(Arc::new(|request: &CStoreRequest| {
@@ -4748,7 +5610,7 @@ mod tests {
         let handle = tokio::spawn(async move { server.accept_one().await });
 
         let mut association =
-            Association::open(addr, "SCU", "SCP", get_contexts(), ClientOptions::default())
+            Association::open(addr, "SCU", "SCP", get_contexts(), get_client_options())
                 .await
                 .unwrap();
         association.set_reverse_store_handler(Arc::new(|request: &CStoreRequest| {
@@ -4812,7 +5674,7 @@ mod tests {
         let handle = tokio::spawn(async move { server.accept_one().await });
 
         let mut association =
-            Association::open(addr, "SCU", "SCP", get_contexts(), ClientOptions::default())
+            Association::open(addr, "SCU", "SCP", get_contexts(), get_client_options())
                 .await
                 .unwrap();
         association.set_reverse_store_handler(Arc::new(|request: &CStoreRequest| {
@@ -4897,7 +5759,7 @@ mod tests {
                     vec!["1.2.840.10008.1.2".to_string()],
                 ),
             ],
-            ClientOptions::default(),
+            get_client_options(),
         )
         .await
         .unwrap();
@@ -4921,6 +5783,7 @@ mod tests {
             "a refused instance fails the retrieve"
         );
         assert_eq!(terminal.summary.failed, 1);
+        assert_eq!(terminal.failed_sop_instance_uids, vec!["1.2.3.4.5.6"]);
 
         association.release().await.unwrap();
         handle.await.unwrap().unwrap();
@@ -5499,15 +6362,20 @@ mod tests {
         .unwrap();
         let addr = server.local_addr();
         let handle = tokio::spawn(async move { server.accept_one().await });
-        let mut association = Association::open(
-            addr,
-            "SCU",
-            "SCP",
-            vec![commit_context()],
-            ClientOptions::default(),
-        )
-        .await
-        .unwrap();
+        let mut client_options = ClientOptions::default();
+        if request_field == CommandField::NEventReportRq {
+            client_options
+                .role_selections
+                .push(crate::pdu::RoleSelection {
+                    sop_class: COMMIT_SOP_CLASS.into(),
+                    scu_role: false,
+                    scp_role: true,
+                });
+        }
+        let mut association =
+            Association::open(addr, "SCU", "SCP", vec![commit_context()], client_options)
+                .await
+                .unwrap();
 
         let mut ok = crate::nservice::NServiceRequest::new(request_field, 1);
         ok.sop_class_uid = Some(COMMIT_SOP_CLASS.to_string());
@@ -6221,7 +7089,7 @@ mod tests {
             "GET-SCU",
             "GET-SCP",
             get_contexts(),
-            ClientOptions::default(),
+            get_client_options(),
         )
         .await
         .unwrap();
@@ -6285,7 +7153,7 @@ mod tests {
             "GET-SCU",
             "GET-SCP",
             get_contexts(),
-            ClientOptions::default(),
+            get_client_options(),
         )
         .await
         .unwrap();
@@ -6627,6 +7495,83 @@ mod tests {
     // -- reverse sub-operations and terminal responses ----------------------
 
     #[tokio::test]
+    async fn reverse_store_response_must_match_storage_context_and_optional_uids() {
+        use crate::association::transfer_syntax;
+        use crate::pdu::RoleSelection;
+        let file = instance_file();
+        let sop = "1.2.840.10008.5.1.4.1.1.7";
+        let provider = Arc::new(VerificationProvider);
+        let options = ServerOptions::default();
+        let splitter = PduSplitter::new(16384, 16);
+        let mut policy = NegotiationPolicy::new(vec![sop.into()]);
+        policy.accept_roles = true;
+        let mut contexts = policy.negotiate(&[PresentationContext::new(
+            3,
+            sop,
+            vec![transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN.into()],
+        )]);
+        policy.negotiate_roles(
+            &mut contexts,
+            &[RoleSelection {
+                sop_class: sop.into(),
+                scu_role: true,
+                scp_role: true,
+            }],
+        );
+        let accepted = AcceptedContexts::from_negotiated(contexts);
+        for mismatch in 0..5 {
+            let (_peer, mut io) = tokio::io::duplex(65536);
+            let mut response = Command::request(CommandField::CStoreRsp, 1);
+            response.message_id_being_responded_to = Some(1);
+            response.status = Some(crate::dimse::status::SUCCESS);
+            if mismatch != 4 {
+                response.affected_sop_class_uid =
+                    Some(if mismatch == 1 { "9.9" } else { sop }.into());
+                response.affected_sop_instance_uid =
+                    Some(if mismatch == 2 { "9.8" } else { "1.2.3.4.5.6" }.into());
+            }
+            let mut cancel = Command::request(CommandField::CCancelRq, 99);
+            cancel.message_id_being_responded_to = Some(99);
+            let pending_units = VecDeque::from([
+                crate::assembler::MessageUnit {
+                    context_id: 1,
+                    stream: Stream::Command,
+                    bytes: command_bytes(&cancel).unwrap().into(),
+                },
+                crate::assembler::MessageUnit {
+                    context_id: if mismatch == 0 { 1 } else { 3 },
+                    stream: Stream::Command,
+                    bytes: command_bytes(&response).unwrap().into(),
+                },
+            ]);
+            let mut serving = Serving {
+                stream: &mut io,
+                splitter: &splitter,
+                provider: &provider,
+                options: &options,
+                assembler: PdvAssembler::new(),
+                pending_units,
+                deferred_units: VecDeque::new(),
+                deferred_requests: 0,
+                incoming_window: 1,
+                accepted: &accepted,
+                reverse_message_id: 1,
+                transcoder_cache: std::collections::HashMap::new(),
+                pdu_reader: crate::transport::PduReader::new(),
+            };
+            let result = serving.send_reverse_store(&file, 1, 99).await;
+            if mismatch < 3 {
+                assert!(
+                    matches!(result, Err(NetworkError::Protocol(_))),
+                    "mismatch {mismatch}: {result:?}"
+                );
+            } else {
+                assert_eq!(result.unwrap(), (StatusState::Success, true));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn a_split_store_response_keeps_the_framer_in_sync() {
         // NET-01: the C-GET loop can leave a half-read frame in the PduReader.
         // await_store_response must use the same framer, never the bare socket.
@@ -6643,6 +7588,9 @@ mod tests {
             options: &options,
             assembler: PdvAssembler::new(),
             pending_units: VecDeque::new(),
+            deferred_units: VecDeque::new(),
+            deferred_requests: 0,
+            incoming_window: 1,
             accepted: &accepted,
             reverse_message_id: 1,
             transcoder_cache: std::collections::HashMap::new(),
@@ -6682,7 +7630,7 @@ mod tests {
         // a hard timeout turns a future regression into a failure, not a hang
         let (command, cancelled) = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            serving.await_store_response(7, 1, 99),
+            serving.await_store_response(7, 1, 1, 99),
         )
         .await
         .expect("the reverse-store wait must not deadlock")
@@ -6822,7 +7770,7 @@ mod tests {
             "GET-SCU",
             "GET-SCP",
             get_contexts(),
-            ClientOptions::default(),
+            get_client_options(),
         )
         .await
         .unwrap();
@@ -6986,6 +7934,9 @@ mod tests {
             options: &options,
             assembler: PdvAssembler::new(),
             pending_units: VecDeque::new(),
+            deferred_units: VecDeque::new(),
+            deferred_requests: 0,
+            incoming_window: 1,
             accepted: &accepted,
             reverse_message_id: 1,
             transcoder_cache: std::collections::HashMap::new(),
@@ -7042,6 +7993,9 @@ mod tests {
             options: &options,
             assembler: PdvAssembler::new(),
             pending_units: VecDeque::new(),
+            deferred_units: VecDeque::new(),
+            deferred_requests: 0,
+            incoming_window: 1,
             accepted: &accepted,
             reverse_message_id: 1,
             transcoder_cache: std::collections::HashMap::new(),
@@ -7077,7 +8031,7 @@ mod tests {
         );
         peer.write_all(&wire).await.unwrap();
 
-        let (command, cancelled) = serving.await_store_response(7, 1, 99).await.unwrap();
+        let (command, cancelled) = serving.await_store_response(7, 1, 1, 99).await.unwrap();
         assert_eq!(command.field, CommandField::CStoreRsp);
         assert!(cancelled, "the C-CANCEL is remembered");
 
@@ -7096,7 +8050,7 @@ mod tests {
                 stream: crate::assembler::Stream::Command,
                 bytes: command_bytes(&response).unwrap().into(),
             });
-        let (again, _) = serving.await_store_response(7, 1, 99).await.unwrap();
+        let (again, _) = serving.await_store_response(7, 1, 1, 99).await.unwrap();
         assert_eq!(again.field, CommandField::CStoreRsp);
     }
 
@@ -7117,13 +8071,16 @@ mod tests {
             options: &options,
             assembler: PdvAssembler::new(),
             pending_units: VecDeque::new(),
+            deferred_units: VecDeque::new(),
+            deferred_requests: 0,
+            incoming_window: 1,
             accepted: &accepted,
             reverse_message_id: 1,
             transcoder_cache: std::collections::HashMap::new(),
             pdu_reader: crate::transport::PduReader::new(),
         };
         assert!(matches!(
-            serving.await_store_response(7, 1, 99).await,
+            serving.await_store_response(7, 1, 1, 99).await,
             Err(NetworkError::ClosedPrematurely { .. })
         ));
 
@@ -7145,13 +8102,16 @@ mod tests {
             options: &options,
             assembler: PdvAssembler::new(),
             pending_units: VecDeque::new(),
+            deferred_units: VecDeque::new(),
+            deferred_requests: 0,
+            incoming_window: 1,
             accepted: &accepted,
             reverse_message_id: 1,
             transcoder_cache: std::collections::HashMap::new(),
             pdu_reader: crate::transport::PduReader::new(),
         };
         assert!(matches!(
-            serving.await_store_response(7, 1, 99).await,
+            serving.await_store_response(7, 1, 1, 99).await,
             Err(NetworkError::Abort { reason: 5, .. })
         ));
 
@@ -7167,13 +8127,16 @@ mod tests {
             options: &options,
             assembler: PdvAssembler::new(),
             pending_units: VecDeque::new(),
+            deferred_units: VecDeque::new(),
+            deferred_requests: 0,
+            incoming_window: 1,
             accepted: &accepted,
             reverse_message_id: 1,
             transcoder_cache: std::collections::HashMap::new(),
             pdu_reader: crate::transport::PduReader::new(),
         };
         assert!(matches!(
-            serving.await_store_response(7, 1, 99).await,
+            serving.await_store_response(7, 1, 1, 99).await,
             Err(NetworkError::ClosedPrematurely { .. })
         ));
 
@@ -7189,13 +8152,16 @@ mod tests {
             options: &options,
             assembler: PdvAssembler::new(),
             pending_units: VecDeque::new(),
+            deferred_units: VecDeque::new(),
+            deferred_requests: 0,
+            incoming_window: 1,
             accepted: &accepted,
             reverse_message_id: 1,
             transcoder_cache: std::collections::HashMap::new(),
             pdu_reader: crate::transport::PduReader::new(),
         };
         assert!(serving
-            .await_store_response(7, 1, 99)
+            .await_store_response(7, 1, 1, 99)
             .await
             .unwrap_err()
             .to_string()
@@ -7383,7 +8349,7 @@ mod tests {
             "SCU",
             "SCP",
             vec![qr_context(sop_class::STUDY_ROOT_QR_MOVE)],
-            ClientOptions::default(),
+            get_client_options(),
         )
         .await
         .unwrap();
@@ -7499,7 +8465,7 @@ mod tests {
                     vec!["1.2.840.10008.1.2".to_string()],
                 ),
             ],
-            ClientOptions::default(),
+            get_client_options(),
         )
         .await
         .unwrap();

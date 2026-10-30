@@ -1,5 +1,8 @@
 # Development Guide
 
+> Current correction and evidence ledger: [07-review-fixes-2026-10-30.md](07-review-fixes-2026-10-30.md).
+> Earlier DONE / coverage statements describe an earlier checkpoint, not proof of complete parity.
+
 > Planning, feature IDs, progress and testing. Design invariants live in
 > [01-architecture.md](01-architecture.md). Historical day-by-day entries are **not** kept here — use
 > `git log`.
@@ -372,7 +375,7 @@ different code path.
 | fuzz | local/manual | both fuzz targets |
 | interop | local / self-hosted | DCMTK / fo-dicom matrix |
 | bench | local/manual | `cargo bench` against a baseline |
-| coverage | push to `master`/`main`, pull request, `workflow_dispatch` | `cargo xtask coverage` (runs `cargo llvm-cov`; production lines only — test/bench/example targets and inline `#[cfg(test)]` modules are excluded) with a **95% floor**. `cargo xtask` is the repository alias in `.cargo/config.toml`; CI runs `cargo run --package xtask -- coverage`. Current measured numbers are in [05-code-review-2026-10-29.md](05-code-review-2026-10-29.md). |
+| coverage | push to `master`/`main`, pull request, `workflow_dispatch` | `cargo xtask coverage` (runs `cargo llvm-cov`; production lines only — test/bench/example targets and inline `#[cfg(test)]` modules are excluded) with a **95% floor**. `cargo xtask` is the repository alias in `.cargo/config.toml`; CI runs `cargo run --package xtask -- coverage`. Current measured numbers and measurement limits are in [07-review-fixes-2026-10-30.md](07-review-fixes-2026-10-30.md). |
 
 ### 5.10 Conventions
 

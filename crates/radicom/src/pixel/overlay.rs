@@ -23,7 +23,7 @@ pub struct OverlayData {
     /// `(60xx,0050)` OverlayOrigin, row\column, re-ordered to `(x, y)`.
     origin: (i16, i16),
     /// `(60xx,0051)` ImageFrameOrigin, 1-based frame number.
-    frame_origin: i16,
+    frame_origin: u16,
     number_of_frames: u32,
     bits_allocated: u16,
     bit_position: u16,
@@ -66,8 +66,8 @@ impl OverlayData {
         };
         let origin_tag = Tag::new(group, 0x0050);
         // PS3.3 C.9.2: OverlayOrigin is row\column (VM 2); expose (x, y).
-        let row = ds.get_at::<i16>(&origin_tag, 0).unwrap_or(0);
-        let column = ds.get_at::<i16>(&origin_tag, 1).unwrap_or(0);
+        let row = ds.get_at::<i16>(&origin_tag, 0).unwrap_or(1);
+        let column = ds.get_at::<i16>(&origin_tag, 1).unwrap_or(1);
         Some(OverlayData {
             group,
             data,
@@ -75,7 +75,7 @@ impl OverlayData {
             columns,
             origin: (column, row),
             // PS3.3 C.9.2.1.4: ImageFrameOrigin (60xx,0051), US VM 1
-            frame_origin: ds.get_or(Tag::new(group, 0x0051), 0u16) as i16,
+            frame_origin: ds.get_or(Tag::new(group, 0x0051), 1u16),
             number_of_frames: ds
                 .try_get_str(Tag::new(group, 0x0015))
                 .and_then(|s| s.trim().parse().ok())
@@ -105,7 +105,7 @@ impl OverlayData {
         self.origin
     }
 
-    pub fn frame_origin(&self) -> i16 {
+    pub fn frame_origin(&self) -> u16 {
         self.frame_origin
     }
 
@@ -140,12 +140,34 @@ impl OverlayData {
         self.load_frame(ds, 0)
     }
 
-    /// Resolves the overlay bytes for `frame`. A standalone `(60xx,3000)`
-    /// element is returned as-is; an embedded plane is carved out of that
-    /// image frame.
+    /// Resolves the overlay plane for the zero-based image `frame`.
+    /// Standalone frames are packed continuously and start at ImageFrameOrigin.
     pub fn load_frame(&self, ds: &Dataset, frame: u32) -> Result<SharedBuffer, Error> {
         if let Some(data) = &self.data {
-            return Ok(data.clone());
+            let first = self.frame_origin.max(1) as u32 - 1;
+            let relative = frame
+                .checked_sub(first)
+                .filter(|f| *f < self.number_of_frames)
+                .ok_or_else(|| {
+                    Error::Imaging(ImagingError("frame outside overlay range".into()))
+                })?;
+            let frame_bits = self.rows as usize * self.columns as usize;
+            let start = relative as usize * frame_bits;
+            let bytes = data.data()?;
+            if start + frame_bits > bytes.len() * 8 {
+                return Err(Error::Imaging(ImagingError(
+                    "overlay data is shorter than its shape".into(),
+                )));
+            }
+            if self.number_of_frames == 1 {
+                return Ok(data.clone());
+            }
+            let mut out = vec![0; frame_bits.div_ceil(8)];
+            for bit in 0..frame_bits {
+                out[bit / 8] |=
+                    ((bytes[(start + bit) / 8] >> ((start + bit) % 8)) & 1) << (bit % 8);
+            }
+            return Ok(Arc::new(MemoryBuffer::from(out)));
         }
         Self::extract_embedded_frame(ds, self.group, frame)
     }
@@ -207,6 +229,11 @@ impl OverlayData {
                 "embedded overlays support 8- and 16-bit pixel data, not {bits}"
             ))));
         }
+        if bit_position >= bits {
+            return Err(Error::Imaging(ImagingError(format!(
+                "overlay bit position {bit_position} exceeds the allocated {bits}-bit sample"
+            ))));
+        }
 
         // The overlay plane is carved out of the image frame starting at
         // OverlayOrigin (1-based row\column), exactly like fo-dicom.
@@ -218,10 +245,10 @@ impl OverlayData {
             )));
         }
         let origin_tag = Tag::new(group, 0x0050);
-        let row = ds.get_at::<i16>(&origin_tag, 0).unwrap_or(0);
-        let column = ds.get_at::<i16>(&origin_tag, 1).unwrap_or(0);
-        let ox = (column as isize - 1).max(0) as usize;
-        let oy = (row as isize - 1).max(0) as usize;
+        let row = ds.get_at::<i16>(&origin_tag, 0).unwrap_or(1);
+        let column = ds.get_at::<i16>(&origin_tag, 1).unwrap_or(1);
+        let ox = column as isize - 1;
+        let oy = row as isize - 1;
 
         let raw = pixel.data()?;
         let unit = (bits / 8) as usize;
@@ -233,17 +260,15 @@ impl OverlayData {
             ))));
         }
         let frame_bytes = &raw[start..start + frame_size];
-        // 1 bit per pixel, row-packed, LSB first (PS3.5 §8.1.2)
-        let row_bytes = columns.div_ceil(8) as usize;
-        let mut out = vec![0u8; row_bytes * rows as usize];
-        let mut o = 0usize;
+        // Continuous bits, LSB first: neither rows nor frames have padding.
+        let mut out = vec![0u8; (columns * rows).div_ceil(8) as usize];
         for y in 0..rows as usize {
             for x in 0..columns as usize {
-                let (ix, iy) = (ox + x, oy + y);
-                if ix >= image_columns || iy >= image_rows {
+                let (ix, iy) = (ox + x as isize, oy + y as isize);
+                if ix < 0 || iy < 0 || ix >= image_columns as isize || iy >= image_rows as isize {
                     continue; // outside the image: no overlay bit
                 }
-                let idx = (iy * image_columns + ix) * unit;
+                let idx = (iy as usize * image_columns + ix as usize) * unit;
                 let value = if unit == 1 {
                     frame_bytes[idx] as u16
                 } else {
@@ -251,10 +276,10 @@ impl OverlayData {
                     u16::from_ne_bytes([frame_bytes[idx], frame_bytes[idx + 1]])
                 };
                 if (value >> bit_position) & 1 == 1 {
-                    out[o + x / 8] |= 0x01 << (x % 8);
+                    let bit = y * columns as usize + x;
+                    out[bit / 8] |= 0x01 << (bit % 8);
                 }
             }
-            o += row_bytes;
         }
         Ok(Arc::new(MemoryBuffer::from(out)))
     }
@@ -280,19 +305,25 @@ impl OverlayData {
 /// Extracts every embedded overlay into a standalone `(60xx,3000)`
 /// element (§9.1). Datasets without overlays are left untouched.
 pub fn extract_overlays(ds: &mut Dataset) -> Result<usize, Error> {
-    let groups: Vec<u16> = OverlayData::from_dataset(ds)
+    let overlays: Vec<_> = OverlayData::from_dataset(ds)
         .into_iter()
         .filter(|o| o.data.is_none())
-        .map(|o| o.group)
         .collect();
     let mut extracted = 0;
-    for group in groups {
-        let data = OverlayData::extract_embedded(ds, group)?;
-        let overlay = OverlayData::from_dataset(ds)
-            .into_iter()
-            .find(|o| o.group == group)
-            .ok_or_else(|| Error::Imaging(ImagingError("overlay group vanished".into())))?;
-        overlay.store(ds, data)?;
+    for overlay in overlays {
+        let frame_bits = overlay.rows as usize * overlay.columns as usize;
+        let count = overlay.number_of_frames;
+        let first = overlay.frame_origin.max(1) as u32 - 1;
+        let mut packed = vec![0; (frame_bits * count as usize).div_ceil(8)];
+        for relative in 0..count {
+            let data = OverlayData::extract_embedded_frame(ds, overlay.group, first + relative)?;
+            let bytes = data.data()?;
+            for bit in 0..frame_bits {
+                let target = relative as usize * frame_bits + bit;
+                packed[target / 8] |= ((bytes[bit / 8] >> (bit % 8)) & 1) << (target % 8);
+            }
+        }
+        overlay.store(ds, Arc::new(MemoryBuffer::from(packed)))?;
         extracted += 1;
     }
     Ok(extracted)
@@ -326,6 +357,118 @@ mod tests {
         ds.insert_str(Tag::new(group, 0x0040), Vr::Cs, "G");
         ds.insert_value(Tag::new(group, 0x0100), 1u16);
         ds.insert_value(Tag::new(group, 0x0102), bit_position);
+    }
+
+    #[test]
+    fn standalone_frames_are_continuous_bits_relative_to_image_frame_origin() {
+        let mut ds = base(8, 3, 1);
+        add_overlay_shape(&mut ds, 0x6000, 3, 1, 0);
+        ds.insert_str(Tag::new(0x6000, 0x0015), Vr::Is, "2");
+        ds.insert_value(Tag::new(0x6000, 0x0051), 40000u16);
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::new(0x6000, 0x3000),
+                Vr::Ob,
+                Arc::new(MemoryBuffer::from(vec![0b00010001])),
+            ),
+        ));
+        let overlay = OverlayData::from_dataset(&ds).pop().unwrap();
+        assert!(overlay.load_frame(&ds, 39998).is_err());
+        assert_eq!(
+            overlay
+                .load_frame(&ds, 39999)
+                .unwrap()
+                .data()
+                .unwrap()
+                .as_ref(),
+            &[1]
+        );
+        assert_eq!(
+            overlay
+                .load_frame(&ds, 40000)
+                .unwrap()
+                .data()
+                .unwrap()
+                .as_ref(),
+            &[2]
+        );
+        assert!(overlay.load_frame(&ds, 40001).is_err());
+    }
+
+    #[test]
+    fn embedded_narrow_rows_and_extracted_frames_pack_continuously() {
+        let mut ds = base(8, 1, 9);
+        ds.insert_value(BITS_STORED, 7u16);
+        ds.insert_str(Tag::NUMBER_OF_FRAMES, Vr::Is, "2");
+        add_overlay_shape(&mut ds, 0x6000, 1, 9, 7);
+        ds.insert_str(Tag::new(0x6000, 0x0015), Vr::Is, "2");
+        let bytes = [vec![0x80; 9], vec![0; 9]].concat();
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                PIXEL_DATA,
+                Vr::Ob,
+                Arc::new(MemoryBuffer::from(bytes)),
+            ),
+        ));
+        assert_eq!(
+            OverlayData::extract_embedded(&ds, 0x6000)
+                .unwrap()
+                .data()
+                .unwrap()
+                .as_ref(),
+            &[255, 1]
+        );
+        extract_overlays(&mut ds).unwrap();
+        let overlay = OverlayData::from_dataset(&ds).pop().unwrap();
+        assert_eq!(
+            overlay.load_frame(&ds, 0).unwrap().data().unwrap().as_ref(),
+            &[255, 1]
+        );
+        assert_eq!(
+            overlay.load_frame(&ds, 1).unwrap().data().unwrap().as_ref(),
+            &[0, 0]
+        );
+    }
+
+    #[test]
+    fn embedded_overlay_negative_origin_keeps_the_source_pixel_offset() {
+        let mut ds = base(8, 3, 1);
+        ds.insert_value(BITS_STORED, 7u16);
+        add_overlay_shape(&mut ds, 0x6000, 5, 1, 7);
+        for (tag, bytes) in [
+            (
+                Tag::new(0x6000, 0x0050),
+                [1i16.to_ne_bytes(), (-1i16).to_ne_bytes()].concat(),
+            ),
+            (PIXEL_DATA, vec![0x80, 0, 0]),
+        ] {
+            let vr = if tag == PIXEL_DATA { Vr::Ob } else { Vr::Ss };
+            ds.insert_or_update(DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(
+                    tag,
+                    vr,
+                    Arc::new(MemoryBuffer::from(bytes)),
+                ),
+            ));
+        }
+        let overlay = OverlayData::from_dataset(&ds).pop().unwrap();
+        assert_eq!(overlay.load(&ds).unwrap().data().unwrap().as_ref(), &[4]);
+    }
+
+    #[test]
+    fn an_overlay_bit_position_outside_the_allocated_sample_returns_an_error() {
+        let mut ds = base(16, 1, 1);
+        ds.insert_value(BITS_STORED, 12u16);
+        add_overlay_shape(&mut ds, 0x6000, 1, 1, 16);
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                PIXEL_DATA,
+                Vr::Ow,
+                Arc::new(MemoryBuffer::from(vec![0, 0])),
+            ),
+        ));
+        assert!(OverlayData::from_dataset(&ds)[0].load(&ds).is_err());
+        assert!(extract_overlays(&mut ds).is_err());
     }
 
     #[test]

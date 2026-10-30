@@ -60,6 +60,16 @@ impl CodeItem {
     /// Writes this code into `dataset`, choosing the value slot by the code
     /// value's length and form (§12.3).
     pub fn write_into(&self, dataset: &mut Dataset) {
+        for tag in [
+            Tag::CODE_VALUE,
+            Tag::LONG_CODE_VALUE,
+            Tag::URN_CODE_VALUE,
+            Tag::CODING_SCHEME_DESIGNATOR,
+            Tag::CODE_MEANING,
+            Tag::CODING_SCHEME_VERSION,
+        ] {
+            dataset.remove(tag);
+        }
         let (value_tag, value_vr) = value_slot(&self.value);
         dataset.insert_str(value_tag, value_vr, self.value.clone());
         if !self.scheme.is_empty() {
@@ -101,6 +111,65 @@ impl CodeItem {
                 .try_get_str(&Tag::CODING_SCHEME_VERSION)
                 .map(|v| v.trim().to_string()),
         })
+    }
+
+    /// Checks a complete coded entry, including mutually exclusive value fields.
+    pub(crate) fn validate_dataset(dataset: &Dataset) -> Result<(), Error> {
+        let slots = [Tag::CODE_VALUE, Tag::LONG_CODE_VALUE, Tag::URN_CODE_VALUE];
+        let present: Vec<_> = slots
+            .into_iter()
+            .filter(|tag| dataset.contains(tag))
+            .collect();
+        let code = Self::read_from(dataset)?;
+        if present.len() != 1
+            || code.value.is_empty()
+            || code
+                .meaning
+                .as_deref()
+                .is_none_or(|meaning| meaning.trim().is_empty())
+            || (present[0] != Tag::URN_CODE_VALUE && code.scheme.is_empty())
+        {
+            return Err(Error::Data(DataError::Other {
+                message: "incomplete or ambiguous coded entry".into(),
+            }));
+        }
+        for (tag, vr) in [
+            (Tag::CODE_VALUE, Vr::Sh),
+            (Tag::LONG_CODE_VALUE, Vr::Uc),
+            (Tag::URN_CODE_VALUE, Vr::Ur),
+            (Tag::CODING_SCHEME_DESIGNATOR, Vr::Sh),
+            (Tag::CODE_MEANING, Vr::Lo),
+            (Tag::CODING_SCHEME_VERSION, Vr::Sh),
+        ] {
+            if let Some(crate::model::item::DicomItem::Element(element)) = dataset.item(&tag) {
+                let value = dataset.get_str(&tag)?;
+                if element.vr() != vr
+                    || value.trim().is_empty()
+                    || (vr.is_multi_value() && value.contains('\\'))
+                {
+                    return Err(Error::Data(DataError::Other {
+                        message: format!("incorrect coded entry VR or multiplicity for {tag}"),
+                    }));
+                }
+                crate::validation::validate_single(vr, &value)
+                    .map_err(|message| Error::Data(DataError::Other { message }))?;
+            } else if dataset.contains(&tag) {
+                return Err(Error::Data(DataError::Other {
+                    message: format!("coded entry {tag} must be an element"),
+                }));
+            }
+        }
+        for item in dataset.items() {
+            if let crate::model::item::DicomItem::Element(element) = item {
+                if !matches!(
+                    element.value(),
+                    crate::model::element::ElementValue::Bytes(_)
+                ) {
+                    crate::validation::validate_element(element)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Wraps the code in a fresh one-item sequence under `sequence_tag`.
@@ -153,6 +222,29 @@ mod tests {
             Some(crate::model::item::DicomItem::Element(element)) => Some(element.vr()),
             _ => None,
         }
+    }
+
+    #[test]
+    fn coded_entries_require_one_value_in_the_expected_vr() {
+        let mut dataset = Dataset::new();
+        CodeItem::new("A", "TEST")
+            .with_meaning("Heading")
+            .write_into(&mut dataset);
+        CodeItem::validate_dataset(&dataset).unwrap();
+        for (tag, vr, value) in [
+            (Tag::CODE_VALUE, Vr::Sh, "A\\B"),
+            (Tag::CODE_MEANING, Vr::Sh, "Heading"),
+            (Tag::CODING_SCHEME_DESIGNATOR, Vr::Sh, ""),
+        ] {
+            let mut bad = dataset.clone();
+            bad.insert_str(tag, vr, value);
+            assert!(CodeItem::validate_dataset(&bad).is_err());
+        }
+        dataset.insert_str(Tag::LONG_CODE_VALUE, Vr::Uc, "another value");
+        assert!(CodeItem::validate_dataset(&dataset).is_err());
+        CodeItem::from_urn("urn:test:a", "URN heading").write_into(&mut dataset);
+        CodeItem::validate_dataset(&dataset).unwrap();
+        assert!(!dataset.contains(&Tag::CODE_VALUE) && !dataset.contains(&Tag::LONG_CODE_VALUE));
     }
 
     #[test]

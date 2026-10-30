@@ -28,12 +28,14 @@ pub const LOSSY_IMAGE_COMPRESSION_METHOD: Tag = Tag::LOSSY_IMAGE_COMPRESSION_MET
 pub struct Transcoder {
     from: Arc<TransferSyntax>,
     to: Arc<TransferSyntax>,
-    in_params: CodecParams,
-    out_params: CodecParams,
+    in_params: Option<CodecParams>,
+    out_params: Option<CodecParams>,
 }
 
 impl Transcoder {
     /// Builds a transcoder; codecs are resolved lazily at use time (§9.1).
+    /// Omitted parameters use the codec's defaults; `Some(CodecParams::None)`
+    /// explicitly passes no parameters.
     pub fn new(
         from: Arc<TransferSyntax>,
         to: Arc<TransferSyntax>,
@@ -43,8 +45,8 @@ impl Transcoder {
         Transcoder {
             from,
             to,
-            in_params: in_params.unwrap_or(CodecParams::None),
-            out_params: out_params.unwrap_or(CodecParams::None),
+            in_params,
+            out_params,
         }
     }
 
@@ -60,56 +62,34 @@ impl Transcoder {
     ///
     /// The input is never mutated: every path works on a clone.
     pub fn transcode_dataset(&self, ds: &Dataset) -> Result<Dataset, Error> {
-        let mut out = ds.clone();
-        // row 1: no pixel data — only the syntax changes
+        let mut source = ds.clone();
         if !ds.contains(&PIXEL_DATA) {
-            out.set_transfer_syntax(self.to.clone());
-            return Ok(out);
+            source.set_transfer_syntax(self.to.clone());
+            return Ok(source);
         }
-        // embedded overlays must be extracted while the pixel data is still
-        // uncompressed, before `out` claims the target syntax (§9.1)
-        extract_overlays(&mut out)?;
-        out.set_transfer_syntax(self.to.clone());
-
-        let uncompressed_from = !self.from.is_encapsulated();
-        let uncompressed_to = !self.to.is_encapsulated();
-
-        let frames = if uncompressed_from && uncompressed_to {
-            // row 2: frame-wise copy, no codec involved
-            self.read_frames(ds)?
-        } else if !uncompressed_from && uncompressed_to {
-            // row 3: decode only
-            self.decode_frames(ds)?
-        } else if uncompressed_from && !uncompressed_to {
-            // row 4: encode only
-            self.encode_frames(ds)?
-        } else {
-            // row 5: decode then encode through a codec
-            let intermediate = self.decode_to_uncompressed(ds)?;
-            self.encode_frames(&intermediate)?
-        };
-
-        // Lossy bookkeeping: the encoded (or decoded) target frames plus the
-        // source's uncompressed first-frame size, captured before `frames` moves.
-        // These are reporting figures only, so a frame that cannot be read
-        // contributes 0 instead of failing an already successful transcode.
-        let encoded_bytes = frames
-            .first()
-            .and_then(|f| f.data().ok())
-            .map_or(0, |d| d.len() as u64);
-        let original_bytes = PixelDataRef::from_dataset(ds)
-            .ok()
-            .and_then(|p| p.uncompressed_frame_size().ok())
-            .unwrap_or(0);
-
-        out.remove(PIXEL_DATA);
-        out.remove(Tag::NUMBER_OF_FRAMES);
-        {
-            let mut pd = PixelData::from_dataset(&mut out)?;
-            for frame in frames {
-                pd.add_frame_buffer(frame)?;
+        if !self.from.is_encapsulated() {
+            extract_overlays(&mut source)?;
+        }
+        let original_bytes = PixelDataRef::from_dataset(ds)?.uncompressed_frame_size()?;
+        let mut out = match (self.from.is_encapsulated(), self.to.is_encapsulated()) {
+            (false, false) => {
+                let frames = self.read_frames(&source)?;
+                let mut out = source;
+                out.set_transfer_syntax(self.to.clone());
+                out.remove(PIXEL_DATA);
+                out.remove(Tag::NUMBER_OF_FRAMES);
+                let mut pixel = PixelData::create_new(&mut out)?;
+                for frame in frames {
+                    pixel.add_frame_buffer(frame)?;
+                }
+                out
             }
-        }
+            (true, false) => self.decode_to_uncompressed(&source)?,
+            (false, true) => self.encode_dataset(&source)?,
+            (true, true) => self.encode_dataset(&self.decode_to_uncompressed(&source)?)?,
+        };
+        out.set_transfer_syntax(self.to.clone());
+        let encoded_bytes = PixelDataRef::from_dataset(&out)?.get_frame(0)?.size();
         self.finish(&mut out)?;
         // (0028,2110) marks the output lossy when the target syntax compresses
         // with loss (PS3.3 C.7.6.4; fo-dicom Transcoder write-lossy bookkeeping).
@@ -146,23 +126,25 @@ impl Transcoder {
         let codec = codec_registry().get_codec(&self.from)?;
         let bytes = self.read_frame(ds, frame)?;
 
-        // decode into a scratch dataset holding just this frame
-        let mut target = ds.clone();
-        target.set_transfer_syntax(
+        // Keep the isolated frame encapsulated: its length is codec-defined.
+        let mut source = ds.clone();
+        source.remove(PIXEL_DATA);
+        source.remove(Tag::NUMBER_OF_FRAMES);
+        PixelData::create_new(&mut source)?.add_frame_buffer(bytes)?;
+        let mut decoded = source.clone();
+        decoded.set_transfer_syntax(
             crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
         );
-        target.remove(PIXEL_DATA);
-        target.remove(Tag::NUMBER_OF_FRAMES);
-        {
-            let mut dst = PixelData::from_dataset(&mut target)?;
-            dst.add_frame_buffer(bytes)?;
-        }
-        let mut decoded = target.clone();
         decoded.remove(PIXEL_DATA);
+        decoded.remove(Tag::NUMBER_OF_FRAMES);
         {
-            let src = PixelDataRef::from_dataset(&target)?;
-            let mut dst = PixelData::from_dataset(&mut decoded)?;
-            codec.decode(&src, &mut dst, &self.in_params)?;
+            let src = PixelDataRef::from_dataset(&source)?;
+            let mut dst = PixelData::create_new(&mut decoded)?;
+            let params = self
+                .in_params
+                .clone()
+                .unwrap_or_else(|| codec.default_params());
+            codec.decode(&src, &mut dst, &params)?;
         }
         PixelDataRef::from_dataset(&decoded)?.get_frame(0)
     }
@@ -189,61 +171,45 @@ impl Transcoder {
         PixelDataRef::from_dataset(ds)?.get_frame(frame)
     }
 
-    /// Row 3: decode `ds` and return the decoded frames.
-    fn decode_frames(&self, ds: &Dataset) -> Result<Vec<SharedBuffer>, Error> {
-        let codec = codec_registry().get_codec(&self.from)?;
-        let frames = self.read_frames(ds)?;
-        let mut source = ds.clone();
-        source.set_transfer_syntax(
-            crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
-        );
-        source.remove(PIXEL_DATA);
-        {
-            let mut pd = PixelData::from_dataset(&mut source)?;
-            for frame in frames {
-                pd.add_frame_buffer(frame)?;
-            }
-        }
-        let mut decoded = source.clone();
-        decoded.remove(PIXEL_DATA);
-        {
-            let src = PixelDataRef::from_dataset(&source)?;
-            let mut dst = PixelData::from_dataset(&mut decoded)?;
-            codec.decode(&src, &mut dst, &self.in_params)?;
-        }
-        self.read_frames(&decoded)
-    }
-
-    /// Row 4: encode `ds` and return the encoded frames.
-    fn encode_frames(&self, ds: &Dataset) -> Result<Vec<SharedBuffer>, Error> {
+    /// Row 4: preserve the complete codec destination, including pixel metadata.
+    fn encode_dataset(&self, ds: &Dataset) -> Result<Dataset, Error> {
         let codec = codec_registry().get_codec(&self.to)?;
         let mut encoded = ds.clone();
         encoded.set_transfer_syntax(self.to.clone());
         encoded.remove(PIXEL_DATA);
+        encoded.remove(Tag::NUMBER_OF_FRAMES);
         {
             let src = PixelDataRef::from_dataset(ds)?;
-            let mut dst = PixelData::from_dataset(&mut encoded)?;
-            codec.encode(&src, &mut dst, &self.out_params)?;
+            let mut dst = PixelData::create_new(&mut encoded)?;
+            let params = self
+                .out_params
+                .clone()
+                .unwrap_or_else(|| codec.default_params());
+            codec.encode(&src, &mut dst, &params)?;
         }
-        self.read_frames(&encoded)
+        Ok(encoded)
     }
 
-    /// Row 5 fallback: decode to explicit VR little endian first.
+    /// Decode the original encapsulated source into a native destination.
     fn decode_to_uncompressed(&self, ds: &Dataset) -> Result<Dataset, Error> {
-        let frames = self.decode_frames(ds)?;
-        let mut out = ds.clone();
-        out.set_transfer_syntax(
+        let codec = codec_registry().get_codec(&self.from)?;
+        let mut decoded = ds.clone();
+        decoded.set_transfer_syntax(
             crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
         );
-        out.remove(PIXEL_DATA);
-        out.remove(Tag::NUMBER_OF_FRAMES);
+        decoded.remove(PIXEL_DATA);
+        decoded.remove(Tag::NUMBER_OF_FRAMES);
         {
-            let mut pd = PixelData::from_dataset(&mut out)?;
-            for frame in frames {
-                pd.add_frame_buffer(frame)?;
-            }
+            let src = PixelDataRef::from_dataset(ds)?;
+            let mut dst = PixelData::create_new(&mut decoded)?;
+            let params = self
+                .in_params
+                .clone()
+                .unwrap_or_else(|| codec.default_params());
+            codec.decode(&src, &mut dst, &params)?;
         }
-        Ok(out)
+        extract_overlays(&mut decoded)?;
+        Ok(decoded)
     }
 
     /// §9.1 bookkeeping: encapsulated VR semantics and overlay extraction.
@@ -340,6 +306,282 @@ mod tests {
     use crate::model::transfer_syntax::syntaxes;
     use crate::pixel::codec::{set_codec_registry, Codec, CodecRegistry};
     use crate::pixel::{BITS_ALLOCATED, COLUMNS, PHOTOMETRIC_INTERPRETATION, ROWS};
+
+    // Contract fake: a two-byte run or six-byte literal becomes one RGB pixel.
+    struct VariableCodec {
+        syntax: &'static TransferSyntax,
+    }
+
+    impl Codec for VariableCodec {
+        fn name(&self) -> &str {
+            "variable frame contract"
+        }
+        fn transfer_syntax(&self) -> &'static TransferSyntax {
+            self.syntax
+        }
+        fn default_params(&self) -> CodecParams {
+            CodecParams::Jpeg2000(crate::pixel::codec::J2kParams::default())
+        }
+        fn encode(
+            &self,
+            src: &PixelDataRef<'_>,
+            dst: &mut PixelData<'_>,
+            params: &CodecParams,
+        ) -> Result<(), Error> {
+            assert!(!src.transfer_syntax().is_encapsulated());
+            assert_eq!(dst.transfer_syntax().uid(), self.syntax.uid());
+            assert_eq!(params, &self.default_params());
+            let pi = if src.samples_per_pixel() == 3 {
+                "YBR_FULL"
+            } else {
+                "MONOCHROME1"
+            };
+            dst.dataset_mut()
+                .insert_str(PHOTOMETRIC_INTERPRETATION, Vr::Cs, pi);
+            for i in 0..src.number_of_frames() {
+                let frame = src.get_frame(i)?;
+                let bytes = frame.data()?;
+                dst.add_frame([bytes[0], 0])?;
+            }
+            Ok(())
+        }
+        fn decode(
+            &self,
+            src: &PixelDataRef<'_>,
+            dst: &mut PixelData<'_>,
+            params: &CodecParams,
+        ) -> Result<(), Error> {
+            assert!(src.transfer_syntax().is_encapsulated());
+            assert_eq!(src.transfer_syntax().uid(), self.syntax.uid());
+            assert_eq!(params, &self.default_params());
+            let ds = dst.dataset_mut();
+            ds.insert_value(ROWS, 1u16);
+            ds.insert_value(COLUMNS, 1u16);
+            ds.insert_value(Tag::SAMPLES_PER_PIXEL, 3u16);
+            ds.insert_value(Tag::BITS_ALLOCATED, 8u16);
+            ds.insert_value(Tag::BITS_STORED, 8u16);
+            ds.insert_value(Tag::HIGH_BIT, 7u16);
+            ds.insert_value(Tag::PLANAR_CONFIGURATION, 0u16);
+            ds.insert_value(Tag::PIXEL_REPRESENTATION, 0u16);
+            ds.insert_str(PHOTOMETRIC_INTERPRETATION, Vr::Cs, "RGB");
+            for i in 0..src.number_of_frames() {
+                let frame = src.get_frame(i)?;
+                let bytes = frame.data()?;
+                assert!(bytes.as_ref() == [10, 0] || bytes.as_ref() == [40, 1, 2, 3, 4, 5]);
+                dst.add_frame([bytes[0], 20, 30])?;
+            }
+            Ok(())
+        }
+    }
+    struct VariableRegistry;
+    impl CodecRegistry for VariableRegistry {
+        fn has_codec(&self, syntax: &TransferSyntax) -> bool {
+            [
+                syntaxes::JPEG_2000_LOSSLESS.uid(),
+                syntaxes::RLE_LOSSLESS.uid(),
+            ]
+            .contains(&syntax.uid())
+        }
+        fn can_transcode(&self, from: &TransferSyntax, to: &TransferSyntax) -> bool {
+            (!from.is_encapsulated() || self.has_codec(from))
+                && (!to.is_encapsulated() || self.has_codec(to))
+        }
+        fn get_codec(&self, syntax: &TransferSyntax) -> Result<Arc<dyn Codec>, Error> {
+            let syntax = [&*syntaxes::JPEG_2000_LOSSLESS, &*syntaxes::RLE_LOSSLESS]
+                .into_iter()
+                .find(|s| s.uid() == syntax.uid())
+                .ok_or_else(|| Error::Codec(CodecError::NotRegistered(syntax.uid().into())))?;
+            Ok(Arc::new(VariableCodec { syntax }))
+        }
+    }
+    fn variable_compressed() -> Dataset {
+        let mut ds = dataset(16, 1, 2);
+        ds.insert_value(Tag::BITS_STORED, 12u16);
+        ds.insert_value(Tag::HIGH_BIT, 11u16);
+        ds.insert_value(Tag::PLANAR_CONFIGURATION, 1u16);
+        ds.insert_value(Tag::PIXEL_REPRESENTATION, 1u16);
+        ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
+        let mut pixel = PixelData::create_new(&mut ds).unwrap();
+        pixel.add_frame([10, 0]).unwrap();
+        pixel.add_frame([40, 1, 2, 3, 4, 5]).unwrap();
+        ds
+    }
+    #[test]
+    fn variable_compressed_frames_keep_the_source_representation_and_decoded_metadata() {
+        let _guard = crate::pixel::codec::lock_registry();
+        set_codec_registry(Arc::new(VariableRegistry));
+        let source = variable_compressed();
+        let tr = Transcoder::new(
+            source.transfer_syntax(),
+            syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+            None,
+            None,
+        );
+        let out = tr.transcode_dataset(&source).unwrap();
+        assert_eq!(out.get_str(PHOTOMETRIC_INTERPRETATION).unwrap(), "RGB");
+        assert_eq!(out.get::<u16>(Tag::SAMPLES_PER_PIXEL).unwrap(), 3);
+        assert_eq!(out.get::<u16>(Tag::BITS_ALLOCATED).unwrap(), 8);
+        assert_eq!(out.get::<u16>(Tag::BITS_STORED).unwrap(), 8);
+        assert_eq!(out.get::<u16>(Tag::HIGH_BIT).unwrap(), 7);
+        assert_eq!(out.get::<u16>(Tag::PLANAR_CONFIGURATION).unwrap(), 0);
+        assert_eq!(out.get::<u16>(Tag::PIXEL_REPRESENTATION).unwrap(), 0);
+        assert_eq!(frames_of(&out), vec![vec![10, 20, 30], vec![40, 20, 30]]);
+        assert_eq!(
+            tr.decode_frame(&source, 1)
+                .unwrap()
+                .data()
+                .unwrap()
+                .as_ref(),
+            &[40, 20, 30]
+        );
+        assert!(tr.decode_frame(&source, 2).is_err());
+        crate::pixel::codec::reset_codec_registry();
+    }
+    #[test]
+    fn codec_metadata_survives_encoding_and_compressed_to_compressed() {
+        let _guard = crate::pixel::codec::lock_registry();
+        set_codec_registry(Arc::new(VariableRegistry));
+        for source in [
+            with_pixels(8, 2, 2, &[&[10, 20, 30, 40]]),
+            variable_compressed(),
+        ] {
+            let tr = Transcoder::new(
+                source.transfer_syntax(),
+                syntaxes::RLE_LOSSLESS.clone(),
+                None,
+                None,
+            );
+            let out = tr.transcode_dataset(&source).unwrap();
+            let expected_pi = if source.transfer_syntax().is_encapsulated() {
+                "YBR_FULL"
+            } else {
+                "MONOCHROME1"
+            };
+            assert_eq!(
+                out.get_str(PHOTOMETRIC_INTERPRETATION).unwrap(),
+                expected_pi
+            );
+            if source.transfer_syntax().is_encapsulated() {
+                assert_eq!(out.get::<u16>(Tag::SAMPLES_PER_PIXEL).unwrap(), 3);
+                assert_eq!(out.get::<u16>(COLUMNS).unwrap(), 1);
+                assert_eq!(frames_of(&out), vec![vec![10, 0], vec![40, 0]]);
+            }
+        }
+        crate::pixel::codec::reset_codec_registry();
+    }
+    #[test]
+    #[cfg(feature = "render")]
+    fn public_rendering_uses_registered_decoder_and_its_rgb_metadata() {
+        let _guard = crate::pixel::codec::lock_registry();
+        set_codec_registry(Arc::new(VariableRegistry));
+        let source = variable_compressed();
+        let direct = crate::render::render_frame(&source, 1).unwrap();
+        assert_eq!((direct.width(), direct.height()), (1, 1));
+        assert_eq!(direct.as_bytes(), &[30, 20, 40, 255]);
+        let image = crate::render::DicomImage::from_dataset_frame(&source, 1).unwrap();
+        assert_eq!(
+            (image.width(), image.height(), image.number_of_frames()),
+            (1, 1, 2)
+        );
+        assert!(!image.is_grayscale());
+        assert_eq!(image.render().unwrap().as_bytes(), direct.as_bytes());
+        crate::pixel::codec::reset_codec_registry();
+    }
+    #[test]
+    fn a_single_encapsulated_frame_rejects_out_of_range_indices() {
+        let mut source = variable_compressed();
+        source.insert_str(Tag::NUMBER_OF_FRAMES, Vr::Is, "1");
+        let pixel = PixelDataRef::from_dataset(&source).unwrap();
+        assert!(pixel.get_frame(1).is_err());
+    }
+
+    #[test]
+    fn decoder_allocation_changes_refresh_native_vr_and_big_endian_bytes() {
+        struct WideCodec;
+        impl Codec for WideCodec {
+            fn name(&self) -> &str {
+                "wide allocation contract"
+            }
+            fn transfer_syntax(&self) -> &'static TransferSyntax {
+                &syntaxes::JPEG_2000_LOSSLESS
+            }
+            fn encode(
+                &self,
+                _: &PixelDataRef<'_>,
+                _: &mut PixelData<'_>,
+                _: &CodecParams,
+            ) -> Result<(), Error> {
+                unreachable!()
+            }
+            fn decode(
+                &self,
+                src: &PixelDataRef<'_>,
+                dst: &mut PixelData<'_>,
+                _: &CodecParams,
+            ) -> Result<(), Error> {
+                assert!(src.transfer_syntax().is_encapsulated());
+                let ds = dst.dataset_mut();
+                ds.insert_value(BITS_ALLOCATED, 16u16);
+                ds.insert_value(Tag::BITS_STORED, 16u16);
+                ds.insert_value(Tag::HIGH_BIT, 15u16);
+                if src.get_frame(0)?.data()?[0] == 1 {
+                    dst.add_frame(0x1234u16.to_ne_bytes())?;
+                } else {
+                    dst.add_frame_buffer(Arc::new(MemoryBuffer::from(
+                        0x1234u16.to_ne_bytes().to_vec(),
+                    )))?;
+                }
+                Ok(())
+            }
+        }
+        impl CodecRegistry for WideCodec {
+            fn has_codec(&self, syntax: &TransferSyntax) -> bool {
+                syntax.uid() == self.transfer_syntax().uid()
+            }
+            fn can_transcode(&self, _: &TransferSyntax, _: &TransferSyntax) -> bool {
+                true
+            }
+            fn get_codec(&self, _: &TransferSyntax) -> Result<Arc<dyn Codec>, Error> {
+                Ok(Arc::new(Self))
+            }
+        }
+        let _guard = crate::pixel::codec::lock_registry();
+        set_codec_registry(Arc::new(WideCodec));
+        for marker in [1, 2] {
+            let mut source = dataset(8, 1, 1);
+            source.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+            source.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4");
+            source.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
+            PixelData::create_new(&mut source)
+                .unwrap()
+                .add_frame([marker, 0])
+                .unwrap();
+            let tr = Transcoder::new(
+                source.transfer_syntax(),
+                syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+                None,
+                None,
+            );
+            let mut decoded = tr.transcode_dataset(&source).unwrap();
+            assert_eq!(decoded.get_element(PIXEL_DATA).unwrap().vr(), Vr::Ow);
+            decoded.set_transfer_syntax(syntaxes::EXPLICIT_VR_BIG_ENDIAN.clone());
+            let file = crate::io::file::DicomFile::from_dataset(decoded);
+            let bytes = file.to_bytes(&Default::default()).unwrap();
+            let reopened =
+                crate::io::file::DicomFile::from_bytes(&bytes, &Default::default()).unwrap();
+            assert_eq!(
+                PixelDataRef::from_dataset(&reopened.dataset)
+                    .unwrap()
+                    .get_frame(0)
+                    .unwrap()
+                    .data()
+                    .unwrap()
+                    .as_ref(),
+                &0x1234u16.to_ne_bytes()
+            );
+        }
+        crate::pixel::codec::reset_codec_registry();
+    }
 
     /// In-repo test-only codec: XOR every byte, so tests can prove the
     /// payload really moved through a codec.

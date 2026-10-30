@@ -108,7 +108,10 @@ fn write_values(out: &mut String, element: &DicomElement, depth: usize) -> Resul
     if text.is_empty() {
         return Ok(());
     }
-    for (index, part) in text.split('\\').enumerate() {
+    for (index, part) in text
+        .split(|c| c == '\\' && (!vr.is_string() || vr.is_multi_value()))
+        .enumerate()
+    {
         indent(out, depth);
         // every component keeps its position, including empty ones: the
         // `number` attribute is the value index (PS3.19 A.1), so dropping an
@@ -334,6 +337,42 @@ mod tests {
         ds.insert_str(Tag::PATIENT_ID, Vr::Lo, "12345");
         ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
         ds
+    }
+
+    #[test]
+    fn binary_numeric_values_keep_separate_xml_value_numbers() {
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::new(0x0011, 0x1010),
+            Vr::Us,
+            Arc::new(radicom::model::buffer::MemoryBuffer::from(vec![1, 0, 2, 0])),
+        )));
+        let xml = dataset_to_xml(&ds).unwrap();
+        assert!(xml.contains("<Value number=\"1\">1</Value>"), "{xml}");
+        assert!(xml.contains("<Value number=\"2\">2</Value>"), "{xml}");
+    }
+
+    #[test]
+    fn review_single_text_xml_keeps_literal_backslashes() {
+        let tag = Tag::new(0x0011, 0x1010);
+        for vr in [Vr::Lt, Vr::St, Vr::Ut] {
+            for element in [
+                DicomElement::new_str(tag.clone(), vr, "A\\B\nC"),
+                DicomElement::new_bytes(
+                    tag.clone(),
+                    vr,
+                    Arc::new(radicom::model::buffer::MemoryBuffer::from(
+                        b"A\\B\nC".to_vec(),
+                    )),
+                ),
+            ] {
+                let mut ds = Dataset::new();
+                ds.insert_or_update(DicomItem::Element(element));
+                let xml = dataset_to_xml(&ds).unwrap();
+                assert!(xml.contains("<Value number=\"1\">A\\B\nC</Value>"), "{xml}");
+                assert!(!xml.contains("<Value number=\"2\">"), "{xml}");
+            }
+        }
     }
 
     #[test]

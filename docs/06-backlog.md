@@ -1,5 +1,8 @@
 # Backlog — deferred feature increments (2026-10-30)
 
+> Current correction and evidence ledger: [07-review-fixes-2026-10-30.md](07-review-fixes-2026-10-30.md).
+> Earlier DONE / coverage statements describe an earlier checkpoint, not proof of complete parity.
+
 Items deliberately left out of the 2026-10-29 defect-fix round. They are **feature additions or
 environment/scope work**, not confirmed defects; the defect findings from that review are fixed.
 Nothing here is a silent gap: each item names the current behaviour, the fo-dicom/standard reference,
@@ -54,13 +57,13 @@ and the acceptance test for the day it is implemented.
   `crates/radicom-json/src/lib.rs` (one provider call, no `InlineBinary`, and a resolver-style
   round-trip through `BulkDataUri::with_data`).
 
-## 4. Structured-report builders, typed readers and full validation — done (2026-10-30)
+## 4. Structured-report builders, typed readers and common document/value validation — done (2026-10-30)
 
 - **Shipped:** SCOORD, SCOORD3D, TCOORD and WAVEFORM builders (`ContentItem::scoord`,
   `scoord3d`, `tcoord`, `waveform`) with their macro attributes and construction-time checks; typed
   readers for all 15 value types (`ContentItem::value` returning `ContentValue`, plus the per-type
   accessors); `StructuredReport::validate` now checks the SR IOD Type 1 attributes and every content
-  item.
+  item. Clinical TID rules and the complete SOP-specific relationship tables are not validated.
 - **Root model fixed with it:** the document dataset *is* the root content item (PS3.3 C.17.2), so
   `root_items`/`set_root_items` became `content_items`/`set_content_items` (the root container's
   children) and `set_root` hoists a root container's ValueType, document title and ContinuityOfContent

@@ -1,5 +1,7 @@
 # radicom
 
+> Current repair, test evidence and parity limits: [review ledger](docs/07-review-fixes-2026-10-30.md).
+
 A pure Rust implementation of the DICOM (Digital Imaging and Communications in Medicine) standard, ported from the [fo-dicom](https://github.com/fo-dicom/fo-dicom) C# library.
 
 [![Crates.io](https://img.shields.io/crates/v/radicom.svg)](https://crates.io/crates/radicom)

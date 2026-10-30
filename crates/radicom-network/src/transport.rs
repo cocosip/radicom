@@ -11,6 +11,30 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// The 6-byte PDU header: type, reserved, length.
 pub const HEADER_LEN: usize = 6;
 
+#[cfg(test)]
+mod body_boundary_regression {
+    use super::*;
+    #[tokio::test]
+    async fn both_readers_accept_the_advertised_body_limit() {
+        let frame = pdu::encode(&Pdu::PData(crate::pdu::PData {
+            pdvs: vec![crate::pdu::Pdv {
+                context_id: 1,
+                is_command: false,
+                is_last: true,
+                data: vec![0; MAX_PDU_SIZE as usize - 6].into(),
+            }],
+        }))
+        .unwrap();
+        assert_eq!(frame.len(), MAX_PDU_SIZE as usize + HEADER_LEN);
+        assert!(read_pdu(&mut &frame[..]).await.unwrap().is_some());
+        assert!(PduReader::new()
+            .read_pdu(&mut &frame[..])
+            .await
+            .unwrap()
+            .is_some());
+    }
+}
+
 /// Options applied to a TCP connection (§11.2).
 #[derive(Debug, Clone)]
 pub struct TcpOptions {
@@ -50,8 +74,8 @@ pub async fn read_pdu<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Pdu
         .map_err(NetworkError::Io)?;
 
     let length = u32::from_be_bytes([header[2], header[3], header[4], header[5]]);
-    // the advertised maximum is the whole PDU: 6-byte header plus body
-    if length > MAX_PDU_SIZE - HEADER_LEN as u32 {
+    // The negotiated maximum limits the variable field, excluding the header.
+    if length > MAX_PDU_SIZE {
         return Err(NetworkError::protocol(
             "PDU exceeds the 262144-byte receive limit",
         ));
@@ -117,7 +141,7 @@ impl PduReader {
             return Ok(None);
         }
         let length = u32::from_be_bytes([self.buf[2], self.buf[3], self.buf[4], self.buf[5]]);
-        if length > MAX_PDU_SIZE - HEADER_LEN as u32 {
+        if length > MAX_PDU_SIZE {
             return Err(NetworkError::protocol(
                 "PDU exceeds the 262144-byte receive limit",
             ));
@@ -443,10 +467,9 @@ mod tests {
     #[tokio::test]
     async fn a_pdu_at_the_advertised_max_is_accepted() {
         // `encode_associate` never advertises more than MAX_PDU_SIZE, so a peer
-        // may legitimately send a whole PDU of exactly that size (header
-        // included): it must be read, not rejected.
+        // may legitimately send a body of exactly that size, plus its header.
         let (mut client, mut server) = duplex(2 * MAX_PDU_SIZE as usize);
-        let body_len = MAX_PDU_SIZE - HEADER_LEN as u32;
+        let body_len = MAX_PDU_SIZE;
         let mut frame = vec![0x04, 0x00];
         frame.extend_from_slice(&body_len.to_be_bytes());
         let pdv_len = body_len - 4;

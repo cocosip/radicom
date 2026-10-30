@@ -412,7 +412,7 @@ impl SpatialCoordinates3D {
             }));
         }
         let frame_of_reference_uid = frame_of_reference_uid.into();
-        if frame_of_reference_uid.trim().is_empty() {
+        if !crate::model::uid::Uid::is_valid(&frame_of_reference_uid) {
             return Err(Error::Data(DataError::Other {
                 message: "SCOORD3D needs a Referenced Frame of Reference UID".into(),
             }));
@@ -489,7 +489,13 @@ impl TemporalCoordinates {
                     crate::model::dicom_datetime::parse_dt(value)?;
                 }
             }
-            TemporalRange::SamplePositions(_) => {}
+            TemporalRange::SamplePositions(values) => {
+                if values.contains(&0) {
+                    return Err(Error::Data(DataError::Other {
+                        message: "TCOORD sample positions are 1-based".into(),
+                    }));
+                }
+            }
         }
         Ok(TemporalCoordinates { range_type, range })
     }
@@ -643,6 +649,13 @@ impl ReferencedSop {
             instance_uid: instance_uid.trim().to_string(),
         })
     }
+}
+
+/// A waveform reference and its channel selection (empty means all channels).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaveformReference {
+    pub reference: ReferencedSop,
+    pub channels: Vec<(u16, u16)>,
 }
 
 /// One content item: the tagged dataset plus its typed value (§12.3).
@@ -884,20 +897,20 @@ impl ContentItem {
         for reference in references {
             let mut reference_item = Dataset::new();
             reference.write_into(&mut reference_item);
-            sequence.push(reference_item);
-        }
-        if !channels.is_empty() {
-            let mut bytes = Vec::with_capacity(channels.len() * 4);
-            for (group, channel) in channels {
-                bytes.extend_from_slice(&group.to_le_bytes());
-                bytes.extend_from_slice(&channel.to_le_bytes());
+            if !channels.is_empty() {
+                let mut bytes = Vec::with_capacity(channels.len() * 4);
+                for (group, channel) in channels {
+                    bytes.extend_from_slice(&group.to_le_bytes());
+                    bytes.extend_from_slice(&channel.to_le_bytes());
+                }
+                insert_bytes(
+                    &mut reference_item,
+                    tags::REFERENCED_WAVEFORM_CHANNELS,
+                    Vr::Us,
+                    bytes,
+                );
             }
-            insert_bytes(
-                &mut item.dataset,
-                tags::REFERENCED_WAVEFORM_CHANNELS,
-                Vr::Us,
-                bytes,
-            );
+            sequence.push(reference_item);
         }
         item
     }
@@ -1075,22 +1088,65 @@ impl ContentItem {
         Some(TemporalCoordinates { range_type, range })
     }
 
-    /// The (multiplex group, channel) pairs of a WAVEFORM item (PS3.3 C.18.5).
-    pub fn waveform_channels(&self) -> Vec<(u16, u16)> {
-        self.numbers(tags::REFERENCED_WAVEFORM_CHANNELS)
-            .and_then(|values| {
-                // an odd count cannot be (group, channel) pairs
-                if !values.len().is_multiple_of(2) {
-                    return None;
+    /// Channel selections grouped by their referenced SOP, preserving their identity.
+    /// `None` means a malformed reference or channel list.
+    pub fn waveform_references(&self) -> Option<Vec<WaveformReference>> {
+        let sequence = self
+            .dataset
+            .try_get_sequence(tags::REFERENCED_SOP_SEQUENCE)?;
+        sequence
+            .items()
+            .iter()
+            .map(|dataset| {
+                let reference = ReferencedSop::read_from(dataset).ok()?;
+                let mut channels = Vec::new();
+                if dataset.contains(&tags::REFERENCED_WAVEFORM_CHANNELS) {
+                    let element = dataset
+                        .get_element(tags::REFERENCED_WAVEFORM_CHANNELS)
+                        .ok()?;
+                    if element.vr() != Vr::Us {
+                        return None;
+                    }
+                    if let crate::model::element::ElementValue::Bytes(buffer) = element.value() {
+                        if !buffer.size().is_multiple_of(4) {
+                            return None;
+                        }
+                    }
+                    let count = dataset
+                        .value_count(&tags::REFERENCED_WAVEFORM_CHANNELS)
+                        .ok()?;
+                    if count == 0 || !count.is_multiple_of(2) {
+                        return None;
+                    }
+                    for index in (0..count).step_by(2) {
+                        let group = dataset
+                            .get_at::<u16>(&tags::REFERENCED_WAVEFORM_CHANNELS, index)
+                            .ok()?;
+                        let channel = dataset
+                            .get_at::<u16>(&tags::REFERENCED_WAVEFORM_CHANNELS, index + 1)
+                            .ok()?;
+                        if group == 0 {
+                            return None;
+                        }
+                        channels.push((group, channel));
+                    }
                 }
-                values
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|pair| Some((unsigned::<u16>(pair[0])?, unsigned::<u16>(pair[1])?)))
-                    .collect::<Option<Vec<(u16, u16)>>>()
+                Some(WaveformReference {
+                    reference,
+                    channels,
+                })
             })
+            .collect()
+    }
+
+    /// All channel pairs flattened across references. Use [`Self::waveform_references`]
+    /// when a content item contains references with distinct channel selections.
+    pub fn waveform_channels(&self) -> Vec<(u16, u16)> {
+        self.waveform_references()
             .unwrap_or_default()
+            .into_iter()
+            .flat_map(|reference| reference.channels)
+            .collect()
     }
 
     /// The item's typed value (PS3.3 C.18.1); `None` when the value tag is
@@ -1109,10 +1165,23 @@ impl ContentItem {
             ValueType::Composite | ValueType::Image => {
                 ContentValue::References(self.referenced_sops())
             }
-            ValueType::Waveform => ContentValue::Waveform {
-                references: self.referenced_sops(),
-                channels: self.waveform_channels(),
-            },
+            ValueType::Waveform => {
+                let references = self.waveform_references()?;
+                let channels = references.first()?.channels.clone();
+                if references
+                    .iter()
+                    .any(|reference| reference.channels != channels)
+                {
+                    return None;
+                }
+                ContentValue::Waveform {
+                    references: references
+                        .into_iter()
+                        .map(|reference| reference.reference)
+                        .collect(),
+                    channels,
+                }
+            }
             ValueType::Scoord => ContentValue::Scoord(self.scoord_value()?),
             ValueType::Scoord3D => ContentValue::Scoord3D(self.scoord3d_value()?),
             ValueType::Tcoord => ContentValue::Tcoord(self.tcoord_value()?),
@@ -1723,6 +1792,9 @@ mod tests {
         assert_eq!(item.waveform_channels(), vec![(1, 0), (3, 2)]);
         assert_eq!(
             item.dataset()
+                .try_get_sequence(tags::REFERENCED_SOP_SEQUENCE)
+                .unwrap()
+                .items()[0]
                 .get_element(tags::REFERENCED_WAVEFORM_CHANNELS)
                 .unwrap()
                 .vr(),
@@ -1735,6 +1807,65 @@ mod tests {
                 references: vec![reference],
                 channels: vec![(1, 0), (3, 2)],
             })
+        );
+    }
+
+    #[test]
+    fn external_waveform_references_keep_distinct_channel_selections() {
+        let mut dataset = Dataset::new();
+        dataset.insert_str(tags::VALUE_TYPE, Vr::Cs, "WAVEFORM");
+        for (instance, group, channel) in [("1.2.3", 1u16, 2u16), ("1.2.4", 2, 3)] {
+            let mut reference = Dataset::new();
+            reference.insert_str(
+                tags::REFERENCED_SOP_CLASS_UID,
+                Vr::Ui,
+                "1.2.840.10008.5.1.4.1.1.9.1.1",
+            );
+            reference.insert_str(tags::REFERENCED_SOP_INSTANCE_UID, Vr::Ui, instance);
+            insert_bytes(
+                &mut reference,
+                tags::REFERENCED_WAVEFORM_CHANNELS,
+                Vr::Us,
+                [group.to_le_bytes(), channel.to_le_bytes()].concat(),
+            );
+            match dataset.sequence_mut(tags::REFERENCED_SOP_SEQUENCE) {
+                Some(sequence) => sequence.push(reference),
+                None => dataset
+                    .insert_sequence(tags::REFERENCED_SOP_SEQUENCE)
+                    .push(reference),
+            }
+        }
+        let item = ContentItem::from_dataset(dataset);
+        let references = item.waveform_references().unwrap();
+        assert_eq!(references[0].reference.instance_uid, "1.2.3");
+        assert_eq!(references[0].channels, [(1, 2)]);
+        assert_eq!(references[1].reference.instance_uid, "1.2.4");
+        assert_eq!(references[1].channels, [(2, 3)]);
+        assert!(
+            item.value().is_none(),
+            "legacy common-channel view must not merge different selections"
+        );
+    }
+
+    #[test]
+    fn waveform_channels_are_nested_in_the_referenced_sop_item() {
+        let item = ContentItem::waveform(
+            concept(),
+            Relationship::Contains,
+            &[ReferencedSop::new("1.2.3", "1.2.4")],
+            &[(1, 2)],
+        );
+        assert!(!item.dataset().contains(&tags::REFERENCED_WAVEFORM_CHANNELS));
+        let reference = &item
+            .dataset()
+            .try_get_sequence(tags::REFERENCED_SOP_SEQUENCE)
+            .unwrap()
+            .items()[0];
+        assert_eq!(
+            reference
+                .get_at::<u16>(&tags::REFERENCED_WAVEFORM_CHANNELS, 1)
+                .unwrap(),
+            2
         );
     }
 

@@ -217,13 +217,12 @@ impl PduSplitter {
 
     /// The largest PDV value that fits in one PDU.
     ///
-    /// The negotiated maximum counts the whole PDU including its 6-byte header
-    /// (as fo-dicom's `CurrentPduSize`, `DicomService.cs:1869-1881`), and each
-    /// PDV costs another 6 header bytes. PDV values are even-padded on the
+    /// The negotiated maximum limits the PDU body, and each PDV costs six
+    /// header bytes. PDV values are even-padded on the
     /// wire, so the usable size is even too: an odd maximum must not become an
     /// odd fragment plus a pad byte (review #17).
     pub fn max_pdv_value(&self) -> usize {
-        ((self.max_pdu as usize).saturating_sub(12)) & !1
+        ((self.max_pdu as usize).saturating_sub(6)) & !1
     }
 
     /// Splits one message stream into PDUs (§11.1).
@@ -237,17 +236,16 @@ impl PduSplitter {
     /// Splits an owned message into PDUs without copying its bytes: every PDV
     /// is a `Bytes::slice` of `data` (§11.2).
     ///
-    /// The negotiated maximum covers the whole PDU: 6 bytes of PDU header plus
-    /// the body (fo-dicom `DicomService.cs:1813-1881`, PS3.8 §9.3.2).
+    /// The negotiated maximum excludes the six-byte fixed PDU header (PS3.8 D.1).
     pub fn split_bytes(
         &self,
         context_id: u8,
         is_command: bool,
         data: bytes::Bytes,
     ) -> Result<Vec<PData>> {
-        let body_limit = (self.max_pdu as usize).saturating_sub(6);
+        let body_limit = self.max_pdu as usize;
         // 6 bytes for the PDV header plus a non-empty even-padded value
-        if body_limit < 12 {
+        if body_limit < 8 {
             return Err(NetworkError::protocol(
                 "maximum PDU length leaves no room for a PDV",
             ));
@@ -561,18 +559,17 @@ mod tests {
 
     #[test]
     fn splitter_fragments_large_messages() {
-        // max PDU 24 is the whole frame: 6 header bytes leave 18 of body, and
-        // the PDV header takes 6 more, so each fragment carries 12 bytes.
+        // A 24-byte body has six PDV header bytes and 18 payload bytes.
         let splitter = PduSplitter::new(24, 16);
-        assert_eq!(splitter.max_pdv_value(), 12);
+        assert_eq!(splitter.max_pdv_value(), 18);
         let data = vec![0xAB; 40];
         let pdus = splitter.split(1, true, &data).unwrap();
-        assert_eq!(pdus.len(), 4, "each PDV fills its PDU");
+        assert_eq!(pdus.len(), 3, "each PDV fills its PDU");
         assert_eq!(
             pdus.iter()
                 .map(|p| p.pdvs[0].data.len())
                 .collect::<Vec<_>>(),
-            vec![12, 12, 12, 4]
+            vec![18, 18, 4]
         );
         let total: usize = pdus
             .iter()
@@ -584,13 +581,12 @@ mod tests {
             .iter()
             .flat_map(|p| p.pdvs.iter().map(|d| d.is_last))
             .collect();
-        assert_eq!(last_flags, vec![false, false, false, true]);
+        assert_eq!(last_flags, vec![false, false, true]);
     }
 
     #[test]
     fn a_pdu_never_exceeds_the_negotiated_maximum() {
-        // NET-03: the negotiated maximum counts the whole PDU, 6-byte header
-        // included (fo-dicom `CurrentPduSize`, DicomService.cs:1869-1881).
+        // The negotiated maximum limits the body, excluding the six-byte header.
         let splitter = PduSplitter::new(16384, 16);
         let input: Vec<u8> = (0..(1 << 20)).map(|i| (i % 251) as u8).collect();
         let pdus = splitter.split(1, false, &input).unwrap();
@@ -600,7 +596,7 @@ mod tests {
         for pdu in pdus {
             let wire = crate::pdu::encode(&crate::pdu::Pdu::PData(pdu)).unwrap();
             assert!(
-                wire.len() <= 16384,
+                wire.len() - 6 <= 16384,
                 "a {} byte PDU exceeds the negotiated 16384 bytes",
                 wire.len()
             );
@@ -650,7 +646,7 @@ mod tests {
         let splitter = PduSplitter::new(24, 1);
         let data = vec![0xCD; 40];
         let pdus = splitter.split(1, false, &data).unwrap();
-        assert_eq!(pdus.len(), 4, "one 12-byte PDV per PDU");
+        assert_eq!(pdus.len(), 3, "one 18-byte PDV per PDU");
         assert!(
             pdus.iter().all(|p| p.pdvs.len() == 1),
             "one PDV per PDU mode"
@@ -718,7 +714,7 @@ mod tests {
         for pdu in pdus {
             let wire = crate::pdu::encode(&crate::pdu::Pdu::PData(pdu)).unwrap();
             assert!(
-                wire.len() <= 16385,
+                wire.len() - 6 <= 16385,
                 "a {} byte PDU exceeds the negotiated 16385 bytes",
                 wire.len()
             );

@@ -1,5 +1,8 @@
 # fo-dicom Alignment Audit (Module-Level, Code-Walkthrough)
 
+> Current correction and evidence ledger: [07-review-fixes-2026-10-30.md](07-review-fixes-2026-10-30.md).
+> Earlier DONE / coverage statements describe an earlier checkpoint, not proof of complete parity.
+
 A module-by-module verdict on how far `radicom` matches fo-dicom's feature surface, answering
 "what is done and what is not" **from reading the code**, not from self-reported status.
 
@@ -19,11 +22,11 @@ A module-by-module verdict on how far `radicom` matches fo-dicom's feature surfa
 
 ## Verdict
 
-**All P0/P1 and the P2 core features are DONE.** The only incomplete items are the concrete codec
-implementations (the external `radicom-codecs` project), macOS MAC reading (platform), reference-peer
-interop (environment), and a handful of single-consumer / no-outer-consumer shape abstractions that
-deliberately were not created. Observability is implemented through `tracing` field conventions and
-introduces **no `opentelemetry` dependency**.
+The library implements the broad in-scope feature surface using Rust ownership, enums, explicit
+registries and async transport. This is not a claim of complete fo-dicom behavioral equivalence.
+The 2026-10-30 review found defects behind prior DONE labels; the current repair/evidence matrix is
+[07-review-fixes-2026-10-30.md](07-review-fixes-2026-10-30.md). Concrete codecs remain excluded.
+Real external peers, print/media hardware and other operating systems need separate evidence.
 
 A second, adversarial review on 2026-10-29 found real parity defects behind previously "DONE" claims
 (wrong functional-group tags, a missing FileMetaInformationVersion, dropped ISO 2022 designators, the
@@ -42,7 +45,7 @@ verified by a test that would have failed before that review.
 | File IO (FILE/RD/WR/BUF/IO/MEM) | FILE-01..06, RD-01..05, WR-01..03, BUF-01..02, IO-01..03, MEM-01 | `io/{file,reader,writer,dataset_builder,byte_source,file_ref,pool}.rs`; `LargeValuePolicy` (FILE-02), `has_valid_header` (FILE-06), `item_len/header_len` (WR-02), deflate (RD-04) |
 | Pixel / codec interfaces (PIX/CODEC/TR) | PIX-01..05, CODEC-01..03,05, TR-01..03 | `pixel/{mod,codec,overlay,photometric,transcoder}.rs`; `uncompressed_frame_size` (PIX-03), palette LUT (PIX-04), `CodecRegistry`/`CodecParams`/JPEG probing (CODEC), `Transcoder` + `Dataset/DicomFile::clone_with_syntax` (TR-03) |
 | Rendering (REND) | REND-01..11 | `render/{mod,bit_depth,color_table,geometry,icon,interpolation,math,pixel_converter,reconstruction,spatial}.rs`; all-PI dispatch, modality/VOI/palette LUTs, `GrayscaleRenderOptions`, `BitDepth`, `PixelDataConverter`, spatial (scale/rotate/flip/pan), MPR, math (Matrix/Histogram/BitList/MovingAverage/Rect/Point2), **hand-written dependency-free PNG/BMP** (`to_png`/`to_png_rgb`/`to_bmp`/`save`) |
-| Network (NET/SRV/CLI/HOST/DIMSE/OBS) | NET-01..08, SRV-01..08, CLI-01..02, HOST-01, DIMSE-01, OBS-01/02 | `radicom-network/src/*.rs`; C-ECHO/STORE/FIND/MOVE/GET, N-services, C-CANCEL (`client.cancel`), PDV assembly (`PduSplitter`/`split_message`), extended negotiation (`extended.rs`), TLS (`tls.rs`), hosting (`hosting.rs`), `observability.rs` (OBS-01 plus `TracingMetrics` under the `otel` feature, no `opentelemetry` dependency) |
+| Network (NET/SRV/CLI/HOST/DIMSE/OBS) | NET-01..08, SRV-01..08, CLI-01..02, HOST-01, DIMSE-01, OBS-01/02 | `radicom-network/src/*.rs`; C-ECHO/STORE/FIND/MOVE/GET, N-services, C-CANCEL (`client.cancel` and the independent cancellation handle), PDV assembly (`PduSplitter`/`split_message`), extended negotiation (`extended.rs`), TLS (`tls.rs`), hosting (`hosting.rs`), `observability.rs` (OBS-01 plus `TracingMetrics` under the `otel` feature, no `opentelemetry` dependency) |
 | Serialization (JSON/XML) | JSON-01..02, XML-01 | `radicom-json/{lib,xml}.rs` (NaN/Inf as strings, bidirectional BulkDataURI, PN three groups, XML NativeDicomModel shape) |
 | Media (MEDIA) | MEDIA-01..03 | `media/{mod,icon,scanner}.rs` (DICOMDIR read/write, icon generation, directory scanning) |
 | Structured reports (SR) | SR-01..02 | `sr/{content_item,code_item,structured_report}.rs` (15 value types including SCOORD3D, 7 relationships, MeasuredValue/ReferencedSop, build + write-back + traversal + open/save) |
@@ -79,7 +82,7 @@ cargo clippy --workspace --all-features --all-targets
 cargo xtask coverage          # production line coverage, 95% floor
 ```
 
-## Current Test Baseline
+## Earlier Test Baseline (superseded by the review ledger)
 
 14 test targets green: **1,374 tests, 1 ignored, 0 failures**; clippy and rustdoc clean; production
 line coverage **95.62%** (core 95.77%, json 96.03%, network 95.20%). Breakdown: core lib 825, dump

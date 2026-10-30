@@ -129,8 +129,8 @@ impl CGetRequest {
 
 /// A C-GET response (§11.4).
 ///
-/// A C-GET response never carries a dataset: the instances arrive as reverse
-/// C-STORE sub-operations.
+/// Instances arrive as reverse C-STORE sub-operations. A terminal response may
+/// carry an Identifier listing the failed SOP Instance UIDs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CGetResponse {
     pub message_id_being_responded_to: u16,
@@ -139,6 +139,8 @@ pub struct CGetResponse {
     pub remaining: u16,
     pub summary: SubOperationSummary,
     pub error_comment: Option<String>,
+    /// SOP instances whose C-STORE sub-operations failed.
+    pub failed_sop_instance_uids: Vec<String>,
 }
 
 impl CGetResponse {
@@ -151,6 +153,7 @@ impl CGetResponse {
             remaining,
             summary,
             error_comment: None,
+            failed_sop_instance_uids: Vec::new(),
         }
     }
 
@@ -163,6 +166,7 @@ impl CGetResponse {
             remaining: 0,
             summary,
             error_comment: None,
+            failed_sop_instance_uids: Vec::new(),
         }
     }
 
@@ -175,6 +179,7 @@ impl CGetResponse {
             remaining: 0,
             summary: SubOperationSummary::default(),
             error_comment: Some(crate::dimse::truncate_lo(&comment.into())),
+            failed_sop_instance_uids: Vec::new(),
         }
     }
 
@@ -192,13 +197,47 @@ impl CGetResponse {
         command.message_id_being_responded_to = Some(self.message_id_being_responded_to);
         command.affected_sop_class_uid = Some(self.affected_sop_class_uid.clone());
         command.status = Some(self.status);
-        command.no_dataset = true;
+        command.no_dataset = self.identifier().is_none();
         command.error_comment = self.error_comment.clone();
-        command.remaining_suboperations = Some(self.remaining);
+        command.remaining_suboperations =
+            matches!(self.state(), StatusState::Pending | StatusState::Cancel)
+                .then_some(self.remaining);
         command.completed_suboperations = Some(self.summary.completed);
         command.failed_suboperations = Some(self.summary.failed);
         command.warning_suboperations = Some(self.summary.warning);
         command
+    }
+
+    /// The failed-instance Identifier of a terminal Warning/Failure/Cancel response.
+    pub fn identifier(&self) -> Option<Dataset> {
+        if !matches!(
+            self.state(),
+            StatusState::Warning | StatusState::Failure | StatusState::Cancel
+        ) || self.failed_sop_instance_uids.is_empty()
+        {
+            return None;
+        }
+        let mut dataset = Dataset::new();
+        dataset.insert_str(
+            Tag::new(0x0008, 0x0058),
+            Vr::Ui,
+            self.failed_sop_instance_uids.join("\\"),
+        );
+        Some(dataset)
+    }
+
+    /// Attaches the failed-instance Identifier read after the command.
+    pub fn set_identifier(&mut self, identifier: &Dataset) {
+        self.failed_sop_instance_uids = identifier
+            .try_get_str(Tag::new(0x0008, 0x0058))
+            .map(|value| {
+                value
+                    .split('\\')
+                    .filter(|uid| !uid.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
     }
 
     pub fn from_command(command: &Command) -> Result<Self> {
@@ -216,6 +255,7 @@ impl CGetResponse {
                 warning: command.warning_suboperations.unwrap_or(0),
             },
             error_comment: command.error_comment.clone(),
+            failed_sop_instance_uids: Vec::new(),
         })
     }
 }
@@ -351,6 +391,35 @@ mod tests {
         let request = CGetRequest::study("1.2.3", 1);
         let response = CGetResponse::failure(&request, status::UNABLE_TO_PROCESS, "x".repeat(500));
         assert_eq!(response.error_comment.as_ref().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn warning_only_retrieve_has_no_failed_instance_identifier() {
+        let response = CGetResponse::completed(
+            &CGetRequest::study("1.2.3", 1),
+            SubOperationSummary {
+                completed: 0,
+                failed: 0,
+                warning: 2,
+            },
+        );
+        assert_eq!(
+            response.status,
+            status::SUBOPERATIONS_COMPLETED_WITH_WARNINGS
+        );
+        // PS3.4 C.4: no failed sub-operation means no Failed UID List or dataset.
+        assert!(response.identifier().is_none());
+        assert!(response.to_command().no_dataset);
+    }
+
+    #[test]
+    fn terminal_retrieve_omits_remaining_but_cancel_keeps_it() {
+        let request = CGetRequest::study("1.2.3", 1);
+        let mut response = CGetResponse::completed(&request, SubOperationSummary::default());
+        assert_eq!(response.to_command().remaining_suboperations, None);
+        response.status = status::CANCEL;
+        response.remaining = 3;
+        assert_eq!(response.to_command().remaining_suboperations, Some(3));
     }
 
     #[test]

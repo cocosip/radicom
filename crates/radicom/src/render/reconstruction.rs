@@ -221,10 +221,10 @@ impl VolumeData {
             let mut last_index = 0usize;
             for y in 0..rows {
                 if let Some(index) = self.sorting_index(ordered, last_index) {
-                    let index = index.max(1);
+                    let index = index.max(1).min(self.slices.len() - 1);
                     last_index = index;
                     let next_slice = &self.slices[index];
-                    let prev_slice = &self.slices[index - 1];
+                    let prev_slice = &self.slices[index.saturating_sub(1)];
                     if let (Ok(next_img), Ok(prev_img)) = (
                         next_slice.geometry.transform_patient_to_image(point),
                         prev_slice.geometry.transform_patient_to_image(point),
@@ -238,6 +238,8 @@ impl VolumeData {
                             if alpha1 + alpha2 != 0.0 {
                                 output[(x + y * cols) as usize] =
                                     (prev_pixel * alpha1 + next_pixel * alpha2) / (alpha1 + alpha2);
+                            } else if ordered == prev_slice.sorting_value() {
+                                output[(x + y * cols) as usize] = prev_pixel;
                             }
                         }
                     }
@@ -697,6 +699,29 @@ mod tests {
         // sorted ascending by z
         assert_eq!(volume.slices[0].sorting_value(), 0.0);
         assert_eq!(volume.slices[2].sorting_value(), 2.0);
+    }
+
+    #[test]
+    fn a_single_slice_cut_samples_its_plane_without_panicking() {
+        let volume = VolumeData::from_datasets(&[axial_slice(0.0, 123)]).unwrap();
+        let cut = volume.get_cut(
+            Point3::new(1.0, 1.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+            1,
+            1,
+            1.0,
+        );
+        assert_eq!(cut.output, vec![123.0]);
+        let outside = volume.get_cut(
+            Point3::new(1.0, 1.0, 1.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+            1,
+            1,
+            1.0,
+        );
+        assert_eq!(outside.output, vec![0.0]);
     }
 
     #[test]

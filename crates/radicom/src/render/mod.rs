@@ -1065,8 +1065,7 @@ impl RawImage {
             return Ok(());
         }
         // a buffer too small to hold the overlay's bit plane is skipped (docs §1.3)
-        let row_bytes = ov_cols.div_ceil(8);
-        if bits.len() < row_bytes * ov_rows {
+        if bits.len() < (ov_cols * ov_rows).div_ceil(8) {
             return Ok(());
         }
         // Origin is 1-based; the composite starts at origin-1
@@ -1076,7 +1075,8 @@ impl RawImage {
 
         for oy in 0..ov_rows {
             for ox in 0..ov_cols {
-                let set = bits[oy * row_bytes + ox / 8] & (0x01 << (ox % 8)) != 0;
+                let bit = oy * ov_cols + ox;
+                let set = bits[bit / 8] & (0x01 << (bit % 8)) != 0;
                 if !set {
                     continue;
                 }
@@ -1151,9 +1151,12 @@ impl Crc32 {
 /// Renders one frame of `dataset` to an 8-bit `RawImage` using the dataset's
 /// window settings (REND-01 `render_image`, docs §1.3 grayscale path).
 ///
-/// Only uncompressed single-sample grayscale frames are handled this round;
+/// Encapsulated frames are decoded through the registered codec first;
 /// other inputs return an error rather than a wrong image.
 pub fn render_grayscale_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error> {
+    if dataset.transfer_syntax().is_encapsulated() {
+        return render_grayscale_frame(&decode_for_render(dataset)?, frame);
+    }
     let options = GrayscaleRenderOptions::from_dataset_frame(dataset, frame)?;
     render_grayscale_with_options(dataset, frame, &options)
 }
@@ -1423,11 +1426,24 @@ fn ycbcr_to_rgb(y: f64, cb: f64, cr: f64) -> (u8, u8, u8) {
     )
 }
 
+fn decode_for_render(dataset: &Dataset) -> Result<Dataset, Error> {
+    crate::pixel::transcoder::Transcoder::new(
+        dataset.transfer_syntax(),
+        crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        None,
+        None,
+    )
+    .transcode_dataset(dataset)
+}
+
 /// Renders one frame, choosing the pipeline by photometric interpretation
 /// (REND-02, docs §2): MONOCHROME → grayscale window; RGB → colour assembly;
 /// PALETTE COLOR → palette index lookup; YBR_FULL / YBR_FULL_422 /
 /// YBR_PARTIAL_422 → YCbCr→RGB conversion. Other PIs error.
 pub fn render_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error> {
+    if dataset.transfer_syntax().is_encapsulated() {
+        return render_frame(&decode_for_render(dataset)?, frame);
+    }
     use crate::pixel::photometric::PhotometricInterpretation as Pi;
     let pi = match dataset.try_get_str_ref(Tag::PHOTOMETRIC_INTERPRETATION) {
         Some(s) => Pi::parse(s),
@@ -1457,6 +1473,9 @@ pub fn render_frame_with_overlays(
     frame: u32,
     color: crate::pixel::Color32,
 ) -> Result<RawImage, Error> {
+    if dataset.transfer_syntax().is_encapsulated() {
+        return render_frame_with_overlays(&decode_for_render(dataset)?, frame, color);
+    }
     let mut image = render_frame(dataset, frame)?;
     composite_overlays(&mut image, dataset, frame, color);
     Ok(image)
@@ -1521,7 +1540,11 @@ impl DicomImage {
     pub fn from_dataset_frame(dataset: &Dataset, frame: u32) -> Result<Self, Error> {
         // One clone: validate and read the geometry from it, then keep it as the
         // owned dataset (the previous code cloned twice, §10).
-        let owned = dataset.clone();
+        let owned = if dataset.transfer_syntax().is_encapsulated() {
+            decode_for_render(dataset)?
+        } else {
+            dataset.clone()
+        };
         let (width, height, number_of_frames, samples_per_pixel) = {
             let pixel = PixelDataRef::from_dataset(&owned)?;
             (
@@ -1532,6 +1555,8 @@ impl DicomImage {
             )
         };
         Ok(DicomImage {
+            voi_lut: parse_voi_lut(&owned),
+            modality_lut: parse_modality_lut(&owned),
             dataset: owned,
             frame,
             window_override: None,
@@ -1544,8 +1569,6 @@ impl DicomImage {
             height,
             number_of_frames,
             samples_per_pixel,
-            voi_lut: parse_voi_lut(dataset),
-            modality_lut: parse_modality_lut(dataset),
         })
     }
 
@@ -3831,9 +3854,7 @@ mod tests {
         // the 4-wide edge and must be clipped, not panic. A renderer that never
         // blits overlays leaves (2,2) grey.
         let mut ds = image_with_embedded_overlay(&[]);
-        let mut plane = vec![0u8; 4]; // one byte per row of a 4-wide plane
-        plane[0] = 0b0000_0001; // (0,0) is the least-significant bit
-        plane[1] = 0b0000_0100; // row 1, column 2
+        let plane = vec![0b0100_0001, 0]; // continuous bits at (0,0) and (2,1)
         ds.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
                 Tag::new(0x6000, 0x3000),
@@ -4015,7 +4036,7 @@ mod tests {
         let data = overlays[0].load(&ds).unwrap();
         assert_eq!(
             data.data().unwrap().as_ref(),
-            &[0x01, 0x02],
+            &[0x09],
             "bits at (1,1) and (2,2) of the image"
         );
     }
@@ -4118,6 +4139,30 @@ mod tests {
     }
 
     #[test]
+    fn narrow_standalone_overlay_renders_all_continuously_packed_rows() {
+        let mut ds = overlay_dataset();
+        ds.insert_value(Tag::new(0x6000, 0x0010), 9u16);
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::new(0x6000, 0x3000),
+                Vr::Ob,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![255, 1])),
+            ),
+        ));
+        let overlay = OverlayData::from_dataset(&ds).pop().unwrap();
+        let mut image = RawImage::new(1, 9, vec![0; 36]);
+        image
+            .composite_overlay(&overlay, &ds, crate::pixel::Color32::new(255, 255, 255))
+            .unwrap();
+        assert!(image
+            .as_bytes()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| *pixel == [255, 255, 255, 255]));
+    }
+
+    #[test]
     fn composite_overlay_draws_its_set_bits_and_clips_outside_pixels() {
         let ds = overlay_dataset();
         let overlays = crate::pixel::overlay::OverlayData::from_dataset(&ds);
@@ -4190,6 +4235,8 @@ mod tests {
 
     #[test]
     fn colour_pipelines_reject_bad_depth_shape_and_truncation() {
+        let _guard = crate::pixel::codec::lock_registry();
+        crate::pixel::codec::reset_codec_registry();
         // BitsAllocated outside 8/16
         let mut ds = color_image("RGB", 3, 8, &[1, 2, 3], 0);
         ds.insert_value(Tag::BITS_ALLOCATED, 32u16);
@@ -4226,6 +4273,8 @@ mod tests {
 
     #[test]
     fn ybr_pipelines_reject_bad_layouts_and_support_planar_444() {
+        let _guard = crate::pixel::codec::lock_registry();
+        crate::pixel::codec::reset_codec_registry();
         // subsampled YBR must be interleaved
         let ds = color_image("YBR_FULL_422", 3, 8, &[128, 128, 128], 1);
         assert!(render_frame(&ds, 0).is_err(), "planar 4:2:2 rejected");

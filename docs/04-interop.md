@@ -1,12 +1,14 @@
 # Interop Testing Against Real Peers
 
+> Current correction and evidence ledger: [07-review-fixes-2026-10-30.md](07-review-fixes-2026-10-30.md).
+> Earlier DONE / coverage statements describe an earlier checkpoint, not proof of complete parity.
+
 How to verify radicom against a **real DICOM peer** — a fo-dicom C-STORE SCP or Q/R SCP, DCMTK,
 dcm4che, or a production PACS.
 
-> The repository already ships comprehensive SCU↔SCP loopback self-tests (`radicom-network` has 352
-> tests in its library suite plus 7 integration tests covering C-ECHO/STORE/FIND/MOVE/GET, extended
-> negotiation, user identity, small-PDU fragmentation and C-CANCEL), so **an external peer is not required
-> for self-testing**. The tools below are for additional cross-implementation acceptance.
+> The repository ships SCU/SCP loopback regressions covering C-ECHO/STORE/FIND/MOVE/GET, negotiation,
+> TLS and cancellation. They exercise real local sockets. Cross-implementation acceptance still needs
+> an external peer; the historical peer results below were not repeated in this repair round.
 
 ## 0. Offline self-test (runs by default)
 

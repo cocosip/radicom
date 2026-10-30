@@ -11,7 +11,10 @@ use crate::model::dataset::Dataset;
 use crate::model::tag::Tag;
 use crate::model::vr::Vr;
 use crate::sr::code_item::CodeItem;
-use crate::sr::content_item::{check_count, tags, ContentItem, ValueType};
+use crate::sr::content_item::{
+    tags, ContentItem, MeasuredValue, ReferencedSop, SpatialCoordinates, SpatialCoordinates3D,
+    TemporalCoordinates, ValueType,
+};
 use std::path::Path;
 
 /// Basic Text SR Storage, the SOP class a `StructuredReport` document is.
@@ -126,6 +129,7 @@ impl StructuredReport {
             tags::CONCEPT_NAME,
             tags::CONTINUITY_OF_CONTENT,
         ] {
+            self.file.dataset.remove(&tag);
             if let Some(item) = root.item(&tag) {
                 self.file.dataset.insert_or_update(item.clone());
             }
@@ -172,9 +176,7 @@ impl StructuredReport {
     pub fn validate(&self) -> Result<(), Error> {
         let dataset = &self.file.dataset;
         for tag in [Tag::SOP_CLASS_UID, Tag::SOP_INSTANCE_UID] {
-            if !dataset.contains(&tag) {
-                return Err(invalid(format!("the SR lacks {tag}")));
-            }
+            required_text(dataset, tag, Vr::Ui)?;
         }
         match dataset.try_get_str(Tag::VALUE_TYPE).as_deref() {
             Some("CONTAINER") => {}
@@ -212,16 +214,105 @@ impl StructuredReport {
             }
             None => return Err(invalid("the SR lacks a CompletionFlag".into())),
         }
-        if let Some(flag) = dataset.try_get_str(tags::VERIFICATION_FLAG) {
-            if flag != "VERIFIED" && flag != "UNVERIFIED" {
-                return Err(invalid(format!(
-                    "VerificationFlag `{flag}` is neither VERIFIED nor UNVERIFIED"
-                )));
+        let flag = dataset
+            .try_get_str(tags::VERIFICATION_FLAG)
+            .ok_or_else(|| invalid("the SR lacks a VerificationFlag".into()))?;
+        if flag != "VERIFIED" && flag != "UNVERIFIED" {
+            return Err(invalid(format!("invalid VerificationFlag `{flag}`")));
+        }
+        for (tag, vr) in [
+            (Tag::CONTENT_DATE, Vr::Da),
+            (Tag::CONTENT_TIME, Vr::Tm),
+            (Tag::INSTANCE_NUMBER, Vr::Is),
+        ] {
+            required_text(dataset, tag, vr)?;
+        }
+        if flag == "VERIFIED" {
+            if self.completion_flag().as_deref() != Some("COMPLETE") {
+                return Err(invalid("VERIFIED requires COMPLETE".into()));
+            }
+            let observers = required_sequence(dataset, Tag::VERIFYING_OBSERVER_SEQUENCE, 1, None)?;
+            for observer in observers.items() {
+                for (tag, vr) in [
+                    (Tag::VERIFYING_OBSERVER_NAME, Vr::Pn),
+                    (Tag::VERIFYING_ORGANIZATION, Vr::Lo),
+                    (Tag::VERIFICATION_DATE_TIME, Vr::Dt),
+                ] {
+                    required_text(observer, tag, vr)?;
+                }
+                let identification = required_sequence(
+                    observer,
+                    Tag::VERIFYING_OBSERVER_IDENTIFICATION_CODE_SEQUENCE,
+                    0,
+                    Some(1),
+                )?;
+                for code in identification.items() {
+                    CodeItem::validate_dataset(code)?;
+                }
             }
         }
-
-        for item in self.content_items() {
-            validate_item(&item)?;
+        for tag in [
+            tags::VALUE_TYPE,
+            tags::COMPLETION_FLAG,
+            tags::VERIFICATION_FLAG,
+            tags::CONTINUITY_OF_CONTENT,
+        ] {
+            required_text(dataset, tag, Vr::Cs)?;
+        }
+        validate_code_sequence(dataset, tags::CONCEPT_NAME)?;
+        for code in
+            required_sequence(dataset, Tag::PERFORMED_PROCEDURE_CODE_SEQUENCE, 0, None)?.items()
+        {
+            CodeItem::validate_dataset(code)?;
+        }
+        if dataset.contains(&tags::CONTENT_SEQUENCE) {
+            required_sequence(dataset, tags::CONTENT_SEQUENCE, 0, None)?;
+        }
+        for (tag, vr) in [
+            (Tag::STUDY_INSTANCE_UID, Vr::Ui),
+            (Tag::SERIES_INSTANCE_UID, Vr::Ui),
+            (Tag::MODALITY, Vr::Cs),
+            (Tag::SERIES_NUMBER, Vr::Is),
+        ] {
+            required_text(dataset, tag, vr)?;
+        }
+        if dataset.try_get_str(Tag::MODALITY).as_deref() != Some("SR") {
+            return Err(invalid("SR Modality must be SR".into()));
+        }
+        for (tag, vr) in [
+            (Tag::PATIENT_NAME, Vr::Pn),
+            (Tag::PATIENT_ID, Vr::Lo),
+            (Tag::PATIENT_BIRTH_DATE, Vr::Da),
+            (Tag::PATIENT_SEX, Vr::Cs),
+            (Tag::STUDY_DATE, Vr::Da),
+            (Tag::STUDY_TIME, Vr::Tm),
+            (Tag::REFERRING_PHYSICIAN_NAME, Vr::Pn),
+            (Tag::STUDY_ID, Vr::Sh),
+            (Tag::ACCESSION_NUMBER, Vr::Sh),
+            (Tag::MANUFACTURER, Vr::Lo),
+        ] {
+            let element = dataset.get_element(&tag)?;
+            if element.vr() != vr {
+                return Err(invalid(format!("incorrect VR for Type 2 {tag}")));
+            }
+            let value = dataset.get_str(&tag)?;
+            let decoded = crate::model::element::DicomElement::new_str(tag, vr, value);
+            crate::validation::validate_element(&decoded)?;
+        }
+        if dataset
+            .try_get_str(Tag::PATIENT_SEX)
+            .is_some_and(|sex| !matches!(sex.as_str(), "" | "M" | "F" | "O"))
+        {
+            return Err(invalid("invalid PatientSex".into()));
+        }
+        required_sequence(
+            dataset,
+            Tag::REFERENCED_PERFORMED_PROCEDURE_STEP_SEQUENCE,
+            0,
+            None,
+        )?;
+        for (index, item) in self.content_items().iter().enumerate() {
+            validate_item(item, dataset, &[1, index as u32 + 1])?;
         }
         Ok(())
     }
@@ -281,6 +372,51 @@ fn invalid(message: String) -> Error {
     Error::Data(crate::error::DataError::Other { message })
 }
 
+fn required_text(dataset: &Dataset, tag: Tag, vr: Vr) -> Result<String, Error> {
+    let value = dataset
+        .try_get_str(&tag)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| invalid(format!("missing or empty Type 1 {tag}")))?;
+    if dataset.get_element(&tag)?.vr() != vr || (vr.is_multi_value() && value.contains('\\')) {
+        return Err(invalid(format!("incorrect VR or multiplicity for {tag}")));
+    }
+    crate::validation::validate_single(vr, &value).map_err(invalid)?;
+    Ok(value)
+}
+
+fn required_numeric(dataset: &Dataset, tag: Tag, vr: Vr) -> Result<(), Error> {
+    let element = dataset.get_element(&tag)?;
+    if element.vr() != vr {
+        return Err(invalid(format!("incorrect numeric VR for {tag}")));
+    }
+    if let crate::model::element::ElementValue::Bytes(buffer) = element.value() {
+        if !buffer.size().is_multiple_of(vr.unit_size() as u64) {
+            return Err(invalid(format!("truncated numeric value for {tag}")));
+        }
+    }
+    Ok(())
+}
+
+fn required_sequence(
+    dataset: &Dataset,
+    tag: Tag,
+    min: usize,
+    max: Option<usize>,
+) -> Result<&crate::model::item::DicomSequence, Error> {
+    let sequence = dataset
+        .try_get_sequence(&tag)
+        .ok_or_else(|| invalid(format!("missing sequence {tag}")))?;
+    if sequence.items().len() < min || max.is_some_and(|max| sequence.items().len() > max) {
+        return Err(invalid(format!("incorrect item count for {tag}")));
+    }
+    Ok(sequence)
+}
+
+fn validate_code_sequence(dataset: &Dataset, tag: Tag) -> Result<(), Error> {
+    let sequence = required_sequence(dataset, tag, 1, Some(1))?;
+    CodeItem::validate_dataset(&sequence.items()[0])
+}
+
 /// ConceptNameCodeSequence is Type 1C (Table C.17-5): required for these value
 /// types; a CONTAINER without a heading, and the reference value types whose
 /// concept name only conveys a purpose of reference, may omit it.
@@ -304,7 +440,9 @@ fn concept_name_required(value_type: ValueType) -> bool {
 /// each one needs a RelationshipType, the concept name the standard makes
 /// conditional and the value its ValueType requires. Any item may carry children
 /// (Table C.17-6), and a CONTAINER must state its ContinuityOfContent.
-fn validate_item(item: &ContentItem) -> Result<(), Error> {
+fn validate_item(item: &ContentItem, root: &Dataset, path: &[u32]) -> Result<(), Error> {
+    required_text(item.dataset(), tags::RELATIONSHIP_TYPE, Vr::Cs)
+        .map_err(|error| invalid(format!("invalid RelationshipType: {error}")))?;
     // Table C.17-6: a by-reference target carries only a RelationshipType and the
     // identifier of the target item - no ValueType, concept name or value.
     if item
@@ -316,11 +454,48 @@ fn validate_item(item: &ContentItem) -> Result<(), Error> {
                 "a by-reference content item lacks a RelationshipType".into(),
             ));
         }
+        let dataset = item.dataset();
+        for field in dataset.items() {
+            if field.tag() != &tags::RELATIONSHIP_TYPE
+                && field.tag() != &tags::REFERENCED_CONTENT_ITEM_IDENTIFIER
+            {
+                return Err(invalid(
+                    "a by-reference item carries by-value attributes".into(),
+                ));
+            }
+        }
+        let tag = tags::REFERENCED_CONTENT_ITEM_IDENTIFIER;
+        if dataset.get_element(&tag)?.vr() != Vr::Ul {
+            return Err(invalid("reference identifier must be UL".into()));
+        }
+        let count = dataset.value_count(&tag)?;
+        let identifiers = (0..count)
+            .map(|index| dataset.get_at::<u32>(&tag, index))
+            .collect::<Result<Vec<_>, _>>()?;
+        if identifiers.first() != Some(&1)
+            || identifiers.contains(&0)
+            || path.starts_with(&identifiers)
+        {
+            return Err(invalid("invalid by-reference target path".into()));
+        }
+        let mut target = root;
+        for index in &identifiers[1..] {
+            target = target
+                .try_get_sequence(tags::CONTENT_SEQUENCE)
+                .and_then(|sequence| sequence.items().get(*index as usize - 1))
+                .ok_or_else(|| invalid("by-reference target is outside the content tree".into()))?;
+        }
+        if target.contains(&tags::REFERENCED_CONTENT_ITEM_IDENTIFIER) {
+            return Err(invalid(
+                "a by-reference item cannot target another reference".into(),
+            ));
+        }
         return Ok(());
     }
     let value_type = item
         .value_type()
         .ok_or_else(|| invalid("a content item lacks a known ValueType".into()))?;
+    required_text(item.dataset(), tags::VALUE_TYPE, Vr::Cs)?;
     let name = value_type.as_str();
     if concept_name_required(value_type) && item.concept_name().is_none() {
         return Err(invalid(format!(
@@ -333,34 +508,101 @@ fn validate_item(item: &ContentItem) -> Result<(), Error> {
     if !item.has_value(value_type) {
         return Err(invalid(format!("a {name} item lacks its value tag")));
     }
+    let dataset = item.dataset();
+    if dataset.contains(&tags::CONCEPT_NAME) {
+        validate_code_sequence(dataset, tags::CONCEPT_NAME)?;
+    }
+    match value_type {
+        ValueType::Text => {
+            required_text(dataset, tags::TEXT_VALUE, Vr::Ut)?;
+        }
+        ValueType::PersonName => {
+            required_text(dataset, tags::PERSON_NAME, Vr::Pn)?;
+        }
+        ValueType::Date => {
+            required_text(dataset, tags::DATE, Vr::Da)?;
+        }
+        ValueType::Time => {
+            required_text(dataset, tags::TIME, Vr::Tm)?;
+        }
+        ValueType::DateTime => {
+            required_text(dataset, tags::DATE_TIME, Vr::Dt)?;
+        }
+        ValueType::UidRef => {
+            required_text(dataset, tags::UID, Vr::Ui)?;
+        }
+        ValueType::Code => validate_code_sequence(dataset, tags::CONCEPT_CODE_SEQUENCE)?,
+        ValueType::Num => {
+            let sequence = required_sequence(dataset, tags::MEASURED_VALUE_SEQUENCE, 0, Some(1))?;
+            for measured in sequence.items() {
+                required_text(measured, tags::NUMERIC_VALUE, Vr::Ds)?;
+                let value = MeasuredValue::read_from(measured)?;
+                value.numeric_value_text()?;
+                validate_code_sequence(measured, tags::MEASUREMENT_UNITS_CODE_SEQUENCE)?;
+            }
+        }
+        ValueType::Composite | ValueType::Image | ValueType::Waveform => {
+            let references = required_sequence(dataset, tags::REFERENCED_SOP_SEQUENCE, 1, Some(1))?;
+            for reference in references.items() {
+                required_text(reference, tags::REFERENCED_SOP_CLASS_UID, Vr::Ui)?;
+                required_text(reference, tags::REFERENCED_SOP_INSTANCE_UID, Vr::Ui)?;
+                ReferencedSop::read_from(reference)?;
+            }
+            if value_type == ValueType::Waveform
+                && (dataset.contains(&tags::REFERENCED_WAVEFORM_CHANNELS)
+                    || item.waveform_references().is_none())
+            {
+                return Err(invalid("malformed WAVEFORM channels".into()));
+            }
+        }
+        ValueType::Tcoord => {
+            required_text(dataset, tags::TEMPORAL_RANGE_TYPE, Vr::Cs)?;
+            for (tag, vr) in [
+                (tags::REFERENCED_SAMPLE_POSITIONS, Vr::Ul),
+                (tags::REFERENCED_TIME_OFFSETS, Vr::Ds),
+                (tags::REFERENCED_DATE_TIME, Vr::Dt),
+            ] {
+                if dataset.contains(&tag) {
+                    required_numeric(dataset, tag, vr)?;
+                }
+            }
+            let value = item
+                .tcoord_value()
+                .ok_or_else(|| invalid("malformed TCOORD".into()))?;
+            TemporalCoordinates::new(value.range_type, value.range)?;
+        }
+        _ => {}
+    }
     // C.18.6.1.2 / C.18.9.1.2: the GraphicType fixes how many coordinates the
     // value must have, so a wrong count is a conformance failure, not just a
     // renderer's guess.
     match value_type {
         ValueType::Scoord => {
+            required_text(dataset, tags::GRAPHIC_TYPE, Vr::Cs)?;
+            required_numeric(dataset, tags::GRAPHIC_DATA, Vr::Fl)?;
             let value = item
                 .scoord_value()
                 .ok_or_else(|| invalid("a SCOORD item has malformed GraphicData".into()))?;
-            check_count(
-                "SCOORD",
-                value.points.len(),
-                value.graphic_type.point_range(),
-            )?;
+            SpatialCoordinates::new(value.graphic_type, &value.points)?;
         }
         ValueType::Scoord3D => {
+            required_text(dataset, tags::GRAPHIC_TYPE, Vr::Cs)?;
+            required_text(dataset, tags::REFERENCED_FRAME_OF_REFERENCE_UID, Vr::Ui)?;
+            required_numeric(dataset, tags::GRAPHIC_DATA, Vr::Fl)?;
             let value = item
                 .scoord3d_value()
                 .ok_or_else(|| invalid("a SCOORD3D item has malformed GraphicData".into()))?;
-            check_count(
-                "SCOORD3D",
-                value.points.len(),
-                value.graphic_type.point_range(),
+            SpatialCoordinates3D::new(
+                value.graphic_type,
+                &value.points,
+                value.frame_of_reference_uid,
             )?;
         }
         _ => {}
     }
     let children = item.children();
     if value_type == ValueType::Container {
+        required_text(dataset, tags::CONTINUITY_OF_CONTENT, Vr::Cs)?;
         match item
             .dataset()
             .try_get_str(tags::CONTINUITY_OF_CONTENT)
@@ -385,8 +627,10 @@ fn validate_item(item: &ContentItem) -> Result<(), Error> {
             "a {name} item has an empty ContentSequence"
         )));
     }
-    for child in &children {
-        validate_item(child)?;
+    for (index, child) in children.iter().enumerate() {
+        let mut child_path = path.to_vec();
+        child_path.push(index as u32 + 1);
+        validate_item(child, root, &child_path)?;
     }
     Ok(())
 }
@@ -400,6 +644,221 @@ mod tests {
         SpatialCoordinates3D, TemporalCoordinates, TemporalRange, TemporalRangeType,
     };
 
+    #[test]
+    fn required_document_attributes_and_verified_conditions_are_checked() {
+        for tag in [
+            Tag::VERIFICATION_FLAG,
+            Tag::CONTENT_DATE,
+            Tag::CONTENT_TIME,
+            Tag::INSTANCE_NUMBER,
+        ] {
+            let mut report = report_with(container());
+            report.file.dataset.remove(&tag);
+            assert!(report.validate().is_err(), "missing {tag}");
+        }
+        let mut report = report_with(container());
+        report.set_verification_flag("VERIFIED");
+        assert!(report.validate().is_err(), "PARTIAL cannot be VERIFIED");
+        report.set_completion_flag("COMPLETE");
+        assert!(report.validate().is_err(), "VERIFIED needs an observer");
+    }
+
+    #[test]
+    fn imported_empty_text_and_malformed_temporal_values_are_rejected() {
+        let mut root = container();
+        root.add_child(ContentItem::text(
+            CodeItem::new("1", "TEST").with_meaning("Finding"),
+            Relationship::Contains,
+            "",
+        ));
+        assert!(report_with(root).validate().is_err());
+        let mut root = container();
+        let mut child = ContentItem::tcoord(
+            CodeItem::new("1", "TEST").with_meaning("Time"),
+            Relationship::Contains,
+            TemporalCoordinates::new(
+                TemporalRangeType::Point,
+                TemporalRange::SamplePositions(vec![1]),
+            )
+            .unwrap(),
+        )
+        .into_dataset();
+        child.insert_str(tags::TEMPORAL_RANGE_TYPE, Vr::Cs, "SEGMENT");
+        root.add_child(ContentItem::from_dataset(child));
+        assert!(report_with(root).validate().is_err());
+    }
+
+    #[test]
+    fn imported_values_obey_constructor_rules_and_type_two_num_is_valid() {
+        let mut root = container();
+        let mut child = Dataset::new();
+        child.insert_str(tags::VALUE_TYPE, Vr::Cs, "NUM");
+        child.insert_str(tags::RELATIONSHIP_TYPE, Vr::Cs, "CONTAINS");
+        let mut name = Dataset::new();
+        CodeItem::new("1", "TEST")
+            .with_meaning("Measurement")
+            .write_into(&mut name);
+        child.insert_sequence(tags::CONCEPT_NAME).push(name);
+        child.insert_sequence(tags::MEASURED_VALUE_SEQUENCE);
+        root.add_child(ContentItem::from_dataset(child));
+        report_with(root).validate().unwrap();
+
+        let name = CodeItem::new("1", "TEST").with_meaning("Region");
+        let mut bad_spatial = ContentItem::scoord(
+            name.clone(),
+            Relationship::Contains,
+            SpatialCoordinates::new(GraphicType::Point, &[(1.0, 1.0)]).unwrap(),
+        )
+        .into_dataset();
+        bad_spatial.insert_or_update(crate::model::element::DicomElement::new_bytes(
+            tags::GRAPHIC_DATA,
+            Vr::Fl,
+            std::sync::Arc::new(crate::model::buffer::MemoryBuffer::new(
+                [f32::NAN.to_le_bytes(), 1f32.to_le_bytes()].concat(),
+            )),
+        ));
+        let mut root = container();
+        root.add_child(ContentItem::from_dataset(bad_spatial));
+        assert!(report_with(root).validate().is_err());
+        let mut root = container();
+        root.add_child(ContentItem::uid_ref(
+            name,
+            Relationship::Contains,
+            "not-a-uid",
+        ));
+        assert!(report_with(root).validate().is_err());
+        assert!(TemporalCoordinates::new(
+            TemporalRangeType::Point,
+            TemporalRange::SamplePositions(vec![0])
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn verified_reports_need_complete_observer_attributes() {
+        let mut report = report_with(container());
+        report
+            .set_completion_flag("COMPLETE")
+            .set_verification_flag("VERIFIED");
+        let mut observer = Dataset::new();
+        observer.insert_str(Tag::VERIFYING_OBSERVER_NAME, Vr::Pn, "Doe^Jane");
+        observer.insert_str(Tag::VERIFYING_ORGANIZATION, Vr::Lo, "Hospital");
+        observer.insert_str(Tag::VERIFICATION_DATE_TIME, Vr::Dt, "20261030120000");
+        observer.insert_sequence(Tag::VERIFYING_OBSERVER_IDENTIFICATION_CODE_SEQUENCE);
+        report
+            .file
+            .dataset
+            .insert_sequence(Tag::VERIFYING_OBSERVER_SEQUENCE)
+            .push(observer.clone());
+        report.validate().unwrap();
+        observer.remove(Tag::VERIFYING_ORGANIZATION);
+        report.file.dataset.remove(Tag::VERIFYING_OBSERVER_SEQUENCE);
+        report
+            .file
+            .dataset
+            .insert_sequence(Tag::VERIFYING_OBSERVER_SEQUENCE)
+            .push(observer);
+        assert!(report.validate().is_err());
+    }
+
+    #[test]
+    fn invalid_type_two_values_and_by_reference_targets_are_rejected() {
+        let mut report = report_with(container());
+        report
+            .file
+            .dataset
+            .insert_str(Tag::PATIENT_BIRTH_DATE, Vr::Da, "not-a-date");
+        assert!(report.validate().is_err());
+        for target in [vec![], vec![0u32], vec![1, 9], vec![1, 1]] {
+            let mut child = Dataset::new();
+            child.insert_str(tags::RELATIONSHIP_TYPE, Vr::Cs, "INFERRED FROM");
+            child.insert_or_update(crate::model::element::DicomElement::new_bytes(
+                tags::REFERENCED_CONTENT_ITEM_IDENTIFIER,
+                Vr::Ul,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::new(
+                    target
+                        .iter()
+                        .flat_map(|n| n.to_le_bytes())
+                        .collect::<Vec<_>>(),
+                )),
+            ));
+            let mut root = container();
+            root.add_child(ContentItem::from_dataset(child));
+            assert!(
+                report_with(root).validate().is_err(),
+                "invalid target {target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn imported_vrs_and_byte_backed_values_are_checked() {
+        for tag in [
+            tags::VALUE_TYPE,
+            tags::COMPLETION_FLAG,
+            tags::VERIFICATION_FLAG,
+            tags::CONTINUITY_OF_CONTENT,
+        ] {
+            let mut report = report_with(container());
+            let value = report.dataset().get_str(&tag).unwrap();
+            report.file.dataset.insert_str(tag, Vr::Lo, value);
+            assert!(report.validate().is_err());
+        }
+        let mut report = report_with(container());
+        report
+            .file
+            .dataset
+            .insert_str(tags::CONTENT_SEQUENCE, Vr::Lo, "bad");
+        assert!(report.validate().is_err());
+        let mut report = report_with(container());
+        report
+            .file
+            .dataset
+            .insert_sequence(Tag::PERFORMED_PROCEDURE_CODE_SEQUENCE)
+            .push(Dataset::new());
+        assert!(report.validate().is_err());
+        for (text, valid) in [("x", false), ("20240101", true), ("", true)] {
+            let mut report = report_with(container());
+            report
+                .file
+                .dataset
+                .insert_or_update(crate::model::element::DicomElement::new_bytes(
+                    Tag::PATIENT_BIRTH_DATE,
+                    Vr::Da,
+                    std::sync::Arc::new(crate::model::buffer::MemoryBuffer::new(
+                        text.as_bytes().to_vec(),
+                    )),
+                ));
+            assert_eq!(
+                report.validate().is_ok(),
+                valid,
+                "byte-backed date {text:?}"
+            );
+        }
+        let mut report = report_with(container());
+        report
+            .file
+            .dataset
+            .insert_or_update(crate::model::element::DicomElement::new_bytes(
+                Tag::CONTENT_DATE,
+                Vr::Da,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::new(
+                    b"20240101".to_vec(),
+                )),
+            ));
+        report.validate().unwrap();
+        let mut child = ContentItem::scoord(
+            CodeItem::new("1", "TEST").with_meaning("Point"),
+            Relationship::Contains,
+            SpatialCoordinates::new(GraphicType::Point, &[(1.0, 1.0)]).unwrap(),
+        )
+        .into_dataset();
+        child.insert_str(tags::GRAPHIC_DATA, Vr::Ds, "1\\1");
+        let mut root = container();
+        root.add_child(ContentItem::from_dataset(child));
+        assert!(report_with(root).validate().is_err());
+    }
+
     fn container() -> ContentItem {
         ContentItem::container(
             CodeItem::new("126000", "DCM").with_meaning("Imaging Measurement Report"),
@@ -411,7 +870,31 @@ mod tests {
     /// A conformant document: SOP identity and document ValueType from
     /// `from_dataset`, plus the Type 1 flags.
     fn report_with(root: ContentItem) -> StructuredReport {
-        let mut report = StructuredReport::from_dataset(Dataset::new());
+        let mut dataset = Dataset::new();
+        for (tag, vr, value) in [
+            (Tag::CONTENT_DATE, Vr::Da, "20261030"),
+            (Tag::CONTENT_TIME, Vr::Tm, "120000"),
+            (Tag::INSTANCE_NUMBER, Vr::Is, "1"),
+            (Tag::STUDY_INSTANCE_UID, Vr::Ui, "1.2.3"),
+            (Tag::SERIES_INSTANCE_UID, Vr::Ui, "1.2.4"),
+            (Tag::MODALITY, Vr::Cs, "SR"),
+            (Tag::SERIES_NUMBER, Vr::Is, "1"),
+            (Tag::PATIENT_NAME, Vr::Pn, ""),
+            (Tag::PATIENT_ID, Vr::Lo, ""),
+            (Tag::PATIENT_BIRTH_DATE, Vr::Da, ""),
+            (Tag::PATIENT_SEX, Vr::Cs, ""),
+            (Tag::STUDY_DATE, Vr::Da, ""),
+            (Tag::STUDY_TIME, Vr::Tm, ""),
+            (Tag::REFERRING_PHYSICIAN_NAME, Vr::Pn, ""),
+            (Tag::STUDY_ID, Vr::Sh, ""),
+            (Tag::ACCESSION_NUMBER, Vr::Sh, ""),
+            (Tag::MANUFACTURER, Vr::Lo, ""),
+        ] {
+            dataset.insert_str(tag, vr, value);
+        }
+        dataset.insert_sequence(Tag::PERFORMED_PROCEDURE_CODE_SEQUENCE);
+        dataset.insert_sequence(Tag::REFERENCED_PERFORMED_PROCEDURE_STEP_SEQUENCE);
+        let mut report = StructuredReport::from_dataset(dataset);
         report.set_completion_flag("PARTIAL");
         report.set_verification_flag("UNVERIFIED");
         report.set_root(root);
@@ -422,7 +905,7 @@ mod tests {
     fn a_report_round_trips_through_bytes() {
         let mut root = container();
         root.add_child(ContentItem::text(
-            CodeItem::new("121071", "DCM"),
+            CodeItem::new("121071", "DCM").with_meaning("Finding"),
             Relationship::Contains,
             "Mass in the left lung",
         ));
@@ -471,7 +954,7 @@ mod tests {
     #[test]
     fn a_text_root_fails_validation() {
         let report = report_with(ContentItem::text(
-            CodeItem::new("121071", "DCM"),
+            CodeItem::new("121071", "DCM").with_meaning("Finding"),
             Relationship::Contains,
             "not a container",
         ));
@@ -486,7 +969,7 @@ mod tests {
     fn a_report_without_a_completion_flag_fails_validation() {
         let mut root = container();
         root.add_child(ContentItem::text(
-            CodeItem::new("121071", "DCM"),
+            CodeItem::new("121071", "DCM").with_meaning("Finding"),
             Relationship::Contains,
             "ok",
         ));
@@ -506,7 +989,7 @@ mod tests {
         let mut root = container();
         // a child built without a relationship: a CONTAINER with `None`
         root.add_child(ContentItem::container(
-            CodeItem::new("121071", "DCM"),
+            CodeItem::new("121071", "DCM").with_meaning("Finding"),
             None,
             None,
         ));
@@ -519,7 +1002,7 @@ mod tests {
     fn a_scoord_with_the_wrong_point_count_fails_validation() {
         // a POLYLINE with two points, then relabelled POINT (which needs exactly one)
         let item = ContentItem::scoord(
-            CodeItem::new("111030", "DCM"),
+            CodeItem::new("111030", "DCM").with_meaning("Region"),
             Relationship::Contains,
             SpatialCoordinates::new(GraphicType::Polyline, &[(0.0, 0.0), (1.0, 1.0)]).unwrap(),
         );
@@ -540,7 +1023,7 @@ mod tests {
         let mut root = container();
         // a TEXT item whose TextValue was dropped
         let mut child = ContentItem::text(
-            CodeItem::new("121071", "DCM"),
+            CodeItem::new("121071", "DCM").with_meaning("Finding"),
             Relationship::Contains,
             "lost",
         );
@@ -559,7 +1042,7 @@ mod tests {
     #[test]
     fn graphic_and_temporal_values_survive_a_write_and_read() {
         let mut root = container();
-        let name = CodeItem::new("121071", "DCM");
+        let name = CodeItem::new("121071", "DCM").with_meaning("Finding");
         let scoord = SpatialCoordinates::new(
             GraphicType::Ellipse,
             &[(1.0, 2.0), (3.0, 4.0), (5.0, 6.0), (7.0, 8.0)],
@@ -623,7 +1106,7 @@ mod tests {
     fn save_writes_a_file_that_opens_back() {
         let mut root = container();
         root.add_child(ContentItem::text(
-            CodeItem::new("121071", "DCM"),
+            CodeItem::new("121071", "DCM").with_meaning("Finding"),
             Relationship::Contains,
             "ok",
         ));
@@ -641,7 +1124,7 @@ mod tests {
     fn a_report_round_trips_through_a_writer_and_reader() {
         let mut root = container();
         root.add_child(ContentItem::text(
-            CodeItem::new("121071", "DCM"),
+            CodeItem::new("121071", "DCM").with_meaning("Finding"),
             Relationship::Contains,
             "stream",
         ));
@@ -664,7 +1147,7 @@ mod tests {
     #[test]
     fn graphic_and_temporal_values_survive_a_big_endian_round_trip() {
         let mut root = container();
-        let name = CodeItem::new("121071", "DCM");
+        let name = CodeItem::new("121071", "DCM").with_meaning("Finding");
         let scoord =
             SpatialCoordinates::new(GraphicType::Polyline, &[(1.0, 2.0), (3.0, 4.5)]).unwrap();
         root.add_child(ContentItem::scoord(

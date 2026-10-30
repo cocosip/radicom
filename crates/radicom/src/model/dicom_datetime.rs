@@ -230,7 +230,7 @@ pub fn parse_dt(s: &str) -> Result<Range<DtPoint>, Error> {
                 };
                 // PS3.3 §6.2: positive offsets are limited to 14h, negative to 12h.
                 let max_hour = if sign > 0 { 14 } else { 12 };
-                if oh > max_hour || om > 59 {
+                if oh > max_hour || om > 59 || (oh == max_hour && om != 0) {
                     return Err(invalid());
                 }
                 let off = FixedOffset::east_opt(sign * ((oh * 3600 + om * 60) as i32))
@@ -258,7 +258,10 @@ pub fn parse_dt(s: &str) -> Result<Range<DtPoint>, Error> {
             };
             (date, h, f)
         };
-        if !frac_s.bytes().all(|b| b.is_ascii_digit()) || frac_s.len() > 6 {
+        if !hour_s.bytes().all(|b| b.is_ascii_digit())
+            || !frac_s.bytes().all(|b| b.is_ascii_digit())
+            || frac_s.len() > 6
+        {
             return Err(invalid());
         }
         let (hour, minute, second) = match hour_s.len() {
@@ -298,6 +301,16 @@ pub fn parse_dt(s: &str) -> Result<Range<DtPoint>, Error> {
         Some((a, b)) => {
             let min = one(a)?;
             let max = if b.is_empty() { min } else { one(b)? };
+            let reversed = match (min.to_fixed(), max.to_fixed()) {
+                (Some(min), Some(max)) => min > max,
+                (None, None) => min.naive > max.naive,
+                _ => false, // a missing offset depends on the containing dataset
+            };
+            if reversed {
+                return Err(Error::Data(DataError::Other {
+                    message: format!("DT range ends before it begins: \"{s}\""),
+                }));
+            }
             Ok(Range::new(min, max))
         }
         None => one(s).map(|p| Range::new(p, p)),
@@ -323,7 +336,12 @@ pub fn has_invalid_dt_offset(s: &str) -> bool {
             };
             // PS3.3 §6.2: positive offsets ≤14h, negative ≤12h.
             let max_hour = if bytes[i] == b'+' { 14 } else { 12 };
-            if hour > max_hour {
+            let minute = if nums.len() == 4 {
+                nums[2..].parse().unwrap_or(u32::MAX)
+            } else {
+                0
+            };
+            if hour > max_hour || (hour == max_hour && minute != 0) {
                 return true;
             }
         }
@@ -475,8 +493,7 @@ mod tests {
         );
 
         // PS3.3 §6.2: a negative offset is limited to 12 hours (positive to 14).
-        // A bare parse_dt() falls back to range-splitting on a bad suffix, so the
-        // guard has_invalid_dt_offset() is what rejects the out-of-range offset.
+        // The guard also catches malformed offsets when validating DT text.
         assert!(
             has_invalid_dt_offset("20240305103015-1300"),
             "negative offset hour > 12"
@@ -493,6 +510,51 @@ mod tests {
             has_invalid_dt_offset("20240305103015+1500"),
             "positive offset hour > 14"
         );
+    }
+
+    #[test]
+    fn review_non_ascii_dt_time_returns_an_error() {
+        for value in ["20240101aéz", "20240101aéz01"] {
+            assert!(parse_dt(value).is_err(), "{value}");
+        }
+        for offset in ["+1401", "-1201", "+14:01", "-12:01"] {
+            assert!(
+                crate::validation::validate_single(
+                    crate::model::vr::Vr::Dt,
+                    &format!("20240101120000{offset}")
+                )
+                .is_err(),
+                "{offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_negative_offsets_do_not_become_reversed_datetime_ranges() {
+        for value in [
+            "20240101120000-1201",
+            "20240101120000-1500",
+            "20250101-20240101",
+        ] {
+            assert!(parse_dt(value).is_err(), "{value}");
+        }
+        let years = parse_dt("2024-2025").unwrap();
+        assert_eq!(
+            years.min.naive.date(),
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()
+        );
+        assert_eq!(
+            years.max.naive.date(),
+            NaiveDate::from_ymd_opt(2025, 1, 1).unwrap()
+        );
+        let datetimes = parse_dt("20240101120000-20240101130000").unwrap();
+        assert!(datetimes.min.naive < datetimes.max.naive);
+        let offset = parse_dt("20240101120000-1200").unwrap();
+        assert_eq!(offset.min, offset.max);
+        assert_eq!(offset.min.offset.unwrap().local_minus_utc(), -43200);
+        // Absolute time increases even though the local wall clock decreases.
+        let offsets = parse_dt("20240101120000+0800-20240101113000+0700").unwrap();
+        assert!(offsets.min.to_fixed().unwrap() < offsets.max.to_fixed().unwrap());
     }
 
     #[test]

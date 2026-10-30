@@ -26,21 +26,20 @@ pub struct SubOperationSummary {
 impl SubOperationSummary {
     /// Total instances the operation covered; a warning counts once.
     pub fn total(&self) -> u16 {
-        self.completed.saturating_add(self.failed)
+        self.completed
+            .saturating_add(self.failed)
+            .saturating_add(self.warning)
     }
 
     /// Folds one sub-operation's terminal status into the counters.
     ///
-    /// PS3.7 status categories: Success and Warning are both *completed*
-    /// sub-operations, and a warning only raises (0000,1023) on top of that, so
-    /// `warning` is a subset of `completed` rather than a third bucket.
-    /// Failure is the one failure bucket; Cancel and Pending are not instance
+    /// Success, Warning and Failure are distinct outcome buckets (PS3.4 C.4).
+    /// Cancel and Pending are not instance
     /// outcomes at all and must not pollute the counts.
     pub fn record(&mut self, state: StatusState) {
         match state {
             StatusState::Success => self.completed = self.completed.saturating_add(1),
             StatusState::Warning => {
-                self.completed = self.completed.saturating_add(1);
                 self.warning = self.warning.saturating_add(1);
             }
             StatusState::Failure => self.failed = self.failed.saturating_add(1),
@@ -55,7 +54,7 @@ impl SubOperationSummary {
         if self.failed == 0 && self.warning == 0 {
             return status::SUCCESS;
         }
-        if self.completed == 0 {
+        if self.completed == 0 && self.warning == 0 {
             return status::UNABLE_TO_PERFORM_SUBOPERATIONS;
         }
         status::SUBOPERATIONS_COMPLETED_WITH_WARNINGS
@@ -205,6 +204,8 @@ pub struct CMoveResponse {
     pub remaining: u16,
     pub summary: SubOperationSummary,
     pub error_comment: Option<String>,
+    /// SOP instances whose C-STORE sub-operations failed.
+    pub failed_sop_instance_uids: Vec<String>,
 }
 
 impl CMoveResponse {
@@ -217,6 +218,7 @@ impl CMoveResponse {
             remaining,
             summary,
             error_comment: None,
+            failed_sop_instance_uids: Vec::new(),
         }
     }
 
@@ -229,6 +231,7 @@ impl CMoveResponse {
             remaining: 0,
             summary,
             error_comment: None,
+            failed_sop_instance_uids: Vec::new(),
         }
     }
 
@@ -241,6 +244,7 @@ impl CMoveResponse {
             remaining: 0,
             summary: SubOperationSummary::default(),
             error_comment: Some(crate::dimse::truncate_lo(&comment.into())),
+            failed_sop_instance_uids: Vec::new(),
         }
     }
 
@@ -253,20 +257,54 @@ impl CMoveResponse {
         crate::dimse::classify(self.status)
     }
 
-    /// The command for this response; a C-MOVE response never carries a dataset.
+    /// The command for this response; a failed-instance Identifier may follow.
     pub fn to_command(&self) -> Command {
         let mut command =
             Command::request(CommandField::CMoveRsp, self.message_id_being_responded_to);
         command.message_id_being_responded_to = Some(self.message_id_being_responded_to);
         command.affected_sop_class_uid = Some(self.affected_sop_class_uid.clone());
         command.status = Some(self.status);
-        command.no_dataset = true;
+        command.no_dataset = self.identifier().is_none();
         command.error_comment = self.error_comment.clone();
-        command.remaining_suboperations = Some(self.remaining);
+        command.remaining_suboperations =
+            matches!(self.state(), StatusState::Pending | StatusState::Cancel)
+                .then_some(self.remaining);
         command.completed_suboperations = Some(self.summary.completed);
         command.failed_suboperations = Some(self.summary.failed);
         command.warning_suboperations = Some(self.summary.warning);
         command
+    }
+
+    /// The failed-instance Identifier of a terminal Warning/Failure/Cancel response.
+    pub fn identifier(&self) -> Option<Dataset> {
+        if !matches!(
+            self.state(),
+            StatusState::Warning | StatusState::Failure | StatusState::Cancel
+        ) || self.failed_sop_instance_uids.is_empty()
+        {
+            return None;
+        }
+        let mut dataset = Dataset::new();
+        dataset.insert_str(
+            Tag::new(0x0008, 0x0058),
+            Vr::Ui,
+            self.failed_sop_instance_uids.join("\\"),
+        );
+        Some(dataset)
+    }
+
+    /// Attaches the failed-instance Identifier read after the command.
+    pub fn set_identifier(&mut self, identifier: &Dataset) {
+        self.failed_sop_instance_uids = identifier
+            .try_get_str(Tag::new(0x0008, 0x0058))
+            .map(|value| {
+                value
+                    .split('\\')
+                    .filter(|uid| !uid.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
     }
 
     pub fn from_command(command: &Command) -> Result<Self> {
@@ -284,6 +322,7 @@ impl CMoveResponse {
                 warning: command.warning_suboperations.unwrap_or(0),
             },
             error_comment: command.error_comment.clone(),
+            failed_sop_instance_uids: Vec::new(),
         })
     }
 }
@@ -306,9 +345,33 @@ pub async fn store_to_destination(
     originator: Option<(&str, u16)>,
     options: ClientOptions,
 ) -> Result<(SubOperationSummary, Option<NetworkError>)> {
+    let (summary, _, error) = store_to_destination_with_failures(
+        destination,
+        calling_ae,
+        called_ae,
+        files,
+        originator,
+        options,
+    )
+    .await?;
+    Ok((summary, error))
+}
+
+/// Delivers a MOVE batch and returns the Failed SOP Instance UID List alongside
+/// its counters and any transport error. Providers attach this list to their
+/// terminal [`CMoveResponse`].
+pub async fn store_to_destination_with_failures(
+    destination: impl tokio::net::ToSocketAddrs,
+    calling_ae: &str,
+    called_ae: &str,
+    files: &[DicomFile],
+    originator: Option<(&str, u16)>,
+    options: ClientOptions,
+) -> Result<(SubOperationSummary, Vec<String>, Option<NetworkError>)> {
     let mut summary = SubOperationSummary::default();
+    let mut failed_uids = Vec::new();
     if files.is_empty() {
-        return Ok((summary, None));
+        return Ok((summary, failed_uids, None));
     }
 
     // one presentation context per (storage class, syntax) the batch needs
@@ -338,28 +401,38 @@ pub async fn store_to_destination(
         Some((ae, id)) => (Some(ae), Some(id)),
         None => (None, None),
     };
-    for file in files {
+    for (index, file) in files.iter().enumerate() {
         match association
             .send_c_store_with_originator(file, originator_ae, originator_id)
             .await
         {
-            Ok(response) => summary.record(response.state()),
+            Ok(response) => {
+                summary.record(response.state());
+                if response.state() == StatusState::Failure {
+                    failed_uids.push(response.affected_sop_instance_uid);
+                }
+            }
             Err(error) => {
                 // A broken destination ends the batch, but the instances already
                 // delivered must stay countable: PS3.4 §C.4.2 reports progress
                 // through the sub-operation counters, not by discarding them
                 // (NET-16). The error travels back alongside them so the caller
                 // can report it in the terminal response.
-                summary.failed = summary.failed.saturating_add(1);
+                for undelivered in &files[index..] {
+                    summary.failed = summary.failed.saturating_add(1);
+                    if let Some(uid) = undelivered.dataset.try_get_str(Tag::SOP_INSTANCE_UID) {
+                        failed_uids.push(uid.trim().to_string());
+                    }
+                }
                 let _ = association.release().await;
-                return Ok((summary, Some(error)));
+                return Ok((summary, failed_uids, Some(error)));
             }
         }
     }
     // the deliveries above are the result; a peer that fumbles the release
     // afterwards must not turn them into a failure
     let _ = association.release().await;
-    Ok((summary, None))
+    Ok((summary, failed_uids, None))
 }
 
 #[cfg(test)]
@@ -529,6 +602,35 @@ mod tests {
     }
 
     #[test]
+    fn warning_only_retrieve_has_no_failed_instance_identifier() {
+        let response = CMoveResponse::completed(
+            &CMoveRequest::study("1.2.3", "DEST", 1),
+            SubOperationSummary {
+                completed: 0,
+                failed: 0,
+                warning: 2,
+            },
+        );
+        assert_eq!(
+            response.status,
+            status::SUBOPERATIONS_COMPLETED_WITH_WARNINGS
+        );
+        // PS3.4 C.4: no failed sub-operation means no Failed UID List or dataset.
+        assert!(response.identifier().is_none());
+        assert!(response.to_command().no_dataset);
+    }
+
+    #[test]
+    fn terminal_retrieve_omits_remaining_but_cancel_keeps_it() {
+        let request = CMoveRequest::study("1.2.3", "ARCHIVE", 1);
+        let mut response = CMoveResponse::completed(&request, SubOperationSummary::default());
+        assert_eq!(response.to_command().remaining_suboperations, None);
+        response.status = status::CANCEL;
+        response.remaining = 3;
+        assert_eq!(response.to_command().remaining_suboperations, Some(3));
+    }
+
+    #[test]
     fn wrong_command_field_is_rejected() {
         let command = Command::request(CommandField::CFindRsp, 1);
         assert!(CMoveResponse::from_command(&command).is_err());
@@ -540,8 +642,10 @@ mod tests {
         summary.record(StatusState::Success);
         summary.record(StatusState::Warning);
         summary.record(StatusState::Failure);
-        // PS3.7: a warning is a *completed* sub-operation, not a third bucket
-        assert_eq!(summary.completed, 2, "success plus the warned instance");
+        assert_eq!(
+            summary.completed, 1,
+            "only successful sub-operations complete"
+        );
         assert_eq!(summary.warning, 1, "the warned instance is flagged as well");
         assert_eq!(summary.failed, 1);
         assert_eq!(summary.total(), 3, "three instances, counted once each");
@@ -572,7 +676,7 @@ mod tests {
         for _ in 0..3 {
             summary.record(StatusState::Warning);
         }
-        assert_eq!(summary.completed, 3);
+        assert_eq!(summary.completed, 0);
         assert_eq!(summary.failed, 0);
         assert_eq!(
             summary.final_status(),
