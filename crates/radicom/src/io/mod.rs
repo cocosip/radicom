@@ -5,7 +5,9 @@ pub mod dataset_builder;
 pub mod file;
 pub mod file_ref;
 pub mod reader;
+pub mod temp;
 pub mod trace;
 pub mod writer;
 
 pub use file_ref::{DirectoryRef, PathFile, TempFileProvider};
+pub use temp::create_unique_file;

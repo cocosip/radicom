@@ -87,7 +87,8 @@ pub enum UserIdentityPolicy {
     /// Reject the association when a user identity is requested.
     #[default]
     Reject,
-    /// Accept any well-formed identity; the AC carries no response.
+    /// Accept any well-formed identity. When the request asked for a positive
+    /// response, the AC carries an empty one (PS3.8 §D.3.3.7 requires it).
     Accept,
     /// Accept and echo this response byte string back (type 1–5 payload).
     Answer(Vec<u8>),
@@ -6762,6 +6763,63 @@ mod tests {
             responses[0].status,
             crate::dimse::status::PROCESSING_FAILURE
         );
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    /// A provider that serves C-GET but never produces a response.
+    struct SilentGetProvider;
+
+    #[async_trait::async_trait]
+    impl ServiceProvider for SilentGetProvider {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec![sop_class::STUDY_ROOT_QR_GET.to_string()]
+        }
+        fn on_c_get<'a>(
+            &'a self,
+            _request: &'a crate::cget::CGetRequest,
+        ) -> futures::stream::BoxStream<'a, Result<crate::cget::CGetEvent>> {
+            Box::pin(futures::stream::empty())
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_c_get_provider_reports_a_failure() {
+        // NET-09: the C-GET arm of the empty-stream guard. C-FIND and C-MOVE
+        // were pinned; C-GET was not, so this branch could regress unnoticed.
+        let provider = Arc::new(SilentGetProvider);
+        let server = DicomServer::bind("127.0.0.1:0", provider, ServerOptions::default())
+            .await
+            .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association = Association::open(
+            addr,
+            "GET-SCU",
+            "GET-SCP",
+            get_contexts(),
+            ClientOptions::default(),
+        )
+        .await
+        .unwrap();
+        association.collect_reverse_stores(Arc::new(std::sync::Mutex::new(Vec::new())));
+
+        let responses = association
+            .send_c_get(&crate::cget::CGetRequest::study("1.2.3.4", 1))
+            .await
+            .unwrap();
+        let terminal = responses.last().expect("one terminal response");
+        assert_eq!(
+            terminal.status,
+            crate::dimse::status::PROCESSING_FAILURE,
+            "an empty C-GET provider stream is a provider bug, not a success"
+        );
+        assert_eq!(
+            terminal.summary.completed, 0,
+            "no sub-operations were counted as delivered"
+        );
+
         association.release().await.unwrap();
         handle.await.unwrap().unwrap();
     }

@@ -293,9 +293,20 @@ fn raw_value_array(raw: &SharedBuffer, vr: Vr, _tag: &Tag) -> Result<Vec<Value>>
         _ if vr.is_string() => {
             let text = String::from_utf8_lossy(bytes);
             let text = text.trim_end_matches(['\0', ' ']).to_string();
+            if text.is_empty() {
+                return Ok(Vec::new());
+            }
+            // a zero-length component is `null`, not `""` (§12.1, PS3.18 Annex
+            // F), exactly like the Str-backed path above: dropping it would
+            // silently change the element's VM
             text.split('\\')
-                .filter(|part| !part.is_empty())
-                .map(|part| Value::String(part.to_string()))
+                .map(|part| {
+                    if part.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::String(part.to_string())
+                    }
+                })
                 .collect()
         }
         _ => bytes
@@ -836,6 +847,31 @@ mod tests {
         assert_eq!(value["00080061"]["Value"], serde_json::json!(["CT", "MR"]));
         let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
         assert_eq!(back.get_str(Tag::MODALITIES_IN_STUDY).unwrap(), "CT\\MR");
+    }
+
+    #[test]
+    fn a_byte_backed_string_keeps_its_empty_components() {
+        // The byte-backed branch used to drop zero-length components, so the
+        // same value exported as ["A","B"] (VM 2) instead of ["A",null,"B"]
+        // (VM 3) depending on how the element happened to be stored.
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::MODALITIES_IN_STUDY,
+            Vr::Cs,
+            Arc::new(MemoryBuffer::from(b"A\\\\B".to_vec())),
+        )));
+
+        let json = dataset_to_json(&ds, &JsonOptions::default()).unwrap();
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            value["00080061"]["Value"],
+            serde_json::json!(["A", null, "B"]),
+            "an empty component is null, like the Str-backed path"
+        );
+
+        // and it round-trips: null imports back as an empty component
+        let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
+        assert_eq!(back.get_str(Tag::MODALITIES_IN_STUDY).unwrap(), "A\\\\B");
     }
 
     #[test]

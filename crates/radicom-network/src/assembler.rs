@@ -24,19 +24,32 @@ pub enum Stream {
 ///
 /// A message that never completes is capped (NET-05): without a limit a peer
 /// can make the receiver buffer forever.
+///
+/// The cap is enforced twice. Per message, so a single stream cannot grow past
+/// `max_message_length`. In total, so a peer that opens many presentation
+/// contexts cannot hold one message's worth of bytes per context: without the
+/// second check the worst case was 128 contexts × 2 streams × the message limit
+/// (NET-05 follow-up).
 #[derive(Debug, Clone)]
 pub struct PdvAssembler {
     /// Half-assembled message per `(context id, stream)`.
     buffers: std::collections::HashMap<(u8, Stream), bytes::BytesMut>,
-    /// Largest single message this assembler accepts, over all streams.
+    /// Bytes currently held in `buffers`, over all streams. Kept incrementally
+    /// so the aggregate check does not walk every context per PDV.
+    buffered: usize,
+    /// Largest single message this assembler accepts.
     max_message_length: usize,
+    /// Largest total buffered across all in-flight messages.
+    max_buffered_bytes: usize,
 }
 
 impl Default for PdvAssembler {
     fn default() -> Self {
         PdvAssembler {
             buffers: std::collections::HashMap::new(),
+            buffered: 0,
             max_message_length: Self::DEFAULT_MAX_MESSAGE_LENGTH,
+            max_buffered_bytes: Self::DEFAULT_MAX_BUFFERED_BYTES,
         }
     }
 }
@@ -60,14 +73,25 @@ impl PdvAssembler {
     /// instances needs a streaming sink (docs/06-backlog.md §1, NET-13).
     pub const DEFAULT_MAX_MESSAGE_LENGTH: usize = 1 << 30;
 
+    /// Largest total buffered across all in-flight messages (2 GiB).
+    ///
+    /// Twice the single-message ceiling, so one maximum-size dataset plus an
+    /// interleaved command stream still fits, while 128 contexts of large
+    /// partial messages are refused instead of filling memory.
+    pub const DEFAULT_MAX_BUFFERED_BYTES: usize = Self::DEFAULT_MAX_MESSAGE_LENGTH * 2;
+
     pub fn new() -> Self {
         Self::default()
     }
 
     /// An assembler that rejects messages larger than `max_message_length`.
+    ///
+    /// The aggregate ceiling scales with it (twice the message limit), so a
+    /// small limit in a test also bounds the total.
     pub fn with_max_message_length(max_message_length: usize) -> Self {
         PdvAssembler {
             max_message_length,
+            max_buffered_bytes: max_message_length.saturating_mul(2),
             ..Self::default()
         }
     }
@@ -107,24 +131,41 @@ impl PdvAssembler {
         let buffered = self.buffers.get(&key).map_or(0, bytes::BytesMut::len);
         if buffered + pdv.data.len() > self.max_message_length {
             // drop the partial message: continuing would only buffer more
-            self.buffers.remove(&key);
+            self.drop_buffer(key);
             return Err(NetworkError::protocol(
                 "DIMSE message exceeds the maximum size",
             ));
         }
+        // aggregate ceiling: one message per presentation context is legal, but
+        // holding the limit in every context at once is not something a peer
+        // needs (NET-05 follow-up)
+        if self.buffered + pdv.data.len() > self.max_buffered_bytes {
+            self.drop_buffer(key);
+            return Err(NetworkError::protocol(
+                "buffered DIMSE messages exceed the maximum size",
+            ));
+        }
         let buffer = self.buffers.entry(key).or_default();
         buffer.extend_from_slice(&pdv.data);
+        self.buffered += pdv.data.len();
         if !pdv.is_last {
             return Ok(None);
         }
 
         // the message is complete: drop the buffer so idle contexts cost nothing
-        let bytes = self.buffers.remove(&key).unwrap_or_default().freeze();
+        let bytes = self.drop_buffer(key).unwrap_or_default().freeze();
         Ok(Some(MessageUnit {
             context_id: pdv.context_id,
             stream,
             bytes,
         }))
+    }
+
+    /// Removes a stream's partial buffer, keeping the aggregate counter honest.
+    fn drop_buffer(&mut self, key: (u8, Stream)) -> Option<bytes::BytesMut> {
+        let dropped = self.buffers.remove(&key)?;
+        self.buffered = self.buffered.saturating_sub(dropped.len());
+        Some(dropped)
     }
 
     /// Bytes buffered for a stream that has not completed yet, over all
@@ -740,6 +781,39 @@ mod tests {
     fn a_single_oversized_pdv_is_rejected() {
         let mut assembler = PdvAssembler::with_max_message_length(4);
         assert!(assembler.push_pdv(&pdv(1, true, true, &[0; 5])).is_err());
+    }
+
+    #[test]
+    fn buffered_bytes_are_capped_across_presentation_contexts() {
+        // NET-05 follow-up: the per-message cap alone let a peer hold one
+        // message per (context, stream) — up to 128 x 2 — so total memory was
+        // unbounded even though every single message was within the limit.
+        let mut assembler = PdvAssembler::with_max_message_length(4);
+        // two contexts each hold a 4-byte incomplete message: the aggregate
+        // ceiling is 8, so this is exactly full
+        assert!(assembler
+            .push_pdv(&pdv(1, false, false, &[0; 4]))
+            .unwrap()
+            .is_none());
+        assert!(assembler
+            .push_pdv(&pdv(2, false, false, &[0; 4]))
+            .unwrap()
+            .is_none());
+
+        let error = assembler
+            .push_pdv(&pdv(3, false, false, &[0; 1]))
+            .expect_err("a third context would exceed the total");
+        assert!(
+            error.to_string().contains("buffered DIMSE messages"),
+            "unexpected error: {error}"
+        );
+
+        // completing a message frees its bytes, so the next context fits again
+        let unit = assembler
+            .push_pdv(&pdv(1, false, true, &[]))
+            .expect("the first message completes");
+        assert!(unit.is_some());
+        assert!(assembler.push_pdv(&pdv(3, false, false, &[0; 1])).is_ok());
     }
 
     #[test]

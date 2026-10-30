@@ -177,9 +177,10 @@ impl TempFileProvider {
     /// reference. The file is *not* auto-queued for deletion; call
     /// [`delete`](Self::delete) (or `Drop` of the provider for queued paths).
     pub fn create(&self) -> Result<PathFile, Error> {
-        let name = format!("radicom-{}.tmp", uuid::Uuid::new_v4());
-        let path = self.dir.join(name);
-        fs::File::create(&path)?;
+        // `create_unique_file` never follows a pre-planted path and creates the
+        // file 0600 on Unix (CORE-17); a plain `File::create` would not.
+        let (path, file) = crate::io::temp::create_unique_file(&self.dir, "radicom", "tmp")?;
+        drop(file);
         Ok(PathFile::new(path))
     }
 

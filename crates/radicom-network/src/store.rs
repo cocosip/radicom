@@ -16,6 +16,7 @@ use crate::dimse::{status, Command, CommandField};
 use crate::error::{NetworkError, Result};
 use crate::services::{CStoreRequest, CStoreResponse};
 use radicom::io::file::DicomFile;
+use radicom::io::temp::create_unique_file;
 use radicom::model::transfer_syntax::TransferSyntax;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -90,10 +91,16 @@ impl StoreSink {
                 )))
             }
             StoreSink::SpoolToTemp => {
-                let path = temp_path();
+                // `create_unique_file` is `create_new` + a random name + 0600 on
+                // Unix, so a symlink planted in the shared temp directory is
+                // never followed and the spooled PHI is not world-readable
+                // (CORE-17, the same rule the FileWindow spill uses).
+                let (path, file) =
+                    create_unique_file(&std::env::temp_dir(), "radicom-store", "dcm")
+                        .map_err(NetworkError::Io)?;
                 // the guard removes the file on every error path below
                 let temp = TempSpool(path.clone());
-                let file = write_and_parse(&path, bytes, syntax)?;
+                let file = write_and_parse(&path, file, bytes, syntax)?;
                 // the instance is parsed from memory, so the spool file has no
                 // reader: the guard deletes it as soon as the instance is done
                 Ok(ReceivedInstance {
@@ -104,8 +111,11 @@ impl StoreSink {
             }
             StoreSink::SpoolToDir(dir) => {
                 std::fs::create_dir_all(dir).map_err(NetworkError::Io)?;
-                let path = dir.join(format!("{}.dcm", uuid_like()));
-                write_and_parse(&path, bytes, syntax).map(|file| ReceivedInstance {
+                // same rule: a random name plus `create_new` under the operator's
+                // directory, so a planted path cannot be followed
+                let (path, file) =
+                    create_unique_file(dir, "radicom-store", "dcm").map_err(NetworkError::Io)?;
+                write_and_parse(&path, file, bytes, syntax).map(|file| ReceivedInstance {
                     file,
                     path: Some(path),
                     temp: None,
@@ -115,9 +125,17 @@ impl StoreSink {
     }
 }
 
-/// Writes the dataset to `path` and opens it, removing the file on failure.
-fn write_and_parse(path: &Path, bytes: &[u8], syntax: &Arc<TransferSyntax>) -> Result<DicomFile> {
-    let mut file = std::fs::File::create(path).map_err(NetworkError::Io)?;
+/// Writes the dataset through the already-open handle, then parses it.
+///
+/// The handle comes from [`create_unique_file`], so this must not re-open the
+/// path: a second open could follow a swapped-in path and would defeat the
+/// `create_new` guarantee.
+fn write_and_parse(
+    path: &Path,
+    mut file: std::fs::File,
+    bytes: &[u8],
+    syntax: &Arc<TransferSyntax>,
+) -> Result<DicomFile> {
     file.write_all(bytes).map_err(NetworkError::Io)?;
     file.flush().map_err(NetworkError::Io)?;
     drop(file);
@@ -131,23 +149,6 @@ fn write_and_parse(path: &Path, bytes: &[u8], syntax: &Arc<TransferSyntax>) -> R
             Err(e)
         }
     }
-}
-
-/// A process-unique temporary path (no extra dependency).
-fn temp_path() -> PathBuf {
-    std::env::temp_dir().join(format!("radicom-store-{}.dcm", uuid_like()))
-}
-
-/// A cheap unique token from the clock and a counter.
-fn uuid_like() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{nanos:x}-{n:x}")
 }
 
 /// The status for a dataset that disagrees with its C-STORE command (§11.4).
@@ -298,6 +299,42 @@ mod tests {
         assert!(
             !spooled.exists(),
             "the temp spool file must not outlive the instance"
+        );
+    }
+
+    #[test]
+    fn a_spooled_instance_gets_a_private_file_with_a_fresh_name() {
+        // CORE-17: the spool used `File::create` on a clock+counter name in the
+        // shared temp directory, so a pre-planted symlink was followed and the
+        // PHI landed world-readable. It now goes through the same
+        // `create_unique_file` helper as the FileWindow spill.
+        let syntax = syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone();
+        let bytes = dataset_bytes(&syntax);
+
+        let first = StoreSink::SpoolToTemp.materialize(&bytes, &syntax).unwrap();
+        let first_path = first.temp.as_ref().expect("a temp spool file").0.clone();
+        let name = first_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert!(
+            name.starts_with("radicom-store-") && name.ends_with(".dcm"),
+            "unexpected spool name {name}"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&first_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "spooled PHI must not be world-readable");
+        }
+
+        let second = StoreSink::SpoolToTemp.materialize(&bytes, &syntax).unwrap();
+        let second_path = second.temp.as_ref().unwrap().0.clone();
+        assert_ne!(
+            first_path, second_path,
+            "two spools must never share a path"
         );
     }
 

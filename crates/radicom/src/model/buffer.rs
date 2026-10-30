@@ -543,48 +543,14 @@ impl<F: Fn() -> Vec<u8> + Send + Sync> ByteBuffer for LazyBuffer<F> {
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Mutex;
 
 /// A process-unique temp path with a non-guessable suffix.
 ///
-/// A fixed name in the shared temp directory would let another local user
-/// pre-create a symlink (the classic temp-file race); `create_temp` opens the
-/// file with `create_new` so an existing path is never followed.
-fn temp_path(tag: &str) -> PathBuf {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let seq = SEQ.fetch_add(1, AtomicOrdering::Relaxed);
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
-        ^ ((seq as u128) << 32);
-    std::env::temp_dir().join(format!(
-        "radicom-buf-{}-{seq}-{nonce:x}-{tag}.tmp",
-        std::process::id()
-    ))
-}
-
-/// Creates a fresh temp file, never following an existing path.
-///
-/// On Unix the file is created `0600` so a spilled value (possibly PHI) is not
-/// readable by other local users.
+/// The safety rules (random name, `create_new`, `0600` on Unix) live in
+/// [`crate::io::temp::create_unique_file`], which also backs the C-STORE spool.
 fn create_temp(tag: &str) -> io::Result<(PathBuf, std::fs::File)> {
-    loop {
-        let path = temp_path(tag);
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        match options.open(&path) {
-            Ok(file) => return Ok((path, file)),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        }
-    }
+    crate::io::temp::create_unique_file(&std::env::temp_dir(), &format!("radicom-buf-{tag}"), "tmp")
 }
 
 /// Deletes the temp file on drop (after the owning file handle has closed).
