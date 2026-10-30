@@ -211,7 +211,7 @@ impl GraphicType {
     }
 
     /// How many (column,row) pairs this type requires (C.18.6.1.2).
-    fn point_range(self) -> (usize, Option<usize>) {
+    pub(crate) fn point_range(self) -> (usize, Option<usize>) {
         match self {
             GraphicType::Point => (1, Some(1)),
             GraphicType::Multipoint => (1, None),
@@ -258,7 +258,7 @@ impl GraphicType3D {
     }
 
     /// How many (x,y,z) triplets this type requires (C.18.9.1.2).
-    fn point_range(self) -> (usize, Option<usize>) {
+    pub(crate) fn point_range(self) -> (usize, Option<usize>) {
         match self {
             GraphicType3D::Point => (1, Some(1)),
             GraphicType3D::Multipoint => (1, None),
@@ -336,7 +336,11 @@ fn fits_f32(value: f64) -> bool {
 }
 
 /// Checks a point count against the type's requirement.
-fn check_count(kind: &str, count: usize, (min, max): (usize, Option<usize>)) -> Result<(), Error> {
+pub(crate) fn check_count(
+    kind: &str,
+    count: usize,
+    (min, max): (usize, Option<usize>),
+) -> Result<(), Error> {
     let fits = count >= min && max.is_none_or(|max| count <= max);
     if fits {
         return Ok(());

@@ -280,6 +280,18 @@ impl FilmBox {
         self.dataset.try_get_str(tags::BORDER_DENSITY)
     }
 
+    /// Sets `(2010,0110)` Empty Image Density (Table C.13-3): the density of an
+    /// image box area on the film that contains no image. Same value forms as
+    /// [`Self::set_border_density`].
+    pub fn set_empty_image_density(&mut self, value: impl Into<String>) {
+        self.dataset
+            .insert_str(tags::EMPTY_IMAGE_DENSITY, Vr::Cs, value);
+    }
+
+    pub fn empty_image_density(&self) -> Option<String> {
+        self.dataset.try_get_str(tags::EMPTY_IMAGE_DENSITY)
+    }
+
     /// Sets `(2010,0120)` Min Density (hundredths of optical density).
     pub fn set_min_density(&mut self, value: u16) {
         self.dataset.insert_value(tags::MIN_DENSITY, value);

@@ -69,7 +69,9 @@ and the acceptance test for the day it is implemented.
   `StructuredReport`/`DicomContentItem`.
 - **Library choices:** `SpatialCoordinates3D` requires the Type 1 `ReferencedFrameOfReferenceUID` and a
   closed POLYGON (C.18.9.1.2); point counts, finite coordinates and a parseable DT are rejected at
-  construction rather than at write time.
+  construction rather than at write time. `validate` also re-checks a SCOORD/SCOORD3D item's point count
+  against its GraphicType (C.18.6.1.2/C.18.9.1.2), so a value built by hand is caught too, and a
+  GRAPHIC_DATA list with a trailing partial coordinate reads as malformed instead of being truncated.
 - **Tests:** `every_value_type_builds_and_reads_back`, `graphic_values_reject_the_wrong_point_count`,
   `a_polygon_must_close_and_a_scoord3d_needs_a_frame_of_reference`,
   `temporal_coordinates_check_their_range_type`, `graphic_and_temporal_values_survive_a_write_and_read`,
@@ -90,7 +92,8 @@ and the acceptance test for the day it is implemented.
 - **API move (breaking):** `ImageBox::min_density`/`max_density`/`set_min_density`/`set_max_density`
   were removed; Min Density and Max Density are Film Box attributes (Table C.13-3), so they now live on
   `FilmBox`. The old placement read tags a conformant SCU never sets on the image box, so the density
-  window was silently a no-op.
+  window was silently a no-op. Likewise `FilmBox::empty_image_density` now reads (2010,0110) from the
+  dataset; `render_to_image`'s `empty_density` argument is only the fallback when the attribute is absent.
 - **Tests:** `a_density_string_parses_into_the_printed_grey`,
   `border_density_paints_the_film_area_between_images`, `smoothing_type_reaches_the_rendered_cell` and
   `smoothing_applies_the_documented_filter` in `crates/radicom/src/print/render.rs`.

@@ -133,17 +133,18 @@ impl TlsOptions {
     /// the platform root store otherwise (NET-17).
     pub fn client_config(&self) -> Result<Arc<ClientConfig>> {
         let mut roots = RootCertStore::empty();
-        match &self.cert_file {
-            Some(ca) => {
-                for cert in load_certs(ca)? {
-                    roots
-                        .add(cert)
-                        .map_err(|e| NetworkError::protocol_tls(e.to_string()))?;
+        // accept_any replaces the verifier, so no anchors are needed at all
+        if !self.accept_any {
+            match &self.cert_file {
+                Some(ca) => {
+                    for cert in load_certs(ca)? {
+                        roots
+                            .add(cert)
+                            .map_err(|e| NetworkError::protocol_tls(e.to_string()))?;
+                    }
                 }
+                None => roots = load_system_roots()?,
             }
-            // accept_any replaces the verifier, so no anchors are needed
-            None if self.accept_any => {}
-            None => roots = load_system_roots()?,
         }
 
         let builder = ClientConfig::builder_with_protocol_versions(self.min_version.versions());

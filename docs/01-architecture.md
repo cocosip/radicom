@@ -394,7 +394,8 @@ client/server. One tokio task per association. Locks must not be held across `.a
 - Film Session / Film Box / Image Box / Presentation LUT are dataset-backed models.
 - Layout rendering reuses the render pipeline (BorderDensity film area, EmptyImageDensity image box
   area, Trim border, per-cell aspect-fit, Polarity REVERSE, the MinDensity/MaxDensity window and the
-  SmoothingType filter).
+  SmoothingType filter). All of these are Film Box attributes (Table C.13-3) read from the dataset; an
+  Image Box SmoothingType overrides the film value (Table C.13-5).
 - Verify every tag against PS3.3 before use: `(2010,0120)` is MinDensity, `(2010,0500)` is
   ReferencedFilmSessionSequence, and `(2010,0510)` is ReferencedImageBoxSequence.
 

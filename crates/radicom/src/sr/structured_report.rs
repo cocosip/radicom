@@ -11,7 +11,7 @@ use crate::model::dataset::Dataset;
 use crate::model::tag::Tag;
 use crate::model::vr::Vr;
 use crate::sr::code_item::CodeItem;
-use crate::sr::content_item::{tags, ContentItem, ValueType};
+use crate::sr::content_item::{check_count, tags, ContentItem, ValueType};
 use std::path::Path;
 
 /// Basic Text SR Storage, the SOP class a `StructuredReport` document is.
@@ -333,6 +333,32 @@ fn validate_item(item: &ContentItem) -> Result<(), Error> {
     if !item.has_value(value_type) {
         return Err(invalid(format!("a {name} item lacks its value tag")));
     }
+    // C.18.6.1.2 / C.18.9.1.2: the GraphicType fixes how many coordinates the
+    // value must have, so a wrong count is a conformance failure, not just a
+    // renderer's guess.
+    match value_type {
+        ValueType::Scoord => {
+            let value = item
+                .scoord_value()
+                .ok_or_else(|| invalid("a SCOORD item has malformed GraphicData".into()))?;
+            check_count(
+                "SCOORD",
+                value.points.len(),
+                value.graphic_type.point_range(),
+            )?;
+        }
+        ValueType::Scoord3D => {
+            let value = item
+                .scoord3d_value()
+                .ok_or_else(|| invalid("a SCOORD3D item has malformed GraphicData".into()))?;
+            check_count(
+                "SCOORD3D",
+                value.points.len(),
+                value.graphic_type.point_range(),
+            )?;
+        }
+        _ => {}
+    }
     let children = item.children();
     if value_type == ValueType::Container {
         match item
@@ -487,6 +513,26 @@ mod tests {
         let report = report_with(root);
         let error = report.validate().unwrap_err().to_string();
         assert!(error.contains("RelationshipType"), "got {error}");
+    }
+
+    #[test]
+    fn a_scoord_with_the_wrong_point_count_fails_validation() {
+        // a POLYLINE with two points, then relabelled POINT (which needs exactly one)
+        let item = ContentItem::scoord(
+            CodeItem::new("111030", "DCM"),
+            Relationship::Contains,
+            SpatialCoordinates::new(GraphicType::Polyline, &[(0.0, 0.0), (1.0, 1.0)]).unwrap(),
+        );
+        let mut dataset = item.into_dataset();
+        dataset.insert_str(tags::GRAPHIC_TYPE, Vr::Cs, "POINT");
+        let mut root = container();
+        root.add_child(ContentItem::from_dataset(dataset));
+        let report = report_with(root);
+        let error = report.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("points"),
+            "the point count is checked against the GraphicType, got {error}"
+        );
     }
 
     #[test]

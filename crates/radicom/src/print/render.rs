@@ -77,9 +77,10 @@ impl FilmBox {
     /// `FilmOrientation` LANDSCAPE swaps the canvas and the cell grid, the film
     /// box's `[MinDensity, MaxDensity]` window maps the rendered greys, and
     /// `SmoothingType` selects the per-cell filter (Table C.13-3/C.13-5).
-    /// `BorderDensity` paints the film areas surrounding and between images;
-    /// `empty_density` paints the image box areas that contain no image, and is
-    /// also the fallback for the film area when no BorderDensity is present.
+    /// `BorderDensity` paints the film areas surrounding and between images and
+    /// `EmptyImageDensity` paints an image box area that contains no image; both
+    /// come from the dataset first (Table C.13-3) and fall back to `empty_density`
+    /// when the attribute is absent or unknown.
     pub fn render_to_image(
         &self,
         margins: f64,
@@ -94,8 +95,15 @@ impl FilmBox {
 
         let canvas_w = ((film.width_mm * scale.pixels_per_mm).round() as u32).max(1);
         let canvas_h = ((film.height_mm * scale.pixels_per_mm).round() as u32).max(1);
+        // Table C.13-3: BorderDensity and EmptyImageDensity are both film box
+        // attributes, so the dataset wins and the argument is the fallback.
         let border = self
             .border_density()
+            .as_deref()
+            .and_then(PrintDensity::parse)
+            .unwrap_or(empty_density);
+        let empty = self
+            .empty_image_density()
             .as_deref()
             .and_then(PrintDensity::parse)
             .unwrap_or(empty_density);
@@ -116,7 +124,7 @@ impl FilmBox {
         for (index, cell) in cells.iter().enumerate() {
             // Table C.13-3: an image box area with no image is painted with the
             // empty-image density, so paint the cell before it gets an image.
-            canvas.fill_cell(cell, empty_density.background(), scale.pixels_per_mm);
+            canvas.fill_cell(cell, empty.background(), scale.pixels_per_mm);
             // PS3.3 C.11.1: ImageBoxPosition selects the cell (1-based). Fall back
             // to list order when a box omits the attribute.
             let position = (index + 1) as u16;
@@ -761,6 +769,32 @@ mod tests {
         assert_eq!(
             PrintDensity::Optical(2.5).background(),
             Color32::new(0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn the_dataset_empty_image_density_beats_the_argument() {
+        // (2010,0110) is a film box attribute, so it wins over the call argument
+        let scale = RenderScale { pixels_per_mm: 1.0 };
+        // no attribute: the argument paints the empty box
+        let arg_only = film_with_empty_box()
+            .render_to_image(10.0, scale, PrintDensity::White)
+            .unwrap();
+        assert_eq!(
+            grey_at(&arg_only, 105, 148),
+            255,
+            "argument is the fallback"
+        );
+
+        let mut film = film_with_empty_box();
+        film.set_empty_image_density("BLACK");
+        let from_dataset = film
+            .render_to_image(10.0, scale, PrintDensity::White)
+            .unwrap();
+        assert_eq!(
+            grey_at(&from_dataset, 105, 148),
+            0,
+            "the dataset value overrides the argument"
         );
     }
 
