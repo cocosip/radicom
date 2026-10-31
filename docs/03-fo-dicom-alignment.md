@@ -28,6 +28,30 @@ The 2026-10-30 review found defects behind prior DONE labels; the current repair
 [07-review-fixes-2026-10-30.md](07-review-fixes-2026-10-30.md). Concrete codecs remain excluded.
 Real external peers, print/media hardware and other operating systems need separate evidence.
 
+### Transfer syntax correction — 2026-11-01
+
+The generated UID dictionary was correct, but the separately hand-written transfer syntax table was
+not aligned with fo-dicom. The incorrect HTJ2K keys were present in the original TS implementation
+(`c6045f4`); the earlier checks exercised local flags without checking the standard wire UIDs.
+This was an implementation and review defect, not an intentional divergence or a codec-project error.
+
+The table now uses generated UID constants. HTJ2K uses `.4.201/.4.202/.4.203`, and JPIP HTJ2K uses
+`.4.204/.4.205`. `.4.108` belongs to HEVC Main 10, `.4.110` to JPEG XL Lossless, and `.7.1/.7.2` to
+SMPTE ST 2110 video; the erroneous HTJ2K assignments are not retained as aliases. The same correction
+fixes MPEG/H.264/HEVC keys and lossy methods, adds their fragmentable variants, removes invented UID
+entries, and repairs JPEG lossless/retired flags, JPIP encapsulation and GE implicit VR.
+
+The reference is fo-dicom commit
+[`d3e6b48426866fa7bf5a52414acca4898f73b6da`](https://github.com/fo-dicom/fo-dicom/tree/d3e6b48426866fa7bf5a52414acca4898f73b6da),
+`FO-DICOM.Core/DicomTransferSyntax.cs`, `DicomUIDGenerated.cs` and `DicomUIDPrivate.cs`.
+`crates/radicom/tests/fixtures/fo-dicom-transfer-syntaxes.tsv` pins its 56 registered entries, including
+their names and encoding flags; `crates/radicom/tests/transfer_syntax.rs` checks public lookup and the
+three HTJ2K constants. The existing virtual implicit big-endian syntax remains available separately.
+UIDs outside the built-in table now retain their UID registry name and retirement flag on lookup,
+so JPEG XL Lossless is no longer mislabeled as Explicit VR Little Endian.
+These metadata checks do not establish codec support or live-peer interoperability. Files previously
+written with an incorrect UID require inspection of the actual codestream before correcting metadata.
+
 A second, adversarial review on 2026-10-29 found real parity defects behind previously "DONE" claims
 (wrong functional-group tags, a missing FileMetaInformationVersion, dropped ISO 2022 designators, the
 Icon Image Sequence tag, multi-fragment single-frame data, an SR anonymization PHI leak, and several
@@ -71,6 +95,7 @@ These are deliberate, tested differences rather than missing features.
 | Area | Divergence | Why |
 |---|---|---|
 | JSON `NumberMode` default | `JsonOptions::default()` uses `PreferablyAsNumber`, not fo-dicom's `AsNumber`. An IS/DS value is written as a JSON number only when the number's own text form is identical, so `"0001"` stays a string. | fo-dicom writes `1`, which loses the stored text; `NumberMode::AsNumber` reproduces fo-dicom exactly when byte-compatible output is required. |
+| MIME/XML transfer syntax retirement | The two retired syntaxes retain `is_retired = true` from the standard UID registry. | The reference fo-dicom transfer syntax initializers omit this flag, although its UID dictionary marks both retired. |
 | Streaming C-STORE dataset | The dataset is streamed through the writer as P-DATA PDUs (one PDV per PDU) instead of one buffered `Vec<u8>`; a transcoded C-STORE still materialises its output. | Peak memory is O(max_pdu + `large_object_size` + a couple of PDUs), independent of instance size; the reassembled DIMSE message and stream bytes are identical, only the PDU framing differs. |
 | JSON `BulkDataURI` for deferred buffers | A deferred value (`FileWindow`/`StreamWindow`/`TempFileSpill`) is written as `BulkDataURI` only when `JsonOptions::bulk_data_uri` names one; otherwise it is materialised and base64-encoded. A URI parsed from JSON is still echoed unchanged. | Naming a URI means hosting the bytes somewhere, which is the caller's job; the default keeps output byte-compatible with the previous release and with fo-dicom's converter. |
 

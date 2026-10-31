@@ -3,6 +3,7 @@
 use crate::error::{DataError, Error};
 use crate::model::endian::Endian;
 use crate::model::uid::{Uid, UidType};
+use crate::uids;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -142,229 +143,344 @@ impl std::fmt::Display for TransferSyntax {
 
 // -- built-in registry (TS-01) --------------------------------------------
 
-// Helper chains keep each entry on one conceptual line.
-fn jpeg_lossy(uid: &'static str, name: &'static str) -> TransferSyntax {
-    TransferSyntax::new(uid, name)
-        .encapsulated()
-        .lossy("ISO_10918_1")
-        .retired()
-}
-
-fn jpeg_lossless(uid: &'static str, name: &'static str, retired: bool) -> TransferSyntax {
-    let ts = TransferSyntax::new(uid, name).encapsulated();
-    if retired {
-        ts.retired()
-    } else {
-        ts
-    }
-}
-
-fn video(uid: &'static str, name: &'static str, retired: bool) -> TransferSyntax {
-    let ts = TransferSyntax::new(uid, name).encapsulated();
-    if retired {
-        ts.retired()
-    } else {
-        ts
-    }
-}
-
-/// All built-in entries, in registry order. Video names for the 4D/Stereo
-/// variants are provisional until the generated name table replaces them.
+/// All built-in entries, in registry order. Standard UID keys come from the
+/// generated dictionary; encoding flags follow fo-dicom's transfer syntax table.
 pub fn builtin_entries() -> Vec<TransferSyntax> {
-    let v = vec![
-        TransferSyntax::new("1.2.840.10008.1.2", "Implicit VR Little Endian").implicit(),
-        TransferSyntax::new("1.2.840.10008.1.2.1", "Explicit VR Little Endian"),
+    vec![
         TransferSyntax::new(
-            "1.2.840.10008.1.2.1.99",
+            "1.2.840.113619.5.2",
+            "Private GE Implicit VR Big Endian",
+        )
+        .implicit()
+        .with_swap_pixel_data(),
+        TransferSyntax::new(
+            uids::IMPLICIT_VR_LITTLE_ENDIAN,
+            "Implicit VR Little Endian: Default Transfer Syntax for DICOM",
+        )
+        .implicit(),
+        TransferSyntax::new(
+            uids::EXPLICIT_VR_LITTLE_ENDIAN,
+            "Explicit VR Little Endian",
+        ),
+        TransferSyntax::new(
+            uids::EXPLICIT_VR_BIG_ENDIAN_RETIRED,
+            "Explicit VR Big Endian (Retired)",
+        )
+        .retired()
+        .big(),
+        TransferSyntax::new(
+            uids::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN,
             "Deflated Explicit VR Little Endian",
         )
         .deflate(),
-        TransferSyntax::new("1.2.840.10008.1.2.2", "Explicit VR Big Endian")
-            .big()
-            .retired(),
-        // JPEG still image family
-        TransferSyntax::new("1.2.840.10008.1.2.4.50", "JPEG Baseline (Process 1)")
-            .encapsulated()
-            .lossy("ISO_10918_1"),
-        TransferSyntax::new("1.2.840.10008.1.2.4.51", "JPEG Extended (Process 2 & 4)")
-            .encapsulated()
-            .lossy("ISO_10918_1"),
-        jpeg_lossy("1.2.840.10008.1.2.4.52", "JPEG Extended (Process 3 & 5)"),
-        jpeg_lossy(
-            "1.2.840.10008.1.2.4.53",
-            "JPEG Spectral Selection (Process 6 & 8)",
-        ),
-        jpeg_lossy(
-            "1.2.840.10008.1.2.4.54",
-            "JPEG Full Progression (Process 7 & 9)",
-        ),
-        jpeg_lossy("1.2.840.10008.1.2.4.55", "JPEG Lossless (Process 10 & 12)"),
-        jpeg_lossy("1.2.840.10008.1.2.4.56", "JPEG Extended (Process 13 & 15)"),
-        jpeg_lossless("1.2.840.10008.1.2.4.57", "JPEG Lossless (Process 14)", true),
-        jpeg_lossy("1.2.840.10008.1.2.4.58", "JPEG Extended (Process 15)"),
-        jpeg_lossy("1.2.840.10008.1.2.4.59", "JPEG Extended (Process 16 & 18)"),
-        jpeg_lossy("1.2.840.10008.1.2.4.60", "JPEG Extended (Process 17 & 19)"),
-        jpeg_lossy("1.2.840.10008.1.2.4.61", "JPEG Extended (Process 20 & 22)"),
-        jpeg_lossy("1.2.840.10008.1.2.4.62", "JPEG Extended (Process 23 & 25)"),
-        jpeg_lossy(
-            "1.2.840.10008.1.2.4.63",
-            "JPEG Spectral Selection (Process 26 & 28)",
-        ),
-        jpeg_lossy(
-            "1.2.840.10008.1.2.4.64",
-            "JPEG Full Progression (Process 29 & 31)",
-        ),
-        jpeg_lossy(
-            "1.2.840.10008.1.2.4.65",
-            "JPEG Lossless (Process 16 & 18) (Hierarchical)",
-        ),
-        jpeg_lossy(
-            "1.2.840.10008.1.2.4.66",
-            "JPEG Lossless (Process 17 & 19) (Hierarchical)",
-        ),
-        jpeg_lossy(
-            "1.2.840.10008.1.2.4.67",
-            "JPEG Lossless (Process 20 & 22) (Hierarchical)",
-        ),
-        jpeg_lossy(
-            "1.2.840.10008.1.2.4.68",
-            "JPEG Lossless (Process 23 & 25) (Hierarchical)",
-        ),
-        jpeg_lossy(
-            "1.2.840.10008.1.2.4.69",
-            "JPEG Lossless (Process 26 & 28) (Hierarchical)",
-        ),
-        jpeg_lossless(
-            "1.2.840.10008.1.2.4.70",
-            "JPEG Lossless (Process 14 Selection Value 1)",
-            false,
-        ),
-        // JPEG-LS
-        TransferSyntax::new("1.2.840.10008.1.2.4.80", "JPEG-LS Lossless").encapsulated(),
-        TransferSyntax::new("1.2.840.10008.1.2.4.81", "JPEG-LS Near Lossless")
-            .encapsulated()
-            .lossy("ISO_14495_1"),
-        // JPEG 2000
         TransferSyntax::new(
-            "1.2.840.10008.1.2.4.90",
+            uids::JPEG_BASELINE8_BIT,
+            "JPEG Baseline (Process 1): Default Transfer Syntax for Lossy JPEG 8 Bit Image Compression",
+        )
+        .encapsulated()
+        .lossy("ISO_10918_1"),
+        TransferSyntax::new(
+            uids::JPEG_EXTENDED12_BIT,
+            "JPEG Extended (Process 2 & 4): Default Transfer Syntax for Lossy JPEG 12 Bit Image Compression (Process 4 only)",
+        )
+        .encapsulated()
+        .lossy("ISO_10918_1"),
+        TransferSyntax::new(
+            uids::JPEG_EXTENDED35_RETIRED,
+            "JPEG Extended (Process 3 & 5) (Retired)",
+        )
+        .retired()
+        .encapsulated()
+        .lossy("ISO_10918_1"),
+        TransferSyntax::new(
+            uids::JPEG_SPECTRAL_SELECTION_NON_HIERARCHICAL68_RETIRED,
+            "JPEG Spectral Selection, Non-Hierarchical (Process 6 & 8) (Retired)",
+        )
+        .retired()
+        .encapsulated()
+        .lossy("ISO_10918_1"),
+        TransferSyntax::new(
+            uids::JPEG_SPECTRAL_SELECTION_NON_HIERARCHICAL79_RETIRED,
+            "JPEG Spectral Selection, Non-Hierarchical (Process 7 & 9) (Retired)",
+        )
+        .retired()
+        .encapsulated()
+        .lossy("ISO_10918_1"),
+        TransferSyntax::new(
+            uids::JPEG_FULL_PROGRESSION_NON_HIERARCHICAL1012_RETIRED,
+            "JPEG Full Progression, Non-Hierarchical (Process 10 & 12) (Retired)",
+        )
+        .retired()
+        .encapsulated()
+        .lossy("ISO_10918_1"),
+        TransferSyntax::new(
+            uids::JPEG_FULL_PROGRESSION_NON_HIERARCHICAL1113_RETIRED,
+            "JPEG Full Progression, Non-Hierarchical (Process 11 & 13) (Retired)",
+        )
+        .retired()
+        .encapsulated()
+        .lossy("ISO_10918_1"),
+        TransferSyntax::new(
+            uids::JPEG_LOSSLESS,
+            "JPEG Lossless, Non-Hierarchical (Process 14)",
+        )
+        .encapsulated(),
+        TransferSyntax::new(
+            uids::JPEG_LOSSLESS_NON_HIERARCHICAL15_RETIRED,
+            "JPEG Lossless, Non-Hierarchical (Process 15) (Retired)",
+        )
+        .retired()
+        .encapsulated(),
+        TransferSyntax::new(
+            uids::JPEG_EXTENDED_HIERARCHICAL1618_RETIRED,
+            "JPEG Extended, Hierarchical (Process 16 & 18) (Retired)",
+        )
+        .retired()
+        .encapsulated()
+        .lossy("ISO_10918_1"),
+        TransferSyntax::new(
+            uids::JPEG_EXTENDED_HIERARCHICAL1719_RETIRED,
+            "JPEG Extended, Hierarchical (Process 17 & 19) (Retired)",
+        )
+        .retired()
+        .encapsulated()
+        .lossy("ISO_10918_1"),
+        TransferSyntax::new(
+            uids::JPEG_SPECTRAL_SELECTION_HIERARCHICAL2022_RETIRED,
+            "JPEG Spectral Selection, Hierarchical (Process 20 & 22) (Retired)",
+        )
+        .retired()
+        .encapsulated()
+        .lossy("ISO_10918_1"),
+        TransferSyntax::new(
+            uids::JPEG_SPECTRAL_SELECTION_HIERARCHICAL2123_RETIRED,
+            "JPEG Spectral Selection, Hierarchical (Process 21 & 23) (Retired)",
+        )
+        .retired()
+        .encapsulated()
+        .lossy("ISO_10918_1"),
+        TransferSyntax::new(
+            uids::JPEG_FULL_PROGRESSION_HIERARCHICAL2426_RETIRED,
+            "JPEG Full Progression, Hierarchical (Process 24 & 26) (Retired)",
+        )
+        .retired()
+        .encapsulated()
+        .lossy("ISO_10918_1"),
+        TransferSyntax::new(
+            uids::JPEG_FULL_PROGRESSION_HIERARCHICAL2527_RETIRED,
+            "JPEG Full Progression, Hierarchical (Process 25 & 27) (Retired)",
+        )
+        .retired()
+        .encapsulated()
+        .lossy("ISO_10918_1"),
+        TransferSyntax::new(
+            uids::JPEG_LOSSLESS_HIERARCHICAL28_RETIRED,
+            "JPEG Lossless, Hierarchical (Process 28) (Retired)",
+        )
+        .retired()
+        .encapsulated(),
+        TransferSyntax::new(
+            uids::JPEG_LOSSLESS_HIERARCHICAL29_RETIRED,
+            "JPEG Lossless, Hierarchical (Process 29) (Retired)",
+        )
+        .retired()
+        .encapsulated(),
+        TransferSyntax::new(
+            uids::JPEG_LOSSLESS_SV1,
+            "JPEG Lossless, Non-Hierarchical, First-Order Prediction (Process 14 [Selection Value 1]): Default Transfer Syntax for Lossless JPEG Image Compression",
+        )
+        .encapsulated(),
+        TransferSyntax::new(
+            uids::JPEGLS_LOSSLESS,
+            "JPEG-LS Lossless Image Compression",
+        )
+        .encapsulated(),
+        TransferSyntax::new(
+            uids::JPEGLS_NEAR_LOSSLESS,
+            "JPEG-LS Lossy (Near-Lossless) Image Compression",
+        )
+        .encapsulated()
+        .lossy("ISO_14495_1"),
+        TransferSyntax::new(
+            uids::JPEG2000_LOSSLESS,
             "JPEG 2000 Image Compression (Lossless Only)",
         )
         .encapsulated(),
-        TransferSyntax::new("1.2.840.10008.1.2.4.91", "JPEG 2000 Image Compression")
-            .encapsulated()
-            .lossy("ISO_15444_1"),
         TransferSyntax::new(
-            "1.2.840.10008.1.2.4.92",
+            uids::JPEG2000,
+            "JPEG 2000 Image Compression",
+        )
+        .encapsulated()
+        .lossy("ISO_15444_1"),
+        TransferSyntax::new(
+            uids::JPEG2000_MC_LOSSLESS,
             "JPEG 2000 Part 2 Multi-component Image Compression (Lossless Only)",
         )
         .encapsulated(),
         TransferSyntax::new(
-            "1.2.840.10008.1.2.4.93",
+            uids::JPEG2000_MC,
             "JPEG 2000 Part 2 Multi-component Image Compression",
         )
         .encapsulated()
         .lossy("ISO_15444_2"),
-        // JPIP
-        TransferSyntax::new("1.2.840.10008.1.2.4.94", "JPIP Referenced")
-            .encapsulated()
-            .retired(),
-        TransferSyntax::new("1.2.840.10008.1.2.4.95", "JPIP Referenced (Deflate)")
-            .encapsulated()
-            .deflate()
-            .retired(),
-        // Video
-        video(
-            "1.2.840.10008.1.2.4.96",
-            "MPEG2 Main Profile @ Main Level",
-            false,
+        TransferSyntax::new(
+            uids::JPIP_REFERENCED,
+            "JPIP Referenced",
         ),
-        video(
-            "1.2.840.10008.1.2.4.97",
-            "MPEG2 Main Profile @ High Level",
-            true,
+        TransferSyntax::new(
+            uids::JPIP_REFERENCED_DEFLATE,
+            "JPIP Referenced Deflate",
+        )
+        .deflate(),
+        TransferSyntax::new(
+            uids::MPEG2_MPML,
+            "MPEG2 Main Profile / Main Level",
+        )
+        .encapsulated()
+        .lossy("ISO_13818_2"),
+        TransferSyntax::new(
+            uids::MPEG2_MPMLF,
+            "Fragmentable MPEG2 Main Profile / Main Level",
+        )
+        .encapsulated()
+        .lossy("ISO_13818_2"),
+        TransferSyntax::new(
+            uids::MPEG2_MPHL,
+            "MPEG2 Main Profile / High Level",
+        )
+        .encapsulated()
+        .lossy("ISO_13818_2"),
+        TransferSyntax::new(
+            uids::MPEG2_MPHLF,
+            "Fragmentable MPEG2 Main Profile / High Level",
+        )
+        .encapsulated()
+        .lossy("ISO_13818_2"),
+        TransferSyntax::new(
+            uids::MPEG4_HP41,
+            "MPEG-4 AVC/H.264 High Profile / Level 4.1",
+        )
+        .encapsulated()
+        .lossy("ISO_14496_10"),
+        TransferSyntax::new(
+            uids::MPEG4_HP41_F,
+            "Fragmentable MPEG-4 AVC/H.264 High Profile / Level 4.1",
+        )
+        .encapsulated()
+        .lossy("ISO_14496_10"),
+        TransferSyntax::new(
+            uids::MPEG4_HP41_BD,
+            "MPEG-4 AVC/H.264 BD-compatible High Profile / Level 4.1",
+        )
+        .encapsulated()
+        .lossy("ISO_14496_10"),
+        TransferSyntax::new(
+            uids::MPEG4_HP41_BDF,
+            "Fragmentable MPEG-4 AVC/H.264 BD-compatible High Profile / Level 4.1",
+        )
+        .encapsulated()
+        .lossy("ISO_14496_10"),
+        TransferSyntax::new(
+            uids::MPEG4_HP422_D,
+            "MPEG-4 AVC/H.264 High Profile / Level 4.2 For 2D Video",
+        )
+        .encapsulated()
+        .lossy("ISO_14496_10"),
+        TransferSyntax::new(
+            uids::MPEG4_HP422_DF,
+            "Fragmentable MPEG-4 AVC/H.264 High Profile / Level 4.2 For 2D Video",
+        )
+        .encapsulated()
+        .lossy("ISO_14496_10"),
+        TransferSyntax::new(
+            uids::MPEG4_HP423_D,
+            "MPEG-4 AVC/H.264 High Profile / Level 4.2 For 3D Video",
+        )
+        .encapsulated()
+        .lossy("ISO_14496_10"),
+        TransferSyntax::new(
+            uids::MPEG4_HP423_DF,
+            "Fragmentable MPEG-4 AVC/H.264 High Profile / Level 4.2 For 3D Video",
+        )
+        .encapsulated()
+        .lossy("ISO_14496_10"),
+        TransferSyntax::new(
+            uids::MPEG4_HP42_STEREO,
+            "MPEG-4 AVC/H.264 Stereo High Profile / Level 4.2",
+        )
+        .encapsulated()
+        .lossy("ISO_14496_10"),
+        TransferSyntax::new(
+            uids::MPEG4_HP42_STEREOF,
+            "Fragmentable MPEG-4 AVC/H.264 Stereo High Profile / Level 4.2",
+        )
+        .encapsulated()
+        .lossy("ISO_14496_10"),
+        TransferSyntax::new(
+            uids::HEVCMP51,
+            "HEVC/H.265 Main Profile / Level 5.1",
+        )
+        .encapsulated()
+        .lossy("ISO_23008_2"),
+        TransferSyntax::new(
+            uids::HEVCM10_P51,
+            "HEVC/H.265 Main 10 Profile / Level 5.1",
+        )
+        .encapsulated()
+        .lossy("ISO_23008_2"),
+        TransferSyntax::new(
+            uids::HTJ2_K_LOSSLESS,
+            "High-Throughput JPEG 2000 Image Compression (Lossless Only)",
+        )
+        .encapsulated(),
+        TransferSyntax::new(
+            uids::HTJ2_K_LOSSLESS_RPCL,
+            "High-Throughput JPEG 2000 with RPCL Options Image Compression (Lossless Only)",
+        )
+        .encapsulated(),
+        TransferSyntax::new(
+            uids::HTJ2_K,
+            "High-Throughput JPEG 2000 Image Compression",
+        )
+        .encapsulated()
+        .lossy("ISO_15444_15"),
+        TransferSyntax::new(
+            uids::JPIPHTJ2_K_REFERENCED,
+            "JPIP HTJ2K Referenced",
         ),
-        video(
-            "1.2.840.10008.1.2.4.98",
-            "MPEG4 AVC/H.264 High Profile / Level 4.1",
-            true,
-        ),
-        video(
-            "1.2.840.10008.1.2.4.99",
-            "MPEG4 AVC/H.264 BD-compatible High Profile / Level 4.1",
-            false,
-        ),
-        video(
-            "1.2.840.10008.1.2.4.100",
-            "MPEG4 AVC/H.264 High Profile / Level 4.2 For 2D Video",
-            false,
-        ),
-        video(
-            "1.2.840.10008.1.2.4.101",
-            "MPEG4 AVC/H.264 High Profile / Level 4.2 For 3D Video",
-            false,
-        ),
-        video(
-            "1.2.840.10008.1.2.4.102",
-            "MPEG4 AVC/H.264 Stereo High Profile / Level 4.2",
-            false,
-        ),
-        video(
-            "1.2.840.10008.1.2.4.103",
-            "HEVC/H.265 Main Profile @ Level 5.1",
-            false,
-        ),
-        video(
-            "1.2.840.10008.1.2.4.104",
-            "HEVC/H.265 Main 10 Profile @ Level 5.1",
-            false,
-        ),
-        video(
-            "1.2.840.10008.1.2.4.105",
-            "HEVC/H.265 Main Profile @ Level 5.1 for 4D Video",
-            false,
-        ),
-        video(
-            "1.2.840.10008.1.2.4.106",
-            "HEVC/H.265 Main 10 Profile @ Level 5.1 for 4D Video",
-            false,
-        ),
-        video(
-            "1.2.840.10008.1.2.4.107",
-            "HEVC/H.265 Main Profile @ Level 5.1 for 3D Video",
-            false,
-        ),
-        // HTJ2K
-        TransferSyntax::new("1.2.840.10008.1.2.4.108", "HTJ2K Lossless").encapsulated(),
-        TransferSyntax::new("1.2.840.10008.1.2.4.109", "HTJ2K Lossless RPCL").encapsulated(),
-        TransferSyntax::new("1.2.840.10008.1.2.4.110", "HTJ2K (Lossy)")
-            .encapsulated()
-            .lossy("ISO_15444_15"),
-        // Other
-        TransferSyntax::new("1.2.840.10008.1.2.5", "RLE Lossless").encapsulated(),
-        TransferSyntax::new("1.2.840.10008.1.2.6.1", "RFC 2557 MIME encapsulation")
-            .encapsulated()
-            .retired(),
-        TransferSyntax::new("1.2.840.10008.1.2.6.2", "XML Encoding")
-            .encapsulated()
-            .retired(),
-        TransferSyntax::new("1.2.840.10008.1.2.7.1", "JPIP HTJ2K Referenced")
-            .encapsulated()
-            .retired(),
-        TransferSyntax::new("1.2.840.10008.1.2.7.2", "JPIP HTJ2K Referenced (Deflate)")
-            .encapsulated()
-            .deflate()
-            .retired(),
-        TransferSyntax::new("1.2.840.10008.1.20", "Papyrus 3 Implicit VR Little Endian")
-            .implicit()
-            .retired(),
-        // Virtual syntaxes (TS-03): not part of the standard registry
-        TransferSyntax::new("1.2.840.10008.1.2.2.123456", "Implicit VR Big Endian")
-            .implicit()
-            .big(),
-        TransferSyntax::new("1.2.840.113619.5.2", "GE Private Implicit VR Big Endian")
-            .with_swap_pixel_data(),
-    ];
-    v
+        TransferSyntax::new(
+            uids::JPIPHTJ2_K_REFERENCED_DEFLATE,
+            "JPIP HTJ2K Referenced Deflate",
+        )
+        .deflate(),
+        TransferSyntax::new(
+            uids::RLE_LOSSLESS,
+            "RLE Lossless",
+        )
+        .encapsulated(),
+        TransferSyntax::new(
+            uids::RFC2557_MIME_ENCAPSULATION_RETIRED,
+            "RFC 2557 MIME encapsulation (Retired)",
+        )
+        .retired(),
+        TransferSyntax::new(
+            uids::XML_ENCODING_RETIRED,
+            "XML Encoding (Retired)",
+        )
+        .retired(),
+        TransferSyntax::new(
+            uids::PAPYRUS3_IMPLICIT_VR_LITTLE_ENDIAN_RETIRED,
+            "Papyrus 3 Implicit VR Little Endian (Retired)",
+        )
+        .retired()
+        .implicit(),
+        TransferSyntax::new(
+            "1.2.840.10008.1.2.2.123456",
+            "Implicit VR Big Endian",
+        )
+        .implicit()
+        .big(),
+    ]
 }
 
 static ENTRIES: Lazy<HashMap<Arc<str>, Arc<TransferSyntax>>> = Lazy::new(|| {
@@ -381,32 +497,36 @@ static EXTENSIONS: Lazy<RwLock<HashMap<Arc<str>, Arc<TransferSyntax>>>> =
 /// Well-known built-in syntaxes as lazily resolved constants.
 pub mod syntaxes {
     use super::{TransferSyntax, ENTRIES};
+    use crate::uids;
     use once_cell::sync::Lazy;
     use std::sync::Arc;
 
     macro_rules! ts_const {
-        ($name:ident, $uid:literal) => {
+        ($name:ident, $uid:expr) => {
             pub static $name: Lazy<Arc<TransferSyntax>> =
                 Lazy::new(|| ENTRIES.get($uid).cloned().expect("built-in entry"));
         };
     }
 
-    ts_const!(IMPLICIT_VR_LITTLE_ENDIAN, "1.2.840.10008.1.2");
-    ts_const!(EXPLICIT_VR_LITTLE_ENDIAN, "1.2.840.10008.1.2.1");
-    ts_const!(DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN, "1.2.840.10008.1.2.1.99");
-    ts_const!(EXPLICIT_VR_BIG_ENDIAN, "1.2.840.10008.1.2.2");
-    ts_const!(JPEG_PROCESS_1, "1.2.840.10008.1.2.4.50");
-    ts_const!(JPEG_PROCESS_2_4, "1.2.840.10008.1.2.4.51");
-    ts_const!(JPEG_LOSSLESS_PROCESS_14, "1.2.840.10008.1.2.4.57");
-    ts_const!(JPEG_LOSSLESS_PROCESS_14_SV1, "1.2.840.10008.1.2.4.70");
-    ts_const!(JPEG_LS_LOSSLESS, "1.2.840.10008.1.2.4.80");
-    ts_const!(JPEG_LS_NEAR_LOSSLESS, "1.2.840.10008.1.2.4.81");
-    ts_const!(JPEG_2000_LOSSLESS, "1.2.840.10008.1.2.4.90");
-    ts_const!(JPEG_2000_LOSSY, "1.2.840.10008.1.2.4.91");
-    ts_const!(HTJ2K_LOSSLESS, "1.2.840.10008.1.2.4.108");
-    ts_const!(HTJ2K_LOSSLESS_RPCL, "1.2.840.10008.1.2.4.109");
-    ts_const!(HTJ2K_LOSSY, "1.2.840.10008.1.2.4.110");
-    ts_const!(RLE_LOSSLESS, "1.2.840.10008.1.2.5");
+    ts_const!(IMPLICIT_VR_LITTLE_ENDIAN, uids::IMPLICIT_VR_LITTLE_ENDIAN);
+    ts_const!(EXPLICIT_VR_LITTLE_ENDIAN, uids::EXPLICIT_VR_LITTLE_ENDIAN);
+    ts_const!(
+        DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN,
+        uids::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN
+    );
+    ts_const!(EXPLICIT_VR_BIG_ENDIAN, uids::EXPLICIT_VR_BIG_ENDIAN_RETIRED);
+    ts_const!(JPEG_PROCESS_1, uids::JPEG_BASELINE8_BIT);
+    ts_const!(JPEG_PROCESS_2_4, uids::JPEG_EXTENDED12_BIT);
+    ts_const!(JPEG_LOSSLESS_PROCESS_14, uids::JPEG_LOSSLESS);
+    ts_const!(JPEG_LOSSLESS_PROCESS_14_SV1, uids::JPEG_LOSSLESS_SV1);
+    ts_const!(JPEG_LS_LOSSLESS, uids::JPEGLS_LOSSLESS);
+    ts_const!(JPEG_LS_NEAR_LOSSLESS, uids::JPEGLS_NEAR_LOSSLESS);
+    ts_const!(JPEG_2000_LOSSLESS, uids::JPEG2000_LOSSLESS);
+    ts_const!(JPEG_2000_LOSSY, uids::JPEG2000);
+    ts_const!(HTJ2K_LOSSLESS, uids::HTJ2_K_LOSSLESS);
+    ts_const!(HTJ2K_LOSSLESS_RPCL, uids::HTJ2_K_LOSSLESS_RPCL);
+    ts_const!(HTJ2K_LOSSY, uids::HTJ2_K);
+    ts_const!(RLE_LOSSLESS, uids::RLE_LOSSLESS);
     ts_const!(IMPLICIT_VR_BIG_ENDIAN, "1.2.840.10008.1.2.2.123456");
     ts_const!(GE_PRIVATE_IMPLICIT_VR_BIG_ENDIAN, "1.2.840.113619.5.2");
 }
@@ -429,10 +549,12 @@ pub fn lookup(uid: &Uid) -> Result<Arc<TransferSyntax>, Error> {
         return Ok(ts.clone());
     }
     if uid.uid_type() == UidType::TransferSyntax {
-        let ts =
-            TransferSyntax::new("1.2.840.10008.1.2.1", "Explicit VR Little Endian").encapsulated();
+        let ts = TransferSyntax::new(uids::EXPLICIT_VR_LITTLE_ENDIAN, "Explicit VR Little Endian")
+            .encapsulated();
         let ts = Arc::new(TransferSyntax {
             uid: Arc::from(uid.value()),
+            name: Arc::from(uid.name().unwrap_or("Unknown Transfer Syntax")),
+            is_retired: uid.is_retired(),
             ..ts
         });
         return Ok(ts);
@@ -524,14 +646,12 @@ mod tests {
         let jls_lossless = JPEG_LS_LOSSLESS.clone();
         assert!(!jls_lossless.is_lossy());
 
-        let mpeg = query("1.2.840.10008.1.2.4.96").unwrap();
-        assert!(
-            mpeg.is_encapsulated() && !mpeg.is_lossy(),
-            "video is encapsulated, not flagged lossy"
-        );
+        let mpeg = query("1.2.840.10008.1.2.4.100").unwrap();
+        assert!(mpeg.is_encapsulated() && mpeg.is_lossy());
+        assert_eq!(mpeg.lossy_compression_method(), Some("ISO_13818_2"));
 
         let jpip = query("1.2.840.10008.1.2.4.95").unwrap();
-        assert!(jpip.is_deflate() && jpip.is_retired());
+        assert!(jpip.is_deflate() && !jpip.is_retired() && !jpip.is_encapsulated());
     }
 
     #[test]
@@ -546,10 +666,7 @@ mod tests {
 
         let ge = GE_PRIVATE_IMPLICIT_VR_BIG_ENDIAN.clone();
         assert!(ge.swap_pixel_data());
-        assert!(
-            ge.is_explicit_vr() && ge.endian() == Endian::Little,
-            "LE syntax with pixel swap"
-        );
+        assert!(!ge.is_explicit_vr() && ge.endian() == Endian::Little);
     }
 
     #[test]
