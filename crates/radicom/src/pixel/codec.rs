@@ -37,6 +37,8 @@ pub struct JpegParams {
     pub sample_factor: SampleFactor,
     pub predictor: u32,
     pub point_transform: u32,
+    /// Restart interval in MCUs (T.81 DRI); `0` emits no DRI and no `RSTm`.
+    pub restart_interval: u16,
 }
 
 impl Default for JpegParams {
@@ -48,6 +50,7 @@ impl Default for JpegParams {
             sample_factor: SampleFactor::Full,
             predictor: 1,
             point_transform: 0,
+            restart_interval: 0,
         }
     }
 }
@@ -127,6 +130,8 @@ pub struct JpegLsParams {
     pub color_transformation: u32,
     pub preset_coding_params: u32,
     pub reset_contexts: bool,
+    /// Restart interval in MCUs (T.87 DRI); `0` emits no DRI and no `RSTm`.
+    pub restart_interval: u16,
 }
 
 /// Codec parameters, one variant per codec family.

@@ -472,7 +472,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "radicom"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -491,11 +491,11 @@ dependencies = [
 
 [[package]]
 name = "radicom-dict"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "radicom-json"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "quick-xml",
@@ -507,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "radicom-network"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",

@@ -8,7 +8,7 @@ license-file.workspace = true
 repository.workspace = true
 
 [dependencies]
-radicom = { path = "../radicom", version = "0.1.0" }
+radicom = { path = "../radicom", version = "0.2.0" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
