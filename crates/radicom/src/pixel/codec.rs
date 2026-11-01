@@ -97,6 +97,9 @@ pub struct HtJ2kParams {
     pub employ_color_transform: bool,
     pub progression_order: ProgressionOrder,
     pub insert_tlm_markers: bool,
+    /// Irreversible quality, 1 (lowest) to 100 (highest); 0 selects the
+    /// encoder's default step table.
+    pub quality: u32,
 }
 
 impl Default for HtJ2kParams {
@@ -107,6 +110,7 @@ impl Default for HtJ2kParams {
             employ_color_transform: false,
             progression_order: ProgressionOrder::Lrcp,
             insert_tlm_markers: false,
+            quality: 0,
         }
     }
 }
