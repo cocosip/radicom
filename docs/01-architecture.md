@@ -1,6 +1,6 @@
 # Architecture and Core Contracts
 
-> Current correction and evidence ledger: [07-review-fixes-2026-10-30.md](07-review-fixes-2026-10-30.md).
+> Current defect and fix evidence: [05-code-review-2026-11-02.md](05-code-review-2026-11-02.md).
 > Earlier DONE / coverage statements describe an earlier checkpoint, not proof of complete parity.
 
 > This is the **only design reference** when changing code. It records the invariants and design
@@ -250,8 +250,10 @@ Changing it breaks `radicom-codecs`.
   are the frozen boundary that `radicom-codecs` implements.
 - `Transcoder` selects a codec from the registry by transfer syntax. When none is registered it returns
   `Error::Codec`; it must **never fall back to pretending success**.
-- Frame-size math must handle 1-bit packing (`rows * ceil(columns / 8)`), YBR 4:2:2 and 4:2:0 chroma
-  subsampling, and multi-frame slicing. A zero-sized frame is an error, not an empty success.
+- Frame-size math must handle 1-bit packing, YBR 4:2:2 and 4:2:0 chroma subsampling, and multi-frame
+  slicing. Single-bit samples pack **continuously** across row boundaries (PS3.5 Annex D), so one frame
+  is `ceil(rows * columns * samples / 8)` bytes — not `rows * ceil(columns / 8)`. A zero-sized frame is
+  an error, not an empty success.
 
 ### 9.2 Photometric interpretation and LUTs
 
@@ -270,9 +272,12 @@ Changing it breaks `radicom-codecs`.
 ## 10. Rendering (REND-01..11)
 
 - Entry points are `render_frame(&Dataset, frame)` and `DicomImage`, both producing `RawImage`.
-- `GrayscaleRenderOptions` decides where the window comes from, in priority order: explicit values →
-  dataset window tags → per-frame functional group `(0028,9132)` → VOI LUT sequence → smallest/largest
-  pixel value → histogram → min/max.
+- `GrayscaleRenderOptions` decides where the window comes from, matching fo-dicom `FromDataset`: an
+  explicit `from_window_level` choice wins; otherwise a VOI LUT Sequence `(0028,3010)`, when usable,
+  takes precedence (its own window is then unused); else top-level Window Center/Width, then the
+  per-frame functional-group window `(0028,9132)`, then Smallest/Largest Image Pixel Value, then a
+  decoded-frame min/max. `from_histogram` and `from_bit_range` are explicit factories, not part of the
+  dataset chain.
 - Stored values must be normalised to the low `bits_stored` bits (drop high-bit padding) **before**
   windowing. Every raw-pixel reader — grayscale, RGB, YBR, palette, MPR, icon — must do this; skipping it
   is how 12-bit-in-16 data renders wrong.
