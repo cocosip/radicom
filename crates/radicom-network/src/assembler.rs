@@ -70,7 +70,8 @@ impl PdvAssembler {
     /// A message is buffered whole before it is dispatched, so this is also the
     /// ceiling on one C-STORE dataset: an instance above it is refused with a
     /// protocol error rather than streamed to the sink. Receiving multi-GB
-    /// instances needs a streaming sink (docs/06-backlog.md §1, NET-13).
+    /// instances needs a streaming sink (NET-13; see
+    /// `docs/03-fo-dicom-alignment.md` "Known limits").
     pub const DEFAULT_MAX_MESSAGE_LENGTH: usize = 1 << 30;
 
     /// Largest total buffered across all in-flight messages (2 GiB).

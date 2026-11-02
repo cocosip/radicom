@@ -284,20 +284,29 @@ fn sharpen(image: &mut RawImage) {
 }
 
 /// Maps the rendered greys into the film box's density window (PS3.3
-/// C.13.3.2). Densities are hundredths of optical density, so `[0, 500]` spans
-/// the 8-bit output range: the defaults are an identity mapping. An explicit
-/// window compresses the greys into `[min, max]`, e.g. `[0, 250]` halves every
-/// byte.
+/// C.13.3.2), using the same optical-density convention as
+/// [`PrintDensity::background`]: a dark pixel (grey 0) prints at the **max**
+/// density and a bright pixel (grey 255) at the **min** density, and density is
+/// converted to grey on the shared `0..=2` OD scale (`255 * (1 - od / 2)`).
+///
+/// `MinDensity` / `MaxDensity` are hundredths of optical density; the defaults
+/// `0..200` (0..2 OD) are therefore an identity mapping. A window such as
+/// `[0, 250]` sets a 2.5-OD maximum, which darkens midtones while leaving white
+/// at white and clipping the darkest pixels — the old map instead darkened white
+/// (255) to mid-grey.
 fn apply_density_range(image: &mut RawImage, min: Option<u16>, max: Option<u16>) {
-    let min = min.unwrap_or(0) as f64;
-    let max = max.unwrap_or(500) as f64;
-    if max <= min {
+    let min_od = min.unwrap_or(0) as f64 / 100.0;
+    let max_od = max.unwrap_or(200) as f64 / 100.0;
+    if max_od <= min_od {
         return;
     }
     for px in image.as_bytes_mut().as_chunks_mut::<4>().0 {
         for channel in &mut px[..3] {
-            let density = min + (*channel as f64 / 255.0) * (max - min);
-            *channel = (density * 255.0 / 500.0).round().clamp(0.0, 255.0) as u8;
+            // grey 0 (black) -> max density, grey 255 (white) -> min density
+            let grey = *channel as f64 / 255.0;
+            let density = max_od - grey * (max_od - min_od);
+            let level = 255.0 * (1.0 - density.clamp(0.0, 2.0) / 2.0);
+            *channel = level.round().clamp(0.0, 255.0) as u8;
         }
     }
 }
@@ -628,30 +637,37 @@ mod tests {
     }
 
     #[test]
-    fn min_and_max_density_map_the_rendered_greys() {
-        // identity when absent: 0..500 spans the 8-bit output
+    fn min_and_max_density_keep_the_od_polarity() {
+        // identity when absent: the default window 0..200 (0..2 OD) is identity
+        let scale = RenderScale { pixels_per_mm: 1.0 };
         let plain = film_with_one_box("", 128)
-            .render_to_image(
-                10.0,
-                RenderScale { pixels_per_mm: 1.0 },
-                PrintDensity::Black,
-            )
+            .render_to_image(10.0, scale, PrintDensity::Black)
             .unwrap();
         assert_eq!(grey_at(&plain, 105, 148), 128);
 
-        // [0, 250] compresses: 128/255 * 250 = 125.5 hundredths → 64/255 byte
-        let compressed = film_with_densities(0, 250)
-            .render_to_image(
-                10.0,
-                RenderScale { pixels_per_mm: 1.0 },
-                PrintDensity::Black,
-            )
+        // MaxDensity = 250 (2.5 OD): white keeps its brightness, black stays at
+        // the maximum density. The old map darkened white to mid-grey (127).
+        let mut white_film = film_with_one_box("", 255);
+        white_film.set_min_density(0);
+        white_film.set_max_density(250);
+        let white = white_film
+            .render_to_image(10.0, scale, PrintDensity::Black)
             .unwrap();
-        assert_eq!(
-            grey_at(&compressed, 105, 148),
-            64,
-            "the density window changes the output values"
-        );
+        assert_eq!(grey_at(&white, 105, 148), 255, "white stays white");
+
+        let mut black_film = film_with_one_box("", 0);
+        black_film.set_min_density(0);
+        black_film.set_max_density(250);
+        let black = black_film
+            .render_to_image(10.0, scale, PrintDensity::Black)
+            .unwrap();
+        assert_eq!(grey_at(&black, 105, 148), 0, "black stays black");
+
+        // a midtone is darkened by the 2.5-OD cap (density 1.245 -> ~96)
+        let mid = film_with_densities(0, 250)
+            .render_to_image(10.0, scale, PrintDensity::Black)
+            .unwrap();
+        assert_eq!(grey_at(&mid, 105, 148), 96);
     }
 
     #[test]

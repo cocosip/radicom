@@ -1208,4 +1208,46 @@ mod tests {
             "slot 0x0010 and 0x0011 stay distinct"
         );
     }
+
+    #[test]
+    fn cp246_large_inner_length_is_not_mistaken_for_a_vr() {
+        // IO-04: CP-246 content is Implicit VR LE. A large inner element whose
+        // 32-bit length bytes happen to spell a VR (0x4E50 = 50 4E = "PN") must
+        // still be parsed implicitly; leaving explicit_vr=true mis-reads it.
+        use crate::model::transfer_syntax::syntaxes;
+        let vlen = 0x4E50usize;
+        let mut inner = Vec::new();
+        inner.extend_from_slice(&0x0010u16.to_le_bytes());
+        inner.extend_from_slice(&0x0020u16.to_le_bytes());
+        inner.extend_from_slice(&(vlen as u32).to_le_bytes());
+        inner.extend_from_slice(&vec![b'A'; vlen]);
+
+        let mut bytes = Vec::new();
+        // (0008,2112) UN, undefined length, Big Endian header
+        bytes.extend_from_slice(&0x0008u16.to_be_bytes());
+        bytes.extend_from_slice(&0x2112u16.to_be_bytes());
+        bytes.extend_from_slice(b"UN");
+        bytes.extend_from_slice(&[0, 0]);
+        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+        // item header/body in little endian
+        bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        bytes.extend_from_slice(&0xE000u16.to_le_bytes());
+        bytes.extend_from_slice(&(inner.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&inner);
+        // sequence delimiter, little endian
+        bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        bytes.extend_from_slice(&0xE0DDu16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+
+        let ds = parse(&bytes, &syntaxes::EXPLICIT_VR_BIG_ENDIAN.clone());
+        let seq = ds
+            .get_sequence(Tag::SOURCE_IMAGE_SEQUENCE)
+            .expect("CP-246 sequence");
+        assert_eq!(seq.len(), 1);
+        assert_eq!(
+            seq.items()[0].get_str(Tag::PATIENT_ID).unwrap().len(),
+            vlen,
+            "the implicit inner value was read with its real length"
+        );
+    }
 }

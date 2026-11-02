@@ -300,7 +300,9 @@ impl Command {
         if self.field.writes_priority() {
             insert_us(&mut ds, tag::PRIORITY, self.priority.code());
         }
-        if self.no_dataset {
+        // C-CANCEL-RQ never carries a dataset and must report 0101H here
+        // (PS3.7 §9.3.2.3 Table 9.3-5); force it regardless of `no_dataset`.
+        if self.no_dataset || self.field == CommandField::CCancelRq {
             insert_us(&mut ds, tag::COMMAND_DATA_SET_TYPE, NO_DATA_SET);
         } else {
             // 0x0001 = "dataset follows, not UID-addressed"
@@ -889,6 +891,12 @@ mod tests {
         assert_eq!(
             element_value(&bytes, 0x0000, 0x0120),
             Some(7u16.to_le_bytes().to_vec())
+        );
+        // PS3.7 §9.3.2.3 Table 9.3-5: C-CANCEL-RQ is always 0101H (no dataset)
+        assert_eq!(
+            element_value(&bytes, 0x0000, 0x0800),
+            Some(NO_DATA_SET.to_le_bytes().to_vec()),
+            "C-CANCEL-RQ Command Data Set Type must be 0101H"
         );
     }
 

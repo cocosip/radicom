@@ -96,11 +96,21 @@ impl LutTable {
             .unwrap_or(Vr::Ow);
 
         let mut out = Vec::with_capacity(count);
-        if data.len() == count {
-            // 8-bit entries (one byte each) carry the value directly
-            out.extend(data[..count].iter().map(|b| *b as i32));
+        if bits == 8 {
+            // 8-bit entries: one byte per entry when byte-packed, otherwise the
+            // low byte of a 16-bit word. Choose by the descriptor, not by length
+            // (PR-12).
+            if data.len() == count {
+                out.extend(data[..count].iter().map(|b| *b as i32));
+            } else if data.len() >= count * 2 {
+                for i in 0..count {
+                    out.push(data[i * 2] as i32);
+                }
+            } else {
+                return None;
+            }
         } else {
-            // two bytes per entry (US/OW/SS); an SS table keeps its sign
+            // 16-bit entries (US/OW/SS); an SS table keeps its sign.
             if data.len() < count * 2 {
                 // fo-dicom: "Number of entries in VOI LUT Sequence do not match"
                 return None;
@@ -126,7 +136,9 @@ impl LutTable {
         if self.entries.is_empty() {
             return None;
         }
-        let index = value.round() as i64 - self.first_mapped as i64;
+        // Truncate toward zero, matching fo-dicom `VOISequenceLUT` and pydicom
+        // `apply_voi`, which cast `(int)(value - first_mapped)` (PR-05).
+        let index = value.trunc() as i64 - self.first_mapped as i64;
         let clamped = index.clamp(0, self.entries.len() as i64 - 1) as usize;
         Some(self.entries[clamped])
     }
@@ -271,6 +283,9 @@ impl GrayscaleRenderOptions {
         voi_lut: Option<Arc<VoiLut>>,
         modality_lut: Option<Arc<ModalityLut>>,
     ) -> Result<Self, Error> {
+        // Fall back to a per-frame (0028,9132) VOI LUT when no top-level
+        // (0028,3010) table was supplied (enhanced multi-frame, PR-NV-1).
+        let voi_lut = voi_lut.or_else(|| functional_voi_lut(dataset, frame));
         let rescale_intercept = dataset
             .try_get::<String>(Tag::RESCALE_INTERCEPT)
             .and_then(|s| s.trim().parse().ok())
@@ -374,12 +389,22 @@ impl GrayscaleRenderOptions {
 
         let start = histogram.window_start() as f64;
         let end = histogram.window_end() as f64;
-        let center = (start + end) / 2.0;
-        let width = (end - start).max(1.0);
 
-        // Same modality/invert rules as from_dataset, but the window is explicit.
-        let mut base = GrayscaleRenderOptions::from_window_level(center, width);
+        // The histogram lives in the stored-value domain, but the window is
+        // applied after rescale/modality LUT in `map`. Map both bounds through
+        // the same modality stage before deriving center/width (PR-03; matches
+        // fo-dicom `FromHistogram`, which scales WindowStart/End by slope).
+        let mut base = GrayscaleRenderOptions::from_window_level(0.0, 1.0);
         base.apply_dataset_modality_and_invert(dataset);
+        let (min, max) = match &base.modality_lut {
+            Some(lut) => (lut.map(start), lut.map(end)),
+            None => (
+                start * base.rescale_slope + base.rescale_intercept,
+                end * base.rescale_slope + base.rescale_intercept,
+            ),
+        };
+        base.window_center = (min + max) / 2.0;
+        base.window_width = (max - min).abs().max(1.0);
         Ok(base)
     }
 
@@ -407,6 +432,21 @@ impl GrayscaleRenderOptions {
             Some((lo, hi)) => (lo, hi),
             None => return Err(unsupported("frame has no non-padding samples")),
         };
+        // Clamp to the declared stored-value range before rescaling (fo-dicom
+        // `FromMinMax` clamps to BitDepth.Minimum/MaximumValue; PR-07).
+        let pixel = PixelDataRef::from_dataset(dataset)?;
+        let allocated = pixel.bits_allocated()?;
+        let stored_bits = match pixel.bits_stored() {
+            0 => allocated,
+            stored => stored.min(allocated),
+        };
+        let depth = BitDepth::new(
+            allocated,
+            stored_bits,
+            pixel.high_bit(),
+            pixel.pixel_representation() != 0,
+        );
+        let (min, max) = clamp_min_max_to_depth(min, max, &depth);
         // map through the modality LUT when present (docs: values mapped first)
         let (min, max) = match &base.modality_lut {
             Some(lut) => (lut.map(min), lut.map(max)),
@@ -416,7 +456,7 @@ impl GrayscaleRenderOptions {
             ),
         };
         base.window_center = (min + max) / 2.0;
-        base.window_width = (max - min).max(1.0);
+        base.window_width = (max - min).abs().max(1.0);
         Ok(base)
     }
 
@@ -454,9 +494,20 @@ impl GrayscaleRenderOptions {
         let signed = pixel.pixel_representation() != 0;
         let depth = BitDepth::new(pixel.bits_allocated()?, bits, pixel.high_bit(), signed);
         let (min, max) = (depth.min_value() as f64, depth.max_value() as f64);
-        let mut base =
-            GrayscaleRenderOptions::from_window_level((min + max) / 2.0, (max - min).max(1.0));
+        // Map the stored bit-range bounds through the modality stage before
+        // deriving the window; `map` applies rescale before windowing (PR-04;
+        // fo-dicom `FromBitRange` does `bits.MinimumValue*slope+intercept`).
+        let mut base = GrayscaleRenderOptions::from_window_level(0.0, 1.0);
         base.apply_dataset_modality_and_invert(dataset);
+        let (min, max) = match &base.modality_lut {
+            Some(lut) => (lut.map(min), lut.map(max)),
+            None => (
+                min * base.rescale_slope + base.rescale_intercept,
+                max * base.rescale_slope + base.rescale_intercept,
+            ),
+        };
+        base.window_center = (min + max) / 2.0;
+        base.window_width = (max - min).abs().max(1.0);
         Ok(base)
     }
 
@@ -593,6 +644,23 @@ impl GrayscaleRenderOptions {
     }
 }
 
+/// Parses a per-frame `(0028,9132)` Frame VOI LUT Sequence item from the
+/// flattened functional groups (enhanced multi-frame). Each item carries its own
+/// `(0028,3002)` LUT Descriptor + `(0028,3006)` LUT Data.
+fn functional_voi_lut(dataset: &Dataset, frame: u32) -> Option<Arc<VoiLut>> {
+    let groups = dataset.functional_groups(frame).ok()?;
+    let frame_voi = groups.try_get_sequence(Tag::FRAME_VOILUT_SEQUENCE)?;
+    let item = frame_voi.items().first()?;
+    // The per-frame item usually carries WC/WW/VOILUTFunction and may nest the
+    // actual (0028,3010) VOI LUT Sequence; prefer the nested LUT, else treat the
+    // item itself as the LUT item.
+    let lut_item = item
+        .try_get_sequence(Tag::VOILUT_SEQUENCE)
+        .and_then(|sequence| sequence.items().first())
+        .unwrap_or(item);
+    VoiLut::from_item(lut_item).map(Arc::new)
+}
+
 /// Parses the first `(0028,3010)` VOI LUT item into a shared table, if usable.
 fn parse_voi_lut(dataset: &Dataset) -> Option<Arc<VoiLut>> {
     dataset
@@ -647,6 +715,15 @@ fn is_xa_xrf(dataset: &Dataset) -> bool {
         .unwrap_or(false)
 }
 
+/// Clamps a stored-value range to the `BitDepth` representable range (fo-dicom
+/// `FromMinMax` does the same before applying rescale; PR-07).
+fn clamp_min_max_to_depth(min: f64, max: f64, depth: &BitDepth) -> (f64, f64) {
+    (
+        min.max(depth.min_value() as f64),
+        max.min(depth.max_value() as f64),
+    )
+}
+
 /// Resolves the top-level WindowCenter/WindowWidth pair (docs §4 priority 1).
 ///
 /// The per-frame functional-group window is resolved separately in
@@ -655,6 +732,12 @@ fn is_xa_xrf(dataset: &Dataset) -> bool {
 fn window_from_window_level(dataset: &Dataset) -> Option<(f64, f64)> {
     let center = first_number(dataset, Tag::WINDOW_CENTER)?;
     let width = first_number(dataset, Tag::WINDOW_WIDTH)?;
+    // fo-dicom `FromDataset` only uses a top-level window when `WindowWidth >= 1.0`;
+    // a smaller width falls through to the functional/smallest-largest/min-max
+    // sources (PR-10).
+    if !(width.is_finite() && width >= 1.0) {
+        return None;
+    }
     Some((center, width))
 }
 
@@ -2772,6 +2855,46 @@ mod tests {
     }
 
     #[test]
+    fn per_frame_voi_lut_sequence_is_used_when_top_level_absent() {
+        // PR-NV-1: an enhanced multi-frame per-frame (0028,9132) item can nest
+        // its own (0028,3010) VOI LUT Sequence; it must drive the VOI stage.
+        let mut ds = gray_image(1, 1, 8, &[1], None, None);
+        {
+            let per = ds.insert_sequence(crate::model::dataset::PER_FRAME_FUNCTIONAL_GROUPS);
+            let mut fg = Dataset::new();
+            let mut lut_item = Dataset::new();
+            let mut desc = Vec::new();
+            desc.extend_from_slice(&2u16.to_le_bytes()); // 2 entries
+            desc.extend_from_slice(&0u16.to_le_bytes()); // first mapped 0
+            desc.extend_from_slice(&8u16.to_le_bytes()); // 8 bits per entry
+            lut_item.insert_or_update(crate::model::item::DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(
+                    Tag::LUT_DESCRIPTOR,
+                    Vr::Us,
+                    std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(desc)),
+                ),
+            ));
+            lut_item.insert_or_update(crate::model::item::DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(
+                    Tag::LUT_DATA,
+                    Vr::Ow,
+                    std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![10u8, 200])),
+                ),
+            ));
+            let mut holder = Dataset::new();
+            holder.insert_sequence(Tag::VOILUT_SEQUENCE).push(lut_item);
+            fg.insert_sequence(Tag::FRAME_VOILUT_SEQUENCE).push(holder);
+            per.push(fg);
+        }
+
+        let options = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
+        assert!(options.use_voi_lut, "per-frame LUT enables the VOI stage");
+        let lut = options.voi_lut.as_ref().expect("per-frame VOI LUT parsed");
+        assert_eq!(lut.table.at(0.0), Some(10));
+        assert_eq!(lut.table.at(1.0), Some(200));
+    }
+
+    #[test]
     fn per_frame_functional_window_renders_each_frame_differently() {
         // Two frames with the SAME stored value (100) but each carrying its own
         // window: only a per-frame end-to-end render can honour that (§10).
@@ -2789,10 +2912,42 @@ mod tests {
     }
 
     #[test]
+    fn histogram_window_applies_the_rescale_slope() {
+        // PR-03: window bounds come from the stored histogram; they must be
+        // mapped through the rescale before center/width are derived.
+        let mut ds = gray_image(4, 1, 8, &[0, 25, 50, 100], None, None);
+        ds.insert_str(Tag::RESCALE_SLOPE, Vr::Ds, "2");
+        let options = GrayscaleRenderOptions::from_histogram(&ds, 0, 100).unwrap();
+        assert_eq!(options.window_center, 100.0);
+        assert_eq!(options.window_width, 200.0);
+    }
+
+    #[test]
+    fn bit_range_window_applies_the_rescale_slope() {
+        // PR-04: stored bit range 0..255, slope 2 -> window 0..510.
+        let mut ds = gray_image(1, 1, 8, &[0], None, None);
+        ds.insert_str(Tag::RESCALE_SLOPE, Vr::Ds, "2");
+        let options = GrayscaleRenderOptions::from_bit_range(&ds).unwrap();
+        assert_eq!(options.window_center, 255.0);
+        assert_eq!(options.window_width, 510.0);
+    }
+
+    #[test]
     fn functional_window_errors_when_absent() {
         // no functional groups at all → error (caller falls back to min/max)
         let ds = gray_image(2, 1, 8, &[10, 20], None, None);
         assert!(GrayscaleRenderOptions::from_functional_window_level(&ds, 0).is_err());
+    }
+
+    #[test]
+    fn sub_one_window_width_falls_through_to_smallest_largest() {
+        // PR-10: fo-dicom ignores a WindowWidth < 1 and uses the next source.
+        let mut ds = gray_image(2, 1, 8, &[0, 100], Some(100.0), Some(0.5));
+        ds.insert_value(Tag::SMALLEST_IMAGE_PIXEL_VALUE, 0u16);
+        ds.insert_value(Tag::LARGEST_IMAGE_PIXEL_VALUE, 255u16);
+        let options = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
+        assert_eq!(options.window_width, 255.0);
+        assert_eq!(options.window_center, 127.5);
     }
 
     #[test]
@@ -2812,6 +2967,49 @@ mod tests {
     }
 
     #[test]
+    fn voi_lut_index_truncates_fractional_input() {
+        // PR-05: fo-dicom/pydicom cast (int)(value - first), i.e. truncate.
+        let mut ds = gray_image(1, 1, 8, &[0], None, None);
+        put_voi_lut_raw(&mut ds, 3, 0, 8, Vr::Ow, &[10, 20, 30]);
+        let item = &ds.try_get_sequence(Tag::VOILUT_SEQUENCE).unwrap().items()[0];
+        let table = super::LutTable::from_item(item).unwrap();
+        assert_eq!(table.at(0.7), Some(10), "0.7 truncates to entry 0");
+        assert_eq!(table.at(1.9), Some(20), "1.9 truncates to entry 1");
+    }
+
+    #[test]
+    fn voi_lut_entry_width_follows_descriptor_not_length() {
+        // PR-12: a 16-bit descriptor with only `count` bytes is truncated and
+        // must be rejected instead of silently read as 8-bit low bytes.
+        let mut ds = gray_image(1, 1, 8, &[0], None, None);
+        put_voi_lut_raw(&mut ds, 3, 0, 16, Vr::Ow, &[1, 2, 3]);
+        let item = &ds.try_get_sequence(Tag::VOILUT_SEQUENCE).unwrap().items()[0];
+        assert!(super::LutTable::from_item(item).is_none());
+
+        // An 8-bit descriptor with two bytes per entry reads the low byte.
+        let mut ds = gray_image(1, 1, 8, &[0], None, None);
+        put_voi_lut_raw(&mut ds, 2, 0, 8, Vr::Ow, &[5, 0, 6, 0]);
+        let item = &ds.try_get_sequence(Tag::VOILUT_SEQUENCE).unwrap().items()[0];
+        let table = super::LutTable::from_item(item).unwrap();
+        assert_eq!(table.at(0.0), Some(5));
+        assert_eq!(table.at(1.0), Some(6));
+    }
+
+    #[test]
+    fn bit_range_clamp_bounds_the_min_max_window() {
+        let unsigned = BitDepth::new(16, 12, 11, false);
+        assert_eq!(
+            super::clamp_min_max_to_depth(-5.0, 9000.0, &unsigned),
+            (0.0, 4095.0)
+        );
+        let signed = BitDepth::new(16, 12, 11, true);
+        assert_eq!(
+            super::clamp_min_max_to_depth(-9000.0, 9000.0, &signed),
+            (-2048.0, 2047.0)
+        );
+    }
+
+    #[test]
     fn from_image_pixel_value_tags_uses_smallest_and_largest() {
         let mut ds = gray_image(1, 1, 16, &[0], None, None);
         ds.insert_value(Tag::SMALLEST_IMAGE_PIXEL_VALUE, 0u16); // SmallestImagePixelValue
@@ -2823,6 +3021,22 @@ mod tests {
         // absent tags → error
         let bare = gray_image(1, 1, 8, &[0], None, None);
         assert!(GrayscaleRenderOptions::from_image_pixel_value_tags(&bare).is_err());
+    }
+
+    #[test]
+    fn missing_high_bit_renders_a_ramp_not_bit_zero_parity() {
+        // PR-01: (0028,0102) is Type 1, but real legacy files omit it. The
+        // high-bit fallback must be BitsStored-1, not 0, or normalize() masks
+        // every sample to its least-significant bit.
+        let mut ds = gray_image(4, 1, 8, &[0, 64, 128, 255], None, None);
+        ds.remove(Tag::HIGH_BIT);
+        let image = render_frame(&ds, 0).unwrap();
+        let gray: Vec<u8> = (0..4).map(|i| image.as_bytes()[i * 4]).collect();
+        assert_eq!(
+            gray,
+            vec![0, 64, 128, 255],
+            "each sample keeps its full stored value instead of collapsing to bit 0"
+        );
     }
 
     #[test]

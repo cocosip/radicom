@@ -549,6 +549,10 @@ pub fn lookup(uid: &Uid) -> Result<Arc<TransferSyntax>, Error> {
         return Ok(ts.clone());
     }
     if uid.uid_type() == UidType::TransferSyntax {
+        // fo-dicom `DicomTransferSyntax.Query` fallback (its private ctor
+        // defaults) assumes explicit VR, little endian and encapsulated for an
+        // unregistered TS UID, so mirror that here (review needs-verification:
+        // confirmed not a defect against DicomTransferSyntax.cs).
         let ts = TransferSyntax::new(uids::EXPLICIT_VR_LITTLE_ENDIAN, "Explicit VR Little Endian")
             .encapsulated();
         let ts = Arc::new(TransferSyntax {

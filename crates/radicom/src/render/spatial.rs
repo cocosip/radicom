@@ -62,10 +62,11 @@ impl SpatialTransform {
         self.is_transformed() || self.flip_x || self.flip_y
     }
 
-    /// Rotate, flip and pan a [`RawImage`] into a new image (fo-dicom `Rotate`
-    /// then `Flip`, then pan). Scale is not pixel-geometric here and is left to
-    /// the caller; rotation-by-90°, flips and integer pan reshape/translate the
-    /// buffer (exposed pan areas are filled black).
+    /// Rotation, flips, pan and scale a [`RawImage`] into a new image (fo-dicom
+    /// `Rotate` then `Flip`, then pan, then scale). Rotation-by-90°, flips and
+    /// integer pan reshape/translate the buffer (exposed pan areas are filled
+    /// black); a non-1 `scale` is applied through [`RawImage::scaled`] so the
+    /// public `scale` field is never a silent no-op (PR-06).
     pub fn apply_to(&self, image: &RawImage) -> RawImage {
         let (width, height) = (image.width(), image.height());
         let mut pixels = pad_rgb(image);
@@ -124,7 +125,12 @@ impl SpatialTransform {
             pixels = moved;
         }
 
-        to_raw_image(&pixels, width, height)
+        let out = to_raw_image(&pixels, width, height);
+        if self.scale.is_finite() && self.scale > 0.0 && self.scale != 1.0 {
+            out.scaled(self.scale)
+        } else {
+            out
+        }
     }
 }
 
@@ -342,6 +348,21 @@ mod tests {
         );
         assert_eq!(pixel(&out, 0, 0), 0, "left edge exposed → black");
         assert_eq!(pixel(&out, 1, 0), red(), "content shifted right");
+    }
+
+    #[test]
+    fn scale_resizes_the_output_instead_of_being_a_no_op() {
+        // PR-06: SpatialTransform::scale is public; it must affect the pixels.
+        let img = image(2, 1, &[red(), green()]);
+        let mut transform = SpatialTransform::new();
+        transform.scale = 2.0;
+        assert!(transform.changes_pixels());
+        let out = transform.apply_to(&img);
+        assert_eq!(
+            (out.width(), out.height()),
+            (4, 2),
+            "scale 2 doubles both dimensions"
+        );
     }
 
     #[test]

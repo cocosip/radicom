@@ -179,11 +179,14 @@ impl DicomWriter {
         charset: Option<&Charsets>,
         out: &mut ByteTargetWriter<W>,
     ) -> Result<u64, Error> {
-        // Private SQs are always explicit-length (fo-dicom rule, §8); only then
-        // is the body length needed. With the default (undefined) lengths the
-        // recursive length pass would be discarded and re-walk the whole
-        // subtree once per nesting level (review CORE-05).
-        let defined = self.options.explicit_length_sequences || seq.tag().is_private();
+        // Private SQs are explicit-length only in Explicit VR (fo-dicom rule,
+        // §8). Under Implicit VR there is no VR on the wire, so a defined-length
+        // private SQ would be read back as opaque UN bytes (IO; needs-verification
+        // item); writing it with undefined length lets the reader's T4 private
+        // probe recover the sequence. Only then is the body length needed
+        // (review CORE-05).
+        let defined = self.options.explicit_length_sequences
+            || (seq.tag().is_private() && syntax.is_explicit_vr());
         let body = if defined {
             Some(self.sequence_body_len(seq, syntax, charset)?)
         } else {
@@ -391,19 +394,29 @@ impl DicomWriter {
                         size + size % 2
                     }
                 };
+                // A value longer than the 32-bit length field cannot be encoded;
+                // `write_header` already rejects it, so the length API must too.
+                u32_length(e.tag(), value_len)?;
                 leaf_len(e.tag(), e.vr(), value_len, syntax)
             }
             DicomItem::Sequence(seq) => {
                 let body = self.sequence_body_len(seq, syntax, charset)?;
-                let defined = self.options.explicit_length_sequences || seq.tag().is_private();
+                let defined = self.options.explicit_length_sequences
+                    || (seq.tag().is_private() && syntax.is_explicit_vr());
+                if defined {
+                    u32_length(seq.tag(), body)?;
+                }
                 header_len(seq.tag(), Vr::Sq, body, syntax) + body + if defined { 0 } else { 8 }
             }
             DicomItem::Fragments(f) => {
                 let mut total = header_len(f.tag(), f.vr(), 0, syntax);
                 let table = f.offset_table().len() as u64 * 4;
+                u32_length(f.tag(), table)?;
                 total += 8 + table;
                 for fragment in f.fragments() {
-                    total += 8 + fragment.size() + fragment.size() % 2;
+                    let len = fragment.size() + fragment.size() % 2;
+                    u32_length(f.tag(), len)?;
+                    total += 8 + len;
                 }
                 total + 8
             }
@@ -573,11 +586,22 @@ fn write_buffer<W: Write>(
         Endian::Little
     };
     if unit <= 1 || target == native {
+        // IO-05: keep chunk boundaries on whole VR units so an `EndianBuffer`
+        // (a big-endian value read from disk) is never asked to swap a misaligned
+        // slice when the target happens to be the native order.
+        let chunk = if unit <= 1 {
+            chunk_size.max(1)
+        } else {
+            align_up(chunk_size.max(1), unit)
+        };
         return out
-            .write_buffer_with_chunk(buffer, chunk_size.max(1) as usize)
+            .write_buffer_with_chunk(buffer, chunk as usize)
             .map_err(io_err);
     }
-    let chunk_size = chunk_size.max(1);
+    // IO-05: a chunk smaller than one VR unit can never hold a whole swap unit;
+    // rounding it to the unit keeps `take` from collapsing to zero (which used to
+    // slice past the end of `chunk`) and keeps the swap aligned across chunks.
+    let chunk_size = chunk_size.max(unit as u64).max(1);
     let mut written = 0u64;
     let mut offset = 0u64;
     let mut chunk = vec![0u8; chunk_size as usize];
@@ -598,6 +622,12 @@ fn write_buffer<W: Write>(
         written += take;
     }
     Ok(written)
+}
+
+/// Rounds `n` up to the next multiple of `unit` (used to keep chunked swaps aligned).
+fn align_up(n: u64, unit: usize) -> u64 {
+    let unit = unit as u64;
+    n.saturating_add(unit - 1) / unit * unit
 }
 
 fn io_err(e: std::io::Error) -> Error {
@@ -1192,6 +1222,83 @@ mod tests {
         assert!(
             matches!(&err, Error::Data(DataError::Other { message }) if message.contains("4 GiB")),
             "{err}"
+        );
+
+        // the length API must reject it too, not report an unencodable size
+        assert!(
+            DicomWriter::new(WriteOptions::default())
+                .dataset_length(&ds, &le())
+                .is_err(),
+            "dataset_length must reject a > 4 GiB value like the writer does"
+        );
+    }
+
+    #[test]
+    fn tiny_write_chunk_swaps_a_multibyte_value_without_panicking() {
+        // IO-05: large_object_size smaller than the VR unit must not panic or
+        // write unswapped bytes.
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::new(0x0009, 0x1001),
+            Vr::Ul,
+            Arc::new(MemoryBuffer::from(vec![1u8, 0, 0, 0, 2, 0, 0, 0])),
+        )));
+        let options = WriteOptions {
+            large_object_size: 1,
+            ..WriteOptions::default()
+        };
+        let out = encode(&ds, &be(), options);
+        assert!(
+            out.windows(8).any(|w| w == [0u8, 0, 0, 1, 0, 0, 0, 2]),
+            "value written big-endian, not dropped or unswapped"
+        );
+    }
+
+    #[test]
+    fn chunked_native_write_of_an_endian_buffer_stays_aligned() {
+        // IO-05: the non-swap path must also align chunks to the VR unit, so an
+        // `EndianBuffer` (big-endian source read to native order) is not asked to
+        // swap a misaligned slice at an odd chunk boundary.
+        use crate::model::buffer::{EndianBuffer, SharedBuffer};
+        let buffer: SharedBuffer = Arc::new(EndianBuffer::new(
+            Arc::new(MemoryBuffer::from(vec![0u8, 0, 0, 1, 0, 0, 0, 2])),
+            4,
+        ));
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::new(0x0009, 0x1001),
+            Vr::Ul,
+            buffer,
+        )));
+        let options = WriteOptions {
+            large_object_size: 3,
+            ..WriteOptions::default()
+        };
+        let out = encode(&ds, &le(), options);
+        assert!(
+            out.windows(8).any(|w| w == [1u8, 0, 0, 0, 2, 0, 0, 0]),
+            "native value read through EndianBuffer stays intact when chunked"
+        );
+    }
+
+    #[test]
+    fn private_sequence_round_trips_under_implicit_vr() {
+        // needs-verification: a private SQ written in Implicit VR must survive a
+        // write→reparse as a sequence (defined length would read back as UN).
+        let mut ds = Dataset::new();
+        let mut item = Dataset::new();
+        item.insert_str(Tag::new(0x0029, 0x1010), Vr::Lo, "widget");
+        ds.insert_sequence(Tag::new(0x0029, 0x1001)).push(item);
+
+        let bytes = encode(&ds, &implicit(), WriteOptions::default());
+        let back = parse_dataset_bytes(&bytes, &implicit()).expect("parse implicit private SQ");
+        let seq = back
+            .try_get_sequence(Tag::new(0x0029, 0x1001))
+            .expect("private sequence recovered");
+        assert_eq!(seq.items().len(), 1);
+        assert_eq!(
+            seq.items()[0].get_str(Tag::new(0x0029, 0x1010)).unwrap(),
+            "widget"
         );
     }
 }

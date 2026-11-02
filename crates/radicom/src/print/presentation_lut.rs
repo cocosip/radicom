@@ -103,13 +103,22 @@ impl PresentationLutTable {
             .unwrap_or(Vr::Ow);
 
         let mut entries = Vec::with_capacity(count);
-        if data.len() == count {
-            // 8-bit entries carry one byte each
+        // The entry width comes from the descriptor's bit depth, never from the
+        // LUT Data length: a 16-bit descriptor whose data is truncated to exactly
+        // `count` bytes must be an error, not silently read as 8-bit entries.
+        if bits == 8 {
+            if data.len() < count {
+                return Err(data_error(format!(
+                    "Presentation LUT has {count} 8-bit entries but only {} data bytes",
+                    data.len()
+                )));
+            }
             entries.extend(data[..count].iter().map(|b| *b as i32));
         } else {
+            // bits == 16 (validated above to be 8 or 16)
             if data.len() < count * 2 {
                 return Err(data_error(format!(
-                    "Presentation LUT has {count} entries but only {} data bytes",
+                    "Presentation LUT has {count} 16-bit entries but only {} data bytes",
                     data.len()
                 )));
             }
@@ -372,6 +381,19 @@ mod tests {
 
         // no data element
         assert!(film_with_lut_item(lut_item(&[1, 0, 0, 0, 8, 0], &[], Vr::Ow)).is_err());
+    }
+
+    #[test]
+    fn a_truncated_16_bit_table_of_exactly_count_bytes_is_rejected() {
+        // Descriptor: 4 entries at 16 bits, but LUT Data is only 4 bytes (== the
+        // entry count). The old width-from-length rule read it as 8-bit data; the
+        // width must come from the descriptor's bit depth.
+        assert!(
+            film_with_lut_item(lut_item(&[4, 0, 0, 0, 16, 0], &[1, 0, 2, 0], Vr::Ow)).is_err(),
+            "a 16-bit table needs 8 data bytes for 4 entries"
+        );
+        // and the same byte count as an 8-bit table is fine
+        assert!(film_with_lut_item(lut_item(&[4, 0, 0, 0, 8, 0], &[1, 2, 3, 4], Vr::Ow)).is_ok());
     }
 
     #[test]

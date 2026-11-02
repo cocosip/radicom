@@ -10,15 +10,16 @@ use std::sync::Arc;
 ///
 /// # Equality / ordering / hashing (TAG-02)
 ///
-/// Mirrors fo-dicom's three-part semantics:
-/// - public vs public: compare `group`, then `element`;
-/// - private vs private with the same creator in the same group: compare only
-///   the **low 8 bits** of `element` (block-relative, creator-defined);
-/// - otherwise: `group`, then element privateness (public before private),
-///   then creator string, then full element.
+/// `Ord` matches fo-dicom `DicomTag.CompareTo`: compare `group`, then the full
+/// `element`, and only when both are equal compare the private creator (public
+/// before private, then creator string). Different private blocks of the same
+/// creator therefore stay distinct keys.
 ///
-/// This keeps dataset storage stable regardless of which concrete block a
-/// private tag was resolved to.
+/// `Eq`/`Hash` are defined from the same comparison (`cmp == Equal`) instead of
+/// fo-dicom `DicomTag.Equals`, which compares only `element & 0xFF` for private
+/// tags. Rust requires `Eq` to agree with `Ord`, so the two fo-dicom behaviours
+/// (Equals vs CompareTo) cannot both be reproduced; `Ord` consistency is the one
+/// that keeps a `BTreeMap<Tag, _>` (the dataset) sound.
 #[derive(Debug, Clone)]
 pub struct Tag {
     group: u16,

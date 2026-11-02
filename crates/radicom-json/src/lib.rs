@@ -286,19 +286,37 @@ fn element_values(element: &DicomElement, vr: Vr, options: &JsonOptions) -> Resu
             .filter(|part| !part.is_empty())
             .map(|part| Value::String(part.trim().to_ascii_uppercase()))
             .collect()),
+        // A zero-length component is `null`, not `""` (§12.1, PS3.18 Annex F),
+        // for the numeric VRs too — dropping it would silently change the VM.
         Vr::Is | Vr::Ds | Vr::Sv | Vr::Uv => Ok(text
             .split('\\')
-            .map(|part| numeric_value(part, options.numbers))
+            .map(|part| {
+                if part.trim().is_empty() {
+                    Value::Null
+                } else {
+                    numeric_value(part, options.numbers)
+                }
+            })
             .collect()),
         Vr::Us | Vr::Ul | Vr::Sl | Vr::Ss => Ok(text
             .split('\\')
-            .filter(|p| !p.is_empty())
-            .map(|part| parse_int_value(part, vr))
+            .map(|part| {
+                if part.trim().is_empty() {
+                    Value::Null
+                } else {
+                    parse_int_value(part, vr)
+                }
+            })
             .collect()),
         Vr::Fl | Vr::Fd => Ok(text
             .split('\\')
-            .filter(|p| !p.is_empty())
-            .map(parse_float_value)
+            .map(|part| {
+                if part.trim().is_empty() {
+                    Value::Null
+                } else {
+                    parse_float_value(part)
+                }
+            })
             .collect()),
         // a zero-length component is `null`, not `""` (§12.1, PS3.18 Annex F)
         _ => Ok(text
@@ -335,6 +353,11 @@ fn raw_value_array(raw: &SharedBuffer, vr: Vr, _tag: &Tag) -> Result<Vec<Value>>
             let text = text.trim_end_matches(['\0', ' ']).to_string();
             if text.is_empty() {
                 return Ok(Vec::new());
+            }
+            // PN must use the three-group object form even when byte-backed
+            // (§12.1, PS3.18 Annex F.3.1) — a plain string array is not PN.
+            if vr == Vr::Pn {
+                return Ok(text.split('\\').map(person_name_value).collect());
             }
             // a zero-length component is `null`, not `""` (§12.1, PS3.18 Annex
             // F), exactly like the Str-backed path above: dropping it would
@@ -673,9 +696,22 @@ fn text_element(tag: Tag, vr: Vr, text: String) -> Result<DicomElement> {
 /// Encodes the text form of a binary numeric VR (or PN) back to bytes.
 fn encode_numeric_or_text(vr: Vr, text: &str, tag: &Tag) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
+    // An entirely empty value is a zero-length element.
+    if text.is_empty() {
+        return Ok(bytes);
+    }
     for part in text.split('\\') {
-        if part.is_empty() {
-            continue;
+        // A zero-length component inside a multi-value binary VR cannot be
+        // represented as a fixed-width unit; rejecting it prevents a silent VM
+        // change (dropping it) or writing a bogus zero value.
+        if part.trim().is_empty() {
+            return Err(JsonError::Malformed {
+                tag: tag_key(tag),
+                reason: format!(
+                    "a zero-length component is not representable for VR {}",
+                    vr.code()
+                ),
+            });
         }
         let malformed = |kind: &str| JsonError::Malformed {
             tag: tag_key(tag),
@@ -1916,10 +1952,67 @@ mod tests {
     }
 
     #[test]
-    fn empty_numeric_components_are_skipped_when_decoding() {
+    fn empty_binary_numeric_components_are_rejected_not_silently_dropped() {
+        // A US value cannot hold a zero-length component; dropping it silently
+        // would change the VM, so the read is rejected.
         let json = r#"{"00280010":{"vr":"US","Value":["","5"]}}"#;
-        let ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
-        let back = dataset_to_value(&ds, &JsonOptions::default()).unwrap();
-        assert_eq!(back["00280010"]["Value"], serde_json::json!([5]));
+        assert!(matches!(
+            json_to_dataset(json, &JsonOptions::default()),
+            Err(JsonError::Malformed { .. })
+        ));
+        // a genuinely empty Value array is still an empty element
+        let empty = json_to_dataset(
+            r#"{"00280010":{"vr":"US","Value":[]}}"#,
+            &JsonOptions::default(),
+        )
+        .unwrap();
+        assert!(empty.get_element(Tag::ROWS).unwrap().is_empty());
+    }
+
+    #[test]
+    fn numeric_empty_components_serialize_as_null_and_round_trip() {
+        // FJ-03: a trailing empty DS component is null in JSON, not "", and
+        // survives a write/read/write round trip.
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::SLICE_THICKNESS, Vr::Ds, "1.50\\");
+        let value = dataset_to_value(&ds, &JsonOptions::default()).unwrap();
+        assert_eq!(
+            value["00180050"]["Value"],
+            serde_json::json!(["1.50", null]),
+            "the empty component is null, not \"\""
+        );
+
+        let json = serde_json::to_string(&value).unwrap();
+        let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
+        assert_eq!(
+            back.get_str(Tag::SLICE_THICKNESS).unwrap(),
+            "1.50\\",
+            "the empty trailing component is preserved"
+        );
+        let again = dataset_to_value(&back, &JsonOptions::default()).unwrap();
+        assert_eq!(
+            again["00180050"]["Value"],
+            serde_json::json!(["1.50", null])
+        );
+    }
+
+    #[test]
+    fn byte_backed_person_name_uses_the_object_form() {
+        // FJ-04: a PN held as bytes must still serialize as a PN object
+        // (Alphabetic/Ideographic/Phonetic), never as a plain string.
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::PATIENT_NAME,
+            Vr::Pn,
+            Arc::new(MemoryBuffer::from(b"Doe^Jane=Yamada^Tarou".to_vec())),
+        )));
+        let value = dataset_to_value(&ds, &JsonOptions::default()).unwrap();
+        assert!(
+            value["00100010"]["Value"][0].is_object(),
+            "PN must be an object, got {}",
+            value["00100010"]["Value"][0]
+        );
+        assert_eq!(value["00100010"]["Value"][0]["Alphabetic"], "Doe^Jane");
+        assert_eq!(value["00100010"]["Value"][0]["Ideographic"], "Yamada^Tarou");
     }
 }

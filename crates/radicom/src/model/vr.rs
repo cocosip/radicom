@@ -185,6 +185,12 @@ impl Vr {
         }
     }
 
+    /// True for the signed integer VRs (SS/SL/SV). Used so binary widening
+    /// sign-extends only for signed source values (CM-02).
+    pub const fn is_signed_integer(self) -> bool {
+        matches!(self, Vr::Ss | Vr::Sl | Vr::Sv)
+    }
+
     /// Byte size of one value unit (spec §2 "unit"); 0 for SQ and the
     /// internal VRs.
     pub const fn unit_size(self) -> usize {

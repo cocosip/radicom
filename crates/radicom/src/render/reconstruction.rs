@@ -221,25 +221,43 @@ impl VolumeData {
             let mut last_index = 0usize;
             for y in 0..rows {
                 if let Some(index) = self.sorting_index(ordered, last_index) {
-                    let index = index.max(1).min(self.slices.len() - 1);
                     last_index = index;
-                    let next_slice = &self.slices[index];
-                    let prev_slice = &self.slices[index.saturating_sub(1)];
-                    if let (Ok(next_img), Ok(prev_img)) = (
-                        next_slice.geometry.transform_patient_to_image(point),
-                        prev_slice.geometry.transform_patient_to_image(point),
-                    ) {
-                        if let (Some(next_pixel), Some(prev_pixel)) = (
-                            next_slice.interpolate(next_img),
-                            prev_slice.interpolate(prev_img),
+                    if index == 0 {
+                        // At/below the first slice. Only the exact first plane
+                        // of a single-slice volume is on-volume; a cut below the
+                        // volume stays black (fo-dicom `GetCut` only interpolates
+                        // for `index > 0`). Forcing index >= 1 here would
+                        // extrapolate from slices 0/1 (PR-02).
+                        let first_slice = &self.slices[0];
+                        if ordered == first_slice.sorting_value() {
+                            if let Ok(first_img) =
+                                first_slice.geometry.transform_patient_to_image(point)
+                            {
+                                if let Some(first_pixel) = first_slice.interpolate(first_img) {
+                                    output[(x + y * cols) as usize] = first_pixel;
+                                }
+                            }
+                        }
+                    } else {
+                        let next_slice = &self.slices[index];
+                        let prev_slice = &self.slices[index - 1];
+                        if let (Ok(next_img), Ok(prev_img)) = (
+                            next_slice.geometry.transform_patient_to_image(point),
+                            prev_slice.geometry.transform_patient_to_image(point),
                         ) {
-                            let alpha1 = next_slice.sorting_value() - ordered;
-                            let alpha2 = ordered - prev_slice.sorting_value();
-                            if alpha1 + alpha2 != 0.0 {
-                                output[(x + y * cols) as usize] =
-                                    (prev_pixel * alpha1 + next_pixel * alpha2) / (alpha1 + alpha2);
-                            } else if ordered == prev_slice.sorting_value() {
-                                output[(x + y * cols) as usize] = prev_pixel;
+                            if let (Some(next_pixel), Some(prev_pixel)) = (
+                                next_slice.interpolate(next_img),
+                                prev_slice.interpolate(prev_img),
+                            ) {
+                                let alpha1 = next_slice.sorting_value() - ordered;
+                                let alpha2 = ordered - prev_slice.sorting_value();
+                                if alpha1 + alpha2 != 0.0 {
+                                    output[(x + y * cols) as usize] = (prev_pixel * alpha1
+                                        + next_pixel * alpha2)
+                                        / (alpha1 + alpha2);
+                                } else if ordered == prev_slice.sorting_value() {
+                                    output[(x + y * cols) as usize] = prev_pixel;
+                                }
                             }
                         }
                     }
@@ -455,6 +473,42 @@ fn invalid(message: &str) -> Error {
     })
 }
 
+/// Formats an `f64` as a DICOM DS value: at most 16 characters, no lower-case
+/// exponent. `format!("{value}")` can print `0.30000000000000004` (19 chars) or
+/// drop tiny values to "0", which produces an invalid DS on a generated series
+/// (PR-11).
+fn format_ds(value: f64) -> String {
+    if !value.is_finite() {
+        return "0".to_string();
+    }
+    let mut fixed = format!("{value:.6}");
+    if fixed.contains('.') {
+        while fixed.ends_with('0') {
+            fixed.pop();
+        }
+        if fixed.ends_with('.') {
+            fixed.pop();
+        }
+    }
+    // A fixed form that collapsed a tiny non-zero value to "0" is not usable.
+    let collapsed = value != 0.0
+        && fixed
+            .parse::<f64>()
+            .map(|parsed| parsed == 0.0)
+            .unwrap_or(false);
+    if !collapsed && fixed.len() <= 16 {
+        return fixed;
+    }
+    // Too long, or the fixed form collapsed a tiny non-zero value to "0".
+    for precision in (0..=6).rev() {
+        let exponent = format!("{:.prec$E}", value, prec = precision);
+        if exponent.len() <= 16 {
+            return exponent;
+        }
+    }
+    "0".to_string()
+}
+
 /// The orthogonal plane a new [`Stack`] is cut along (fo-dicom `StackType`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StackType {
@@ -584,24 +638,41 @@ impl DicomGenerator {
             ds.insert_str(
                 Tag::IMAGE_POSITION_PATIENT,
                 Vr::Ds,
-                format!("{}\\{}\\{}", tl.x, tl.y, tl.z),
+                format!(
+                    "{}\\{}\\{}",
+                    format_ds(tl.x),
+                    format_ds(tl.y),
+                    format_ds(tl.z)
+                ),
             );
             let rd = slice.row_direction();
             let cd = slice.column_direction();
             ds.insert_str(
                 Tag::IMAGE_ORIENTATION_PATIENT,
                 Vr::Ds,
-                format!("{}\\{}\\{}\\{}\\{}\\{}", rd.x, rd.y, rd.z, cd.x, cd.y, cd.z),
+                format!(
+                    "{}\\{}\\{}\\{}\\{}\\{}",
+                    format_ds(rd.x),
+                    format_ds(rd.y),
+                    format_ds(rd.z),
+                    format_ds(cd.x),
+                    format_ds(cd.y),
+                    format_ds(cd.z)
+                ),
             );
             ds.insert_str(
                 Tag::PIXEL_SPACING,
                 Vr::Ds,
-                format!("{}\\{}", slice.spacing(), slice.spacing()),
+                format!(
+                    "{}\\{}",
+                    format_ds(slice.spacing()),
+                    format_ds(slice.spacing())
+                ),
             );
             ds.insert_str(
                 Tag::SLICE_THICKNESS,
                 Vr::Ds,
-                format!("{}", stack.slice_distance()),
+                format_ds(stack.slice_distance()),
             );
 
             // Pick a depth that actually holds the observed range, signed when
@@ -722,6 +793,27 @@ mod tests {
             1.0,
         );
         assert_eq!(outside.output, vec![0.0]);
+    }
+
+    #[test]
+    fn a_cut_below_the_first_slice_stays_black() {
+        // PR-02: slicing z=-5 on a volume spanning z=0..1 is outside; it must not
+        // extrapolate from the two lowest slices.
+        let volume =
+            VolumeData::from_datasets(&[axial_slice(0.0, 0), axial_slice(1.0, 100)]).unwrap();
+        let cut = volume.get_cut(
+            Point3::new(1.0, 1.0, -5.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+            1,
+            1,
+            1.0,
+        );
+        assert_eq!(
+            cut.pixels(),
+            &[0.0],
+            "below the volume is black, not extrapolated"
+        );
     }
 
     #[test]
@@ -868,6 +960,35 @@ mod tests {
             // the pixel data decodes back through the facade
             let pixel = PixelDataRef::from_dataset(ds).unwrap();
             assert!(pixel.get_frame(0).is_ok(), "pixel data written");
+        }
+    }
+
+    #[test]
+    fn format_ds_keeps_every_value_within_16_chars() {
+        for value in [
+            0.0f64,
+            1.0,
+            -1.0,
+            0.1,
+            0.300_000_000_000_000_04,
+            1_234.567_890_123,
+            1e20,
+            -1e-9,
+            1.234_567_890_123_456_7e-7,
+        ] {
+            let ds = super::format_ds(value);
+            assert!(
+                ds.len() <= 16,
+                "{value} -> {ds:?} exceeds the DS 16-byte cap"
+            );
+            assert!(
+                !ds.contains('e'),
+                "{value} -> {ds:?} uses a lower-case exponent"
+            );
+            assert!(
+                ds.parse::<f64>().is_ok(),
+                "{value} -> {ds:?} is not DS-numeric"
+            );
         }
     }
 

@@ -96,10 +96,14 @@ impl TransformRule {
                 if let Some(item) = found {
                     record(&mut modified, dataset, dst);
                     if let DicomItem::Element(e) = &item {
-                        let (vr, buffer) = (e.vr(), e.encoded());
-                        dataset.insert_or_update(DicomItem::Element(
-                            crate::model::element::DicomElement::new_bytes(dst.clone(), vr, buffer),
-                        ));
+                        // IO-01: copy the value *representation*, not its encoded
+                        // bytes. Rebuilding a byte-backed element under a string VR
+                        // loses the text (the writer encodes strings from
+                        // `string_value()`, which is empty for a byte value), so a
+                        // cloned-and-retagged element keeps text, charset and binary
+                        // values intact through serialization.
+                        dataset
+                            .insert_or_update(DicomItem::Element(e.clone().with_tag(dst.clone())));
                     }
                 }
             }
@@ -412,6 +416,23 @@ mod tests {
         let mut ds = dataset();
         TransformRule::CopyValue(Tag::OTHER_PATIENT_I_DS, Tag::PATIENT_ID).apply(&mut ds);
         assert_eq!(value(&ds, 0x0010, 0x0020).as_deref(), Some("ACC123"));
+    }
+
+    #[test]
+    fn copied_string_value_survives_serialization() {
+        // IO-01: CopyValue must preserve a string value through write→reparse,
+        // not just in memory (the old byte-backed rebuild serialised as empty).
+        use crate::io::dataset_builder::parse_dataset_bytes;
+        use crate::io::writer::{DicomWriter, WriteOptions};
+        use crate::model::transfer_syntax::syntaxes;
+        let mut ds = dataset();
+        TransformRule::CopyValue(Tag::OTHER_PATIENT_I_DS, Tag::PATIENT_ID).apply(&mut ds);
+        let mut out = Vec::new();
+        DicomWriter::new(WriteOptions::default())
+            .write_dataset(&ds, &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN, &mut out)
+            .expect("encode");
+        let back = parse_dataset_bytes(&out, &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN).expect("decode");
+        assert_eq!(back.get_str(Tag::PATIENT_ID).unwrap(), "ACC123");
     }
 
     #[test]

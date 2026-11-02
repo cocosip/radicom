@@ -10,7 +10,7 @@
 //! [`crate::assembler::PdvAssembler::DEFAULT_MAX_MESSAGE_LENGTH`] (1 GiB) and
 //! parses it into a `DicomFile`, so peak memory tracks the instance size rather
 //! than the PDU size. Streaming a dataset into the sink as PDVs arrive is a
-//! documented backlog item (docs/06-backlog.md §1, NET-13).
+//! documented limit (NET-13; see `docs/03-fo-dicom-alignment.md` "Known limits").
 
 use crate::dimse::{status, Command, CommandField};
 use crate::error::{NetworkError, Result};

@@ -17,6 +17,7 @@ use crate::error::{DataError, Error};
 use crate::model::tag::Tag;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
+use std::ops::BitOr;
 use std::sync::Arc;
 
 /// The 11 de-identification options, in CSV column order (§12.5).
@@ -49,6 +50,74 @@ impl AnonOption {
         AnonOption::CleanStructdCont,
         AnonOption::CleanGraph,
     ];
+}
+
+/// A composable set of de-identification options, mirroring fo-dicom's
+/// `[Flags] DicomAnonymizerOptions` (§12.5).
+///
+/// `BasicProfile` is the baseline; a combined set applies the Basic Profile for
+/// every attribute and then lets each additionally enabled option's non-empty
+/// CSV cell override it (fo-dicom `SecurityProfile.LoadProfile`). Selecting a
+/// single non-Basic [`AnonOption`] through [`From<AnonOption>`] therefore yields
+/// `BasicProfile | that option` so a caller cannot accidentally disable the
+/// baseline de-identification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnonOptions(u16);
+
+impl AnonOptions {
+    /// No option at all (nothing is anonymized).
+    pub const NONE: AnonOptions = AnonOptions(0);
+    /// The PS3.15 Basic Profile baseline (column 0 of the CSV).
+    pub const BASIC_PROFILE: AnonOptions = AnonOptions(1 << 0);
+
+    /// The single bit for `option` (no baseline added).
+    pub const fn bit(option: AnonOption) -> AnonOptions {
+        AnonOptions(1 << option as u16)
+    }
+
+    /// Whether `option` is enabled.
+    pub const fn contains(self, option: AnonOption) -> bool {
+        self.0 & (1 << option as u16) != 0
+    }
+
+    /// The set with `option` added.
+    pub const fn with(self, option: AnonOption) -> AnonOptions {
+        AnonOptions(self.0 | (1 << option as u16))
+    }
+
+    /// The raw bit mask (bit `i` = `AnonOption` with discriminant `i`).
+    pub const fn bits(self) -> u16 {
+        self.0
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl Default for AnonOptions {
+    fn default() -> Self {
+        AnonOptions::BASIC_PROFILE
+    }
+}
+
+impl BitOr for AnonOptions {
+    type Output = AnonOptions;
+
+    fn bitor(self, rhs: AnonOptions) -> AnonOptions {
+        AnonOptions(self.0 | rhs.0)
+    }
+}
+
+impl From<AnonOption> for AnonOptions {
+    /// A single non-Basic option implies the Basic Profile too (fo-dicom callers
+    /// always OR the baseline), so single-option call sites stay safe.
+    fn from(option: AnonOption) -> Self {
+        match option {
+            AnonOption::BasicProfile => AnonOptions::BASIC_PROFILE,
+            other => AnonOptions::BASIC_PROFILE.with(other),
+        }
+    }
 }
 
 /// One de-identification action (§12.5).
@@ -388,6 +457,45 @@ impl SecurityProfile {
             &format!("{:04X},{:04X}", tag.group(), tag.element()),
             option,
         )
+    }
+
+    /// The composed action for `tag` under an option *set* (§12.5).
+    ///
+    /// fo-dicom's `SecurityProfile.LoadProfile` takes the Basic Profile column as
+    /// the baseline and then lets each additionally enabled option override it
+    /// when its CSV cell is non-empty, in column order. This is what makes
+    /// `BasicProfile | RetainUids` keep UIDs while still blanking PatientName.
+    pub fn action_for_with(&self, tag: &str, options: AnonOptions) -> Option<Action> {
+        let mut action = if options.contains(AnonOption::BasicProfile) {
+            self.action_for(tag, AnonOption::BasicProfile)
+        } else {
+            None
+        };
+        for option in AnonOption::ALL.into_iter().skip(1) {
+            if options.contains(option) {
+                if let Some(override_action) = self.action_for(tag, option) {
+                    action = Some(override_action);
+                }
+            }
+        }
+        action
+    }
+
+    /// The composed action for a typed [`Tag`].
+    pub fn action_for_tag_with(&self, tag: &Tag, options: AnonOptions) -> Option<Action> {
+        let mut action = if options.contains(AnonOption::BasicProfile) {
+            self.action_for_tag(tag, AnonOption::BasicProfile)
+        } else {
+            None
+        };
+        for option in AnonOption::ALL.into_iter().skip(1) {
+            if options.contains(option) {
+                if let Some(override_action) = self.action_for_tag(tag, option) {
+                    action = Some(override_action);
+                }
+            }
+        }
+        action
     }
 
     fn match_wildcard(&self, tag: &str, option: AnonOption) -> Option<Action> {

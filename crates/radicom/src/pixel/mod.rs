@@ -124,8 +124,20 @@ macro_rules! pixel_read_methods {
             self.dataset.get_or(BITS_STORED, 0u16)
         }
 
+        /// `(0028,0102)`; when absent, derive it as `BitsStored - 1` (falling
+        /// back to `BitsAllocated - 1` when BitsStored is also absent), matching
+        /// PS3.3 C.7.6.3.1.2 ("High Bit shall be one less than Bits Stored") and
+        /// fo-dicom `BitDepth.FromDataset`. A `0` fallback would mask every
+        /// sample down to bit 0 (PR-01).
         pub fn high_bit(&self) -> u16 {
-            self.dataset.get_or(HIGH_BIT, 0u16)
+            if let Some(high_bit) = self.dataset.try_get::<u16>(HIGH_BIT) {
+                return high_bit;
+            }
+            let stored = match self.bits_stored() {
+                0 => self.dataset.get_or(BITS_ALLOCATED, 8u16),
+                stored => stored,
+            };
+            stored.saturating_sub(1)
         }
 
         pub fn samples_per_pixel(&self) -> u16 {
@@ -176,15 +188,21 @@ macro_rules! pixel_read_methods {
                 return Ok((columns * rows * samples.max(1)).div_ceil(8));
             }
             if pi.is_some_and(|p| p.is_subsampled()) {
-                // chroma subsampling: 4:2:2 halves the chroma samples, 4:2:0 both
+                // Chroma subsampling: every row is padded to an even pixel count,
+                // so luma is over the rounded-up width. Chroma plane size is
+                // ceil(cols/2) x rows for 4:2:2 and ceil(cols/2) x ceil(rows/2)
+                // for 4:2:0 (an odd height keeps an extra chroma row, PR-09).
                 columns = columns.div_ceil(2) * 2;
-                let plane = columns * rows * bits / 8;
-                let chroma = if pi.is_some_and(|p| p.is_420()) {
-                    plane / 4
+                let sample_bytes = bits.div_ceil(8);
+                let luma = columns * rows * sample_bytes;
+                let chroma_columns = columns / 2;
+                let chroma_rows = if pi.is_some_and(|p| p.is_420()) {
+                    rows.div_ceil(2)
                 } else {
-                    plane / 2
+                    rows
                 };
-                return Ok(plane + 2 * chroma);
+                let chroma = chroma_columns * chroma_rows * sample_bytes;
+                return Ok(luma + 2 * chroma);
             }
             let bytes_per_sample = bits.div_ceil(8);
             Ok(columns * rows * samples * bytes_per_sample)
@@ -945,6 +963,34 @@ mod tests {
             .unwrap();
         // 4:2:2: 16 luma + 2 * 8 chroma
         assert_eq!(size, 32);
+    }
+
+    #[test]
+    fn frame_size_for_420_uses_ceil_rows_and_columns() {
+        // PR-09: an odd height keeps ceil(rows/2) chroma rows.
+        let mut ds = mono_dataset(3, 3, 8, 1);
+        ds.insert_value(SAMPLES_PER_PIXEL, 3u16);
+        ds.insert_str(PHOTOMETRIC_INTERPRETATION, Vr::Cs, "YBR_PARTIAL_420");
+        // columns padded to 4: luma 4*3 = 12, chroma 2*2 = 4 each -> 20.
+        assert_eq!(
+            PixelData::from_dataset(&mut ds)
+                .unwrap()
+                .uncompressed_frame_size()
+                .unwrap(),
+            20
+        );
+
+        // 4:2:2 on the same odd geometry stays 24 (ceil(3/2)*4 bytes * 3 rows).
+        let mut ds = mono_dataset(3, 3, 8, 1);
+        ds.insert_value(SAMPLES_PER_PIXEL, 3u16);
+        ds.insert_str(PHOTOMETRIC_INTERPRETATION, Vr::Cs, "YBR_FULL_422");
+        assert_eq!(
+            PixelData::from_dataset(&mut ds)
+                .unwrap()
+                .uncompressed_frame_size()
+                .unwrap(),
+            24
+        );
     }
 
     #[test]

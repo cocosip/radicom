@@ -120,8 +120,17 @@ impl DicomElement {
                 }
             }
             ElementValue::Bytes(b) => {
-                if self.vr.is_string() && !self.vr.is_multi_value() {
-                    usize::from(b.size() > 0)
+                if self.vr.is_string() {
+                    // Byte-backed string VRs still count by value, not by byte
+                    // (CM-08): a multi-valued `US`-style byte buffer would
+                    // otherwise report its byte length as the value count.
+                    if b.size() == 0 {
+                        0
+                    } else if self.vr.is_multi_value() {
+                        self.string_parts().len().max(1)
+                    } else {
+                        1
+                    }
                 } else if self.vr.unit_size() == 0 {
                     0
                 } else {
@@ -138,10 +147,25 @@ impl DicomElement {
     }
 
     /// Splits a multi-value string into its `\`-separated parts.
+    ///
+    /// Works for both text- and byte-backed string VRs (CM-08); the bytes are
+    /// viewed as UTF-8 without allocating a `String` when they are an in-memory
+    /// slice. Non-string VRs and unreadable/non-UTF-8 buffers yield no parts.
     pub fn string_parts(&self) -> Vec<&str> {
         match &self.value {
             ElementValue::Str(s) if !s.is_empty() => {
                 s.split(|c| c == '\\' && self.vr.is_multi_value()).collect()
+            }
+            ElementValue::Bytes(b) if self.vr.is_string() => {
+                match b
+                    .as_slice()
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                {
+                    Some(text) if !text.is_empty() => text
+                        .split(|c| c == '\\' && self.vr.is_multi_value())
+                        .collect(),
+                    _ => Vec::new(),
+                }
             }
             _ => Vec::new(),
         }
@@ -244,20 +268,25 @@ fn read_le_unit<T: FromLeBytes>(
             count: data.len() / unit.max(1),
         }));
     }
-    Ok(T::from_le_widened(&data[start..start + unit]))
+    Ok(T::from_le_widened(
+        &data[start..start + unit],
+        e.vr().is_signed_integer(),
+    ))
 }
 
 /// Little-endian construction for numeric element reads.
 pub trait FromLeBytes: Sized {
     const SIZE: usize;
     fn from_le(bytes: &[u8]) -> Self;
-    /// Interpret `bytes` (the VR's natural unit, `bytes.len()` >= `SIZE` or
-    /// smaller) as this type, widening and sign-extending as needed.
-    fn from_le_widened(bytes: &[u8]) -> Self;
+    /// Interpret `bytes` (the VR's natural unit) as this type, zero- or
+    /// sign-extending to the destination width. `sign` is the *source VR's*
+    /// signedness: an unsigned VR (US/UL/UV) is always zero-extended, even when
+    /// the destination Rust type is signed (CM-02).
+    fn from_le_widened(bytes: &[u8], sign: bool) -> Self;
 }
 
 macro_rules! impl_le {
-    ($t:ty, $signed:expr) => {
+    ($t:ty) => {
         impl FromLeBytes for $t {
             const SIZE: usize = std::mem::size_of::<$t>();
             fn from_le(bytes: &[u8]) -> Self {
@@ -265,13 +294,14 @@ macro_rules! impl_le {
                 arr.copy_from_slice(&bytes[..std::mem::size_of::<$t>()]);
                 <$t>::from_le_bytes(arr)
             }
-            fn from_le_widened(bytes: &[u8]) -> Self {
+            fn from_le_widened(bytes: &[u8], sign: bool) -> Self {
                 let mut arr = [0u8; std::mem::size_of::<$t>()];
                 let n = bytes.len().min(arr.len());
                 arr[..n].copy_from_slice(&bytes[..n]);
-                // Sign-extend when the source is narrower and its top bit is set,
-                // so a signed SS value read as i32 keeps its sign.
-                if $signed && n > 0 && n < arr.len() && (bytes[n - 1] & 0x80) != 0 {
+                // Sign-extend only for a signed source VR whose top bit is set,
+                // so SS -1 read as i32 stays -1 while US 65535 read as i64
+                // stays 65535.
+                if sign && n > 0 && n < arr.len() && (bytes[n - 1] & 0x80) != 0 {
                     for b in &mut arr[n..] {
                         *b = 0xFF;
                     }
@@ -281,14 +311,14 @@ macro_rules! impl_le {
         }
     };
 }
-impl_le!(i16, true);
-impl_le!(u16, false);
-impl_le!(i32, true);
-impl_le!(u32, false);
-impl_le!(i64, true);
-impl_le!(u64, false);
-impl_le!(f32, true);
-impl_le!(f64, true);
+impl_le!(i16);
+impl_le!(u16);
+impl_le!(i32);
+impl_le!(u32);
+impl_le!(i64);
+impl_le!(u64);
+impl_le!(f32);
+impl_le!(f64);
 
 macro_rules! impl_from_int {
     ($t:ty) => {
@@ -362,6 +392,10 @@ impl FromElement for f64 {
     }
 }
 
+/// String access is deliberately lenient: a byte-backed value is viewed as
+/// lossy UTF-8. This is correct for byte-backed *string* VRs (e.g. a decoded
+/// value the parser kept as bytes); for a numeric VR prefer the typed
+/// `get::<u16>()`/`get::<f64>()` accessors rather than `get_str`.
 impl FromElement for String {
     fn from_element(e: &DicomElement, index: Option<usize>) -> Result<Self, Error> {
         select(e, index)
@@ -431,7 +465,12 @@ impl<T: FromElement> FromElement for Vec<T> {
                 })
                 .collect();
         }
-        let count = e.count().max(1);
+        let count = e.count();
+        if count == 0 {
+            // A zero-length binary value has no values, not one bad value
+            // (CM-03): fo-dicom GetValues returns an empty collection.
+            return Ok(Vec::new());
+        }
         (0..count).map(|i| T::from_element(e, Some(i))).collect()
     }
 }
@@ -850,6 +889,12 @@ impl Eq for DicomElement {}
 /// the final VR from the dictionary entry whose value type matches.
 pub trait IntoElement {
     fn preferred_vr(&self) -> Option<Vr>;
+    /// True only when the value is a negative integer. Lets the dataset resolve
+    /// a `US\SS` attribute to `SS` for signed values instead of always taking
+    /// the first (`US`) VR (CM-01). Defaults to `false` for non-integer values.
+    fn is_negative_integer(&self) -> bool {
+        false
+    }
     fn into_element(self, tag: Tag, vr: Vr) -> DicomElement;
 }
 
@@ -916,6 +961,9 @@ macro_rules! impl_into_int_string {
         impl IntoElement for $t {
             fn preferred_vr(&self) -> Option<Vr> {
                 Some(Vr::Is)
+            }
+            fn is_negative_integer(&self) -> bool {
+                (*self as i128) < 0
             }
             fn into_element(self, tag: Tag, vr: Vr) -> DicomElement {
                 match vr {
@@ -1138,5 +1186,51 @@ mod extra_tests {
         let element = DicomElement::new_str(t(12), Vr::Ui, "1.2.840.10008.1.2.1");
         let uid = <Uid as FromElement>::from_element(&element, None).unwrap();
         assert_eq!(uid.value(), "1.2.840.10008.1.2.1");
+    }
+}
+
+#[cfg(test)]
+mod cm_regression {
+    use super::*;
+    use crate::model::buffer::MemoryBuffer;
+    use crate::model::tag::Tag;
+    use std::sync::Arc;
+
+    fn bytes(vr: Vr, b: &[u8]) -> DicomElement {
+        DicomElement::new_bytes(
+            Tag::new(0x7777, 0x0001),
+            vr,
+            Arc::new(MemoryBuffer::from(b.to_vec())),
+        )
+    }
+
+    #[test]
+    fn cm02_unsigned_widening_zero_extends() {
+        let us = bytes(Vr::Us, &[0xFF, 0xFF]);
+        assert_eq!(us.get::<i64>(None).unwrap(), 65535, "US 65535 -> i64");
+        assert_eq!(us.get::<i32>(None).unwrap(), 65535, "US 65535 -> i32");
+        assert_eq!(us.get::<u16>(None).unwrap(), 65535);
+        let ul = bytes(Vr::Ul, &[0xFF, 0xFF, 0xFF, 0xFF]);
+        assert_eq!(ul.get::<i64>(None).unwrap(), 4294967295, "UL -> i64");
+        let ss = bytes(Vr::Ss, &[0xFF, 0xFF]);
+        assert_eq!(ss.get::<i32>(None).unwrap(), -1, "SS still sign-extends");
+        assert_eq!(ss.get::<i64>(None).unwrap(), -1);
+    }
+
+    #[test]
+    fn cm03_empty_binary_vec_is_empty() {
+        let empty = DicomElement::new_empty(Tag::new(0x7777, 0x0002), Vr::Us);
+        assert!(empty.get::<Vec<u16>>(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn cm08_byte_backed_string_count_and_parts() {
+        let multi = bytes(Vr::Lo, b"A\\B\\C");
+        assert_eq!(multi.count(), 3);
+        assert_eq!(multi.string_parts(), vec!["A", "B", "C"]);
+        let single = bytes(Vr::Lt, b"a\\b");
+        assert_eq!(single.count(), 1);
+        assert_eq!(single.string_parts(), vec!["a\\b"]);
+        assert!(bytes(Vr::Us, &[1, 0]).string_parts().is_empty());
     }
 }

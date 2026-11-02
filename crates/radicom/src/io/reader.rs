@@ -903,13 +903,20 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                     if private_probe {
                         self.explicit_vr =
                             self.probe_inner_explicit(defined.unwrap_or(u32::MAX))?;
-                        if self.explicit_vr {
+                        // IO-03: only an implicitly-encoded outer dataset gets the
+                        // little-endian private-subtree assumption (T4). An explicit
+                        // big-endian dataset must keep its byte order; forcing LE
+                        // here corrupted private sequences.
+                        if !saved_explicit && self.explicit_vr {
                             self.set_byte_order(false);
                         }
                     } else if cp246 && self.big_endian {
-                        // CP-246: the contents of a UN-encoded SQ are Implicit
-                        // VR Little Endian; the per-element T2 fallback already
-                        // handles the VR side, so only the byte order changes.
+                        // IO-04: CP-246 content of a UN-encoded SQ is Implicit VR
+                        // Little Endian, so clear `explicit_vr` too (not just the
+                        // byte order). Relying on the per-element T2 fallback broke
+                        // for a large inner element whose leading implicit-length
+                        // bytes happen to spell a VR code (e.g. 0x4E50 = "PN").
+                        self.explicit_vr = false;
                         self.set_byte_order(false);
                     }
                     self.enter()?;
@@ -1012,51 +1019,97 @@ fn decode_offset_table(buffer: &SharedBuffer, big_endian: bool) -> Result<Vec<u3
 /// deflated, so this applies to the dataset bytes only.
 ///
 /// PS3.5 A.5: the deflated transfer syntax uses **raw DEFLATE (RFC 1951)** — no
-/// zlib header/trailer. Some non-conformant writers wrap it in zlib anyway, so
-/// try the zlib decoder first (it errors cleanly on raw deflate) and fall back
-/// to the raw decoder. The reverse order would let the raw decoder silently
-/// mis-decode a zlib-wrapped stream.
+/// zlib header/trailer. Raw is therefore the default decoder; a zlib-wrapped
+/// (non-conformant) stream is only tried first when its 2-byte header actually
+/// validates as zlib, so a raw stream can never be fed to the zlib decoder and
+/// silently mis-decoded. A header we fail to recognise still falls back to zlib
+/// after raw fails (tolerance).
 pub fn inflate(bytes: &[u8]) -> Result<Vec<u8>, Error> {
     use std::io::Read as _;
+    let zlib_first = looks_like_zlib(bytes);
     let mut out = Vec::new();
-    if flate2::read::ZlibDecoder::new(bytes)
-        .read_to_end(&mut out)
-        .is_ok()
+    if zlib_first
+        && flate2::read::ZlibDecoder::new(bytes)
+            .read_to_end(&mut out)
+            .is_ok()
     {
         return Ok(out);
     }
     out.clear();
-    flate2::read::DeflateDecoder::new(bytes)
-        .read_to_end(&mut out)
-        .map_err(|e| Error::Reader(ReaderError::Other(format!("deflate: {e}"))))?;
-    Ok(out)
+    let raw = flate2::read::DeflateDecoder::new(bytes).read_to_end(&mut out);
+    if raw.is_ok() {
+        return Ok(out);
+    }
+    if !zlib_first {
+        out.clear();
+        if flate2::read::ZlibDecoder::new(bytes)
+            .read_to_end(&mut out)
+            .is_ok()
+        {
+            return Ok(out);
+        }
+    }
+    Err(Error::Reader(ReaderError::Other(format!(
+        "deflate: {}",
+        raw.unwrap_err()
+    ))))
+}
+
+/// True when `bytes` starts with a syntactically valid zlib (RFC 1950) header.
+fn looks_like_zlib(bytes: &[u8]) -> bool {
+    if bytes.len() < 2 {
+        return false;
+    }
+    let (cmf, flg) = (bytes[0], bytes[1]);
+    (cmf & 0x0F) == 8 && (cmf >> 4) <= 7 && (u16::from(cmf) * 256 + u16::from(flg)) % 31 == 0
 }
 
 /// Streaming variant of [`inflate`] for a seekable source: decompresses the
 /// deflate body starting at `start` **without first materialising the compressed
 /// payload**, so the file path peaks at one full (inflated) copy plus the codec's
-/// small window instead of compressed + inflated. Same zlib-then-raw fallback and
-/// the same typed error on a truncated stream.
+/// small window instead of compressed + inflated. Same header-sniffed
+/// zlib/raw order and the same typed error on a truncated stream.
 pub fn inflate_stream<R: Read + Seek>(source: &mut R, start: u64) -> Result<Vec<u8>, Error> {
     use std::io::Read as _;
     source
         .seek(std::io::SeekFrom::Start(start))
         .map_err(|e| Error::Reader(ReaderError::Other(format!("deflate seek: {e}"))))?;
+    let mut hdr = [0u8; 2];
+    let zlib_first = source.read_exact(&mut hdr).is_ok() && looks_like_zlib(&hdr);
+    source
+        .seek(std::io::SeekFrom::Start(start))
+        .map_err(|e| Error::Reader(ReaderError::Other(format!("deflate seek: {e}"))))?;
     let mut out = Vec::new();
-    {
+    if zlib_first {
         let mut decoder = flate2::read::ZlibDecoder::new(&mut *source);
         if decoder.read_to_end(&mut out).is_ok() {
             return Ok(out);
         }
+        out.clear();
+        source
+            .seek(std::io::SeekFrom::Start(start))
+            .map_err(|e| Error::Reader(ReaderError::Other(format!("deflate seek: {e}"))))?;
     }
-    out.clear();
-    source
-        .seek(std::io::SeekFrom::Start(start))
-        .map_err(|e| Error::Reader(ReaderError::Other(format!("deflate seek: {e}"))))?;
-    flate2::read::DeflateDecoder::new(&mut *source)
-        .read_to_end(&mut out)
-        .map_err(|e| Error::Reader(ReaderError::Other(format!("deflate: {e}"))))?;
-    Ok(out)
+    let raw = flate2::read::DeflateDecoder::new(&mut *source).read_to_end(&mut out);
+    if raw.is_ok() {
+        return Ok(out);
+    }
+    if !zlib_first {
+        out.clear();
+        source
+            .seek(std::io::SeekFrom::Start(start))
+            .map_err(|e| Error::Reader(ReaderError::Other(format!("deflate seek: {e}"))))?;
+        if flate2::read::ZlibDecoder::new(&mut *source)
+            .read_to_end(&mut out)
+            .is_ok()
+        {
+            return Ok(out);
+        }
+    }
+    Err(Error::Reader(ReaderError::Other(format!(
+        "deflate: {}",
+        raw.unwrap_err()
+    ))))
 }
 
 #[cfg(test)]
@@ -1271,5 +1324,45 @@ mod tests {
     fn non_eof_io_errors_map_to_a_typed_reader_error() {
         let mapped = io_err(std::io::Error::other("boom"), 7);
         assert!(matches!(mapped, Error::Reader(ReaderError::Other(_))));
+    }
+
+    #[test]
+    fn private_sequence_inside_a_big_endian_dataset_stays_big_endian() {
+        // IO-03: an explicit big-endian dataset must not have its private SQ
+        // subtree forced to little-endian by the T4 probe.
+        use crate::io::dataset_builder::parse_dataset_bytes;
+        let syntax = crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_BIG_ENDIAN.clone();
+        // inner element (0029,1010) LO "widget", Big Endian
+        let mut inner = Vec::new();
+        inner.extend_from_slice(&0x0029u16.to_be_bytes());
+        inner.extend_from_slice(&0x1010u16.to_be_bytes());
+        inner.extend_from_slice(b"LO");
+        inner.extend_from_slice(&6u16.to_be_bytes());
+        inner.extend_from_slice(b"widget");
+        // item FFFE,E000 with that body, Big Endian
+        let mut item = Vec::new();
+        item.extend_from_slice(&0xFFFEu16.to_be_bytes());
+        item.extend_from_slice(&0xE000u16.to_be_bytes());
+        item.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+        item.extend_from_slice(&inner);
+        // private SQ (0029,1001) defined length, Big Endian
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x0029u16.to_be_bytes());
+        bytes.extend_from_slice(&0x1001u16.to_be_bytes());
+        bytes.extend_from_slice(b"SQ");
+        bytes.extend_from_slice(&[0, 0]);
+        bytes.extend_from_slice(&(item.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&item);
+
+        let ds = parse_dataset_bytes(&bytes, &syntax).expect("parse big-endian private SQ");
+        let seq = ds
+            .try_get_sequence(Tag::new(0x0029, 0x1001))
+            .expect("private sequence survives");
+        assert_eq!(seq.items().len(), 1);
+        assert_eq!(
+            seq.items()[0].get_str(Tag::new(0x0029, 0x1010)).unwrap(),
+            "widget",
+            "inner element decoded with the dataset's big-endian order"
+        );
     }
 }

@@ -314,7 +314,7 @@ impl Dataset {
 
     /// Typed insert with dictionary VR resolution (DS-03 dispatch).
     pub fn insert_value<V: IntoElement>(&mut self, tag: Tag, value: V) -> &mut Self {
-        let vr = self.resolve_vr(&tag, value.preferred_vr());
+        let vr = self.resolve_vr(&tag, value.preferred_vr(), value.is_negative_integer());
         self.insert_or_update(value.into_element(tag, vr))
     }
 
@@ -331,7 +331,7 @@ impl Dataset {
 
     /// Typed insert erroring on duplicate tags (Add semantics).
     pub fn insert_new<V: IntoElement>(&mut self, tag: Tag, value: V) -> Result<&mut Self, Error> {
-        let vr = self.resolve_vr(&tag, value.preferred_vr());
+        let vr = self.resolve_vr(&tag, value.preferred_vr(), value.is_negative_integer());
         self.insert(value.into_element(tag, vr))
     }
 
@@ -364,7 +364,12 @@ impl Dataset {
 
     /// Mutable access to an existing sequence, for in-place updates that must
     /// not rebuild (and re-clone) the whole sequence.
+    ///
+    /// Resolves a private dictionary-style tag to its concrete block tag first,
+    /// like the other accessors (CM-06); without it a valid private SQ stored
+    /// under `(gggg,10xx:creator)` was unreachable by its dictionary-style tag.
     pub fn sequence_mut(&mut self, tag: Tag) -> Option<&mut DicomSequence> {
+        let tag = self.normalize_read(&tag);
         match self.items.get_mut(&tag) {
             Some(DicomItem::Sequence(s)) => Some(s),
             _ => None,
@@ -439,7 +444,21 @@ impl Dataset {
     /// `CopyTo(dest, params DicomTag[])`); missing tags are skipped.
     pub fn copy_tags(&self, dest: &mut Dataset, tags: &[Tag]) {
         for tag in tags {
-            if let Some(item) = self.items.get(tag) {
+            // Resolve a private dictionary-style tag to the concrete block tag
+            // it is stored under, like the other accessors.
+            let tag = self.normalize_read(tag);
+            if let Some(item) = self.items.get(&tag) {
+                // Copy the private creator slot too, otherwise `dest` cannot
+                // resolve the copied private tag (its block binding lives in
+                // the dataset, not just in the Tag value).
+                if let Some(creator) = tag.private_creator() {
+                    if tag.element() > 0x00FF && !creator.as_str().is_empty() {
+                        let slot = Tag::new(tag.group(), tag.element() >> 8);
+                        if let Some(slot_item) = self.items.get(&slot) {
+                            dest.items.insert(slot, slot_item.clone());
+                        }
+                    }
+                }
                 dest.items.insert(tag.clone(), item.clone());
             }
         }
@@ -611,19 +630,41 @@ impl Dataset {
 
     // -- internals ---------------------------------------------------------------
 
-    fn resolve_vr(&self, tag: &Tag, preferred: Option<Vr>) -> Vr {
+    fn resolve_vr(&self, tag: &Tag, preferred: Option<Vr>, negative: bool) -> Vr {
         // The dictionary is authoritative for known tags. The value's own
         // preference is only a hint: a `u16` written to ROWS must produce US
         // (the standard VR), not IS. Letting the preference always win wrote
         // non-conformant bytes that still round-tripped because reader and
         // writer shared the same mistake.
         let entry = crate::model::dictionary::dictionary().entry(tag);
-        let Some(dict_vr) = entry.vrs.first().copied() else {
+        let vrs = &entry.vrs;
+        let Some(&dict_vr) = vrs.first() else {
             return preferred.unwrap_or(Vr::Un);
         };
+        // A textual value on a binary attribute cannot be encoded as that VR
+        // (the bytes would be corrupt and `new_str` asserts): keep it
+        // encodable as text (CM-12).
+        if preferred.is_none() && !dict_vr.is_string() {
+            return Vr::Lo;
+        }
+        // A negative integer must not be written into an unsigned VR. When the
+        // dictionary offers the `US\SS` alternatives, select SS (CM-01).
+        let pick_ss = negative && dict_vr == Vr::Us && vrs.contains(&Vr::Ss);
         match preferred {
-            Some(p) if p == dict_vr || numeric_hint_fits(p, dict_vr) => dict_vr,
-            Some(p) => p,
+            Some(p) if p == dict_vr || numeric_hint_fits(p, dict_vr) => {
+                if pick_ss {
+                    Vr::Ss
+                } else {
+                    dict_vr
+                }
+            }
+            Some(p) => {
+                if pick_ss && p == Vr::Us {
+                    Vr::Ss
+                } else {
+                    p
+                }
+            }
             None => dict_vr,
         }
     }
@@ -1437,8 +1478,14 @@ impl Dataset {
         time_tag: impl AsRef<Tag>,
     ) -> Result<chrono::NaiveDateTime, Error> {
         let date: chrono::NaiveDate = self.get(date_tag)?;
-        let time: chrono::NaiveTime =
-            self.get_or(time_tag.as_ref().clone(), chrono::NaiveTime::MIN);
+        let time: chrono::NaiveTime = match self.get::<chrono::NaiveTime>(time_tag.as_ref()) {
+            Ok(t) => t,
+            // A missing time defaults to midnight; a *present* but malformed TM
+            // is a data problem and must surface rather than silently become
+            // midnight (CM-09).
+            Err(Error::Data(DataError::TagNotFound { .. })) => chrono::NaiveTime::MIN,
+            Err(error) => return Err(error),
+        };
         Ok(chrono::NaiveDateTime::new(date, time))
     }
 
@@ -1921,5 +1968,89 @@ mod core13_tests {
         // makes the read resolution fail instead of returning a stale tag
         ds.remove(Tag::new(0x0029, 0x0010));
         assert!(ds.get_element(tag).is_err(), "stale cache is not trusted");
+    }
+}
+
+#[cfg(test)]
+mod cm_regression {
+    use super::*;
+    use crate::model::private_creator::PrivateCreator;
+    use crate::model::vr::Vr;
+    use std::sync::Arc;
+
+    #[test]
+    fn cm01_negative_integer_selects_ss() {
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::SMALLEST_IMAGE_PIXEL_VALUE, -5i32);
+        let e = ds.get_element(Tag::SMALLEST_IMAGE_PIXEL_VALUE).unwrap();
+        assert_eq!(e.vr(), Vr::Ss, "negative signed value must use SS, not US");
+        assert_eq!(ds.get::<i32>(Tag::SMALLEST_IMAGE_PIXEL_VALUE).unwrap(), -5);
+
+        let mut pos = Dataset::new();
+        pos.insert_value(Tag::SMALLEST_IMAGE_PIXEL_VALUE, 7u16);
+        assert_eq!(
+            pos.get_element(Tag::SMALLEST_IMAGE_PIXEL_VALUE)
+                .unwrap()
+                .vr(),
+            Vr::Us
+        );
+
+        let mut pad = Dataset::new();
+        pad.insert_value(Tag::PIXEL_PADDING_VALUE, -1i16);
+        assert_eq!(
+            pad.get_element(Tag::PIXEL_PADDING_VALUE).unwrap().vr(),
+            Vr::Ss
+        );
+    }
+
+    #[test]
+    fn cm12_text_value_on_numeric_tag_is_encodable_as_text() {
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::ROWS, "512");
+        let e = ds.get_element(Tag::ROWS).unwrap();
+        assert_eq!(
+            e.vr(),
+            Vr::Lo,
+            "text on a binary attribute must not stay US"
+        );
+        assert_eq!(ds.get_str(Tag::ROWS).unwrap(), "512");
+    }
+
+    #[test]
+    fn cm06_sequence_mut_resolves_private_dictionary_tag() {
+        let creator = Arc::new(PrivateCreator::new("ACME"));
+        let dict_tag = Tag::private(0x0029, 0x0002, creator);
+        let mut ds = Dataset::new();
+        ds.insert_sequence(dict_tag.clone());
+        assert!(
+            ds.sequence_mut(dict_tag).is_some(),
+            "dictionary-style private SQ must be reachable mutably"
+        );
+    }
+
+    #[test]
+    fn cm09_present_but_malformed_tm_is_an_error() {
+        let mut bad = Dataset::new();
+        bad.insert_str(Tag::STUDY_DATE, Vr::Da, "20240101");
+        bad.insert_str(Tag::STUDY_TIME, Vr::Tm, "999999");
+        assert!(bad.get_datetime(Tag::STUDY_DATE, Tag::STUDY_TIME).is_err());
+
+        let mut missing = Dataset::new();
+        missing.insert_str(Tag::STUDY_DATE, Vr::Da, "20240101");
+        assert!(missing
+            .get_datetime(Tag::STUDY_DATE, Tag::STUDY_TIME)
+            .is_ok());
+    }
+
+    #[test]
+    fn copy_tags_resolves_private_dictionary_tag() {
+        let creator = Arc::new(PrivateCreator::new("ACME"));
+        let dict_tag = Tag::private(0x0029, 0x0001, creator);
+        let mut src = Dataset::new();
+        src.insert_str(dict_tag.clone(), Vr::Lo, "v");
+        let mut dest = Dataset::new();
+        src.copy_tags(&mut dest, std::slice::from_ref(&dict_tag));
+        assert_eq!(dest.len(), 2, "private item + its creator slot are copied");
+        assert_eq!(dest.get_str(dict_tag).unwrap(), "v");
     }
 }
