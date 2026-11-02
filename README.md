@@ -1,6 +1,6 @@
 # radicom
 
-> Current repair, test evidence and parity limits: [review ledger](docs/07-review-fixes-2026-10-30.md).
+> Current alignment, gap audit and fix status: [docs/03-fo-dicom-alignment.md](docs/03-fo-dicom-alignment.md).
 
 A pure Rust implementation of the DICOM (Digital Imaging and Communications in Medicine) standard, ported from the [fo-dicom](https://github.com/fo-dicom/fo-dicom) C# library.
 
@@ -596,7 +596,7 @@ The mapping from fo-dicom to radicom — feature parity, intentional divergences
 
 - [docs/02-development-guide.md](docs/02-development-guide.md) — feature-by-feature mapping with IDs and priorities
 - [docs/01-architecture.md](docs/01-architecture.md) — architecture and divergences D1–D12
-- [docs/03-fo-dicom-alignment.md](docs/03-fo-dicom-alignment.md) — module-level alignment status
+- [docs/03-fo-dicom-alignment.md](docs/03-fo-dicom-alignment.md) — alignment verdict, 2026-11-02 gap audit and per-finding fix status
 
 ## Documentation
 
@@ -605,7 +605,7 @@ The mapping from fo-dicom to radicom — feature parity, intentional divergences
 | [docs/README.md](docs/README.md) | Documentation index, project background, glossary |
 | [docs/01-architecture.md](docs/01-architecture.md) | **What the code must obey**: Tag ordering, tolerance rules T1–T10, the frozen codec boundary, wire formats, known deviations |
 | [docs/02-development-guide.md](docs/02-development-guide.md) | Feature list with IDs and priorities, milestone status, what is outstanding, test strategy and CI |
-| [docs/03-fo-dicom-alignment.md](docs/03-fo-dicom-alignment.md) | Module-by-module fo-dicom parity verdict with code evidence |
+| [docs/03-fo-dicom-alignment.md](docs/03-fo-dicom-alignment.md) | fo-dicom parity verdict, gap audit and per-finding fix status |
 | [docs/04-interop.md](docs/04-interop.md) | Interop testing against real peers |
 
 ## License

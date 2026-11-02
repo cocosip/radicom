@@ -60,6 +60,15 @@ pub struct ReadOptions {
     pub read: FileReadOption,
     /// Values at or above this size are "large" (default 64 KiB).
     pub large_object_size: u64,
+    /// Character encoding for text in a dataset that carries no (0008,0005),
+    /// e.g. legacy Latin-1 or Shift-JIS archives (H1; fo-dicom
+    /// `DicomFile.Open(..., Encoding fallbackEncoding)`). `None` decodes the
+    /// default repertoire (ISO-IR 6).
+    pub fallback_encoding: Option<&'static encoding_rs::Encoding>,
+    /// Stream input up to this many bytes is parsed from memory; anything larger
+    /// is spooled to a temporary file and parsed with the file's lazy value
+    /// windows, so the whole instance is never held in RAM (M2, default 8 MiB).
+    pub stream_spool_threshold: u64,
 }
 
 impl Default for ReadOptions {
@@ -67,7 +76,23 @@ impl Default for ReadOptions {
         ReadOptions {
             read: FileReadOption::Default,
             large_object_size: 64 * 1024,
+            fallback_encoding: None,
+            stream_spool_threshold: 8 * 1024 * 1024,
         }
+    }
+}
+
+impl ReadOptions {
+    /// These options with a fallback character encoding (H1).
+    pub fn with_fallback_encoding(mut self, encoding: &'static encoding_rs::Encoding) -> Self {
+        self.fallback_encoding = Some(encoding);
+        self
+    }
+
+    /// The fallback list handed to the parser and stored on the dataset, so a
+    /// save re-encodes the text the same way it was decoded (H1).
+    fn fallback_encodings(&self) -> Vec<&'static encoding_rs::Encoding> {
+        self.fallback_encoding.into_iter().collect()
     }
 }
 
@@ -82,6 +107,10 @@ pub struct DicomFile {
     pub is_partial: bool,
     /// Identity of the source, used in error context.
     source: Option<PathBuf>,
+    /// Owns the temporary file a stream was spooled into (M2). It must outlive
+    /// the dataset's value windows, which the field order guarantees: `dataset`
+    /// (and its windows) drops first, then this deletes the file.
+    spooled: Option<Arc<crate::model::buffer::TempFileSpill>>,
 }
 
 impl DicomFile {
@@ -98,12 +127,25 @@ impl DicomFile {
             format: FileFormat::Dicom3,
             is_partial: false,
             source: None,
+            spooled: None,
         }
     }
 
     /// Opens and parses a file from disk (FILE-01, default read options).
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         Self::open_with_options(path, &ReadOptions::default())
+    }
+
+    /// Opens a file whose text carries no (0008,0005) with `encoding` (H1;
+    /// fo-dicom `DicomFile.Open(path, fallbackEncoding)`).
+    pub fn open_with_encoding(
+        path: impl AsRef<Path>,
+        encoding: &'static encoding_rs::Encoding,
+    ) -> Result<Self, Error> {
+        Self::open_with_options(
+            path,
+            &ReadOptions::default().with_fallback_encoding(encoding),
+        )
     }
 
     /// Opens a file honoring the [`ReadOptions`] large-value policy (FILE-02).
@@ -188,7 +230,10 @@ impl DicomFile {
                 partial_on_eof: true,
                 ..DicomReader::default()
             };
-            let mut builder = DatasetBuilder::with_transfer_syntax(syntax.clone());
+            let mut builder = DatasetBuilder::with_transfer_syntax_and_fallback(
+                syntax.clone(),
+                options.fallback_encodings(),
+            );
             let outcome = reader.read(&mut source, &syntax, &mut builder, None)?;
             (builder.into_dataset(), outcome)
         };
@@ -210,6 +255,7 @@ impl DicomFile {
             format,
             is_partial: outcome == crate::io::reader::ReadOutcome::Suspended,
             source: Some(path.to_path_buf()),
+            spooled: None,
         })
     }
 
@@ -221,16 +267,39 @@ impl DicomFile {
         Self::parse_raw(bytes, options)
     }
 
-    /// Parses from any seekable reader (FILE-01).
-    pub fn from_reader<R: Read + Seek>(
-        reader: &mut R,
-        options: &ReadOptions,
-    ) -> Result<Self, Error> {
-        let mut raw = Vec::new();
-        reader
-            .read_to_end(&mut raw)
-            .map_err(|e| Error::File(FileError::Other(format!("read: {e}"))))?;
-        Self::parse_raw(&raw, options)
+    /// Parses from any reader (FILE-01, M2).
+    ///
+    /// A stream up to [`ReadOptions::stream_spool_threshold`] bytes is parsed
+    /// from memory. Anything larger is spooled to a temporary file — never
+    /// `read_to_end`ed into RAM — and parsed with the file's lazy value windows;
+    /// the temporary file is owned by the returned [`DicomFile`] and deleted when
+    /// it (and every value window in it) is dropped.
+    pub fn from_reader<R: Read>(reader: &mut R, options: &ReadOptions) -> Result<Self, Error> {
+        let limit = options.stream_spool_threshold;
+        // read one byte past the threshold: that is enough to tell which path to
+        // take, and the prefix is reused by the spool. The `Take` is scoped, so
+        // the spool continues from the reader itself and never loses its tail.
+        let mut head = Vec::new();
+        {
+            let mut window = (&mut *reader).take(limit.saturating_add(1));
+            window
+                .read_to_end(&mut head)
+                .map_err(|e| Error::File(FileError::Other(format!("read: {e}"))))?;
+        }
+        if head.len() as u64 <= limit {
+            let mut file = Self::parse_raw(&head, options)?;
+            file.source = None;
+            return Ok(file);
+        }
+        let (path, len) = spool_stream(&head, reader)?;
+        let mut file = Self::open_with_options(&path, options)?;
+        // a stream has no path of its own: the spool is an implementation detail
+        file.source = None;
+        file.spooled = Some(Arc::new(
+            crate::model::buffer::TempFileSpill::from_temp_file(path, len)
+                .map_err(|e| Error::File(FileError::Other(format!("spool: {e}"))))?,
+        ));
+        Ok(file)
     }
 
     /// Parses a complete file image already in memory.
@@ -266,6 +335,7 @@ impl DicomFile {
             format,
             is_partial: outcome == crate::io::reader::ReadOutcome::Suspended,
             source: None,
+            spooled: None,
         })
     }
 
@@ -296,6 +366,7 @@ impl DicomFile {
             format,
             is_partial: outcome != crate::io::reader::ReadOutcome::Success,
             source: Some(path.to_path_buf()),
+            spooled: None,
         })
     }
 
@@ -306,23 +377,66 @@ impl DicomFile {
 
     /// Writes the file to disk using the given write options
     /// (fo-dicom `Save(string, DicomWriteOptions)`).
+    ///
+    /// The file is streamed through the writer (M2): no `Vec` of the whole file
+    /// is built. It goes to a sibling temporary file that is renamed into place,
+    /// so a failure mid-write never destroys an existing destination.
+    ///
+    /// ponytail: the rename replaces a destination symlink instead of writing
+    /// through it; follow the link here if that ever matters to a caller.
     pub fn save_with(&self, path: impl AsRef<Path>, options: &WriteOptions) -> Result<(), Error> {
         let path = path.as_ref();
-        let bytes = self.to_bytes(options)?;
-        std::fs::write(path, bytes).map_err(|e| file_err(path, "write", e))
+        let dir = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        let (temp_path, mut file) = crate::io::temp::create_unique_file(dir, "radicom-save", "tmp")
+            .map_err(|e| file_err(path, "create", e))?;
+        let result = self
+            .write_stream(&mut file, options)
+            .and_then(|()| file.flush().map_err(|e| file_err(path, "write", e)));
+        drop(file);
+        match result {
+            Ok(()) => std::fs::rename(&temp_path, path).map_err(|e| {
+                let _ = std::fs::remove_file(&temp_path);
+                file_err(path, "rename", e)
+            }),
+            Err(error) => {
+                let _ = std::fs::remove_file(&temp_path);
+                Err(error)
+            }
+        }
     }
 
-    /// Serializes preamble, meta group and dataset (FILE-05).
+    /// Serializes preamble, meta group and dataset into memory (FILE-05).
+    ///
+    /// Kept for callers that need the whole image as bytes; `save_with`/`write`
+    /// stream instead (M2).
     pub fn to_bytes(&self, options: &WriteOptions) -> Result<Vec<u8>, Error> {
+        #[cfg(test)]
+        TO_BYTES_CALLS.with(|count| count.set(count.get() + 1));
+        let mut out = Vec::new();
+        self.write_stream(&mut out, options)?;
+        Ok(out)
+    }
+
+    /// The one streaming implementation behind [`Self::to_bytes`], [`Self::write`]
+    /// and [`Self::save_with`] (M2): preamble, meta group, then the dataset —
+    /// deflated in flight when the transfer syntax asks for it.
+    pub(crate) fn write_stream<W: Write>(
+        &self,
+        out: &mut W,
+        options: &WriteOptions,
+    ) -> Result<(), Error> {
         if !self.format.is_saveable() {
             return Err(Error::File(FileError::FormatNotSaveable(format!(
                 "{:?}",
                 self.format
             ))));
         }
-        let mut out = Vec::new();
-        out.extend_from_slice(&[0u8; 128]);
-        out.extend_from_slice(b"DICM");
+        out.write_all(&[0u8; 128])
+            .and_then(|()| out.write_all(b"DICM"))
+            .map_err(|e| Error::File(FileError::Other(format!("write: {e}"))))?;
         let meta = self.refreshed_meta()?;
         // PS3.10 Table 7.1-1: (0002,0000) File Meta Information Group Length is
         // Type 1 (required), so always recalculate it for the meta group whatever
@@ -334,22 +448,40 @@ impl DicomFile {
         DicomWriter::new(meta_options).write_dataset(
             &meta,
             &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN,
-            &mut out,
+            out,
         )?;
         // the dataset keeps its own syntax; deflated bodies are compressed
         let syntax = self.dataset.transfer_syntax();
         if syntax.is_deflate() {
-            let mut plain = Vec::new();
-            DicomWriter::new(options.clone()).write_dataset(
-                &self.dataset,
-                &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN,
-                &mut plain,
-            )?;
-            out.extend_from_slice(&deflate(&plain)?);
+            let mut counted = CountingWriter {
+                inner: out,
+                written: 0,
+            };
+            {
+                let mut encoder = flate2::write::DeflateEncoder::new(
+                    &mut counted,
+                    flate2::Compression::default(),
+                );
+                DicomWriter::new(options.clone()).write_dataset(
+                    &self.dataset,
+                    &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN,
+                    &mut encoder,
+                )?;
+                encoder.finish().map_err(|e| {
+                    Error::Writer(crate::error::WriterError(format!("deflate: {e}")))
+                })?;
+            }
+            // PS3.5 A.5: a deflated file is padded to an even length
+            if counted.written % 2 == 1 {
+                counted
+                    .inner
+                    .write_all(&[0])
+                    .map_err(|e| Error::File(FileError::Other(format!("write: {e}"))))?;
+            }
         } else {
-            DicomWriter::new(options.clone()).write_dataset(&self.dataset, &syntax, &mut out)?;
+            DicomWriter::new(options.clone()).write_dataset(&self.dataset, &syntax, out)?;
         }
-        Ok(out)
+        Ok(())
     }
 
     /// Length of the 128-byte preamble, `DICM` magic and encoded file meta
@@ -372,11 +504,9 @@ impl DicomFile {
         Ok(132 + meta_len)
     }
 
-    /// Writes to an arbitrary writer.
+    /// Writes to an arbitrary writer, streaming (M2).
     pub fn write<W: Write>(&self, out: &mut W, options: &WriteOptions) -> Result<(), Error> {
-        let bytes = self.to_bytes(options)?;
-        out.write_all(&bytes)
-            .map_err(|e| Error::File(FileError::Other(format!("write: {e}"))))
+        self.write_stream(out, options)
     }
 
     /// FILE-06: true when `path` carries the 128-byte preamble + `DICM`.
@@ -443,8 +573,10 @@ impl DicomFile {
                 .unwrap_or_else(Uid::generate_value);
             meta.insert_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID, Vr::Ui, uid);
         }
-        // the file meta group is always Explicit VR LE; drop stale lengths
-        meta.remove(Tag::FILE_META_INFORMATION_GROUP_LENGTH);
+        // the file meta group is always Explicit VR LE; drop the stale length and
+        // seed a placeholder, because the writer recalculates a present
+        // (0002,0000) but no longer invents a missing one (L2)
+        meta.insert_value_with_vr(Tag::FILE_META_INFORMATION_GROUP_LENGTH, Vr::Ul, 0u32);
         Ok(meta)
     }
 }
@@ -494,7 +626,10 @@ fn parse_slice(
         partial_on_eof: true,
         ..DicomReader::default()
     };
-    let mut builder = DatasetBuilder::with_transfer_syntax(Arc::new(syntax.clone()));
+    let mut builder = DatasetBuilder::with_transfer_syntax_and_fallback(
+        Arc::new(syntax.clone()),
+        options.fallback_encodings(),
+    );
     let outcome = reader.read(&mut source, syntax, &mut builder, None)?;
     Ok((builder.into_dataset(), outcome))
 }
@@ -723,20 +858,66 @@ fn looks_explicit(dataset: &[u8]) -> bool {
     Vr::try_parse(&code_le).is_some() || Vr::try_parse(&code_be).is_some()
 }
 
-fn deflate(bytes: &[u8]) -> Result<Vec<u8>, Error> {
-    use std::io::Write as _;
-    // PS3.5 A.5: the deflated transfer syntax is **raw DEFLATE (RFC 1951)**, no
-    // zlib header/trailer; an odd-length stream gets one padding byte.
-    let mut encoder =
-        flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
-    let mut out = encoder
-        .write_all(bytes)
-        .and_then(|_| encoder.finish())
-        .map_err(|e| Error::Writer(crate::error::WriterError(format!("deflate: {e}"))))?;
-    if out.len() % 2 == 1 {
-        out.push(0);
+// Counts in-memory serializations on the current thread, so a test can prove
+// that the streaming save path never enters `to_bytes` (M2 seam). Thread-local
+// so parallel tests cannot inflate it.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TO_BYTES_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// A writer that counts the bytes it forwards, so a deflated body can be padded
+/// to an even length without ever buffering it (M2).
+struct CountingWriter<'a, W: Write> {
+    inner: &'a mut W,
+    written: u64,
+}
+
+impl<W: Write> Write for CountingWriter<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.written += written as u64;
+        Ok(written)
     }
-    Ok(out)
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Copies an already-read prefix plus the rest of a stream into a fresh
+/// temporary file, returning its path and length (M2). The caller owns deletion.
+fn spool_stream<R: Read>(head: &[u8], stream: &mut R) -> Result<(PathBuf, u64), Error> {
+    let (path, mut file) =
+        crate::io::temp::create_unique_file(&std::env::temp_dir(), "radicom-stream", "tmp")
+            .map_err(|e| Error::File(FileError::Other(format!("spool create: {e}"))))?;
+    let result = (|| -> Result<u64, Error> {
+        file.write_all(head).map_err(spool_err)?;
+        let mut len = head.len() as u64;
+        let mut chunk = vec![0u8; 64 * 1024];
+        loop {
+            let read = stream.read(&mut chunk).map_err(spool_err)?;
+            if read == 0 {
+                break;
+            }
+            file.write_all(&chunk[..read]).map_err(spool_err)?;
+            len += read as u64;
+        }
+        file.flush().map_err(spool_err)?;
+        Ok(len)
+    })();
+    match result {
+        Ok(len) => Ok((path, len)),
+        Err(error) => {
+            let _ = std::fs::remove_file(&path);
+            Err(error)
+        }
+    }
+}
+
+/// Maps a stream/copy failure while spooling (M2).
+fn spool_err(e: std::io::Error) -> Error {
+    Error::File(FileError::Other(format!("spool: {e}")))
 }
 
 fn file_err(path: &Path, action: &str, e: std::io::Error) -> Error {
@@ -822,6 +1003,7 @@ mod tests {
             format: FileFormat::Dicom3,
             is_partial: false,
             source: None,
+            spooled: None,
         }
     }
 
@@ -844,6 +1026,53 @@ mod tests {
         assert_eq!(back.format, FileFormat::Dicom3);
         assert_eq!(back.get_str(Tag::PATIENT_NAME), "Doe^John");
         assert_eq!(back.get_str(Tag::PATIENT_ID), "PID-1");
+    }
+
+    #[test]
+    fn fallback_encoding_decodes_and_reencodes_a_file_without_a_charset() {
+        use crate::encoding::charset::charset_encoding;
+
+        // A Shift-JIS PN with no (0008,0005): the legacy/misbehaving-archive
+        // case. The raw element is appended by hand because the writer
+        // re-encodes string VRs from their decoded text — a real such file has
+        // these bytes on disk. 0x93FA 0x967B is "日本" in Shift-JIS.
+        let mut dataset = Dataset::new();
+        dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5");
+        let mut bytes = DicomFile::from_dataset(dataset)
+            .to_bytes(&WriteOptions::default())
+            .unwrap();
+        bytes.extend_from_slice(&[
+            0x10, 0x00, 0x10, 0x00, // (0010,0010)
+            b'P', b'N', 0x04, 0x00, // PN, 4 bytes
+            0x93, 0xFA, 0x96, 0x7B, // "日本"
+        ]);
+        assert!(
+            !bytes.windows(6).any(|w| w == b"ISO_IR"),
+            "the fixture carries no SpecificCharacterSet"
+        );
+
+        // without a fallback the bytes are decoded with the default repertoire,
+        // so the value is mojibake
+        let default = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
+        assert_ne!(default.get_str(Tag::PATIENT_NAME), "日本");
+
+        // with ISO-IR 13 the text comes back intact (H1)
+        let shift_jis = charset_encoding("ISO_IR 13");
+        let with_fallback = DicomFile::from_bytes(
+            &bytes,
+            &ReadOptions::default().with_fallback_encoding(shift_jis),
+        )
+        .unwrap();
+        assert_eq!(with_fallback.get_str(Tag::PATIENT_NAME), "日本");
+
+        // the fallback is remembered, so saving keeps the original bytes instead
+        // of emitting unlabelled UTF-8
+        let again = with_fallback.to_bytes(&WriteOptions::default()).unwrap();
+        assert!(
+            again.windows(4).any(|w| w == [0x93, 0xFA, 0x96, 0x7B]),
+            "re-encoded with the fallback encoding"
+        );
     }
 
     #[test]
@@ -1572,6 +1801,7 @@ mod tests {
             let opts = ReadOptions {
                 read: FileReadOption::ReadLargeOnDemand,
                 large_object_size: 1000,
+                ..ReadOptions::default()
             };
             let file = DicomFile::open_with_options(&path, &opts).unwrap();
             let buffer = large_value_buffer(&file.dataset);
@@ -1608,6 +1838,7 @@ mod tests {
             let opts = ReadOptions {
                 read: FileReadOption::ReadAll,
                 large_object_size: 1000,
+                ..ReadOptions::default()
             };
             let file = DicomFile::open_with_options(&path, &opts).unwrap();
             let buffer = large_value_buffer(&file.dataset);
@@ -1618,6 +1849,164 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// An `(0009,1001)` OB of `big_len` bytes plus a small (0010,0020).
+    ///
+    /// Carries a SOP instance UID because `refreshed_meta` generates a random
+    /// (0002,0003) otherwise, which would make two writes of the same file
+    /// differ byte-wise.
+    fn large_file(big_len: usize) -> (DicomFile, Vec<u8>) {
+        let big: Vec<u8> = (0..big_len).map(|i| (i % 251) as u8).collect();
+        let mut ds = Dataset::new();
+        ds.insert_or_update(crate::model::element::DicomElement::new_bytes(
+            Tag::new(0x0009, 0x1001),
+            Vr::Ob,
+            std::sync::Arc::new(MemoryBuffer::from(big.clone())),
+        ));
+        ds.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID-1");
+        ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.2");
+        ds.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5.6.7");
+        (DicomFile::from_dataset(ds), big)
+    }
+
+    #[test]
+    fn save_streams_a_large_value_and_reopens_it_windowed() {
+        // (a) M2: an 8 MiB value goes through the writer to the file, not through
+        // a `to_bytes()` image of the whole instance
+        let (file, big) = large_file(8 * 1024 * 1024);
+        let path = temp_file("stream-large");
+        file.save_with(&path, &WriteOptions::default()).unwrap();
+
+        let written = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(
+            written,
+            file.to_bytes(&WriteOptions::default()).unwrap().len() as u64,
+            "the streamed file is byte-identical to the in-memory image"
+        );
+
+        let opts = ReadOptions {
+            read: FileReadOption::ReadLargeOnDemand,
+            ..ReadOptions::default()
+        };
+        let reopened = DicomFile::open_with_options(&path, &opts).unwrap();
+        let buffer = large_value_buffer(&reopened.dataset);
+        assert_eq!(buffer.size(), big.len() as u64);
+        assert!(!buffer.is_memory(), "the reopened value is a file window");
+        let mut streamed = Vec::new();
+        assert_eq!(buffer.copy_to(&mut streamed).unwrap(), big.len() as u64);
+        assert_eq!(streamed, big, "the 8 MiB value survives the streamed write");
+        assert_eq!(reopened.get_str(Tag::PATIENT_ID), "PID-1");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A `Read` with no `Seek`: the shape of a socket or pipe (M2).
+    struct StreamOnly<'a> {
+        inner: Cursor<&'a [u8]>,
+    }
+
+    impl Read for StreamOnly<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.inner.read(buf)
+        }
+    }
+
+    fn spool_files() -> Vec<PathBuf> {
+        std::fs::read_dir(std::env::temp_dir())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("radicom-stream-"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn from_reader_spools_a_non_seekable_stream() {
+        // (b) M2: no Seek bound, no read_to_end; large streams spool to a temp
+        // file and window their large values out of it
+        let (file, big) = large_file(256 * 1024);
+        let bytes = file.to_bytes(&WriteOptions::default()).unwrap();
+        let before = spool_files().len();
+        let options = ReadOptions {
+            read: FileReadOption::ReadLargeOnDemand,
+            large_object_size: 1024,
+            stream_spool_threshold: 4096,
+            ..ReadOptions::default()
+        };
+        let mut stream = StreamOnly {
+            inner: Cursor::new(bytes.as_slice()),
+        };
+        let parsed = DicomFile::from_reader(&mut stream, &options).unwrap();
+        assert_eq!(
+            parsed.dataset.try_get_str_ref(Tag::PATIENT_ID),
+            Some("PID-1"),
+            "the spooled stream keeps every element (partial={})",
+            parsed.is_partial
+        );
+        let buffer = large_value_buffer(&parsed.dataset);
+        assert!(
+            !buffer.is_memory(),
+            "a spooled stream windows the value instead of holding it in RAM"
+        );
+        assert_eq!(&*buffer.data().unwrap(), &big[..]);
+        assert_eq!(
+            spool_files().len(),
+            before + 1,
+            "the stream went to exactly one temp file"
+        );
+        drop(parsed);
+        assert_eq!(
+            spool_files().len(),
+            before,
+            "the spool is deleted with the file it backs"
+        );
+
+        // a stream below the threshold is parsed from memory and touches no disk
+        let small = large_file(16).0.to_bytes(&WriteOptions::default()).unwrap();
+        let before = spool_files().len();
+        let mut stream = StreamOnly {
+            inner: Cursor::new(small.as_slice()),
+        };
+        let parsed = DicomFile::from_reader(&mut stream, &ReadOptions::default()).unwrap();
+        assert_eq!(parsed.get_str(Tag::PATIENT_ID), "PID-1");
+        assert_eq!(spool_files().len(), before, "small streams stay in memory");
+    }
+
+    #[test]
+    fn save_and_write_stream_without_the_in_memory_path() {
+        // (a) M2 seam: only `to_bytes` increments the counter, and neither
+        // `save_with` nor `write` reaches it
+        let (file, _) = large_file(1024 * 1024);
+        let path = temp_file("stream-seam");
+        let before = TO_BYTES_CALLS.with(|count| count.get());
+        file.save_with(&path, &WriteOptions::default()).unwrap();
+        let mut sink = Vec::new();
+        file.write(&mut sink, &WriteOptions::default()).unwrap();
+        assert_eq!(
+            TO_BYTES_CALLS.with(|count| count.get()),
+            before,
+            "save_with/write stream through the writer instead of materializing the file"
+        );
+
+        // ...and the streaming path produces exactly the in-memory image
+        assert_eq!(sink, file.to_bytes(&WriteOptions::default()).unwrap());
+        assert_eq!(
+            TO_BYTES_CALLS.with(|count| count.get()),
+            before + 1,
+            "to_bytes is the only in-memory path"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), sink);
+
+        // an existing destination is replaced rather than appended to
+        std::fs::write(&path, b"stale").unwrap();
+        file.save(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), sink);
+        std::fs::remove_file(&path).ok();
+    }
+
     #[test]
     fn skip_large_tags_omits_the_attribute_and_advances() {
         let (path, _big) = file_with_large_value(5000);
@@ -1625,6 +2014,7 @@ mod tests {
             let opts = ReadOptions {
                 read: FileReadOption::SkipLargeTags,
                 large_object_size: 1000,
+                ..ReadOptions::default()
             };
             let file = DicomFile::open_with_options(&path, &opts).unwrap();
             // fo-dicom's FileByteSource hands the observer no buffer for a
@@ -1654,6 +2044,7 @@ mod extra_tests {
             format: FileFormat::Dicom3,
             is_partial: false,
             source: None,
+            spooled: None,
         }
     }
 

@@ -20,13 +20,15 @@
 
 use base64::Engine as _;
 use radicom::model::buffer::{MemoryBuffer, SharedBuffer};
+use std::borrow::Cow;
 
 pub mod xml;
 
 use radicom::model::dataset::Dataset;
-use radicom::model::element::DicomElement;
+use radicom::model::element::{DicomElement, ElementValue};
 use radicom::model::item::{DicomItem, DicomSequence};
 use radicom::model::person_name::PersonName;
+use radicom::model::private_creator::PrivateCreator;
 use radicom::model::tag::Tag;
 use radicom::model::vr::Vr;
 use serde_json::{Map, Number, Value};
@@ -90,6 +92,13 @@ pub struct JsonOptions {
     pub validate_on_read: bool,
     pub numbers: NumberMode,
     pub format_indented: bool,
+    /// Non-standard: also emit each attribute's dictionary keyword as a
+    /// `"keyword"` property (fo-dicom `WriteKeyword`). Unknown, masked and
+    /// private tags carry no annotation.
+    pub write_keyword: bool,
+    /// Non-standard: also emit each attribute's dictionary name as a `"name"`
+    /// property (fo-dicom `WriteName`).
+    pub write_name: bool,
     /// Names a URI for deferred values instead of materialising them
     /// (PS3.18 Annex F `BulkDataURI`). Only non-memory buffers are offered, so
     /// an in-memory value always becomes `InlineBinary` and the output of an
@@ -104,6 +113,8 @@ impl std::fmt::Debug for JsonOptions {
             .field("validate_on_read", &self.validate_on_read)
             .field("numbers", &self.numbers)
             .field("format_indented", &self.format_indented)
+            .field("write_keyword", &self.write_keyword)
+            .field("write_name", &self.write_name)
             .field("bulk_data_uri", &self.bulk_data_uri.is_some())
             .finish()
     }
@@ -116,6 +127,8 @@ impl Default for JsonOptions {
             validate_on_read: false,
             numbers: NumberMode::PreferablyAsNumber,
             format_indented: false,
+            write_keyword: false,
+            write_name: false,
             bulk_data_uri: None,
         }
     }
@@ -126,9 +139,18 @@ pub fn tag_key(tag: &Tag) -> String {
     tag.to_json_string()
 }
 
-/// Parses a tag key (8 hex digits); anything else is skipped on read.
+/// Parses a tag key: an 8-hex-digit tag, or a dictionary keyword (fo-dicom
+/// `ParseTag`: `DicomDictionary.Default[tagstr]`). Anything else is skipped on
+/// read.
 fn parse_tag_key(key: &str) -> Option<Tag> {
-    Tag::parse(key).ok()
+    if let Ok(tag) = Tag::parse(key) {
+        return Some(tag);
+    }
+    // private keywords resolve to a placeholder creator-scoped tag, which is
+    // not the tag the writer would have produced; only public keywords count.
+    radicom::default_dictionary()
+        .tag_by_keyword(key)
+        .filter(|tag| tag.private_creator().is_none())
 }
 
 /// Serializes a dataset to DICOM JSON (§12.1).
@@ -168,16 +190,14 @@ pub fn dataset_to_value(dataset: &Dataset, options: &JsonOptions) -> Result<Valu
         }
         match item {
             DicomItem::Element(element) => {
-                object.insert(
-                    key_for(element.tag(), options),
-                    element_to_value(element, options)?,
-                );
+                let mut value = element_to_value(element, options)?;
+                annotate(&mut value, element.tag(), options);
+                object.insert(key_for(element.tag(), options), value);
             }
             DicomItem::Sequence(sequence) => {
-                object.insert(
-                    key_for(sequence.tag(), options),
-                    sequence_to_value(sequence, options)?,
-                );
+                let mut value = sequence_to_value(sequence, options)?;
+                annotate(&mut value, sequence.tag(), options);
+                object.insert(key_for(sequence.tag(), options), value);
             }
             DicomItem::Fragments(_) => return Err(JsonError::Fragments),
         }
@@ -185,10 +205,45 @@ pub fn dataset_to_value(dataset: &Dataset, options: &JsonOptions) -> Result<Valu
     Ok(Value::Object(object))
 }
 
+/// The dictionary keyword/name of a tag that fo-dicom may use as a JSON key or
+/// annotation. Unknown, blank-keyword, masked/repeating-group and private tags
+/// fall back to the hex tag instead: their keyword is shared by many tags
+/// (`Unknown`, `PrivateCreator`, `OverlayData`) and would collide in the JSON
+/// object (fo-dicom `JsonDicomConverter.cs:116-129`).
+fn keyword_and_name(tag: &Tag) -> Option<(&'static str, &'static str)> {
+    if tag.is_private() {
+        return None;
+    }
+    let entry = radicom::default_dictionary().entry(tag);
+    if entry.mask.is_some() || entry.keyword.is_empty() || entry.keyword == "Unknown" {
+        return None;
+    }
+    Some((entry.keyword, entry.name))
+}
+
+/// Adds the non-standard per-attribute `keyword`/`name` annotations
+/// (fo-dicom `WriteKeyword`/`WriteName`).
+fn annotate(value: &mut Value, tag: &Tag, options: &JsonOptions) {
+    if !options.write_keyword && !options.write_name {
+        return;
+    }
+    let Some((keyword, name)) = keyword_and_name(tag) else {
+        return;
+    };
+    let Value::Object(object) = value else {
+        return;
+    };
+    if options.write_keyword {
+        object.insert("keyword".to_string(), Value::String(keyword.to_string()));
+    }
+    if options.write_name {
+        object.insert("name".to_string(), Value::String(name.to_string()));
+    }
+}
+
 fn key_for(tag: &Tag, options: &JsonOptions) -> String {
     if options.tags_as_keywords {
-        let keyword = radicom::default_dictionary().entry(tag).keyword;
-        if !keyword.is_empty() {
+        if let Some((keyword, _)) = keyword_and_name(tag) {
             return keyword.to_string();
         }
     }
@@ -508,6 +563,74 @@ fn person_name_value(text: &str) -> Value {
     Value::Object(object)
 }
 
+/// Removes `//` and `/* */` comments outside JSON strings, the way fo-dicom
+/// reads with `JsonCommentHandling.Skip`. Comments become a single space so
+/// removing one cannot join two tokens; the input is borrowed unchanged when it
+/// contains no comment, so a large `InlineBinary` payload is not copied.
+fn strip_json_comments(json: &str) -> Cow<'_, str> {
+    let bytes = json.as_bytes();
+    let mut out: Option<String> = None;
+    let mut copied = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                // skip a string, honouring backslash escapes
+                index += 1;
+                while index < bytes.len() {
+                    match bytes[index] {
+                        b'\\' => index += 2,
+                        b'"' => {
+                            index += 1;
+                            break;
+                        }
+                        _ => index += 1,
+                    }
+                }
+            }
+            b'/' if index + 1 < bytes.len() && bytes[index + 1] == b'/' => {
+                match out.as_mut() {
+                    Some(text) => text.push_str(&json[copied..index]),
+                    None => out = Some(json[..index].to_string()),
+                }
+                out.as_mut().expect("just initialized").push(' ');
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+                copied = index;
+            }
+            b'/' if index + 1 < bytes.len() && bytes[index + 1] == b'*' => {
+                match out.as_mut() {
+                    Some(text) => text.push_str(&json[copied..index]),
+                    None => out = Some(json[..index].to_string()),
+                }
+                out.as_mut().expect("just initialized").push(' ');
+                index += 2;
+                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                {
+                    index += 1;
+                }
+                index = (index + 2).min(bytes.len());
+                copied = index;
+            }
+            _ => index += 1,
+        }
+    }
+    match out {
+        None => Cow::Borrowed(json),
+        Some(mut text) => {
+            text.push_str(&json[copied..]);
+            Cow::Owned(text)
+        }
+    }
+}
+
+/// Parses JSON into a value tree, tolerating comments like fo-dicom.
+fn parse_json(json: &str) -> serde_json::Result<Value> {
+    serde_json::from_str(&strip_json_comments(json))
+}
+
 /// Deserializes a dataset from DICOM JSON (§12.1).
 ///
 /// With [`JsonOptions::validate_on_read`] the result is run through
@@ -515,17 +638,19 @@ fn person_name_value(text: &str) -> Value {
 /// value multiplicity, recursing into sequences — the equivalent of fo-dicom's
 /// `autoValidate`. Without it, reading stays tolerant (§12.1).
 pub fn json_to_dataset(json: &str, options: &JsonOptions) -> Result<Dataset> {
-    let value: Value = serde_json::from_str(json)?;
-    let dataset = value_to_dataset(&value)?;
+    let value = parse_json(json)?;
+    let mut dataset = value_to_dataset(&value)?;
     if options.validate_on_read {
         dataset.validate()?;
+        // like fo-dicom's autoValidate dataset, later writes validate again
+        dataset.set_validation(true);
     }
     Ok(dataset)
 }
 
 /// Deserializes a DICOM JSON array into a collection of datasets (§12.1).
 pub fn json_to_datasets(json: &str, options: &JsonOptions) -> Result<Vec<Dataset>> {
-    let value: Value = serde_json::from_str(json)?;
+    let value = parse_json(json)?;
     let Value::Array(values) = value else {
         return Err(JsonError::Unsupported(
             "a DICOM JSON dataset collection must be an array",
@@ -535,9 +660,10 @@ pub fn json_to_datasets(json: &str, options: &JsonOptions) -> Result<Vec<Dataset
     values
         .iter()
         .map(|value| {
-            let dataset = value_to_dataset(value)?;
+            let mut dataset = value_to_dataset(value)?;
             if options.validate_on_read {
                 dataset.validate()?;
+                dataset.set_validation(true);
             }
             Ok(dataset)
         })
@@ -545,6 +671,10 @@ pub fn json_to_datasets(json: &str, options: &JsonOptions) -> Result<Vec<Dataset
 }
 
 /// Deserializes a dataset from a JSON value tree (§12.1).
+///
+/// Reading is tolerant: the dataset is built with write-time validation off,
+/// like fo-dicom's `ReadJsonDataset` `.NotValidated()`; call
+/// [`Dataset::validate`] to check it explicitly.
 pub fn value_to_dataset(value: &Value) -> Result<Dataset> {
     let Value::Object(object) = value else {
         return Err(JsonError::Unsupported(
@@ -552,6 +682,9 @@ pub fn value_to_dataset(value: &Value) -> Result<Dataset> {
         ));
     };
     let mut dataset = Dataset::new();
+    // JSON without autoValidate is read-tolerant (§12.1), also matching the
+    // datasets the DICOM parser produces (fo-dicom `NotValidated`).
+    dataset.set_validation(false);
 
     for (key, attribute) in object {
         let Some(tag) = parse_tag_key(key) else {
@@ -561,7 +694,66 @@ pub fn value_to_dataset(value: &Value) -> Result<Dataset> {
         let item = attribute_to_item(tag, attribute)?;
         dataset.insert(item)?;
     }
+    restore_private_creators(&mut dataset)?;
     Ok(dataset)
+}
+
+/// Attaches the private creator named by a `(gggg,00xx)` block slot to every
+/// private element in the same dataset (fo-dicom `ReadJsonDataset`
+/// `JsonDicomConverter.cs:174-187`). JSON keys carry no creator, so without this
+/// `get(Tag::private(..., creator))` would miss after a round trip.
+fn restore_private_creators(dataset: &mut Dataset) -> Result<()> {
+    let retags: Vec<(Tag, Tag)> = dataset
+        .items()
+        .filter_map(|item| {
+            let tag = item.tag();
+            if !tag.is_private() || tag.element() & 0xFF00 == 0 || tag.private_creator().is_some() {
+                return None;
+            }
+            let slot = Tag::new(tag.group(), tag.element() >> 8);
+            let creator = dataset.try_get_str(&slot)?;
+            let creator = creator.trim();
+            if creator.is_empty() {
+                return None;
+            }
+            Some((
+                tag.clone(),
+                Tag::private(
+                    tag.group(),
+                    tag.element(),
+                    Arc::new(PrivateCreator::new(creator)),
+                ),
+            ))
+        })
+        .collect();
+    for (old, new) in retags {
+        let Some(item) = dataset.remove(&old) else {
+            continue;
+        };
+        // a sequence item must be rebuilt because `DicomItem::with_tag` is
+        // crate-private in radicom
+        let item = match item {
+            DicomItem::Element(element) => {
+                let element = match element.value().clone() {
+                    ElementValue::Str(text) => DicomElement::new_str(new, element.vr(), text),
+                    ElementValue::Bytes(buffer) => {
+                        DicomElement::new_bytes(new, element.vr(), buffer)
+                    }
+                };
+                DicomItem::Element(element)
+            }
+            DicomItem::Sequence(sequence) => {
+                let mut rebuilt = DicomSequence::new(new);
+                for child in sequence.items() {
+                    rebuilt.push(child.clone());
+                }
+                DicomItem::Sequence(rebuilt)
+            }
+            fragments => fragments,
+        };
+        dataset.insert(item)?;
+    }
+    Ok(())
 }
 
 fn attribute_to_item(tag: Tag, attribute: &Value) -> Result<DicomItem> {
@@ -592,7 +784,19 @@ fn attribute_to_item(tag: Tag, attribute: &Value) -> Result<DicomItem> {
         )));
     }
 
-    if let Some(encoded) = object.get("InlineBinary").and_then(Value::as_str) {
+    if let Some(inline) = object.get("InlineBinary") {
+        // fo-dicom also accepts the single-element array form
+        let encoded = match inline {
+            Value::String(text) => Some(text.as_str()),
+            Value::Array(values) => values.first().and_then(Value::as_str),
+            _ => None,
+        };
+        let Some(encoded) = encoded else {
+            return Err(JsonError::Malformed {
+                tag: tag.to_json_string(),
+                reason: "\"InlineBinary\" must be a base64 string".to_string(),
+            });
+        };
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(encoded)
             .map_err(|e| JsonError::Malformed {
@@ -1180,17 +1384,6 @@ mod tests {
         let json = r#"{"00100020":{"Value":["PID-1"],"extra":true,"vr":"LO"}}"#;
         let ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
         assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
-    }
-
-    #[test]
-    fn reading_skips_unknown_keys() {
-        let json = r#"{"PatientID":{"vr":"LO","Value":["PID-1"]},"00100020":{"vr":"LO","Value":["PID-1"]}}"#;
-        let ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
-        assert_eq!(
-            ds.len(),
-            1,
-            "the keyword key is skipped, the tag key is read"
-        );
     }
 
     #[test]
@@ -1921,5 +2114,171 @@ mod tests {
         let ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
         let back = dataset_to_value(&ds, &JsonOptions::default()).unwrap();
         assert_eq!(back["00280010"]["Value"], serde_json::json!([5]));
+    }
+
+    /// A dataset whose tags would all collapse onto one keyword: unknown tags
+    /// (`Unknown`), repeating-group overlay tags (`OverlayData`) and a private
+    /// element behind a creator slot.
+    fn collision_prone_dataset() -> Dataset {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+        ds.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID-1");
+        ds.insert_str(Tag::new(0x7777, 0x0001), Vr::Lo, "unknown-1");
+        ds.insert_str(Tag::new(0x7777, 0x0002), Vr::Lo, "unknown-2");
+        ds.insert_value(Tag::new(0x6000, 0x0010), 2u16);
+        ds.insert_value(Tag::new(0x6002, 0x0010), 3u16);
+        ds.insert_str(Tag::new(0x0011, 0x0010), Vr::Lo, "ACME 1.2");
+        ds.insert_str(
+            Tag::private(0x0011, 0x1010, Arc::new(PrivateCreator::new("ACME 1.2"))),
+            Vr::Lo,
+            "secret",
+        );
+        ds
+    }
+
+    #[test]
+    fn tags_as_keywords_falls_back_to_hex_and_loses_no_element() {
+        let ds = collision_prone_dataset();
+        let options = JsonOptions {
+            tags_as_keywords: true,
+            ..Default::default()
+        };
+        let value = dataset_to_value(&ds, &options).unwrap();
+        let object = value.as_object().expect("dataset object");
+        assert_eq!(
+            object.len(),
+            ds.len(),
+            "every element needs its own key: {value}"
+        );
+        for key in [
+            "77770001", "77770002", "60000010", "60020010", "00110010", "00111010",
+        ] {
+            assert!(
+                object.contains_key(key),
+                "hex key {key} is present: {value}"
+            );
+        }
+        assert!(object.contains_key("PatientName"));
+        assert!(!object.contains_key("Unknown"));
+        assert!(!object.contains_key("OverlayRows"));
+        assert!(!object.contains_key("PrivateCreator"));
+    }
+
+    #[test]
+    fn keyword_keyed_json_round_trips_and_unknown_keys_stay_skipped() {
+        let ds = collision_prone_dataset();
+        let options = JsonOptions {
+            tags_as_keywords: true,
+            ..Default::default()
+        };
+        let json = dataset_to_json(&ds, &options).unwrap();
+        assert!(json.contains("\"PatientName\""), "{json}");
+
+        let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
+        assert_eq!(
+            dataset_to_json(&back, &JsonOptions::default()).unwrap(),
+            dataset_to_json(&ds, &JsonOptions::default()).unwrap(),
+            "keyword-mode output reads back as the original dataset"
+        );
+
+        // a key that is neither a tag nor a keyword is still skipped
+        let ds = json_to_dataset(
+            r#"{"NotAKeyword":{"vr":"LO","Value":["x"]},"00100020":{"vr":"LO","Value":["PID-1"]}}"#,
+            &JsonOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(ds.len(), 1);
+        assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
+    }
+
+    #[test]
+    fn private_creators_are_restored_when_reading_json() {
+        let json = r#"{"00290010":{"vr":"LO","Value":["ACME 1.2"]},
+                       "00291001":{"vr":"LO","Value":["secret"]}}"#;
+        let ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
+        let tag = Tag::private(0x0029, 0x1001, Arc::new(PrivateCreator::new("ACME 1.2")));
+        assert_eq!(ds.try_get_str(&tag).as_deref(), Some("secret"));
+        assert!(
+            !ds.contains(&Tag::new(0x0029, 0x1001)),
+            "the creator-less tag is replaced by the creator-bound one"
+        );
+
+        // sequence items get the same treatment
+        let nested = r#"{"0040A730":{"vr":"SQ","Value":[
+            {"00110010":{"vr":"LO","Value":["ACME"]},
+             "00111010":{"vr":"LO","Value":["nested"]}}]}}"#;
+        let ds = json_to_dataset(nested, &JsonOptions::default()).unwrap();
+        let item = &ds.try_get_sequence(Tag::CONTENT_SEQUENCE).unwrap().items()[0];
+        let tag = Tag::private(0x0011, 0x1010, Arc::new(PrivateCreator::new("ACME")));
+        assert_eq!(item.try_get_str(&tag).as_deref(), Some("nested"));
+    }
+
+    #[test]
+    fn json_reading_accepts_comments_and_array_inline_binary() {
+        let json = r#"
+            // a line comment before the object
+            {
+                /* a block comment */ "00100020": {"vr":"LO","Value":["PID-1"]},
+                "00080080": {"vr":"LO","Value":["a//b /*c*/"]},
+                "7FE00010": {"vr":"OB","InlineBinary":["AAECAw=="]}
+            }"#;
+        let ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
+        assert_eq!(ds.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
+        assert_eq!(
+            ds.get_str(Tag::INSTITUTION_NAME).unwrap(),
+            "a//b /*c*/",
+            "comment markers inside a string are data, not comments"
+        );
+        assert_eq!(
+            ds.get_element(Tag::PIXEL_DATA)
+                .unwrap()
+                .value()
+                .as_buffer()
+                .unwrap()
+                .data()
+                .unwrap()
+                .as_ref(),
+            &[0u8, 1, 2, 3],
+            "the array form of InlineBinary is decoded, not dropped"
+        );
+
+        // malformed InlineBinary is diagnosed instead of silently dropped
+        let bad = r#"{"7FE00010":{"vr":"OB","InlineBinary":[]}}"#;
+        assert!(matches!(
+            json_to_dataset(bad, &JsonOptions::default()),
+            Err(JsonError::Malformed { .. })
+        ));
+    }
+
+    #[test]
+    fn keyword_and_name_annotations_are_optional_writer_extensions() {
+        let options = JsonOptions {
+            write_keyword: true,
+            write_name: true,
+            ..Default::default()
+        };
+        let value = dataset_to_value(&sample(), &options).unwrap();
+        assert_eq!(value["00100010"]["keyword"], "PatientName");
+        assert!(value["00100010"]["name"]
+            .as_str()
+            .unwrap()
+            .contains("Patient"));
+        assert!(value["00100010"].get("value").is_none());
+
+        // unknown and masked tags carry no annotation
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::new(0x7777, 0x0001), Vr::Lo, "x");
+        ds.insert_value(Tag::new(0x6000, 0x0010), 2u16);
+        let value = dataset_to_value(&ds, &options).unwrap();
+        assert!(value["77770001"].get("keyword").is_none());
+        assert!(value["60000010"].get("keyword").is_none());
+
+        // reading the annotation back ignores the extra properties
+        let json = dataset_to_json(&sample(), &options).unwrap();
+        let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
+        assert_eq!(
+            dataset_to_json(&back, &JsonOptions::default()).unwrap(),
+            dataset_to_json(&sample(), &JsonOptions::default()).unwrap()
+        );
     }
 }

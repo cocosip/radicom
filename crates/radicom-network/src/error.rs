@@ -105,6 +105,9 @@ pub enum NetworkError {
     AssociationRequestTimedOut { attempts: u32 },
     #[error("request {message_id} timed out")]
     RequestTimedOut { message_id: u16 },
+    /// The TCP connect did not complete inside `ClientOptions::connect_timeout`.
+    #[error("TCP connect timed out after {timeout_ms} ms")]
+    ConnectTimedOut { timeout_ms: u64 },
     #[error("A-RELEASE-RP did not arrive within {timeout_ms} ms")]
     ReleaseTimedOut { timeout_ms: u64 },
     #[error("connection closed prematurely")]

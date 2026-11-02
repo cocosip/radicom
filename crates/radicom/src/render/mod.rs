@@ -42,7 +42,8 @@ pub use geometry::{
 pub use icon::IconImage;
 pub use interpolation::{bilinear_bgra32, bilinear_color24, bilinear_grayscale, nearest_grayscale};
 pub use math::{
-    BitList, Histogram, Interval, Matrix, MovingAverage, Point2, Point3, Rect, Vector3,
+    BitList, Histogram, Interval, Line3, Matrix, MovingAverage, Orientation3, Plane3, Point2,
+    Point3, Rect, Segment3, Slice3, Vector3,
 };
 pub use pixel_converter::reverse_bits;
 pub use reconstruction::{DicomGenerator, ImageData, Slice, Stack, StackType, VolumeData};
@@ -158,6 +159,15 @@ impl LutTable {
     pub fn map_value(&self, value: f64) -> f64 {
         self.at(value).map(|v| v as f64).unwrap_or(0.0)
     }
+
+    /// The first and last output entries, i.e. the LUT's output range
+    /// (fo-dicom `ILUT.MinimumOutputValue`/`MaximumOutputValue` for a sequence
+    /// LUT). `None` when the table is empty.
+    pub fn output_bounds(&self) -> Option<(i32, i32)> {
+        let first = *self.entries.first()?;
+        let last = *self.entries.last()?;
+        Some((first, last))
+    }
 }
 
 /// A parsed VOI LUT (`(0028,3010)` item): maps rescaled input values to an
@@ -194,6 +204,14 @@ impl ModalityLut {
     /// Maps a stored value to the modality-transformed value (raw table entry).
     pub fn map(&self, stored: f64) -> f64 {
         self.table.map_value(stored)
+    }
+
+    /// The minimum/maximum output of this LUT (its first/last entry, matching
+    /// fo-dicom `ModalitySequenceLUT`), `None` when the table is empty.
+    pub fn output_bounds(&self) -> Option<(f64, f64)> {
+        self.table
+            .output_bounds()
+            .map(|(first, last)| (first as f64, last as f64))
     }
 }
 
@@ -271,13 +289,16 @@ impl GrayscaleRenderOptions {
         voi_lut: Option<Arc<VoiLut>>,
         modality_lut: Option<Arc<ModalityLut>>,
     ) -> Result<Self, Error> {
-        let rescale_intercept = dataset
-            .try_get::<String>(Tag::RESCALE_INTERCEPT)
-            .and_then(|s| s.trim().parse().ok())
+        // fo-dicom resolves rescale and VOILUTFunction from the flattened
+        // functional groups when the top level omits them (H4,
+        // GrayscaleRenderOptions.cs:225-232,295-302): enhanced MR/CT/PET carry
+        // them in the per-frame Pixel Value Transformation Sequence (0028,9145).
+        let functional = geometry::functional_group_values(dataset, frame);
+        let rescale_intercept = first_number(dataset, Tag::RESCALE_INTERCEPT)
+            .or_else(|| first_number(&functional, Tag::RESCALE_INTERCEPT))
             .unwrap_or(0.0);
-        let rescale_slope = dataset
-            .try_get::<String>(Tag::RESCALE_SLOPE)
-            .and_then(|s| s.trim().parse().ok())
+        let rescale_slope = first_number(dataset, Tag::RESCALE_SLOPE)
+            .or_else(|| first_number(&functional, Tag::RESCALE_SLOPE))
             .unwrap_or(1.0);
 
         // A VOI LUT Sequence takes precedence over WindowCenter/Width (docs §4):
@@ -302,7 +323,11 @@ impl GrayscaleRenderOptions {
 
         // (0028,1056) VOILUTFunction selects the window formula; LINEAR by default.
         // LINEAR with width < 1 still falls back to LINEAR_EXACT at map time (#1905).
-        let voi_lut_function = voi_function_from_dataset(dataset);
+        // A per-frame value wins over the top level (fo-dicom checks the
+        // functional group first).
+        let voi_lut_function = voi_function_from_dataset(&functional)
+            .or_else(|| voi_function_from_dataset(dataset))
+            .unwrap_or(VoiFunction::Linear);
 
         let use_voi_lut = voi_lut.is_some();
         let invert = dataset
@@ -440,8 +465,10 @@ impl GrayscaleRenderOptions {
     }
 
     /// Options covering the full stored bit range (REND-04 `from_bit_range`,
-    /// docs §4): a window over `[0, 2^bitsStored-1]` (unsigned) or
-    /// `[-2^(bitsStored-1), 2^(bitsStored-1)-1]` (signed).
+    /// docs §4): a window over the bit range converted to physical values, i.e.
+    /// through a modality LUT's output range when present, else through the
+    /// rescale slope/intercept (fo-dicom `FromBitRange`,
+    /// `GrayscaleRenderOptions.cs:446-472`).
     pub fn from_bit_range(dataset: &Dataset) -> Result<Self, Error> {
         let pixel = PixelDataRef::from_dataset(dataset)?;
         let bits = match pixel.bits_stored() {
@@ -453,34 +480,35 @@ impl GrayscaleRenderOptions {
         }
         let signed = pixel.pixel_representation() != 0;
         let depth = BitDepth::new(pixel.bits_allocated()?, bits, pixel.high_bit(), signed);
-        let (min, max) = (depth.min_value() as f64, depth.max_value() as f64);
-        let mut base =
-            GrayscaleRenderOptions::from_window_level((min + max) / 2.0, (max - min).max(1.0));
+        let (min, max) = match parse_modality_lut(dataset).and_then(|lut| lut.output_bounds()) {
+            // a modality LUT replaces the rescale and defines its own output range
+            Some((first, last)) => (first, last),
+            None => {
+                let slope = first_number(dataset, Tag::RESCALE_SLOPE).unwrap_or(1.0);
+                let intercept = first_number(dataset, Tag::RESCALE_INTERCEPT).unwrap_or(0.0);
+                (
+                    depth.min_value() as f64 * slope + intercept,
+                    depth.max_value() as f64 * slope + intercept,
+                )
+            }
+        };
+        let mut base = GrayscaleRenderOptions::from_window_level(
+            (min + max) / 2.0,
+            (max - min).abs().max(1.0),
+        );
         base.apply_dataset_modality_and_invert(dataset);
         Ok(base)
     }
 
     /// A per-frame functional-group window (REND-04 priority 2, docs §4):
     /// flattens enhanced-multiframe functional groups for `frame` (DS-06) and
-    /// reads the `(0028,9132)` FrameVOILUTSequence item's WindowCenter/Width,
-    /// falling back to top-level values in the flattened set. Errors when absent.
+    /// reads WindowCenter/Width from them, so the `(0028,9132)` FrameVOILUTSequence
+    /// item and a direct functional-group window are both found. Errors when absent.
     pub fn from_functional_window_level(
         dataset: &Dataset,
         frame: u32,
     ) -> Result<(f64, f64), Error> {
-        let fg = dataset.functional_groups(frame)?;
-        // (0028,9132) FrameVOILUTSequence item carries the per-frame window
-        if let Some(seq) = fg.try_get_sequence(Tag::FRAME_VOILUT_SEQUENCE) {
-            if let Some(item) = seq.items().first() {
-                if let (Some(center), Some(width)) = (
-                    first_number(item, Tag::WINDOW_CENTER),
-                    first_number(item, Tag::WINDOW_WIDTH),
-                ) {
-                    return Ok((center, width));
-                }
-            }
-        }
-        // some encoders leave the window directly in the flattened set
+        let fg = geometry::functional_group_values(dataset, frame);
         match (
             first_number(&fg, Tag::WINDOW_CENTER),
             first_number(&fg, Tag::WINDOW_WIDTH),
@@ -510,7 +538,7 @@ impl GrayscaleRenderOptions {
             .try_get_str_ref(Tag::PHOTOMETRIC_INTERPRETATION)
             .map(|pi| pi.trim() == "MONOCHROME1")
             .unwrap_or(false);
-        self.voi_lut_function = voi_function_from_dataset(dataset);
+        self.voi_lut_function = voi_function_from_dataset(dataset).unwrap_or(VoiFunction::Linear);
     }
 
     /// Options from an explicit window (REND-04 `from_window_level`).
@@ -615,13 +643,17 @@ fn parse_modality_lut(dataset: &Dataset) -> Option<Arc<ModalityLut>> {
         .map(Arc::new)
 }
 
-/// The `(0028,1056)` VOILUTFunction selector (CS). Missing/unknown → LINEAR.
-/// fo-dicom `DicomImage.VOILUTFunction` mapping: SIGMOID / LINEAR_EXACT / LINEAR.
-fn voi_function_from_dataset(dataset: &Dataset) -> VoiFunction {
+/// The `(0028,1056)` VOILUTFunction selector (CS), or `None` when absent.
+/// fo-dicom `DicomImage.VOILUTFunction` mapping: SIGMOID / LINEAR_EXACT / LINEAR;
+/// an unknown non-empty value reads as LINEAR.
+fn voi_function_from_dataset(dataset: &Dataset) -> Option<VoiFunction> {
     match dataset.try_get_str_ref(Tag::VOILUT_FUNCTION).map(str::trim) {
-        Some(v) if v.eq_ignore_ascii_case("SIGMOID") => VoiFunction::Sigmoid,
-        Some(v) if v.eq_ignore_ascii_case("LINEAR_EXACT") => VoiFunction::LinearExact,
-        _ => VoiFunction::Linear,
+        Some(v) if v.eq_ignore_ascii_case("SIGMOID") => Some(VoiFunction::Sigmoid),
+        Some(v) if v.eq_ignore_ascii_case("LINEAR_EXACT") => Some(VoiFunction::LinearExact),
+        // #1891: an empty value is ignored, not a selector
+        Some("") => None,
+        Some(_) => Some(VoiFunction::Linear),
+        None => None,
     }
 }
 
@@ -632,17 +664,30 @@ fn linear_exact(value: f64, center: f64, width: f64) -> f64 {
     ((value - center) / width + 0.5) * 255.0
 }
 
+/// True for the Multi-frame Single Bit Secondary Capture SOP class, whose 1-bit
+/// pixel stream is MSB first (fo-dicom `PixelDataFactory` reverses it).
+fn is_multi_frame_single_bit(dataset: &Dataset) -> bool {
+    dataset
+        .try_get_str_ref(Tag::SOP_CLASS_UID)
+        .map(|uid| {
+            uid.trim() == crate::uids::MULTI_FRAME_SINGLE_BIT_SECONDARY_CAPTURE_IMAGE_STORAGE
+        })
+        .unwrap_or(false)
+}
+
 /// True for X-Ray Angiographic / X-Ray Radiofluoroscopic Image Storage SOP
-/// classes, whose display omits the modality LUT (Clunie guidance, docs §4).
+/// classes (including the retired biplane class), whose display omits the
+/// modality LUT (Clunie guidance, docs §4; GrayscaleRenderOptions.cs:167-174).
 fn is_xa_xrf(dataset: &Dataset) -> bool {
     // generated constants, not literals: the CI UID guard in lib.rs enforces it
     let xa = crate::uids::X_RAY_ANGIOGRAPHIC_IMAGE_STORAGE;
     let xrf = crate::uids::X_RAY_RADIOFLUOROSCOPIC_IMAGE_STORAGE;
+    let xa_biplane = crate::uids::X_RAY_ANGIOGRAPHIC_BI_PLANE_IMAGE_STORAGE_RETIRED;
     dataset
         .try_get_str_ref(Tag::SOP_CLASS_UID)
         .map(|uid| {
             let uid = uid.trim();
-            uid == xa || uid == xrf
+            uid == xa || uid == xrf || uid == xa_biplane
         })
         .unwrap_or(false)
 }
@@ -1218,6 +1263,15 @@ fn render_grayscale_with_threshold(
     // They are display-black/white, not windowed data.
     if bits == 1 {
         let (w, h) = (width as usize, height as usize);
+        // Multi-frame Single Bit Secondary Capture packs MSB first (fo-dicom
+        // `Render/PixelData.cs:116-131` calls ReverseBits for this SOP class).
+        let reversed;
+        let raw: &[u8] = if is_multi_frame_single_bit(dataset) {
+            reversed = pixel_converter::reverse_bits(raw);
+            &reversed
+        } else {
+            raw
+        };
         let samples = unpack_single_bit(raw, w, h);
         let invert = options.invert;
         let mut bytes = Vec::with_capacity(w * h * 4);
@@ -1482,7 +1536,9 @@ pub fn render_frame_with_overlays(
 }
 
 /// OR-composites every overlay covering `frame` onto `image` in `color`
-/// (docs §1.3 step 4). A malformed overlay is skipped, never fatal.
+/// (docs §1.3 step 4). Only Graphics overlays are drawn; ROI overlays are
+/// annotations, not display graphics (fo-dicom `DicomImage.cs:409-412`). A
+/// malformed overlay is skipped, never fatal.
 fn composite_overlays(
     image: &mut RawImage,
     dataset: &Dataset,
@@ -1490,6 +1546,9 @@ fn composite_overlays(
     color: crate::pixel::Color32,
 ) {
     for overlay in OverlayData::from_dataset(dataset) {
+        if !is_graphics_overlay(&overlay) {
+            continue;
+        }
         if !overlay_covers_frame(&overlay, frame) {
             continue;
         }
@@ -1515,6 +1574,8 @@ pub struct DicomImage {
     dataset: Dataset,
     frame: u32,
     window_override: Option<(f64, f64)>,
+    /// Explicit invert override; `None` follows the photometric interpretation.
+    invert_override: Option<bool>,
     colormap: Option<ColorTable>,
     show_overlays: bool,
     overlay_color: crate::pixel::Color32,
@@ -1560,6 +1621,7 @@ impl DicomImage {
             dataset: owned,
             frame,
             window_override: None,
+            invert_override: None,
             colormap: None,
             show_overlays: true,
             overlay_color: DEFAULT_OVERLAY_COLOR,
@@ -1618,6 +1680,20 @@ impl DicomImage {
     /// Drops a window override, reverting to the dataset's own setting.
     pub fn clear_window(&mut self) -> &mut Self {
         self.window_override = None;
+        self
+    }
+
+    /// Inverts the grayscale output (`fo-dicom DicomImage.Invert`,
+    /// `DicomImage.cs:174-193`): MONOCHROME2 prints as MONOCHROME1 and vice
+    /// versa. Overrides the photometric interpretation for this image.
+    pub fn set_invert(&mut self, invert: bool) -> &mut Self {
+        self.invert_override = Some(invert);
+        self
+    }
+
+    /// Drops an invert override, reverting to the photometric interpretation.
+    pub fn clear_invert(&mut self) -> &mut Self {
+        self.invert_override = None;
         self
     }
 
@@ -1690,6 +1766,9 @@ impl DicomImage {
                 options.voi_lut = None;
                 options.voi_lut_function = VoiFunction::Linear;
             }
+            if let Some(invert) = self.invert_override {
+                options.invert = invert;
+            }
             render_grayscale_with_options(&self.dataset, frame, &options)?
         } else {
             render_frame(&self.dataset, frame)?
@@ -1713,6 +1792,16 @@ impl DicomImage {
         }
         Ok(image)
     }
+}
+
+/// True when the overlay's `(60xx,0040)` OverlayType is Graphics (`G...`), the
+/// only type composited on the image (fo-dicom filters `Type == Graphics`).
+fn is_graphics_overlay(overlay: &OverlayData) -> bool {
+    overlay
+        .overlay_type()
+        .trim()
+        .to_ascii_uppercase()
+        .starts_with('G')
 }
 
 /// True when `overlay` applies to `frame` (docs §1.3 frame-range filtering).
@@ -2049,6 +2138,25 @@ mod tests {
     }
 
     #[test]
+    fn dicom_image_invert_override_flips_the_output() {
+        // fo-dicom DicomImage.Invert (DicomImage.cs:174-193) is a runtime control,
+        // not only a PI-derived default.
+        let ds = gray_image(1, 2, 8, &[0, 255], Some(127.5), Some(255.0));
+        let mut image = DicomImage::from_dataset(&ds).unwrap();
+        let plain = image.render().unwrap();
+        assert_eq!(plain.as_bytes()[0], 0);
+        assert_eq!(plain.as_bytes()[4], 255);
+
+        image.set_invert(true);
+        let inverted = image.render().unwrap();
+        assert_eq!(inverted.as_bytes()[0], 255);
+        assert_eq!(inverted.as_bytes()[4], 0);
+
+        image.clear_invert();
+        assert_eq!(image.render().unwrap().as_bytes()[0], 0);
+    }
+
+    #[test]
     fn voilinear_maps_window_endpoints_to_black_and_white() {
         // C.11.2.1.3.1: center 40, width 400 → the full 0..255 range spans ~ -160..240
         let o = GrayscaleRenderOptions::from_window_level(40.0, 400.0);
@@ -2365,6 +2473,18 @@ mod tests {
         ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.2");
         let ct = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
         assert!(ct.modality_lut.is_some(), "CT applies the modality LUT");
+
+        // The retired XA biplane class follows the same rule (L15).
+        ds.insert_str(
+            Tag::SOP_CLASS_UID,
+            Vr::Ui,
+            crate::uids::X_RAY_ANGIOGRAPHIC_BI_PLANE_IMAGE_STORAGE_RETIRED,
+        );
+        let biplane = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
+        assert!(
+            biplane.modality_lut.is_none(),
+            "the retired XA biplane class ignores the modality LUT"
+        );
     }
 
     #[test]
@@ -2549,6 +2669,26 @@ mod tests {
         // 8x1, byte 0b0000_0001: the first pixel is the least significant bit
         let image = render_frame(&single_bit_image(8, 1, &[0b0000_0001]), 0).unwrap();
         assert_eq!(greys(&image), vec![255, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn multi_frame_single_bit_secondary_capture_is_msb_first() {
+        // fo-dicom PixelDataFactory reverses the bits for this SOP class
+        // (Render/PixelData.cs:116-131): byte 0b1000_0000 means pixel 0, not 7.
+        let mut ds = single_bit_image(8, 1, &[0b1000_0000]);
+        ds.insert_str(
+            Tag::SOP_CLASS_UID,
+            Vr::Ui,
+            crate::uids::MULTI_FRAME_SINGLE_BIT_SECONDARY_CAPTURE_IMAGE_STORAGE,
+        );
+        let image = render_frame(&ds, 0).unwrap();
+        assert_eq!(greys(&image), vec![255, 0, 0, 0, 0, 0, 0, 0]);
+        // a plain 1-bit Secondary Capture keeps the LSB-first order
+        let plain = single_bit_image(8, 1, &[0b1000_0000]);
+        assert_eq!(
+            greys(&render_frame(&plain, 0).unwrap()),
+            vec![0, 0, 0, 0, 0, 0, 0, 255]
+        );
     }
 
     /// Builds a 32-bit MONOCHROME2 frame from raw `u32` sample bits (signed
@@ -2795,6 +2935,44 @@ mod tests {
         assert!(GrayscaleRenderOptions::from_functional_window_level(&ds, 0).is_err());
     }
 
+    /// Puts a per-frame Pixel Value Transformation Sequence `(0028,9145)` with
+    /// `(slope, intercept)` pairs into each frame's functional group.
+    fn put_per_frame_rescale(ds: &mut Dataset, pairs: &[(f64, f64)]) {
+        let per = ds.insert_sequence(crate::model::dataset::PER_FRAME_FUNCTIONAL_GROUPS);
+        for &(slope, intercept) in pairs {
+            let mut fg = Dataset::new();
+            {
+                let transformations = fg.insert_sequence(Tag::PIXEL_VALUE_TRANSFORMATION_SEQUENCE);
+                let mut item = Dataset::new();
+                item.insert_str(Tag::RESCALE_SLOPE, Vr::Ds, format!("{slope}"));
+                item.insert_str(Tag::RESCALE_INTERCEPT, Vr::Ds, format!("{intercept}"));
+                transformations.push(item);
+            }
+            per.push(fg);
+        }
+    }
+
+    #[test]
+    fn per_frame_pixel_value_transformation_drives_the_rescale() {
+        // Enhanced multi-frame: the window is physical, the rescale is per frame
+        // in (0028,9145), and the top level has none (fo-dicom H4).
+        let mut ds = gray_image(1, 2, 16, &[1524, 2524], Some(500.0), Some(1000.0));
+        ds.insert_str(Tag::NUMBER_OF_FRAMES, Vr::Is, "2");
+        put_per_frame_rescale(&mut ds, &[(1.0, -1024.0), (2.0, 0.0)]);
+
+        let frame0 = GrayscaleRenderOptions::from_dataset_frame(&ds, 0).unwrap();
+        assert_eq!(frame0.rescale_slope, 1.0);
+        assert_eq!(frame0.rescale_intercept, -1024.0);
+        // stored 1524 → physical 500 = window centre → mid grey, not clipped white
+        assert_eq!(frame0.map(1524.0), 127);
+
+        let frame1 = GrayscaleRenderOptions::from_dataset_frame(&ds, 1).unwrap();
+        assert_eq!(frame1.rescale_slope, 2.0);
+        assert_eq!(frame1.rescale_intercept, 0.0);
+        // stored 2524 → physical 5048, above the window → white
+        assert_eq!(frame1.map(2524.0), 255);
+    }
+
     #[test]
     fn from_bit_range_covers_the_stored_range() {
         // 8-bit unsigned: full range [0, 255] → centre 127.5, width 255.
@@ -2809,6 +2987,21 @@ mod tests {
         let o = GrayscaleRenderOptions::from_bit_range(&ds).unwrap();
         assert_eq!(o.window_center, -0.5);
         assert_eq!(o.window_width, 65535.0);
+    }
+
+    #[test]
+    fn from_bit_range_converts_the_range_through_rescale() {
+        // fo-dicom FromBitRange (GrayscaleRenderOptions.cs:446-472): the bit
+        // range is mapped to physical values before the window is set.
+        let mut ds = gray_image(1, 1, 16, &[0], None, None);
+        ds.insert_value(Tag::PIXEL_REPRESENTATION, 1u16);
+        ds.insert_str(Tag::RESCALE_SLOPE, Vr::Ds, "1");
+        ds.insert_str(Tag::RESCALE_INTERCEPT, Vr::Ds, "-1024");
+        let o = GrayscaleRenderOptions::from_bit_range(&ds).unwrap();
+        // [-32768, 32767] - 1024 → centre -1024.5, width 65535
+        assert_eq!(o.window_center, -1024.5);
+        assert_eq!(o.window_width, 65535.0);
+        assert_eq!((o.rescale_slope, o.rescale_intercept), (1.0, -1024.0));
     }
 
     #[test]
@@ -4209,6 +4402,41 @@ mod tests {
         let image =
             render_frame_with_overlays(&ds, 0, crate::pixel::Color32::new(0, 255, 0)).unwrap();
         assert_eq!(image.width(), 2);
+    }
+
+    #[test]
+    fn roi_overlays_are_not_composited() {
+        // (60xx,0040) "R" is an ROI annotation; only Graphics ("G") is drawn
+        // (fo-dicom DicomImage.cs:409-412).
+        let mut ds = overlay_dataset();
+        // a black background so an OR-composited overlay is visible
+        ds.insert_str(Tag::WINDOW_CENTER, Vr::Ds, "127.5");
+        ds.insert_str(Tag::WINDOW_WIDTH, Vr::Ds, "255");
+        let group = 0x6002u16;
+        ds.insert_value(Tag::new(group, 0x0010), 1u16); // Rows
+        ds.insert_value(Tag::new(group, 0x0011), 1u16); // Columns
+        ds.insert_str(Tag::new(group, 0x0040), Vr::Cs, "R"); // Type
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::new(group, 0x0050),
+                Vr::Us,
+                us_bytes(&[1, 2]), // row 1, column 2 → covers pixel (1,0)
+            ),
+        ));
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::new(group, 0x3000),
+                Vr::Ow,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![0b1u8])),
+            ),
+        ));
+
+        let image =
+            render_frame_with_overlays(&ds, 0, crate::pixel::Color32::new(0, 255, 0)).unwrap();
+        // the graphics overlay (origin 1,1) is drawn over pixel 0
+        assert_eq!(&image.as_bytes()[0..4], &[0, 255, 0, 255]);
+        // the ROI overlay would cover pixel 1; it must be left as rendered (black)
+        assert_eq!(&image.as_bytes()[4..8], &[0, 0, 0, 255]);
     }
 
     #[test]

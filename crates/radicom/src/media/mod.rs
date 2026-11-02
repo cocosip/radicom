@@ -578,6 +578,10 @@ impl DicomDirectory {
             }
         }
 
+        // fo-dicom copies the source charset into every record so non-ASCII
+        // names keep their encoding (DicomDirectory.cs:719-727).
+        copy_specific_character_set(&mut record, dataset);
+
         // optional preview (§3.4): built from a clone so the source is untouched.
         // A generator failure only costs the preview — fo-dicom's
         // AddIconSequence swallows every exception, because a missing icon must
@@ -875,9 +879,21 @@ fn level_record(kind: RecordType, source: &Dataset) -> DirectoryRecord {
             }
         }
     }
+    copy_specific_character_set(&mut record, source);
     DirectoryRecord {
         dataset: record,
         parent: None,
+    }
+}
+
+/// Copies `(0008,0005)` SpecificCharacterSet from `source` into `record`
+/// (fo-dicom `DicomDirectory.CreateRecordSequenceItem`), so a DICOMDIR record
+/// declares the encoding of its own text values.
+fn copy_specific_character_set(record: &mut Dataset, source: &Dataset) {
+    if let Some(charset) = source.try_get_str(Tag::SPECIFIC_CHARACTER_SET) {
+        if !charset.trim().is_empty() {
+            record.insert_str(Tag::SPECIFIC_CHARACTER_SET, Vr::Cs, charset);
+        }
     }
 }
 
@@ -1254,6 +1270,42 @@ mod tests {
         assert_eq!(
             (reused.patient, reused.study, reused.series, reused.instance),
             (0, 1, 2, 4)
+        );
+    }
+
+    #[test]
+    fn records_copy_the_specific_character_set_and_round_trip_non_ascii_names() {
+        // fo-dicom copies (0008,0005) into every record (DicomDirectory.cs:719-727);
+        // without it a non-ASCII PatientName has no declared encoding.
+        let mut file = instance("P1", "1.2.3", "1.2.3.4", CT, "1.2.3.4.5");
+        file.dataset
+            .insert_str(Tag::SPECIFIC_CHARACTER_SET, Vr::Cs, "ISO_IR 192");
+        file.dataset
+            .insert_str(tags::PATIENT_NAME, Vr::Pn, "Müller^Jörg");
+
+        let mut dir = DicomDirectory::new("MYFS");
+        dir.add_file(&file, "IMG0001").unwrap();
+        for record in dir.records() {
+            assert_eq!(
+                record
+                    .dataset
+                    .try_get_str(Tag::SPECIFIC_CHARACTER_SET)
+                    .as_deref(),
+                Some("ISO_IR 192"),
+                "{:?} record must declare the charset",
+                record.record_type()
+            );
+        }
+
+        let bytes = dir.to_bytes().unwrap();
+        let reopened = DicomDirectory::from_bytes(&bytes).unwrap();
+        assert_eq!(
+            reopened.records()[0]
+                .dataset
+                .try_get_str(tags::PATIENT_NAME)
+                .as_deref(),
+            Some("Müller^Jörg"),
+            "the PATIENT record keeps its name through the DICOMDIR round trip"
         );
     }
 

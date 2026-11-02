@@ -1,7 +1,8 @@
 # radicom Documentation
 
-The documents below separate architecture, development, interoperability and review evidence. Start with the architecture document when changing code, and the
-development guide when working out what is left.
+The documents below separate architecture, development, interoperability and fo-dicom alignment. Start
+with the architecture document when changing code, and the development guide when working out what is
+left.
 
 User-facing introduction and usage examples are in the root [README.md](../README.md).
 
@@ -11,22 +12,16 @@ User-facing introduction and usage examples are in the root [README.md](../READM
 |---|---|
 | [01-architecture.md](01-architecture.md) | **You are about to change code.** Holds the invariants: Tag ordering semantics, parsing tolerance rules T1–T10, the frozen codec boundary, wire-format details, naming conventions, and the list of known deviations not to copy |
 | [02-development-guide.md](02-development-guide.md) | You need the feature list with stable IDs, milestone status, what is outstanding, risks, or the testing strategy |
-| [03-fo-dicom-alignment.md](03-fo-dicom-alignment.md) | You need the module-by-module fo-dicom parity verdict with code evidence |
+| [03-fo-dicom-alignment.md](03-fo-dicom-alignment.md) | You need the fo-dicom parity verdict, the 2026-11-02 gap audit and per-finding fix status |
 | [04-interop.md](04-interop.md) | You are testing against a real DICOM peer |
-| [05-code-review-2026-10-29.md](05-code-review-2026-10-29.md) | Earlier defect inventory |
-| [06-backlog.md](06-backlog.md) | Feature increments and known limits |
-| [07-review-fixes-2026-10-30.md](07-review-fixes-2026-10-30.md) | Current fixes, verification and parity limits |
 
 ```
 docs/
 ├── README.md                    ← this index
 ├── 01-architecture.md           ← what the code must obey
 ├── 02-development-guide.md      ← features, progress, risks, testing
-├── 03-fo-dicom-alignment.md     ← parity audit verdict
-├── 04-interop.md                ← real-peer testing procedure
-├── 05-code-review-2026-10-29.md  ← earlier findings
-├── 06-backlog.md                ← feature increments and limits
-└── 07-review-fixes-2026-10-30.md ← current repair and verification ledger
+├── 03-fo-dicom-alignment.md     ← parity verdict, gap audit and fix status
+└── 04-interop.md                ← real-peer testing procedure
 ```
 
 ## Authority
@@ -44,6 +39,7 @@ at present. Anything listed there is a defect, not a contract.
 |---|---|
 | Known deviations from the intended design (currently none) | [01-architecture.md](01-architecture.md) §15 |
 | Outstanding work, environment- or scope-limited | [02-development-guide.md](02-development-guide.md) §3 |
+| Parity gaps and their fix status | [03-fo-dicom-alignment.md](03-fo-dicom-alignment.md) §Fix status |
 
 ---
 
@@ -121,4 +117,5 @@ defined in [02-development-guide.md](02-development-guide.md) §2.
 - Feature IDs are never renumbered. A superseded feature is marked `Dropped` with a reason.
 - Source comments reference sections as `docs/<file>.md §N`. Moving or renumbering a document means
   updating those references; `grep -r "docs/" crates xtask` finds them all.
-- Historical day-by-day records live in `git log`, not in these documents.
+- Historical day-by-day records live in `git log`, not in these documents. The 2026-10-29/30 review
+  ledgers were consolidated away during the 2026-11-02 documentation pass.

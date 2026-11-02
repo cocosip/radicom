@@ -1,17 +1,19 @@
 //! C-STORE receive path (SRV-03; docs/01-architecture.md §11).
 //!
-//! The receiver parses the inbound dataset bytes into a [`DicomFile`]. The
-//! bytes are already buffered in memory by the time the sink runs, so the
-//! default [`StoreSink::Memory`] parses them directly; [`StoreSink::SpoolToTemp`]
-//! and [`StoreSink::SpoolToDir`] additionally keep an on-disk copy for callers
-//! that want one.
+//! The receiver streams the inbound dataset PDVs into a temporary file (H3,
+//! fo-dicom `DicomService.CreateCStoreReceiveStream`) and parses that file into
+//! a [`DicomFile`] only once the last fragment arrived. [`StoreSink::Memory`]
+//! parses and deletes the temp file; [`StoreSink::SpoolToTemp`] keeps the
+//! received file as the instance's spool; [`StoreSink::SpoolToDir`] keeps a copy
+//! under the configured directory.
 //!
-//! **Ceiling:** a dataset arrives whole. The assembler buffers up to
-//! [`crate::assembler::PdvAssembler::DEFAULT_MAX_MESSAGE_LENGTH`] (1 GiB) and
-//! parses it into a `DicomFile`, so peak memory tracks the instance size rather
-//! than the PDU size. Streaming a dataset into the sink as PDVs arrive is a
-//! documented backlog item (docs/06-backlog.md §1, NET-13).
+//! **Ceiling:** the *receive* phase is bounded by the PDU size
+//! ([`crate::assembler::SpoolConfig`]) instead of the instance size. Parsing a
+//! dataset still materializes it once in memory, because
+//! `parse_dataset_bytes` is byte-slice based; a file-backed dataset parse in the
+//! core crate would remove that last copy.
 
+use crate::assembler::MessageBody;
 use crate::dimse::{status, Command, CommandField};
 use crate::error::{NetworkError, Result};
 use crate::services::{CStoreRequest, CStoreResponse};
@@ -74,18 +76,92 @@ impl Drop for TempSpool {
 }
 
 impl StoreSink {
+    /// Materializes the instance from an already-received body (H3).
+    ///
+    /// A body that was streamed to a temporary file is parsed from that file,
+    /// and the sink decides whether the file survives: `Memory` deletes it,
+    /// `SpoolToTemp` adopts it (no second copy), `SpoolToDir` keeps a copy under
+    /// the directory as before.
+    pub fn materialize_body(
+        &self,
+        body: &MessageBody,
+        syntax: &Arc<TransferSyntax>,
+    ) -> Result<ReceivedInstance> {
+        self.materialize_body_with_fallback(body, syntax, None)
+    }
+
+    /// Materializes the instance, decoding text with no (0008,0005) under
+    /// `fallback` (H1, a DICOM Defined Term such as `"ISO_IR 100"`).
+    pub fn materialize_body_with_fallback(
+        &self,
+        body: &MessageBody,
+        syntax: &Arc<TransferSyntax>,
+        fallback: Option<&str>,
+    ) -> Result<ReceivedInstance> {
+        let MessageBody::Spilled(spool) = body else {
+            let bytes = body.in_memory().expect("a non-spilled body is in memory");
+            return self.materialize_with_fallback(bytes, syntax, fallback);
+        };
+        // one materialization for the parse (`parse_dataset_bytes` is
+        // slice-based); the receive itself never buffered the instance
+        let bytes = spool.read_all()?;
+        match self {
+            StoreSink::Memory => {
+                let dataset = decode(&bytes, syntax, fallback)?;
+                // dropping the last `SpoolFile` reference deletes the temp file
+                Ok(ReceivedInstance::from_file(DicomFile::from_dataset(
+                    dataset,
+                )))
+            }
+            StoreSink::SpoolToTemp => {
+                let dataset = decode(&bytes, syntax, fallback)?;
+                // adopt the received file instead of writing a second copy
+                spool.keep();
+                Ok(ReceivedInstance {
+                    file: DicomFile::from_dataset(dataset),
+                    path: None,
+                    temp: Some(TempSpool(spool.path().to_path_buf())),
+                })
+            }
+            StoreSink::SpoolToDir(dir) => {
+                let dataset = decode(&bytes, syntax, fallback)?;
+                std::fs::create_dir_all(dir).map_err(NetworkError::Io)?;
+                let (path, mut file) =
+                    create_unique_file(dir, "radicom-store", "dcm").map_err(NetworkError::Io)?;
+                // the bytes were just parsed, so only the kept copy is written
+                file.write_all(&bytes).map_err(NetworkError::Io)?;
+                Ok(ReceivedInstance {
+                    file: DicomFile::from_dataset(dataset),
+                    path: Some(path),
+                    temp: None,
+                })
+            }
+        }
+    }
+
     /// Materializes the instance from the dataset bytes.
     pub fn materialize(
         &self,
         bytes: &[u8],
         syntax: &Arc<TransferSyntax>,
     ) -> Result<ReceivedInstance> {
+        self.materialize_with_fallback(bytes, syntax, None)
+    }
+
+    /// Materializes the instance from the dataset bytes, decoding text with no
+    /// (0008,0005) under `fallback` (H1).
+    pub fn materialize_with_fallback(
+        &self,
+        bytes: &[u8],
+        syntax: &Arc<TransferSyntax>,
+        fallback: Option<&str>,
+    ) -> Result<ReceivedInstance> {
         match self {
             StoreSink::Memory => {
                 // PS3.7 §9.3: the dataset is encoded in the negotiated transfer
                 // syntax and carries no file meta, so it must be parsed *with*
                 // that syntax instead of being sniffed (NET-24)
-                let dataset = crate::message::decode_dataset(bytes, syntax)?;
+                let dataset = decode(bytes, syntax, fallback)?;
                 Ok(ReceivedInstance::from_file(DicomFile::from_dataset(
                     dataset,
                 )))
@@ -100,7 +176,7 @@ impl StoreSink {
                         .map_err(NetworkError::Io)?;
                 // the guard removes the file on every error path below
                 let temp = TempSpool(path.clone());
-                let file = write_and_parse(&path, file, bytes, syntax)?;
+                let file = write_and_parse(&path, file, bytes, syntax, fallback)?;
                 // the instance is parsed from memory, so the spool file has no
                 // reader: the guard deletes it as soon as the instance is done
                 Ok(ReceivedInstance {
@@ -115,7 +191,7 @@ impl StoreSink {
                 // directory, so a planted path cannot be followed
                 let (path, file) =
                     create_unique_file(dir, "radicom-store", "dcm").map_err(NetworkError::Io)?;
-                write_and_parse(&path, file, bytes, syntax).map(|file| ReceivedInstance {
+                write_and_parse(&path, file, bytes, syntax, fallback).map(|file| ReceivedInstance {
                     file,
                     path: Some(path),
                     temp: None,
@@ -135,6 +211,7 @@ fn write_and_parse(
     mut file: std::fs::File,
     bytes: &[u8],
     syntax: &Arc<TransferSyntax>,
+    fallback: Option<&str>,
 ) -> Result<DicomFile> {
     file.write_all(bytes).map_err(NetworkError::Io)?;
     file.flush().map_err(NetworkError::Io)?;
@@ -142,13 +219,23 @@ fn write_and_parse(
 
     // the spooled bytes are a bare dataset: parse them with the negotiated
     // syntax, never by sniffing (NET-24)
-    match crate::message::decode_dataset(bytes, syntax) {
+    match decode(bytes, syntax, fallback) {
         Ok(dataset) => Ok(DicomFile::from_dataset(dataset)),
         Err(e) => {
             let _ = std::fs::remove_file(path);
             Err(e)
         }
     }
+}
+
+/// Parses a received bare dataset, applying the configured fallback charset
+/// when it carries no (0008,0005) (H1).
+fn decode(
+    bytes: &[u8],
+    syntax: &Arc<TransferSyntax>,
+    fallback: Option<&str>,
+) -> Result<radicom::model::dataset::Dataset> {
+    crate::message::decode_dataset_with_fallback(bytes, syntax, fallback)
 }
 
 /// The status for a dataset that disagrees with its C-STORE command (§11.4).

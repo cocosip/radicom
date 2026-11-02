@@ -1,6 +1,10 @@
 //! DICOM UID: typing, registry and generation (UID-01..03; docs/01-architecture.md §2).
 
 use crate::error::{DataError, Error};
+use crate::model::dataset::Dataset;
+use crate::model::item::DicomItem;
+use crate::model::tag::Tag;
+use crate::model::vr::Vr;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -409,6 +413,53 @@ impl UidGenerator {
         regenerated
     }
 
+    /// Regenerates every SOP Instance / unknown-typed UID in `dataset`,
+    /// including UIDs inside sequence items, and returns the replacements in
+    /// visit order (L1; fo-dicom `DicomUIDGenerator.RegenerateAll(Dataset)`).
+    ///
+    /// Mapping goes through [`Self::map`], so one source UID always yields one
+    /// replacement (references stay consistent) and other UID types — SOP
+    /// classes, transfer syntaxes, frame of reference — are left untouched.
+    pub fn regenerate_dataset(&self, dataset: &mut Dataset) -> Vec<Arc<Uid>> {
+        let mut replaced = Vec::new();
+        self.regenerate_level(dataset, &mut replaced);
+        replaced
+    }
+
+    fn regenerate_level(&self, dataset: &mut Dataset, replaced: &mut Vec<Arc<Uid>>) {
+        let targets: Vec<(Tag, Arc<Uid>)> = dataset
+            .items()
+            .filter_map(|item| {
+                let DicomItem::Element(element) = item else {
+                    return None;
+                };
+                if element.vr() != Vr::Ui {
+                    return None;
+                }
+                let uid = element.first::<Arc<Uid>>().ok()?;
+                matches!(uid.uid_type(), UidType::SopInstance | UidType::Unknown)
+                    .then(|| (element.tag().clone(), uid))
+            })
+            .collect();
+        for (tag, uid) in targets {
+            let replacement = self.map(&uid);
+            dataset.insert_value_with_vr(tag, Vr::Ui, (*replacement).clone());
+            replaced.push(replacement);
+        }
+        let sequences: Vec<Tag> = dataset
+            .items()
+            .filter(|item| matches!(item, DicomItem::Sequence(_)))
+            .map(|item| item.tag().clone())
+            .collect();
+        for tag in sequences {
+            if let Some(sequence) = dataset.sequence_mut(tag) {
+                for item in sequence.items_mut() {
+                    self.regenerate_level(item, replaced);
+                }
+            }
+        }
+    }
+
     /// The Meta SOP Class a member SOP Class belongs to, where PS3.6 defines a
     /// single one. Covers the unambiguous print-management members; ambiguous
     /// members (Film Session/Film Box/Printer belong to both the grayscale and
@@ -745,6 +796,45 @@ mod tests {
         let again = gen.regenerate_all();
         assert_eq!(again[0].value(), all[0].value());
         assert_eq!(again[1].value(), all[1].value());
+    }
+
+    #[test]
+    fn regenerate_dataset_rewrites_instance_uids_including_sequences() {
+        use crate::model::dataset::Dataset;
+        use crate::model::vr::Vr;
+
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.2");
+        ds.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5");
+        ds.insert_str(Tag::STUDY_INSTANCE_UID, Vr::Ui, "1.2.3.4.6");
+        let mut item = Dataset::new();
+        item.insert_str(Tag::REFERENCED_SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5");
+        ds.insert_sequence(Tag::new(0x0008, 0x1140)).push(item);
+
+        let generator = UidGenerator::new();
+        let replaced = generator.regenerate_dataset(&mut ds);
+        assert_eq!(replaced.len(), 3, "two top level + one inside the sequence");
+
+        let new_sop = ds.try_get_str(Tag::SOP_INSTANCE_UID).unwrap();
+        assert_ne!(new_sop, "1.2.3.4.5");
+        assert_eq!(
+            ds.try_get_sequence(Tag::new(0x0008, 0x1140))
+                .unwrap()
+                .items()[0]
+                .try_get_str(Tag::REFERENCED_SOP_INSTANCE_UID)
+                .unwrap(),
+            new_sop,
+            "a reference to the same instance maps to the same new UID"
+        );
+        assert_ne!(
+            ds.try_get_str(Tag::STUDY_INSTANCE_UID).unwrap(),
+            "1.2.3.4.6"
+        );
+        assert_eq!(
+            ds.try_get_str(Tag::SOP_CLASS_UID).unwrap(),
+            "1.2.840.10008.5.1.4.1.1.2",
+            "a SOP class is not an instance UID"
+        );
     }
 
     #[test]

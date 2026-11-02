@@ -60,16 +60,30 @@ fn run(args: impl IntoIterator<Item = String>) -> i32 {
         }
     };
 
-    // file-format diagnostics (INF-07)
-    println!("File: {path}");
-    println!("Transfer syntax: {}", file.dataset.transfer_syntax().uid());
-    // pixel-data summary, if present
-    if let Some(summary) = pixel_summary(&file.dataset) {
-        println!("Image: {}", summary.one_line());
-    }
-    println!("---");
-    print!("{}", dump_dataset(&file.dataset, &options));
+    // file-format diagnostics, then both groups (INF-07; the file meta group is
+    // part of the dump because `DicomFile` walks it, fo-dicom `WriteToLog`)
+    print!("{}", report(&path, &file, &options));
     0
+}
+
+/// The whole CLI report: header lines, the file-meta group and the dataset.
+/// Separated from [`run`] so the rendered output is testable without capturing
+/// stdout.
+fn report(path: &str, file: &DicomFile, options: &DumpOptions) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("File: {path}\n"));
+    out.push_str(&format!(
+        "Transfer syntax: {}\n",
+        file.dataset.transfer_syntax().uid()
+    ));
+    if let Some(summary) = pixel_summary(&file.dataset) {
+        out.push_str(&format!("Image: {}\n", summary.one_line()));
+    }
+    out.push_str("--- file meta (0002) ---\n");
+    out.push_str(&dump_dataset(&file.file_meta, options));
+    out.push_str("--- dataset ---\n");
+    out.push_str(&dump_dataset(&file.dataset, options));
+    out
 }
 
 fn print_usage() {
@@ -133,6 +147,18 @@ mod tests {
             &path.to_string_lossy(),
         ]));
         assert_eq!(code, 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_report_includes_the_file_meta_group_before_the_dataset() {
+        let path = sample_file("meta");
+        let file = DicomFile::open(&path).unwrap();
+        let text = report("sample.dcm", &file, &DumpOptions::default());
+        assert!(text.contains("(0002,0010)"), "group 0002 is shown: {text}");
+        let meta = text.find("(0002,").expect("meta line");
+        let patient = text.find("(0010,0010)").expect("dataset line");
+        assert!(meta < patient, "meta precedes the dataset: {text}");
         let _ = std::fs::remove_file(path);
     }
 

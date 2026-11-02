@@ -149,6 +149,8 @@ pub struct DicomClient {
     pub options: DicomClientOptions,
     /// Reverse C-STORE handler, required for C-GET (§11.4).
     reverse_store: Option<crate::server::ReverseStoreHandler>,
+    /// Answers an SCP-initiated N-EVENT-REPORT-RQ on this client (H2).
+    n_event: Option<crate::server::NEventReportHandler>,
     events: Option<Arc<dyn Fn(ClientEvent) + Send + Sync>>,
     /// Requests already sent on the current association.
     sent_on_association: usize,
@@ -172,6 +174,7 @@ impl DicomClient {
             called_ae: called_ae.into(),
             options: DicomClientOptions::default(),
             reverse_store: None,
+            n_event: None,
             events: None,
             sent_on_association: 0,
             last_request: None,
@@ -197,6 +200,23 @@ impl DicomClient {
         handler: crate::server::ReverseStoreHandler,
     ) -> Self {
         self.reverse_store = Some(handler);
+        self
+    }
+
+    /// Registers the handler for SCP-initiated N-EVENT-REPORT-RQ (H2).
+    ///
+    /// Without one an incoming N-EVENT-REPORT stays unhandled; with one the
+    /// peer's reports are answered on the association the client opened
+    /// (fo-dicom `DicomClient.OnNEventReportRequest`). The associate accept must
+    /// grant this side the SCP role for the service class
+    /// (`ClientOptions::role_selections`); a client that also sends requests on
+    /// that class proposes both roles, because a role selection replaces the
+    /// default one for that class (PS3.7 §10.1).
+    pub fn with_n_event_report_handler(
+        mut self,
+        handler: crate::server::NEventReportHandler,
+    ) -> Self {
+        self.n_event = Some(handler);
         self
     }
 
@@ -338,6 +358,9 @@ impl DicomClient {
                     if let Some(handler) = self.reverse_store.clone() {
                         association.set_reverse_store_handler(handler);
                     }
+                    if let Some(handler) = self.n_event.clone() {
+                        association.set_n_event_report_handler(handler);
+                    }
                     self.emit(ClientEvent::StateChanged {
                         state: ConnectionState::Open,
                     });
@@ -453,6 +476,79 @@ impl DicomClient {
         response
     }
 
+    /// Sends several C-STOREs without waiting for each response (M6).
+    ///
+    /// The association is negotiated once for every distinct SOP class in
+    /// `files`; up to the peer's async-operations window is in flight at a time
+    /// (see [`Association::send_c_store_batch`]). Results keep the request order.
+    pub async fn send_c_store_batch(
+        &mut self,
+        files: &[&DicomFile],
+    ) -> Result<Vec<CStoreResponse>> {
+        if files.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut contexts = Vec::new();
+        for file in files {
+            let sop_class = file
+                .dataset
+                .try_get_str(radicom::model::tag::Tag::SOP_CLASS_UID)
+                .map(|s| s.trim().to_string())
+                .ok_or(NetworkError::protocol("instance has no SOP class UID"))?;
+            let syntax = file.dataset.transfer_syntax().uid().to_string();
+            if !seen.insert((sop_class.clone(), syntax.clone())) {
+                continue;
+            }
+            contexts.push(PresentationContext::new(
+                1,
+                sop_class,
+                crate::services::c_store_transfer_syntaxes(&syntax, &[], false),
+            ));
+        }
+        let result = {
+            let association = self.ensure_association(contexts).await?;
+            association.send_c_store_batch(files).await
+        };
+        let result = self.finish_request(result).await;
+        if let Ok(responses) = &result {
+            self.sent_on_association += responses.len();
+        }
+        result
+    }
+
+    /// Runs several C-FINDs within the async-operations window (M6).
+    ///
+    /// Returns each request's responses in request order; see
+    /// [`Association::send_c_find_batch`] for the demultiplexing rules.
+    pub async fn send_c_find_batch(
+        &mut self,
+        requests: &[CFindRequest],
+    ) -> Result<Vec<Vec<CFindResponse>>> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut contexts = Vec::new();
+        for request in requests {
+            if !seen.insert(request.sop_class_uid.clone()) {
+                continue;
+            }
+            contexts.push(PresentationContext::new(
+                1,
+                request.sop_class_uid.clone(),
+                vec![
+                    crate::association::transfer_syntax::IMPLICIT_VR_LITTLE_ENDIAN.to_string(),
+                    crate::association::transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN.to_string(),
+                ],
+            ));
+        }
+        let result = {
+            let association = self.ensure_association(contexts).await?;
+            association.send_c_find_batch(requests).await
+        };
+        self.finish_request(result).await
+    }
     /// Runs a C-FIND and collects every response (§11.4).
     pub async fn send_c_find(&mut self, request: &CFindRequest) -> Result<Vec<CFindResponse>> {
         let context = PresentationContext::new(
@@ -583,6 +679,68 @@ impl DicomClient {
             self.last_request = Some((request.message_id, context_id));
         }
         Ok(responses)
+    }
+
+    /// Sends one N-service request and returns its response (H2, §11.4).
+    ///
+    /// One call site covers all six services: the presentation context comes
+    /// from the request's SOP class, and the dataset (if any) travels in its own
+    /// transfer syntax. A `message_id` of 0 is allocated by the association, so
+    /// a caller does not have to track IDs; the response carries the one used in
+    /// `message_id_being_responded_to`.
+    pub async fn send_n_service(
+        &mut self,
+        request: &crate::nservice::NServiceRequest,
+    ) -> Result<crate::nservice::NServiceResponse> {
+        let sop_class = request
+            .sop_class_uid
+            .clone()
+            .ok_or_else(|| NetworkError::protocol("an N-service request has no SOP class UID"))?;
+        let proposed = match &request.dataset {
+            Some(dataset) => dataset.transfer_syntax().uid().to_string(),
+            None => crate::association::transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN.to_string(),
+        };
+        let context = PresentationContext::new(1, sop_class.clone(), vec![proposed]);
+        let (context_id, response) = {
+            let association = self.ensure_association(vec![context]).await?;
+            let context_id = association
+                .contexts()
+                .pick(&sop_class, "")
+                .map(|c| c.id)
+                .ok();
+            let mut request = request.clone();
+            if request.message_id == 0 {
+                request.message_id = association.next_message_id()?;
+            }
+            let response = association.send_n_service(&request).await;
+            (context_id, response)
+        };
+        let response = self.finish_request(response).await;
+        if let (Ok(response), Some(context_id)) = (&response, context_id) {
+            self.sent_on_association += 1;
+            self.last_request = Some((response.message_id_being_responded_to, context_id));
+        }
+        response
+    }
+
+    /// Sends an N-ACTION and returns the response (H2, §11.4).
+    ///
+    /// The common case of [`Self::send_n_service`]: a service-class SCP expects
+    /// an action type ID and usually a dataset.
+    pub async fn send_n_action(
+        &mut self,
+        sop_class_uid: impl Into<String>,
+        sop_instance_uid: impl Into<String>,
+        action_type_id: u16,
+        dataset: Option<radicom::model::dataset::Dataset>,
+    ) -> Result<crate::nservice::NServiceResponse> {
+        let mut request =
+            crate::nservice::NServiceRequest::new(crate::dimse::CommandField::NActionRq, 0);
+        request.sop_class_uid = Some(sop_class_uid.into());
+        request.sop_instance_uid = Some(sop_instance_uid.into());
+        request.action_type_id = Some(action_type_id);
+        request.dataset = dataset;
+        self.send_n_service(&request).await
     }
 
     /// Sends C-CANCEL explicitly on the most recently used request's context.
@@ -1706,5 +1864,339 @@ mod tests {
         assert!(!responses.last().unwrap().is_pending());
         client.release().await;
         handle.await.unwrap().unwrap();
+    }
+
+    const PRINTER_SOP_CLASS: &str = "1.2.840.10008.5.1.1.16";
+
+    /// An SCP that answers N-ACTION and reports the event afterwards (H2).
+    struct PrinterScp {
+        actions: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ServiceProvider for PrinterScp {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec![PRINTER_SOP_CLASS.to_string()]
+        }
+
+        async fn on_n_action(
+            &self,
+            request: &crate::nservice::NServiceRequest,
+        ) -> Result<crate::nservice::NServiceResponse> {
+            self.actions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(crate::nservice::NServiceResponse::success(request, None))
+        }
+
+        async fn on_send_n_event_report(
+            &self,
+            request: &crate::nservice::NServiceRequest,
+        ) -> Result<Vec<crate::nservice::NServiceRequest>> {
+            // only the first action reports, so the test's second request is
+            // free to read and answer the pushed report
+            if self.actions.load(std::sync::atomic::Ordering::SeqCst) > 1 {
+                return Ok(Vec::new());
+            }
+            let mut event = crate::nservice::NServiceRequest::new(
+                crate::dimse::CommandField::NEventReportRq,
+                0,
+            );
+            event.sop_class_uid = request.sop_class_uid.clone();
+            event.sop_instance_uid = request.sop_instance_uid.clone();
+            event.event_type_id = Some(1);
+            let mut dataset = radicom::model::dataset::Dataset::new();
+            dataset.insert_str(
+                radicom::model::tag::Tag::PATIENT_NAME,
+                radicom::model::vr::Vr::Pn,
+                "Report",
+            );
+            dataset.set_transfer_syntax(
+                radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+            );
+            event.dataset = Some(dataset);
+            Ok(vec![event])
+        }
+    }
+
+    #[tokio::test]
+    async fn an_n_action_round_trip_and_the_scp_pushed_event_report() {
+        // H2: the high-level client sends an N-service request, and the SCP of
+        // the service class reports the event back on the same association
+        // (fo-dicom `DicomClient.OnNEventReportRequest`).
+        let actions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(PrinterScp {
+                actions: actions.clone(),
+            }),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let seen: Arc<std::sync::Mutex<Vec<(u16, String)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
+            .with_n_event_report_handler(Arc::new(move |request| {
+                recorded.lock().unwrap().push((
+                    request.event_type_id.unwrap_or(0),
+                    request.sop_class_uid.clone().unwrap_or_default(),
+                ));
+                Ok(crate::nservice::NServiceResponse::success(request, None))
+            }));
+        // SCP so the peer may report the event here, SCU so this side may still
+        // send the N-ACTION on the same class (PS3.7 §10.1 role selection)
+        client.options.connection.role_selections = vec![crate::pdu::RoleSelection {
+            sop_class: PRINTER_SOP_CLASS.to_string(),
+            scu_role: true,
+            scp_role: true,
+        }];
+
+        let first = client
+            .send_n_action(PRINTER_SOP_CLASS, "1.2.3.4", 1, None)
+            .await
+            .unwrap();
+        assert_eq!(first.status, crate::dimse::status::SUCCESS);
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "an idle client reads the report with its next request"
+        );
+
+        let second = client
+            .send_n_action(PRINTER_SOP_CLASS, "1.2.3.4", 1, None)
+            .await
+            .unwrap();
+        assert_eq!(second.status, crate::dimse::status::SUCCESS);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![(1u16, PRINTER_SOP_CLASS.to_string())],
+            "the client answered exactly one pushed report"
+        );
+        assert_eq!(actions.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        client.release().await;
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_large_store_reaches_the_sink_through_a_temp_file() {
+        // H3: the dataset PDVs stream to a temporary file while they arrive, so
+        // the sink sees an instance far larger than one PDU without the
+        // receiver holding it.
+        struct StoreProvider {
+            seen: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl ServiceProvider for StoreProvider {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec!["1.2.840.10008.5.1.4.1.1.7".to_string()]
+            }
+            async fn on_c_store(&self, request: &CStoreRequest) -> Result<CStoreResponse> {
+                assert_eq!(
+                    request
+                        .file
+                        .dataset
+                        .get_str(radicom::model::tag::Tag::SOP_INSTANCE_UID)
+                        .unwrap(),
+                    "1.2.3"
+                );
+                self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(CStoreResponse::success(request))
+            }
+        }
+
+        let receive_dir = std::env::temp_dir().join(format!("radicom-recv-{}", std::process::id()));
+        let sink_dir = std::env::temp_dir().join(format!("radicom-sink-{}", std::process::id()));
+        std::fs::create_dir_all(&receive_dir).unwrap();
+        std::fs::create_dir_all(&sink_dir).unwrap();
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(StoreProvider { seen: seen.clone() }),
+            ServerOptions {
+                store_sink: StoreSink::SpoolToDir(sink_dir.clone()),
+                store_spool: crate::assembler::SpoolConfig {
+                    memory_threshold: 0,
+                    max_message_length: 64 * 1024 * 1024,
+                    dir: Some(receive_dir.clone()),
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut dataset = radicom::model::dataset::Dataset::new();
+        dataset.insert_str(
+            radicom::model::tag::Tag::SOP_CLASS_UID,
+            radicom::model::vr::Vr::Ui,
+            "1.2.840.10008.5.1.4.1.1.7",
+        );
+        dataset.insert_str(
+            radicom::model::tag::Tag::SOP_INSTANCE_UID,
+            radicom::model::vr::Vr::Ui,
+            "1.2.3",
+        );
+        // 2 MiB: many PDVs at the default 16 KiB peer maximum
+        dataset.insert_or_update(radicom::model::item::DicomItem::Element(
+            radicom::model::element::DicomElement::new_bytes(
+                radicom::model::tag::Tag::PIXEL_DATA,
+                radicom::model::vr::Vr::Ob,
+                Arc::new(radicom::model::buffer::MemoryBuffer::from(vec![
+                    0x5Au8;
+                    2 * 1024
+                        * 1024
+                ])),
+            ),
+        ));
+        dataset.set_transfer_syntax(
+            radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
+        let file = DicomFile::from_dataset(dataset);
+
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string());
+        let response = client.send_c_store(&file).await.unwrap();
+        assert_eq!(response.status, crate::dimse::status::SUCCESS);
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let stored: Vec<std::path::PathBuf> = std::fs::read_dir(&sink_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(stored.len(), 1, "the sink kept exactly one instance");
+        assert!(
+            std::fs::metadata(&stored[0]).unwrap().len() >= 2 * 1024 * 1024,
+            "the whole dataset arrived"
+        );
+        assert_eq!(
+            std::fs::read_dir(&receive_dir).unwrap().count(),
+            0,
+            "the receive spool is removed once the sink copied it"
+        );
+
+        client.release().await;
+        handle.await.unwrap().unwrap();
+        std::fs::remove_dir_all(&sink_dir).ok();
+        std::fs::remove_dir_all(&receive_dir).ok();
+    }
+
+    /// Sends `file` to a fresh loopback SCP configured with `fallback`, and
+    /// returns the PatientName the provider decoded (H1).
+    async fn store_and_read_name(fallback: Option<&'static str>, file: &DicomFile) -> String {
+        struct StoreProvider {
+            seen: Arc<std::sync::Mutex<Vec<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl ServiceProvider for StoreProvider {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec!["1.2.840.10008.5.1.4.1.1.7".to_string()]
+            }
+            async fn on_c_store(&self, request: &CStoreRequest) -> Result<CStoreResponse> {
+                assert!(
+                    !request
+                        .file
+                        .dataset
+                        .contains(&radicom::model::tag::Tag::SPECIFIC_CHARACTER_SET),
+                    "the premise is a dataset without (0008,0005)"
+                );
+                let name = request
+                    .file
+                    .dataset
+                    .get_str(radicom::model::tag::Tag::PATIENT_NAME)
+                    .unwrap_or_default();
+                self.seen.lock().unwrap().push(name);
+                Ok(CStoreResponse::success(request))
+            }
+        }
+
+        let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(StoreProvider { seen: seen.clone() }),
+            ServerOptions {
+                fallback_encoding: fallback,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string());
+        let response = client.send_c_store(file).await.unwrap();
+        assert_eq!(response.status, crate::dimse::status::SUCCESS);
+        client.release().await;
+        handle.await.unwrap().unwrap();
+        let name = seen.lock().unwrap().pop().expect("the instance arrived");
+        name
+    }
+
+    /// An instance whose PatientName is "Müller" encoded with `term`, carrying
+    /// no (0008,0005): the sender writes the text in the dataset's own fallback
+    /// encoding, so the wire bytes are the declared repertoire (H1).
+    fn instance_without_charset(term: &str) -> DicomFile {
+        let mut dataset = radicom::model::dataset::Dataset::new();
+        dataset.insert_str(
+            radicom::model::tag::Tag::SOP_CLASS_UID,
+            radicom::model::vr::Vr::Ui,
+            "1.2.840.10008.5.1.4.1.1.7",
+        );
+        dataset.insert_str(
+            radicom::model::tag::Tag::SOP_INSTANCE_UID,
+            radicom::model::vr::Vr::Ui,
+            "1.2.3",
+        );
+        dataset.insert_str(
+            radicom::model::tag::Tag::PATIENT_NAME,
+            radicom::model::vr::Vr::Pn,
+            "Müller",
+        );
+        dataset.set_transfer_syntax(
+            radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
+        dataset.set_fallback_encodings(vec![radicom::encoding::charset::charset_encoding(term)]);
+        DicomFile::from_dataset(dataset)
+    }
+
+    #[tokio::test]
+    async fn a_store_without_a_charset_decodes_with_the_servers_fallback() {
+        // H1: a peer that omits (0008,0005) declares ISO-IR 6, but a legacy
+        // Latin-1 instance is common. `ServerOptions::fallback_encoding` makes
+        // the SCP decode that text as Latin-1. Nothing is re-decoded on the send
+        // path: the writer takes its encoding from the dataset's own fallback
+        // list, so the bytes on the wire are the instance's repertoire.
+        let latin1 = instance_without_charset("ISO_IR 100");
+        assert_eq!(
+            store_and_read_name(Some("ISO_IR 100"), &latin1).await,
+            "Müller",
+            "configured ISO_IR 100 must decode the Latin-1 bytes"
+        );
+        // radicom resolves the ISO_IR 6 label to windows-1252 (the WHATWG label
+        // table maps the ASCII and Latin-1 labels there), so the default
+        // repertoire already preserves these bytes: `None` must not change that.
+        assert_eq!(
+            store_and_read_name(None, &latin1).await,
+            "Müller",
+            "the default repertoire stays the default"
+        );
+
+        // A repertoire that is *not* the default proves the option decides the
+        // decode: the same text as UTF-8, still without (0008,0005).
+        let utf8 = instance_without_charset("ISO_IR 192");
+        assert_eq!(
+            store_and_read_name(Some("ISO_IR 192"), &utf8).await,
+            "Müller",
+            "configured ISO_IR 192 must decode the UTF-8 bytes"
+        );
+        assert_eq!(
+            store_and_read_name(None, &utf8).await,
+            "MÃ¼ller",
+            "without a fallback the default repertoire reads UTF-8 as single bytes"
+        );
     }
 }

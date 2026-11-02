@@ -82,6 +82,57 @@ pub fn decode_dataset(bytes: &[u8], syntax: &TransferSyntax) -> Result<Dataset> 
     })
 }
 
+/// Decodes a received dataset, reading text that carries no (0008,0005) with
+/// `fallback` (H1; fo-dicom `DicomFile.Open(..., Encoding fallbackEncoding)`).
+///
+/// `fallback` is a DICOM Defined Term (`"ISO_IR 100"` = Latin-1). An unknown
+/// term keeps the default repertoire instead of guessing an encoding: a typo
+/// must not silently relabel the text.
+///
+/// The fallback is stored on the returned dataset (the core builder does that),
+/// so saving the instance re-encodes the text with the same repertoire instead
+/// of degrading it to ISO-IR 6. Nothing is re-decoded on the send path.
+pub fn decode_dataset_with_fallback(
+    bytes: &[u8],
+    syntax: &TransferSyntax,
+    fallback: Option<&str>,
+) -> Result<Dataset> {
+    let encoding = fallback
+        .filter(|term| radicom::encoding::charset::is_known_charset(term))
+        .map(radicom::encoding::charset::charset_encoding);
+    let Some(encoding) = encoding else {
+        return decode_dataset(bytes, syntax);
+    };
+    let owned;
+    let bytes = if syntax.is_deflate() {
+        owned = radicom::io::reader::inflate(bytes).map_err(decode_error)?;
+        &owned[..]
+    } else {
+        bytes
+    };
+    let mut source = radicom::io::byte_source::ByteSourceReader::new(
+        std::io::Cursor::new(bytes),
+        syntax.endian(),
+    );
+    let mut builder =
+        radicom::io::dataset_builder::DatasetBuilder::with_transfer_syntax_and_fallback(
+            std::sync::Arc::new(syntax.clone()),
+            vec![encoding],
+        );
+    radicom::io::reader::DicomReader::default()
+        .read(&mut source, syntax, &mut builder, None)
+        .map_err(decode_error)?;
+    Ok(builder.into_dataset())
+}
+
+/// A reader error as the typed IO error the DIMSE layers return.
+fn decode_error(error: radicom::Error) -> NetworkError {
+    NetworkError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        error.to_string(),
+    ))
+}
+
 /// Splits a command (and optional dataset) into P-DATA-TF PDUs (§11.1).
 ///
 /// The command stream always occupies its own P-DATA-TF, before the dataset.

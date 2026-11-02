@@ -6,12 +6,193 @@
 
 use crate::error::{NetworkError, Result};
 use crate::pdu::{PData, Pdv};
+use radicom::io::temp::create_unique_file;
+use std::io::Write as _;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// Which stream a PDV belongs to (§11.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Stream {
     Command,
     Data,
+}
+
+/// How a spoolable dataset is received (H3).
+///
+/// fo-dicom writes every C-STORE PDV straight to a `TemporaryFile`
+/// (`DicomService.CreateCStoreReceiveStream`) instead of buffering the whole
+/// instance. [`PdvAssembler::arm_spill`] selects that path for one dataset
+/// stream; this carries its limits.
+#[derive(Debug, Clone)]
+pub struct SpoolConfig {
+    /// Bytes kept in memory before the dataset moves to a file.
+    ///
+    /// `0` spills from the first PDV, which is fo-dicom's behaviour and the
+    /// default; a larger value keeps small instances entirely in memory.
+    pub memory_threshold: usize,
+    /// Hard bound on one spooled dataset. A larger message is refused.
+    ///
+    /// This replaces the flat [`PdvAssembler::DEFAULT_MAX_MESSAGE_LENGTH`]
+    /// refusal for armed streams, so a valid whole-slide instance above 1 GiB
+    /// is no longer rejected.
+    pub max_message_length: u64,
+    /// Directory for the spool files (`None` = the OS temp directory).
+    pub dir: Option<std::path::PathBuf>,
+}
+
+impl Default for SpoolConfig {
+    fn default() -> Self {
+        SpoolConfig {
+            memory_threshold: 0,
+            max_message_length: Self::DEFAULT_MAX_SPILLED_LENGTH,
+            dir: None,
+        }
+    }
+}
+
+impl SpoolConfig {
+    /// Largest spooled dataset a default assembler accepts (64 GiB).
+    pub const DEFAULT_MAX_SPILLED_LENGTH: u64 = 64 * 1024 * 1024 * 1024;
+}
+
+/// A received message body: in memory, or streamed to a file (H3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessageBody {
+    /// The whole message is in memory (the normal path).
+    Memory(bytes::Bytes),
+    /// The message was streamed to this file as its PDVs arrived.
+    Spilled(Arc<SpoolFile>),
+}
+
+impl MessageBody {
+    /// The message length in bytes, without reading a spooled file.
+    pub fn len(&self) -> u64 {
+        match self {
+            MessageBody::Memory(bytes) => bytes.len() as u64,
+            MessageBody::Spilled(spool) => spool.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The bytes, reading the spool file back when the message was spilled.
+    pub fn read_all(&self) -> Result<bytes::Bytes> {
+        match self {
+            MessageBody::Memory(bytes) => Ok(bytes.clone()),
+            MessageBody::Spilled(spool) => spool.read_all(),
+        }
+    }
+
+    /// The bytes when they never left memory.
+    pub fn in_memory(&self) -> Option<&[u8]> {
+        match self {
+            MessageBody::Memory(bytes) => Some(bytes),
+            MessageBody::Spilled(_) => None,
+        }
+    }
+
+    /// The spool file, when the message was streamed to disk.
+    pub fn spool(&self) -> Option<&Arc<SpoolFile>> {
+        match self {
+            MessageBody::Spilled(spool) => Some(spool),
+            MessageBody::Memory(_) => None,
+        }
+    }
+}
+
+impl From<bytes::Bytes> for MessageBody {
+    fn from(bytes: bytes::Bytes) -> Self {
+        MessageBody::Memory(bytes)
+    }
+}
+
+/// A dataset streamed to disk, removed when the last reference drops.
+///
+/// Mirrors fo-dicom's `TemporaryFile`: the file exists only while the received
+/// instance does, unless [`SpoolFile::keep`] hands ownership to the caller.
+#[derive(Debug)]
+pub struct SpoolFile {
+    path: std::path::PathBuf,
+    len: AtomicU64,
+    keep: AtomicBool,
+}
+
+impl SpoolFile {
+    fn new(path: std::path::PathBuf) -> Self {
+        SpoolFile {
+            path,
+            len: AtomicU64::new(0),
+            keep: AtomicBool::new(false),
+        }
+    }
+
+    /// The file's path.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// Bytes written so far (the dataset length once it is complete).
+    pub fn len(&self) -> u64 {
+        self.len.load(Ordering::Relaxed)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Keeps the file after the last reference drops; the caller then owns it.
+    pub fn keep(&self) {
+        self.keep.store(true, Ordering::Relaxed);
+    }
+
+    /// Reads the whole spooled message back into memory.
+    pub fn read_all(&self) -> Result<bytes::Bytes> {
+        let bytes = std::fs::read(&self.path).map_err(NetworkError::Io)?;
+        Ok(bytes::Bytes::from(bytes))
+    }
+
+    fn add_len(&self, bytes: usize) {
+        self.len.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+}
+
+impl PartialEq for SpoolFile {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+    }
+}
+
+impl Eq for SpoolFile {}
+
+impl Drop for SpoolFile {
+    fn drop(&mut self) {
+        if !self.keep.load(Ordering::Relaxed) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// An in-progress spilled dataset: its final [`SpoolFile`] and the open handle.
+#[derive(Debug, Clone)]
+struct SpillWriter {
+    spool: Arc<SpoolFile>,
+    file: Arc<std::fs::File>,
+}
+
+impl SpillWriter {
+    fn append(&mut self, bytes: &[u8]) -> Result<()> {
+        let mut file = &*self.file;
+        file.write_all(bytes).map_err(NetworkError::Io)?;
+        self.spool.add_len(bytes.len());
+        Ok(())
+    }
+
+    fn written(&self) -> u64 {
+        self.spool.len()
+    }
 }
 
 /// Reassembles PDVs into complete message units (§11.2).
@@ -41,6 +222,14 @@ pub struct PdvAssembler {
     max_message_length: usize,
     /// Largest total buffered across all in-flight messages.
     max_buffered_bytes: usize,
+    /// Spool policy for armed dataset streams (H3); `None` never spills.
+    spool: Option<SpoolConfig>,
+    /// Contexts whose next dataset stream spills (`arm_spill`).
+    armed: std::collections::HashSet<u8>,
+    /// Dataset streams currently being written to a file, per context.
+    spilling: std::collections::HashMap<u8, SpillWriter>,
+    /// High-water mark of `buffered`, so a test can prove the spill bounded it.
+    peak_buffered: usize,
 }
 
 impl Default for PdvAssembler {
@@ -50,6 +239,10 @@ impl Default for PdvAssembler {
             buffered: 0,
             max_message_length: Self::DEFAULT_MAX_MESSAGE_LENGTH,
             max_buffered_bytes: Self::DEFAULT_MAX_BUFFERED_BYTES,
+            spool: None,
+            armed: std::collections::HashSet::new(),
+            spilling: std::collections::HashMap::new(),
+            peak_buffered: 0,
         }
     }
 }
@@ -60,17 +253,30 @@ pub struct MessageUnit {
     pub context_id: u8,
     pub stream: Stream,
     /// The message bytes. Single-PDV messages share the PDV's `Bytes` (no copy);
-    /// fragmented ones are frozen from a `BytesMut` exactly once.
+    /// fragmented ones are frozen from a `BytesMut` exactly once. Empty when
+    /// [`Self::spool`] is set.
     pub bytes: bytes::Bytes,
+    /// Set instead of `bytes` when the dataset was streamed to a file (H3).
+    pub spool: Option<Arc<SpoolFile>>,
+}
+
+impl MessageUnit {
+    /// The body, in memory or spooled.
+    pub fn body(&self) -> MessageBody {
+        match &self.spool {
+            Some(spool) => MessageBody::Spilled(spool.clone()),
+            None => MessageBody::Memory(self.bytes.clone()),
+        }
+    }
 }
 
 impl PdvAssembler {
     /// Largest message a default assembler will buffer (1 GiB).
     ///
-    /// A message is buffered whole before it is dispatched, so this is also the
-    /// ceiling on one C-STORE dataset: an instance above it is refused with a
-    /// protocol error rather than streamed to the sink. Receiving multi-GB
-    /// instances needs a streaming sink (docs/06-backlog.md §1, NET-13).
+    /// Applies to messages that are not armed for spilling. An armed dataset
+    /// stream (a C-STORE instance) is bounded by
+    /// [`SpoolConfig::max_message_length`] instead, because it never has to be
+    /// resident in memory (H3).
     pub const DEFAULT_MAX_MESSAGE_LENGTH: usize = 1 << 30;
 
     /// Largest total buffered across all in-flight messages (2 GiB).
@@ -96,6 +302,35 @@ impl PdvAssembler {
         }
     }
 
+    /// An assembler that can spill armed dataset streams to a file (H3).
+    pub fn with_spool(spool: SpoolConfig) -> Self {
+        PdvAssembler {
+            spool: Some(spool),
+            ..Self::default()
+        }
+    }
+
+    /// Arms the next dataset stream on `context_id` for spilling (H3).
+    ///
+    /// The server arms a context as soon as it decodes a C-STORE command, so
+    /// the dataset PDVs that follow are written to a temporary file instead of
+    /// being buffered. Without a [`SpoolConfig`] this is a no-op.
+    pub fn arm_spill(&mut self, context_id: u8) {
+        if self.spool.is_some() {
+            self.armed.insert(context_id);
+        }
+    }
+
+    /// True when `context_id` has an armed (or in-progress) dataset spill.
+    pub fn is_spilling(&self, context_id: u8) -> bool {
+        self.armed.contains(&context_id) || self.spilling.contains_key(&context_id)
+    }
+
+    /// The largest value of `buffered` seen so far (test/diagnostic use).
+    pub fn peak_buffered(&self) -> usize {
+        self.peak_buffered
+    }
+
     /// Feeds one P-DATA-TF, returning every unit it completed.
     pub fn push_pdata(&mut self, pdata: &PData) -> Result<Vec<MessageUnit>> {
         let mut completed = Vec::new();
@@ -114,6 +349,10 @@ impl PdvAssembler {
         } else {
             Stream::Data
         };
+        // H3: an armed dataset stream goes to a temporary file as it arrives.
+        if stream == Stream::Data && self.armed.contains(&pdv.context_id) {
+            return self.push_spilled_pdv(pdv);
+        }
         let key = (pdv.context_id, stream);
         if pdv.data.len() > self.max_message_length {
             return Err(NetworkError::protocol(
@@ -126,6 +365,7 @@ impl PdvAssembler {
                 context_id: pdv.context_id,
                 stream,
                 bytes: pdv.data.clone(),
+                spool: None,
             }));
         }
         let buffered = self.buffers.get(&key).map_or(0, bytes::BytesMut::len);
@@ -148,6 +388,7 @@ impl PdvAssembler {
         let buffer = self.buffers.entry(key).or_default();
         buffer.extend_from_slice(&pdv.data);
         self.buffered += pdv.data.len();
+        self.peak_buffered = self.peak_buffered.max(self.buffered);
         if !pdv.is_last {
             return Ok(None);
         }
@@ -158,7 +399,92 @@ impl PdvAssembler {
             context_id: pdv.context_id,
             stream,
             bytes,
+            spool: None,
         }))
+    }
+
+    /// Feeds one dataset PDV of an armed context (H3).
+    ///
+    /// The message stays in memory up to [`SpoolConfig::memory_threshold`]
+    /// bytes, is moved to a temporary file when it outgrows that, and is
+    /// bounded by [`SpoolConfig::max_message_length`] rather than by the flat
+    /// in-memory ceiling.
+    fn push_spilled_pdv(&mut self, pdv: &Pdv) -> Result<Option<MessageUnit>> {
+        let config = self
+            .spool
+            .clone()
+            .expect("an armed stream requires a spool config");
+        let context_id = pdv.context_id;
+        let key = (context_id, Stream::Data);
+
+        if !self.spilling.contains_key(&context_id) {
+            let buffered = self.buffers.get(&key).map_or(0, bytes::BytesMut::len);
+            let total = buffered + pdv.data.len();
+            if total <= config.memory_threshold {
+                let buffer = self.buffers.entry(key).or_default();
+                buffer.extend_from_slice(&pdv.data);
+                self.buffered += pdv.data.len();
+                self.peak_buffered = self.peak_buffered.max(self.buffered);
+                if !pdv.is_last {
+                    return Ok(None);
+                }
+                // small enough after all: hand it back from memory
+                self.armed.remove(&context_id);
+                let bytes = self.drop_buffer(key).unwrap_or_default().freeze();
+                return Ok(Some(MessageUnit {
+                    context_id,
+                    stream: Stream::Data,
+                    bytes,
+                    spool: None,
+                }));
+            }
+            if total as u64 > config.max_message_length {
+                self.drop_buffer(key);
+                self.armed.remove(&context_id);
+                return Err(NetworkError::protocol(
+                    "spilled DIMSE message exceeds the maximum size",
+                ));
+            }
+            let prefix = self.drop_buffer(key).unwrap_or_default();
+            let writer = self.open_spill(&config, &prefix)?;
+            self.spilling.insert(context_id, writer);
+        }
+
+        let writer = self.spilling.get_mut(&context_id).expect("spool writer");
+        if writer.written() + pdv.data.len() as u64 > config.max_message_length {
+            self.spilling.remove(&context_id);
+            self.armed.remove(&context_id);
+            return Err(NetworkError::protocol(
+                "spilled DIMSE message exceeds the maximum size",
+            ));
+        }
+        writer.append(&pdv.data)?;
+        if !pdv.is_last {
+            return Ok(None);
+        }
+        let writer = self.spilling.remove(&context_id).expect("spool writer");
+        self.armed.remove(&context_id);
+        Ok(Some(MessageUnit {
+            context_id,
+            stream: Stream::Data,
+            bytes: bytes::Bytes::new(),
+            spool: Some(writer.spool),
+        }))
+    }
+
+    /// Opens the spool file and moves an in-memory prefix into it.
+    fn open_spill(&self, config: &SpoolConfig, prefix: &[u8]) -> Result<SpillWriter> {
+        let dir = config.dir.clone().unwrap_or_else(std::env::temp_dir);
+        let (path, file) =
+            create_unique_file(&dir, "radicom-recv", "dcm").map_err(NetworkError::Io)?;
+        let mut writer = SpillWriter {
+            spool: Arc::new(SpoolFile::new(path)),
+            file: Arc::new(file),
+        };
+        if !prefix.is_empty() {
+            writer.append(prefix)?;
+        }
+        Ok(writer)
     }
 
     /// Removes a stream's partial buffer, keeping the aggregate counter honest.
@@ -181,6 +507,8 @@ impl PdvAssembler {
     /// True when nothing is half-assembled.
     pub fn is_idle(&self) -> bool {
         self.buffers.values().all(|bytes| bytes.is_empty())
+            && self.spilling.is_empty()
+            && self.armed.is_empty()
     }
 }
 
@@ -193,16 +521,45 @@ impl PdvAssembler {
 pub struct PduSplitter {
     max_pdu: u32,
     max_pdvs_per_pdu: usize,
+    /// Optional cap on one command PDV value (fo-dicom `MaxCommandBuffer`).
+    max_command_pdv: Option<usize>,
+    /// Optional cap on one dataset PDV value (fo-dicom `MaxDataBuffer`).
+    max_data_pdv: Option<usize>,
 }
 
 impl PduSplitter {
     /// `max_pdu` is the peer's maximum PDU length; `max_pdvs_per_pdu` exists
     /// for buggy peers that only accept one PDV per PDU.
     pub fn new(max_pdu: u32, max_pdvs_per_pdu: usize) -> Self {
+        Self::with_limits(max_pdu, max_pdvs_per_pdu, None, None)
+    }
+
+    /// A splitter with the interop knobs of fo-dicom `DicomServiceOptions`:
+    /// how many PDVs may share a PDU and how large one command / dataset PDV
+    /// may be (`MaxCommandBuffer` / `MaxDataBuffer`). `None` uses the whole PDU
+    /// for one PDV, which is the previous behaviour (L7).
+    pub fn with_limits(
+        max_pdu: u32,
+        max_pdvs_per_pdu: usize,
+        max_command_pdv: Option<usize>,
+        max_data_pdv: Option<usize>,
+    ) -> Self {
         PduSplitter {
             max_pdu,
             max_pdvs_per_pdu: max_pdvs_per_pdu.max(1),
+            max_command_pdv: max_command_pdv.map(|limit| limit.max(1)),
+            max_data_pdv: max_data_pdv.map(|limit| limit.max(1)),
         }
+    }
+
+    /// The configured cap on one command PDV value, if any.
+    pub fn max_command_pdv(&self) -> Option<usize> {
+        self.max_command_pdv
+    }
+
+    /// The configured cap on one dataset PDV value, if any.
+    pub fn max_data_pdv(&self) -> Option<usize> {
+        self.max_data_pdv
     }
 
     /// The peer's maximum PDU length this splitter was built for.
@@ -223,6 +580,24 @@ impl PduSplitter {
     /// odd fragment plus a pad byte (review #17).
     pub fn max_pdv_value(&self) -> usize {
         ((self.max_pdu as usize).saturating_sub(6)) & !1
+    }
+
+    /// The largest PDV value this splitter writes for `is_command`.
+    ///
+    /// A configured `MaxCommandBuffer`/`MaxDataBuffer` may only shrink the
+    /// negotiated PDU limit, never exceed it, and the value stays even so the
+    /// pad byte never pushes it past the limit.
+    fn pdv_value_limit(&self, is_command: bool) -> usize {
+        let pdu = self.max_pdv_value();
+        let configured = if is_command {
+            self.max_command_pdv
+        } else {
+            self.max_data_pdv
+        };
+        match configured {
+            Some(limit) => (limit.min(pdu)).max(2) & !1,
+            None => pdu,
+        }
     }
 
     /// Splits one message stream into PDUs (§11.1).
@@ -266,6 +641,9 @@ impl PduSplitter {
             return Ok(pdus);
         }
 
+        // a configured MaxCommandBuffer/MaxDataBuffer caps every PDV value of
+        // this stream, even when the PDU has more room (L7)
+        let value_limit = self.pdv_value_limit(is_command);
         let mut offset = 0usize;
         while offset < data.len() {
             // A PDV costs 6 header bytes plus its value, which is even-padded on
@@ -280,7 +658,7 @@ impl PduSplitter {
             // `available` is either the full body or a leftover of at most one
             // byte after a flush, so this slice is never empty: no zero-length
             // PDV can be emitted.
-            let room = (available - 6) & !1;
+            let room = ((available - 6) & !1).min(value_limit);
             let end = (offset + room).min(data.len());
             let is_last = end == data.len();
             let len = end - offset;
@@ -856,5 +1234,197 @@ mod tests {
             .map(|pdv| pdv.data.len())
             .sum();
         assert_eq!(total, data.len());
+    }
+
+    /// A directory for one spill test, unique per process and tag.
+    fn spill_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("radicom-spill-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A dataset PDV of `len` repeated bytes.
+    fn dataset_pdv(context_id: u8, last: bool, len: usize) -> Pdv {
+        Pdv {
+            context_id,
+            is_command: false,
+            is_last: last,
+            data: bytes::Bytes::from(vec![0x5A; len]),
+        }
+    }
+
+    #[test]
+    fn an_armed_dataset_streams_to_a_file_instead_of_the_buffer() {
+        // H3: fo-dicom writes every C-STORE PDV to a TemporaryFile
+        // (DicomService.CreateCStoreReceiveStream). An armed stream must never
+        // hold the instance in memory.
+        let dir = spill_dir("armed");
+        let mut assembler = PdvAssembler::with_spool(SpoolConfig {
+            memory_threshold: 0,
+            max_message_length: 64 * 1024 * 1024,
+            dir: Some(dir.clone()),
+        });
+        assembler.arm_spill(1);
+        let mut completed = None;
+        for index in 0..32 {
+            let pdv = dataset_pdv(1, index == 31, 64 * 1024);
+            completed = assembler.push_pdv(&pdv).unwrap().or(completed);
+        }
+        let unit = completed.expect("the last PDV completes the dataset");
+        assert!(unit.bytes.is_empty(), "no copy is kept in memory");
+        let spool = unit.spool.clone().expect("the dataset was spilled");
+        assert_eq!(spool.len(), 2 * 1024 * 1024);
+        assert_eq!(
+            std::fs::metadata(spool.path()).unwrap().len(),
+            2 * 1024 * 1024
+        );
+        assert!(
+            assembler.peak_buffered() < 64 * 1024,
+            "peak buffer {} must stay below one instance",
+            assembler.peak_buffered()
+        );
+        assert!(!assembler.is_spilling(1), "the spill ends with the message");
+        assert!(assembler.is_idle());
+        let path = spool.path().to_path_buf();
+        drop(spool);
+        drop(unit);
+        drop(assembler);
+        assert!(!path.exists(), "the temp file dies with the message");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_kept_spool_file_survives_the_message() {
+        // StoreSink::SpoolToTemp adopts the received file instead of copying it
+        let dir = spill_dir("keep");
+        let mut assembler = PdvAssembler::with_spool(SpoolConfig {
+            memory_threshold: 0,
+            dir: Some(dir.clone()),
+            ..SpoolConfig::default()
+        });
+        assembler.arm_spill(1);
+        let unit = assembler
+            .push_pdv(&dataset_pdv(1, true, 4096))
+            .unwrap()
+            .expect("one PDV completes the dataset");
+        let spool = unit.spool.clone().expect("the dataset was spilled");
+        spool.keep();
+        let path = spool.path().to_path_buf();
+        drop(unit);
+        drop(assembler);
+        assert!(path.exists(), "a kept spool file outlives the message");
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_armed_dataset_above_the_in_memory_cap_is_still_accepted() {
+        // The flat DEFAULT_MAX_MESSAGE_LENGTH refusal no longer applies to a
+        // spilled dataset; 64 KiB exercises the path a multi-GB instance takes.
+        let dir = spill_dir("cap");
+        let mut assembler = PdvAssembler {
+            spool: Some(SpoolConfig {
+                memory_threshold: 0,
+                max_message_length: 8 * 1024 * 1024,
+                dir: Some(dir.clone()),
+            }),
+            ..PdvAssembler::with_max_message_length(1024)
+        };
+        assembler.arm_spill(1);
+        let unit = assembler
+            .push_pdv(&dataset_pdv(1, true, 64 * 1024))
+            .unwrap()
+            .expect("one PDV completes the dataset");
+        assert!(
+            unit.spool.is_some(),
+            "64 KiB is accepted although the memory cap is 1 KiB"
+        );
+
+        // the spool's own bound still applies
+        let mut bounded = PdvAssembler::with_spool(SpoolConfig {
+            memory_threshold: 0,
+            max_message_length: 4,
+            dir: Some(dir.clone()),
+        });
+        bounded.arm_spill(1);
+        let error = bounded
+            .push_pdv(&dataset_pdv(1, false, 16))
+            .expect_err("the spool bound is enforced");
+        assert!(error.to_string().contains("maximum size"), "{error}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_small_armed_dataset_never_reaches_the_disk() {
+        // with a threshold the small-instance path stays in memory (no temp
+        // file for the common few-hundred-KB image)
+        let dir = spill_dir("small");
+        let mut assembler = PdvAssembler::with_spool(SpoolConfig {
+            memory_threshold: 64 * 1024,
+            max_message_length: 1024 * 1024,
+            dir: Some(dir.clone()),
+        });
+        assembler.arm_spill(1);
+        let mut completed = None;
+        for index in 0..2 {
+            let pdv = dataset_pdv(1, index == 1, 4096);
+            completed = assembler.push_pdv(&pdv).unwrap().or(completed);
+        }
+        let unit = completed.expect("the last PDV completes the dataset");
+        assert!(unit.spool.is_none(), "a small dataset stays in memory");
+        assert_eq!(unit.bytes.len(), 8 * 1024);
+        assert!(assembler.is_idle());
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            0,
+            "no temp file was created"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn configured_pdv_limits_shrink_the_fragments_and_the_batch() {
+        let splitter = PduSplitter::with_limits(512, 2, Some(64), Some(256));
+        assert_eq!(splitter.max_command_pdv(), Some(64));
+        assert_eq!(splitter.max_data_pdv(), Some(256));
+
+        let command = splitter.split(1, true, &[0u8; 200]).unwrap();
+        let values: Vec<usize> = command
+            .iter()
+            .flat_map(|pdu| pdu.pdvs.iter().map(|pdv| pdv.data.len()))
+            .collect();
+        assert_eq!(
+            values,
+            vec![64, 64, 64, 8],
+            "MaxCommandBuffer caps each command PDV"
+        );
+        assert!(
+            command.iter().all(|pdu| pdu.pdvs.len() <= 2),
+            "MaxPDVsPerPDU caps the batch"
+        );
+
+        let dataset = splitter.split(1, false, &[0u8; 600]).unwrap();
+        let values: Vec<usize> = dataset
+            .iter()
+            .flat_map(|pdu| pdu.pdvs.iter().map(|pdv| pdv.data.len()))
+            .collect();
+        assert_eq!(
+            values,
+            vec![256, 244, 100],
+            "MaxDataBuffer caps each dataset PDV and the PDU still bounds the rest"
+        );
+        assert!(values.iter().all(|len| *len <= 256));
+
+        // a configured cap may shrink the negotiated PDU but never raise it
+        let capped = PduSplitter::with_limits(64, 4, Some(1 << 20), None);
+        let pdus = capped.split(1, true, &[0u8; 200]).unwrap();
+        assert!(pdus
+            .iter()
+            .flat_map(|pdu| pdu.pdvs.iter())
+            .all(|pdv| pdv.data.len() <= 58));
+
+        // the defaults keep the previous behaviour: one PDV fills the PDU
+        let default = PduSplitter::new(512, 16);
+        assert_eq!(default.split(1, true, &[0u8; 200]).unwrap().len(), 1);
     }
 }

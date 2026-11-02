@@ -312,6 +312,24 @@ pub trait ServiceProvider: Send + Sync {
         ))
     }
 
+    /// N-EVENT-REPORT requests to push after an N-ACTION response (H2).
+    ///
+    /// Mirrors fo-dicom `IDicomNEventReportRequestProvider
+    /// .OnSendNEventReportRequestAsync`: the SCP of the service class answers
+    /// N-ACTION, then reports the resulting event to the SCU on the *same*
+    /// association. The engine assigns each request's message ID and sends it
+    /// only when the peer granted this side the SCU role for its SOP class
+    /// (§11.2); a peer that rejected the report's status is not treated as a
+    /// failure of the N-ACTION, which was already answered.
+    ///
+    /// Defaults to sending nothing, so existing providers are unaffected.
+    async fn on_send_n_event_report(
+        &self,
+        _request: &crate::nservice::NServiceRequest,
+    ) -> Result<Vec<crate::nservice::NServiceRequest>> {
+        Ok(Vec::new())
+    }
+
     /// Answers an N-CREATE (§11.4). Defaults to unsupported.
     async fn on_n_create(
         &self,

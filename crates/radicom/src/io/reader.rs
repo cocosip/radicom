@@ -56,6 +56,13 @@ pub trait ParseObserver {
         offset_table: Vec<u32>,
     ) -> Result<(), Error>;
     fn on_fragment(&mut self, ctx: &ParseContext, buffer: SharedBuffer) -> Result<(), Error>;
+    /// A fragment was dropped by [`LargeValuePolicy::Skip`] (M1). fo-dicom hands
+    /// the observer no buffer and withholds the *whole* fragment sequence, so a
+    /// dataset builder must not keep a partial one; the default ignores the
+    /// event for observers that only count bytes.
+    fn on_fragment_skipped(&mut self, _ctx: &ParseContext) -> Result<(), Error> {
+        Ok(())
+    }
     fn on_end_fragment(&mut self, ctx: &ParseContext) -> Result<(), Error>;
 }
 
@@ -348,10 +355,6 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         let large = length >= self.options.large_object_size;
         let raw = if large {
             match self.options.large_policy {
-                LargeValuePolicy::Skip => {
-                    self.source.skip(length).map_err(|e| io_err(e, at))?;
-                    return Ok(EmptyBuffer::shared());
-                }
                 LargeValuePolicy::OnDemand => match self
                     .source
                     .window_at_current(length)
@@ -363,7 +366,10 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                     }
                     None => self.source.read_buffer(length).map_err(|e| io_err(e, at))?,
                 },
-                LargeValuePolicy::Materialize => {
+                // `Skip` never reaches this point: the element and fragment
+                // loops drop the value before asking for a buffer (M1), so a
+                // skipped value can never be stored as an empty placeholder.
+                LargeValuePolicy::Skip | LargeValuePolicy::Materialize => {
                     self.source.read_buffer(length).map_err(|e| io_err(e, at))?
                 }
             }
@@ -735,18 +741,19 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                         }));
                     }
                     let first = offset_table.is_none();
-                    if !first
-                        && self.options.large_policy == LargeValuePolicy::Skip
+                    if self.options.large_policy == LargeValuePolicy::Skip
                         && length as u64 >= self.options.large_object_size
                     {
-                        // same policy as elements: a skipped fragment is not
-                        // stored at all (fo-dicom hands the observer no buffer)
+                        // same policy as elements: the observer is not shown the
+                        // value, and fo-dicom additionally withholds the whole
+                        // sequence once any fragment is skipped (M1).
                         if self.source.require(length as u64).is_err() {
                             break;
                         }
                         self.source
                             .skip(length as u64)
                             .map_err(|e| io_err(e, pos))?;
+                        observer.on_fragment_skipped(&self.ctx(pos))?;
                         continue;
                     }
                     // Fragment 0 is the basic offset table: its entries are
@@ -1237,6 +1244,44 @@ mod tests {
             ..DicomReader::default()
         };
         assert!(read_with(&bytes, options).is_ok());
+    }
+
+    #[test]
+    fn skipped_values_are_absent_instead_of_empty() {
+        fn skip() -> DicomReader {
+            DicomReader {
+                large_object_size: 4,
+                large_policy: LargeValuePolicy::Skip,
+                ..DicomReader::default()
+            }
+        }
+
+        // a leaf above the skip threshold is dropped from the dataset, not kept
+        // as an empty element (M1; fo-dicom calls no observer for a skipped value)
+        let mut bytes = vec![0x10, 0x00, 0x10, 0x00, b'P', b'N', 0x08, 0x00];
+        bytes.extend_from_slice(b"ABCDEFGH");
+        let ds = read_with(&bytes, skip()).unwrap();
+        assert!(
+            !ds.contains(&Tag::PATIENT_NAME),
+            "a skipped element must not exist in the dataset"
+        );
+
+        // an encapsulated value whose offset table and fragment are skipped
+        // withholds the whole fragment sequence (fo-dicom never adds a sequence
+        // whose fragment buffer is null)
+        let mut bytes = vec![
+            0xE0, 0x7F, 0x10, 0x00, b'O', b'B', 0, 0, 0xFF, 0xFF, 0xFF, 0xFF,
+        ];
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 0x08, 0x00, 0x00, 0x00]);
+        bytes.extend_from_slice(&[0u8; 8]);
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 0x08, 0x00, 0x00, 0x00]);
+        bytes.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0xDD, 0xE0, 0, 0, 0, 0]);
+        let ds = read_with(&bytes, skip()).unwrap();
+        assert!(
+            !ds.contains(&Tag::PIXEL_DATA),
+            "a skipped fragment sequence must not exist in the dataset"
+        );
     }
 
     #[test]

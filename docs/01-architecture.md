@@ -1,7 +1,6 @@
 # Architecture and Core Contracts
 
-> Current correction and evidence ledger: [07-review-fixes-2026-10-30.md](07-review-fixes-2026-10-30.md).
-> Earlier DONE / coverage statements describe an earlier checkpoint, not proof of complete parity.
+> Current alignment, gap-audit and fix status: [03-fo-dicom-alignment.md](03-fo-dicom-alignment.md).
 
 > This is the **only design reference** when changing code. It records the invariants and design
 > decisions you must not violate — it does not restate the implementation, which is the source of truth.

@@ -410,6 +410,21 @@ impl FromElement for DtPoint {
     }
 }
 
+impl FromElement for Tag {
+    /// AT value: two 16-bit units per value, group first (M4). In-memory
+    /// values are native little-endian like every other numeric VR.
+    fn from_element(e: &DicomElement, index: Option<usize>) -> Result<Self, Error> {
+        if e.vr() != Vr::At {
+            return Err(type_err(e, "AT"));
+        }
+        let Some(buffer) = e.value().as_buffer() else {
+            return Err(type_err(e, "AT"));
+        };
+        let packed = read_le_unit::<u32>(e, buffer, index)?;
+        Ok(Tag::new(packed as u16, (packed >> 16) as u16))
+    }
+}
+
 impl<T: FromElement> FromElement for Vec<T> {
     fn from_element(e: &DicomElement, _index: Option<usize>) -> Result<Self, Error> {
         // Split a string value once and convert each part in place instead of
@@ -996,6 +1011,133 @@ macro_rules! impl_into_float {
 impl_into_float!(f32);
 impl_into_float!(f64);
 
+/// Multi-valued integers (M4). Mirrors the scalar impls: byte VRs get their
+/// native little-endian units, text VRs a backslash-joined list, so the value
+/// is never written with a unit size that disagrees with the chosen VR.
+macro_rules! impl_into_int_vec {
+    ($t:ty) => {
+        impl IntoElement for Vec<$t> {
+            fn preferred_vr(&self) -> Option<Vr> {
+                Some(Vr::Is)
+            }
+            fn into_element(self, tag: Tag, vr: Vr) -> DicomElement {
+                fn bytes<const N: usize>(tag: Tag, vr: Vr, units: Vec<[u8; N]>) -> DicomElement {
+                    DicomElement::new_bytes(tag, vr, Arc::new(MemoryBuffer::from(units.concat())))
+                }
+                match vr {
+                    Vr::Ss | Vr::Us => bytes(
+                        tag,
+                        vr,
+                        self.iter()
+                            .map(|v| (*v as i64 as i16).to_le_bytes())
+                            .collect(),
+                    ),
+                    Vr::Sl | Vr::Ul => bytes(
+                        tag,
+                        vr,
+                        self.iter()
+                            .map(|v| (*v as i64 as i32).to_le_bytes())
+                            .collect(),
+                    ),
+                    Vr::Sv | Vr::Uv => bytes(
+                        tag,
+                        vr,
+                        self.iter().map(|v| (*v as i64).to_le_bytes()).collect(),
+                    ),
+                    _ => DicomElement::new_str(
+                        tag,
+                        vr,
+                        self.iter()
+                            .map(|v| v.to_string())
+                            .collect::<Vec<_>>()
+                            .join("\\"),
+                    ),
+                }
+            }
+        }
+    };
+}
+impl_into_int_vec!(i16);
+impl_into_int_vec!(u16);
+impl_into_int_vec!(i32);
+impl_into_int_vec!(u32);
+impl_into_int_vec!(i64);
+impl_into_int_vec!(u64);
+
+/// Multi-valued floats (M4): `FL`/`FD` byte units, otherwise a `DS` list.
+macro_rules! impl_into_float_vec {
+    ($t:ty) => {
+        impl IntoElement for Vec<$t> {
+            fn preferred_vr(&self) -> Option<Vr> {
+                Some(Vr::Ds)
+            }
+            fn into_element(self, tag: Tag, vr: Vr) -> DicomElement {
+                match vr {
+                    Vr::Fl => DicomElement::new_bytes(
+                        tag,
+                        vr,
+                        Arc::new(MemoryBuffer::from(
+                            self.iter()
+                                .flat_map(|v| (*v as f32).to_le_bytes())
+                                .collect::<Vec<u8>>(),
+                        )),
+                    ),
+                    Vr::Fd => DicomElement::new_bytes(
+                        tag,
+                        vr,
+                        Arc::new(MemoryBuffer::from(
+                            self.iter()
+                                .flat_map(|v| (*v as f64).to_le_bytes())
+                                .collect::<Vec<u8>>(),
+                        )),
+                    ),
+                    _ => DicomElement::new_str(
+                        tag,
+                        vr,
+                        self.iter()
+                            .map(|v| crate::model::person_name::format_ds(*v as f64))
+                            .collect::<Vec<_>>()
+                            .join("\\"),
+                    ),
+                }
+            }
+        }
+    };
+}
+impl_into_float_vec!(f32);
+impl_into_float_vec!(f64);
+
+impl IntoElement for Tag {
+    fn preferred_vr(&self) -> Option<Vr> {
+        Some(Vr::At)
+    }
+    fn into_element(self, tag: Tag, vr: Vr) -> DicomElement {
+        DicomElement::new_bytes(
+            tag,
+            vr,
+            Arc::new(MemoryBuffer::from(pack_tag(self).to_le_bytes().to_vec())),
+        )
+    }
+}
+
+impl IntoElement for Vec<Tag> {
+    fn preferred_vr(&self) -> Option<Vr> {
+        Some(Vr::At)
+    }
+    fn into_element(self, tag: Tag, vr: Vr) -> DicomElement {
+        let bytes = self
+            .into_iter()
+            .flat_map(|t| pack_tag(t).to_le_bytes())
+            .collect::<Vec<u8>>();
+        DicomElement::new_bytes(tag, vr, Arc::new(MemoryBuffer::from(bytes)))
+    }
+}
+
+/// AT packing shared with the reader: group in the low unit, element high.
+fn pack_tag(tag: Tag) -> u32 {
+    (tag.group() as u32) | ((tag.element() as u32) << 16)
+}
+
 impl IntoElement for NaiveDate {
     fn preferred_vr(&self) -> Option<Vr> {
         Some(Vr::Da)
@@ -1138,5 +1280,51 @@ mod extra_tests {
         let element = DicomElement::new_str(t(12), Vr::Ui, "1.2.840.10008.1.2.1");
         let uid = <Uid as FromElement>::from_element(&element, None).unwrap();
         assert_eq!(uid.value(), "1.2.840.10008.1.2.1");
+    }
+
+    #[test]
+    fn at_and_multi_valued_numerics_convert_both_ways() {
+        use crate::model::dataset::Dataset;
+
+        // AT: single value through the dictionary VR (FrameIncrementPointer, AT)
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::FRAME_INCREMENT_POINTER, Tag::new(0x0018, 0x1063));
+        assert_eq!(
+            ds.get_element(Tag::FRAME_INCREMENT_POINTER).unwrap().vr(),
+            Vr::At
+        );
+        assert_eq!(
+            ds.get::<Tag>(Tag::FRAME_INCREMENT_POINTER).unwrap(),
+            Tag::new(0x0018, 0x1063)
+        );
+
+        // AT multi-value
+        let pointers = vec![Tag::new(0x0018, 0x1063), Tag::new(0x0028, 0x0009)];
+        ds.insert_value(Tag::FRAME_INCREMENT_POINTER, pointers.clone());
+        assert_eq!(
+            ds.get::<Vec<Tag>>(Tag::FRAME_INCREMENT_POINTER).unwrap(),
+            pointers
+        );
+
+        // numeric vectors: US/SL byte units and a DS list
+        ds.insert_value_with_vr(Tag::new(0x7777, 0x0001), Vr::Us, vec![1u16, 2, 3]);
+        assert_eq!(
+            ds.get::<Vec<u16>>(Tag::new(0x7777, 0x0001)).unwrap(),
+            vec![1, 2, 3]
+        );
+        ds.insert_value_with_vr(Tag::new(0x7777, 0x0002), Vr::Sl, vec![-1i32, 2_000_000]);
+        assert_eq!(
+            ds.get::<Vec<i32>>(Tag::new(0x7777, 0x0002)).unwrap(),
+            vec![-1, 2_000_000]
+        );
+        ds.insert_value(Tag::PIXEL_SPACING, vec![0.5f64, 0.75]);
+        assert_eq!(
+            ds.get_element(Tag::PIXEL_SPACING).unwrap().string_value(),
+            "0.5\\0.75"
+        );
+        assert_eq!(
+            ds.get::<Vec<f64>>(Tag::PIXEL_SPACING).unwrap(),
+            vec![0.5, 0.75]
+        );
     }
 }

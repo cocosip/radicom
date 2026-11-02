@@ -177,14 +177,24 @@ impl PresentationLutTable {
 }
 
 /// The presentation LUT carried by a Film Box: an optional table and/or shape.
+///
+/// A Presentation LUT SOP instance (PS3.4 F.1) is the same table plus a SOP
+/// Class/Instance UID; [`FilmBox::resolve_presentation_lut`] resolves such an
+/// instance from the film session when the film box references it through
+/// `(2050,0500)` instead of embedding `(2050,0010)`.
+///
+/// [`FilmBox::resolve_presentation_lut`]: crate::print::models::FilmBox::resolve_presentation_lut
 #[derive(Debug, Clone, Default)]
 pub struct PresentationLut {
     shape: Option<PresentationLutShape>,
     table: Option<PresentationLutTable>,
+    sop_instance_uid: Option<String>,
 }
 
 impl PresentationLut {
-    /// Parses `(2050,0010)` and `(2050,0020)` from a film-box dataset.
+    /// Parses `(2050,0010)` and `(2050,0020)` from a film-box dataset, plus the
+    /// SOP Instance UID `(0008,0018)` when the dataset is a Presentation LUT
+    /// SOP instance.
     ///
     /// Missing attributes yield `None` fields; a malformed shape, an empty
     /// sequence or an inconsistent table is an error.
@@ -203,7 +213,17 @@ impl PresentationLut {
             }
             None => None,
         };
-        Ok(PresentationLut { shape, table })
+        let sop_instance_uid = dataset.try_get_str(Tag::SOP_INSTANCE_UID);
+        Ok(PresentationLut {
+            shape,
+            table,
+            sop_instance_uid,
+        })
+    }
+
+    /// The SOP Instance UID `(0008,0018)` of a Presentation LUT SOP instance.
+    pub fn sop_instance_uid(&self) -> Option<String> {
+        self.sop_instance_uid.clone()
     }
 
     pub fn shape(&self) -> Option<PresentationLutShape> {

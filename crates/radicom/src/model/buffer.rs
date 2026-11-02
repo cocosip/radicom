@@ -742,6 +742,17 @@ impl TempFileSpill {
         })
     }
 
+    /// Takes ownership of a temp file that already holds `len` bytes, deleting it
+    /// when the spill (and therefore the parsed dataset) drops (M2: a spooled
+    /// stream becomes the lazy backing store for its large values).
+    pub fn from_temp_file(path: PathBuf, len: u64) -> io::Result<Self> {
+        let window = FileWindow::open(&path, 0, len)?;
+        Ok(TempFileSpill {
+            window,
+            _temp: TempFile { path },
+        })
+    }
+
     /// Reads exactly `len` bytes from `reader` into a temp file, then windows it.
     pub fn from_reader<R: Read>(mut reader: R, len: u64) -> io::Result<Self> {
         use std::io::Write as _;

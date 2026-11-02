@@ -29,15 +29,20 @@ impl ParseObserver for TraceObserver {
         ctx: &ParseContext,
         tag: &Tag,
         vr: Vr,
-        _buffer: SharedBuffer,
+        buffer: SharedBuffer,
     ) -> Result<(), Error> {
+        // fo-dicom's DicomParserLogger prints the tag, VR code, dictionary name
+        // and value size per element (Log/DicomParserLogger.cs:29-38); without
+        // the size and name a trace says nothing about what was parsed (L20).
         tracing::debug!(
             target: targets::IO,
             position = ctx.position,
             depth = ctx.depth,
             group = tag.group(),
             element = tag.element(),
+            name = dictionary_name(tag),
             vr = ?vr,
+            size = buffer.size(),
             "element"
         );
         Ok(())
@@ -55,6 +60,7 @@ impl ParseObserver for TraceObserver {
             depth = ctx.depth,
             group = tag.group(),
             element = tag.element(),
+            name = dictionary_name(tag),
             defined_length = ?defined_length,
             "begin sequence"
         );
@@ -94,15 +100,21 @@ impl ParseObserver for TraceObserver {
         tracing::debug!(
             target: targets::IO,
             position = ctx.position, depth = ctx.depth,
-            group = tag.group(), element = tag.element(), vr = ?vr,
+            group = tag.group(), element = tag.element(),
+            name = dictionary_name(tag),
+            vr = ?vr,
             offsets = offset_table.len(),
             "begin fragment sequence"
         );
         Ok(())
     }
 
-    fn on_fragment(&mut self, ctx: &ParseContext, _buffer: SharedBuffer) -> Result<(), Error> {
-        tracing::debug!(target: targets::IO, position = ctx.position, depth = ctx.depth, "fragment");
+    fn on_fragment(&mut self, ctx: &ParseContext, buffer: SharedBuffer) -> Result<(), Error> {
+        tracing::debug!(
+            target: targets::IO,
+            position = ctx.position, depth = ctx.depth, size = buffer.size(),
+            "fragment"
+        );
         Ok(())
     }
 
@@ -110,6 +122,11 @@ impl ParseObserver for TraceObserver {
         tracing::debug!(target: targets::IO, position = ctx.position, depth = ctx.depth, "end fragment sequence");
         Ok(())
     }
+}
+
+/// Dictionary name for a tag, or `Private` for an unknown/private one.
+fn dictionary_name(tag: &Tag) -> &'static str {
+    crate::model::dictionary::dictionary().entry(tag).name
 }
 
 /// Parses `bytes` with a [`TraceObserver`], logging every event at debug level.
@@ -127,6 +144,7 @@ pub fn trace(bytes: &[u8], syntax: &TransferSyntax) -> Result<(), Error> {
 mod tests {
     use super::*;
     use crate::model::transfer_syntax::syntaxes;
+    use std::sync::{Arc, Mutex, Once, OnceLock};
 
     /// A minimal Explicit VR Little Endian element: (0010,0010) PN "DOE^JOHN"
     /// (PN is a short VR: 2-byte length, no reserved field).
@@ -140,6 +158,69 @@ mod tests {
         out
     }
 
+    type Events = Arc<Mutex<Vec<Vec<(String, String)>>>>;
+
+    /// Records every event's fields. One global subscriber serves all tests in
+    /// this module: the tracing interest cache is process-global, so a second
+    /// `set_global_default` would silently lose events (and parallel tests that
+    /// touch tracing would race a thread-local one).
+    #[derive(Clone)]
+    struct Capture(Events);
+
+    struct FieldVisitor<'a>(&'a mut Vec<(String, String)>);
+
+    impl tracing::field::Visit for FieldVisitor<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .push((field.name().to_string(), format!("{value:?}")));
+        }
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.push((field.name().to_string(), value.to_string()));
+        }
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.0.push((field.name().to_string(), value.to_string()));
+        }
+        fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+            self.0.push((field.name().to_string(), value.to_string()));
+        }
+    }
+
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _attrs: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut fields = Vec::new();
+            event.record(&mut FieldVisitor(&mut fields));
+            self.0.lock().expect("capture lock").push(fields);
+        }
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    fn capture() -> Events {
+        static INSTALL: Once = Once::new();
+        static EVENTS: OnceLock<Events> = OnceLock::new();
+        let events = EVENTS.get_or_init(Default::default).clone();
+        INSTALL.call_once(|| {
+            let _ = tracing::subscriber::set_global_default(Capture(events.clone()));
+            tracing_core::callsite::rebuild_interest_cache();
+        });
+        events
+    }
+
+    fn field<'a>(event: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        event
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
+
     #[test]
     fn trace_parses_without_error() {
         // exercises every observer callback path through a real parse; the
@@ -150,49 +231,39 @@ mod tests {
 
     #[test]
     fn trace_emits_debug_events() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::{Arc, Once};
-
-        #[derive(Clone)]
-        struct Counter(Arc<AtomicUsize>);
-        impl tracing::Subscriber for Counter {
-            fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-                true
-            }
-            fn new_span(&self, _attrs: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-                tracing::span::Id::from_u64(1)
-            }
-            fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-            fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {
-            }
-            fn event(&self, _event: &tracing::Event<'_>) {
-                self.0.fetch_add(1, Ordering::Relaxed);
-            }
-            fn enter(&self, _span: &tracing::span::Id) {}
-            fn exit(&self, _span: &tracing::span::Id) {}
-        }
-
-        // The callsite interest cache is process-global, so a thread-scoped
-        // subscriber races other parallel tests that touch tracing callsites
-        // (they can pin ours to `never`). Install one counting subscriber as the
-        // *global* default once, force one cache rebuild, then emit. The counter
-        // is shared, so concurrent tracing elsewhere only inflates it, never
-        // starves our assertion.
-        static INSTALL: Once = Once::new();
-        static COUNT: std::sync::OnceLock<Arc<AtomicUsize>> = std::sync::OnceLock::new();
-        let count = COUNT.get_or_init(|| Arc::new(AtomicUsize::new(0))).clone();
-        INSTALL.call_once(|| {
-            let _ = tracing::subscriber::set_global_default(Counter(count.clone()));
-            tracing_core::callsite::rebuild_interest_cache();
-        });
-
-        let before = count.load(Ordering::Relaxed);
+        let events = capture();
+        let before = events.lock().expect("capture lock").len();
         let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
         trace(&pn_element(), &syntax).expect("trace parse succeeds");
         assert!(
-            count.load(Ordering::Relaxed) > before,
+            events.lock().expect("capture lock").len() > before,
             "the observer must emit at least one debug event"
         );
+    }
+
+    #[test]
+    fn trace_reports_element_size_and_dictionary_name() {
+        // L20: fo-dicom's parser logger prints "... {Tag} {Vr} {Name} [{Size}]"
+        let events = capture();
+        let before = events.lock().expect("capture lock").len();
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        trace(&pn_element(), &syntax).expect("trace parse succeeds");
+
+        let captured = events.lock().expect("capture lock");
+        let element = captured[before..]
+            .iter()
+            .find(|event| field(event, "size") == Some("8"))
+            .expect("an element event carries the value size");
+        assert_eq!(
+            field(element, "name"),
+            Some(
+                crate::model::dictionary::dictionary()
+                    .entry(&Tag::PATIENT_NAME)
+                    .name
+            ),
+            "the dictionary name is logged"
+        );
+        assert_eq!(field(element, "vr"), Some("Pn"));
     }
 
     #[test]

@@ -24,33 +24,59 @@ pub struct DatasetBuilder {
     sequence_stack: Vec<DicomSequence>,
     /// Open fragment sequences (no nesting inside them).
     fragment_stack: Vec<DicomFragmentSequence>,
+    /// A fragment of the sequence being read was dropped by the skip policy, so
+    /// the whole item must be withheld (M1; fo-dicom's reader observer does the
+    /// same for a null fragment buffer).
+    fragment_skipped: bool,
     /// Basic offset table decoded from fragment 0, applied once all
     /// fragments are in (the wire table is authoritative, so it must not be
     /// recomputed by `push_fragment`).
     fragment_offset_table: Option<Vec<u32>>,
     /// Active charset per nesting level, parallel to the dataset stack.
     charset_stack: Vec<&'static encoding_rs::Encoding>,
+    /// Decoding fallback used when a level has no (0008,0005), in priority
+    /// order (H1, fo-dicom `FallbackEncodings`). Empty means the default
+    /// repertoire (ISO-IR 6).
+    fallback_encodings: Vec<&'static encoding_rs::Encoding>,
 }
 
 impl Default for DatasetBuilder {
     fn default() -> Self {
-        DatasetBuilder {
-            root: Dataset::new(),
-            dataset_stack: Vec::new(),
-            sequence_stack: Vec::new(),
-            fragment_stack: Vec::new(),
-            fragment_offset_table: None,
-            charset_stack: vec![charset_encoding("ISO_IR 6")],
-        }
+        DatasetBuilder::with_transfer_syntax(Dataset::new().transfer_syntax())
     }
 }
 
 impl DatasetBuilder {
     /// Builder for a dataset encoded with `syntax`.
     pub fn with_transfer_syntax(syntax: Arc<TransferSyntax>) -> Self {
+        Self::with_transfer_syntax_and_fallback(syntax, Vec::new())
+    }
+
+    /// Builder for a dataset encoded with `syntax`, decoding text that has no
+    /// (0008,0005) with `fallback` (H1; fo-dicom
+    /// `DicomFile.Open(..., Encoding fallbackEncoding)`). The list is also
+    /// stored on the built dataset so a save re-encodes with it.
+    pub fn with_transfer_syntax_and_fallback(
+        syntax: Arc<TransferSyntax>,
+        fallback: Vec<&'static encoding_rs::Encoding>,
+    ) -> Self {
+        let mut root = Dataset::with_transfer_syntax(syntax);
+        // lenient reading: parsed datasets never validate on insert (M3)
+        root.set_validation(false);
+        root.set_fallback_encodings(fallback.clone());
+        let first = fallback
+            .first()
+            .copied()
+            .unwrap_or_else(|| charset_encoding("ISO_IR 6"));
         DatasetBuilder {
-            root: Dataset::with_transfer_syntax(syntax),
-            ..Default::default()
+            root,
+            dataset_stack: Vec::new(),
+            sequence_stack: Vec::new(),
+            fragment_stack: Vec::new(),
+            fragment_skipped: false,
+            fragment_offset_table: None,
+            charset_stack: vec![first],
+            fallback_encodings: fallback,
         }
     }
 
@@ -139,7 +165,10 @@ impl ParseObserver for DatasetBuilder {
         _ctx: &ParseContext,
         _defined_length: Option<u32>,
     ) -> Result<(), Error> {
-        let ds = Dataset::with_transfer_syntax(self.current().transfer_syntax());
+        let mut ds = Dataset::with_transfer_syntax(self.current().transfer_syntax());
+        // lenient reading: parsed datasets never validate on insert (M3)
+        ds.set_validation(false);
+        ds.set_fallback_encodings(self.fallback_encodings.clone());
         self.dataset_stack.push(ds);
         // nested items inherit the enclosing charset until they override it
         let inherited = self.current_charset();
@@ -191,6 +220,12 @@ impl ParseObserver for DatasetBuilder {
             self.fragment_offset_table = None;
             return Ok(());
         }
+        if self.fragment_skipped {
+            // a skipped fragment already invalidated this sequence: fo-dicom
+            // never adds a sequence with a missing fragment (M1)
+            self.fragment_offset_table = None;
+            return Ok(());
+        }
         self.fragment_offset_table = Some(offset_table);
         self.fragment_stack
             .push(DicomFragmentSequence::new(tag.clone(), vr));
@@ -205,7 +240,19 @@ impl ParseObserver for DatasetBuilder {
         Ok(())
     }
 
+    fn on_fragment_skipped(&mut self, _ctx: &ParseContext) -> Result<(), Error> {
+        self.fragment_skipped = true;
+        Ok(())
+    }
+
     fn on_end_fragment(&mut self, _ctx: &ParseContext) -> Result<(), Error> {
+        if self.fragment_skipped {
+            // withhold the incomplete sequence entirely (M1)
+            self.fragment_skipped = false;
+            self.fragment_offset_table = None;
+            self.fragment_stack.pop();
+            return Ok(());
+        }
         let Some(mut frags) = self.fragment_stack.pop() else {
             // the fragment sequence was skipped at begin time
             return Ok(());

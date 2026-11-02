@@ -6,7 +6,7 @@
 //! Larger service behaviour (streaming C-FIND/C-MOVE, C-GET sub-operations) builds on
 //! these same primitives in M6.
 
-use crate::assembler::{MessageUnit, PduSplitter, PdvAssembler, Stream};
+use crate::assembler::{MessageBody, MessageUnit, PduSplitter, PdvAssembler, Stream};
 use crate::association::{AcceptedContexts, NegotiationPolicy};
 use crate::dimse::{Command, CommandField, StatusState};
 use crate::error::{AbortSource, NetworkError, RejectResult, RejectSource, Result};
@@ -35,6 +35,17 @@ pub struct ServerOptions {
     pub max_clients: usize,
     /// Peer maximum PDU length advertised in the association accept.
     pub max_pdu_length: u32,
+    /// How many PDVs may share one P-DATA-TF this SCP writes (L7).
+    ///
+    /// fo-dicom `DicomServiceOptions.MaxPDVsPerPDU`; the default 16 is the
+    /// interop workaround knob for peers that mishandle batched PDVs.
+    pub max_pdvs_per_pdu: usize,
+    /// Optional cap on one command PDV value this SCP writes (L7, fo-dicom
+    /// `MaxCommandBuffer`). `None` fills the negotiated PDU.
+    pub max_command_buffer: Option<u32>,
+    /// Optional cap on one dataset PDV value this SCP writes (L7, fo-dicom
+    /// `MaxDataBuffer`). `None` fills the negotiated PDU.
+    pub max_data_buffer: Option<u32>,
     /// Maximum simultaneous operations this endpoint invokes/performs. Zero
     /// requests unlimited; accepted server windows and echo batches cap at 64.
     pub async_operations: crate::pdu::AsyncOperations,
@@ -54,6 +65,33 @@ pub struct ServerOptions {
     pub tcp: TcpOptions,
     /// Where incoming C-STORE instances are put before the provider sees them.
     pub store_sink: crate::store::StoreSink,
+    /// How a received C-STORE dataset is streamed to disk before it is parsed
+    /// (H3). Memory is bounded by the PDU size, not by the instance size.
+    pub store_spool: crate::assembler::SpoolConfig,
+    /// Send a dataset whose syntax cannot be transcoded as-is, in its own
+    /// source syntax, instead of failing the sub-operation (L3, fo-dicom
+    /// `IgnoreUnsupportedTransferSyntaxChange`).
+    ///
+    /// Default `false`: a C-GET whose instance syntax no registered codec can
+    /// convert fails that sub-operation, which is the safe answer. With `true`
+    /// the bytes go out unchanged under the negotiated presentation context —
+    /// PixelData is never stripped — and the peer decides what to do with a
+    /// dataset in a syntax it did not negotiate. That is what fo-dicom's flag
+    /// is for: interoperating with peers that mislabel their syntax.
+    pub ignore_unsupported_syntax_change: bool,
+    /// Fallback character set for received text that carries no (0008,0005)
+    /// (H1), as a DICOM Defined Term such as `"ISO_IR 100"` (Latin-1).
+    ///
+    /// Applies to every dataset this SCP parses (C-STORE instances, C-FIND /
+    /// C-MOVE / C-GET identifiers, and N-service requests). `None` keeps the
+    /// default repertoire (ISO-IR 6), which is what a peer that omits the
+    /// element declares. An unknown term is ignored rather than guessed.
+    pub fallback_encoding: Option<&'static str>,
+    /// How long an SCP-issued request waits for the peer's response (H2/M8).
+    ///
+    /// Applies to reverse C-STORE sub-operations and to N-EVENT-REPORT requests
+    /// sent on this association; `None` keeps the wait unbounded.
+    pub request_timeout: Option<Duration>,
     /// Answers SOP Class Extended Negotiation requests (§11.2).
     pub extended_negotiation: crate::extended::ExtendedNegotiationPolicy,
     /// User identity types this SCP accepts, and the response to echo (§11.2).
@@ -128,6 +166,9 @@ impl Default for ServerOptions {
             called_ae_title: None,
             max_clients: 0,
             max_pdu_length: 16384,
+            max_pdvs_per_pdu: 16,
+            max_command_buffer: None,
+            max_data_buffer: None,
             async_operations: crate::pdu::AsyncOperations::default(),
             supported_transfer_syntaxes: vec![
                 syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.uid().to_string(),
@@ -139,6 +180,10 @@ impl Default for ServerOptions {
             tls_handshake_timeout: Duration::from_secs(10),
             tcp: TcpOptions::default(),
             store_sink: crate::store::StoreSink::default(),
+            store_spool: crate::assembler::SpoolConfig::default(),
+            ignore_unsupported_syntax_change: false,
+            fallback_encoding: None,
+            request_timeout: None,
             extended_negotiation: crate::extended::ExtendedNegotiationPolicy::decline_all(),
             user_identity: UserIdentityPolicy::default(),
             #[cfg(feature = "tls")]
@@ -303,7 +348,7 @@ impl<P: ServiceProvider + 'static> DicomServer<P> {
 }
 
 /// Drives one accepted connection through association, one exchange, release (§11.1).
-async fn serve_connection<P: ServiceProvider, S>(
+async fn serve_connection<P: ServiceProvider + 'static, S>(
     stream: S,
     provider: Arc<P>,
     options: ServerOptions,
@@ -330,7 +375,7 @@ where
     result
 }
 
-async fn serve_connection_inner<P: ServiceProvider, S>(
+async fn serve_connection_inner<P: ServiceProvider + 'static, S>(
     mut stream: &mut crate::observability::CountingStream<S>,
     provider: Arc<P>,
     options: ServerOptions,
@@ -478,7 +523,12 @@ where
     } else {
         request.user_information.max_pdu_length
     };
-    let splitter = PduSplitter::new(peer_max_pdu, 16);
+    let splitter = PduSplitter::with_limits(
+        peer_max_pdu,
+        options.max_pdvs_per_pdu,
+        options.max_command_buffer.map(|limit| limit as usize),
+        options.max_data_buffer.map(|limit| limit as usize),
+    );
     // a command awaiting its dataset (§11.2)
     let mut awaiting_dataset: std::collections::HashMap<u8, Command> =
         std::collections::HashMap::new();
@@ -488,7 +538,7 @@ where
         splitter: &splitter,
         provider: &provider,
         options: &options,
-        assembler: PdvAssembler::new(),
+        assembler: PdvAssembler::with_spool(options.store_spool.clone()),
         pending_units: VecDeque::new(),
         deferred_units: VecDeque::new(),
         deferred_requests: 0,
@@ -500,8 +550,49 @@ where
     };
 
     // -- message loop ----------------------------------------------------
+    //
+    // M6: a request that needs no further read from this association runs on
+    // its own task (see [`DispatchJob`]). This loop is still the only writer,
+    // so one response is written in one batch and the PDVs of two messages
+    // never interleave (§11.1); the message ID in the response is the request's,
+    // so finishing order does not matter. `select!` prefers a ready response
+    // over the next read, and a dropped read keeps its half frame in the
+    // cancel-safe framer (review #13).
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Result<Outgoing>>(64);
+    let mut jobs: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+    // a C-CANCEL for a request running on a task is forwarded through here
+    let cancels: CancelMap = CancelMap::default();
+    let max_jobs = if incoming_window == 0 {
+        MAX_CONCURRENT_REQUESTS
+    } else {
+        incoming_window.clamp(1, MAX_CONCURRENT_REQUESTS)
+    };
     loop {
-        let Some(pdu) = serving.next_pdu().await? else {
+        tokio::select! {
+            biased;
+            outgoing = out_rx.recv() => {
+                if let Some(outgoing) = outgoing {
+                    let outgoing = outgoing?;
+                    serving
+                        .send_with_dataset(
+                            outgoing.context_id,
+                            &outgoing.command,
+                            outgoing.dataset.as_ref(),
+                            &outgoing.syntax,
+                        )
+                        .await?;
+                }
+            }
+            joined = jobs.join_next(), if !jobs.is_empty() => {
+                if let Some(Err(error)) = joined {
+                    // a panicking provider leaves a request unanswered: the
+                    // association cannot be trusted to stay in step
+                    tracing::error!("a dispatched request task failed: {error}");
+                    return Err(NetworkError::protocol("a dispatched request task failed"));
+                }
+            }
+            maybe = serving.next_pdu() => {
+        let Some(pdu) = maybe? else {
             return Ok(()); // peer closed
         };
         match pdu {
@@ -540,6 +631,12 @@ where
                                         | CommandField::NActionRq
                                 );
                             if expects_dataset {
+                                // H3: a C-STORE dataset streams to a temp file
+                                // instead of growing in memory. Armed before its
+                                // first data PDV can arrive.
+                                if command.field == CommandField::CStoreRq {
+                                    serving.assembler.arm_spill(unit.context_id);
+                                }
                                 // the dataset arrives in later PDVs; keyed by
                                 // context so a second request cannot displace it
                                 if awaiting_dataset.insert(unit.context_id, command).is_some() {
@@ -547,6 +644,38 @@ where
                                         "overlapping command/dataset pairs on one context",
                                     ));
                                 }
+                            } else if command.field == CommandField::CCancelRq {
+                                // SRV-08: a request running on a task cannot read
+                                // this socket, so the loop forwards the cancel
+                                if let Some(id) = command.message_id_being_responded_to {
+                                    if let Some(cancel) = cancels.lock().unwrap().get(&id) {
+                                        let _ = cancel.send(true);
+                                    }
+                                }
+                                handle_command(&mut serving, unit.context_id, command).await?;
+                                serving.resume_deferred();
+                            } else if DispatchJob::is_concurrent(&command) && jobs.len() < max_jobs
+                            {
+                                // M6: the provider runs on its own task while this
+                                // loop keeps reading the association
+                                let syntax = serving
+                                    .accepted
+                                    .by_id(unit.context_id)
+                                    .map(|c| transfer_syntax_of(&c.transfer_syntax))
+                                    .unwrap_or_else(|| syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+                                jobs.spawn(run_job(
+                                    DispatchJob {
+                                        context_id: unit.context_id,
+                                        command,
+                                        body: MessageBody::Memory(bytes::Bytes::new()),
+                                        syntax,
+                                        cancel: None,
+                                    },
+                                    provider.clone(),
+                                    options.clone(),
+                                    out_tx.clone(),
+                                ));
+                                serving.resume_deferred();
                             } else {
                                 handle_command(&mut serving, unit.context_id, command).await?;
                                 serving.resume_deferred();
@@ -570,14 +699,31 @@ where
                                         "dataset on an unaccepted presentation context",
                                     )
                                 })?;
-                            handle_command_with_dataset(
-                                &mut serving,
-                                context_id,
-                                command,
-                                unit.bytes,
-                                &syntax,
-                            )
-                            .await?;
+                            if DispatchJob::is_concurrent(&command) && jobs.len() < max_jobs {
+                                let cancel = (command.field == CommandField::CFindRq)
+                                    .then(|| CancelSlot::register(&cancels, command.message_id));
+                                jobs.spawn(run_job(
+                                    DispatchJob {
+                                        context_id,
+                                        command,
+                                        body: unit.body(),
+                                        syntax: syntax.clone(),
+                                        cancel,
+                                    },
+                                    provider.clone(),
+                                    options.clone(),
+                                    out_tx.clone(),
+                                ));
+                            } else {
+                                handle_command_with_dataset(
+                                    &mut serving,
+                                    context_id,
+                                    command,
+                                    unit.body(),
+                                    &syntax,
+                                )
+                                .await?;
+                            }
                             serving.resume_deferred();
                         }
                     }
@@ -585,6 +731,12 @@ where
             }
             Pdu::ReleaseRq => {
                 serving.send_pdu(&Pdu::ReleaseRp).await?;
+                if !jobs.is_empty() {
+                    // PS3.8 §9.3: the requestor releases once its operations
+                    // completed; releasing with one still running ends the
+                    // association abnormally, as it did before M6
+                    return Err(NetworkError::ClosedPrematurely { source: None });
+                }
                 return Ok(());
             }
             // PS3.8 §9.3.8: the peer gave up on the association. Returning Ok
@@ -605,6 +757,24 @@ where
                 }))
             }
         }
+            }
+        }
+    }
+}
+
+/// Connects, failing with `ConnectTimedOut` when `timeout` expires first (M7).
+async fn connect_with_timeout<F>(connect: F, timeout: Option<Duration>) -> Result<TcpStream>
+where
+    F: std::future::Future<Output = std::io::Result<TcpStream>>,
+{
+    match timeout {
+        None => connect.await.map_err(NetworkError::Io),
+        Some(limit) => tokio::time::timeout(limit, connect)
+            .await
+            .map_err(|_| NetworkError::ConnectTimedOut {
+                timeout_ms: limit.as_millis() as u64,
+            })?
+            .map_err(NetworkError::Io),
     }
 }
 
@@ -747,27 +917,34 @@ async fn handle_command_with_dataset<P: ServiceProvider, S>(
     serving: &mut Serving<'_, P, S>,
     context_id: u8,
     command: Command,
-    dataset_bytes: bytes::Bytes,
+    body: MessageBody,
     syntax: &Arc<radicom::model::transfer_syntax::TransferSyntax>,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     match command.field {
-        CommandField::CStoreRq => {
-            handle_c_store(serving, context_id, command, dataset_bytes, syntax).await
-        }
+        // the C-STORE sink owns the temp file a spilled body arrived in (H3)
+        CommandField::CStoreRq => handle_c_store(serving, context_id, command, body, syntax).await,
         CommandField::CFindRq => {
+            let dataset_bytes = body.read_all()?;
             handle_c_find(serving, context_id, command, &dataset_bytes, syntax).await
         }
         CommandField::CMoveRq => {
+            let dataset_bytes = body.read_all()?;
             handle_c_move(serving, context_id, command, &dataset_bytes, syntax).await
         }
         CommandField::CGetRq => {
+            let dataset_bytes = body.read_all()?;
             handle_c_get(serving, context_id, command, &dataset_bytes, syntax).await
         }
         field if crate::nservice::is_n_request(field) => {
-            let dataset = match crate::message::decode_dataset(&dataset_bytes, syntax) {
+            let dataset_bytes = body.read_all()?;
+            let dataset = match crate::message::decode_dataset_with_fallback(
+                &dataset_bytes,
+                syntax,
+                serving.options.fallback_encoding,
+            ) {
                 Ok(dataset) => dataset,
                 Err(error) => return serving.fail(context_id, &command, &error.to_string()).await,
             };
@@ -824,7 +1001,14 @@ where
                     response.dataset.as_ref(),
                     syntax,
                 )
-                .await
+                .await?;
+            // H2: the SCP of the service class answers N-ACTION and may then
+            // report the event on this same association (fo-dicom
+            // `IDicomNEventReportRequestProvider`).
+            if request.field == CommandField::NActionRq {
+                serving.send_n_event_reports(&request).await?;
+            }
+            Ok(())
         }
         // a provider error becomes a ProcessingFailure, keeping the association alive
         Err(error) => serving.fail(context_id, &command, &error.to_string()).await,
@@ -855,7 +1039,11 @@ async fn handle_c_get<P: ServiceProvider, S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let identifier = match crate::message::decode_dataset(dataset_bytes, syntax) {
+    let identifier = match crate::message::decode_dataset_with_fallback(
+        dataset_bytes,
+        syntax,
+        serving.options.fallback_encoding,
+    ) {
         Ok(identifier) => identifier,
         Err(error) => return serving.fail(context_id, &command, &error.to_string()).await,
     };
@@ -1075,7 +1263,11 @@ async fn handle_c_move<P: ServiceProvider, S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let identifier = match crate::message::decode_dataset(dataset_bytes, syntax) {
+    let identifier = match crate::message::decode_dataset_with_fallback(
+        dataset_bytes,
+        syntax,
+        serving.options.fallback_encoding,
+    ) {
         Ok(identifier) => identifier,
         Err(error) => return serving.fail(context_id, &command, &error.to_string()).await,
     };
@@ -1236,7 +1428,11 @@ async fn handle_c_find<P: ServiceProvider, S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let identifier = match crate::message::decode_dataset(dataset_bytes, syntax) {
+    let identifier = match crate::message::decode_dataset_with_fallback(
+        dataset_bytes,
+        syntax,
+        serving.options.fallback_encoding,
+    ) {
         Ok(identifier) => identifier,
         Err(error) => return serving.fail(context_id, &command, &error.to_string()).await,
     };
@@ -1352,7 +1548,7 @@ async fn handle_c_store<P: ServiceProvider, S>(
     serving: &mut Serving<'_, P, S>,
     context_id: u8,
     command: Command,
-    bytes: bytes::Bytes,
+    body: MessageBody,
     syntax: &Arc<radicom::model::transfer_syntax::TransferSyntax>,
 ) -> Result<()>
 where
@@ -1374,15 +1570,19 @@ where
     // (§11.2).
     let sink = serving.options.store_sink.clone();
     let syntax = syntax.clone();
-    let instance =
-        match tokio::task::spawn_blocking(move || sink.materialize(&bytes, &syntax)).await {
-            Ok(Ok(instance)) => instance,
-            Ok(Err(error)) => return serving.fail(context_id, &command, &error.to_string()).await,
-            Err(join) => {
-                let message = format!("spool task failed: {join}");
-                return serving.fail(context_id, &command, &message).await;
-            }
-        };
+    let fallback = serving.options.fallback_encoding;
+    let instance = match tokio::task::spawn_blocking(move || {
+        sink.materialize_body_with_fallback(&body, &syntax, fallback)
+    })
+    .await
+    {
+        Ok(Ok(instance)) => instance,
+        Ok(Err(error)) => return serving.fail(context_id, &command, &error.to_string()).await,
+        Err(join) => {
+            let message = format!("spool task failed: {join}");
+            return serving.fail(context_id, &command, &message).await;
+        }
+    };
 
     let request = match crate::store::c_store_request_from_message(&command, instance) {
         Ok(request) => request,
@@ -1461,12 +1661,15 @@ where
                 self.deferred_requests += 1;
             }
         }
-        let bytes: usize = self
+        // a spooled dataset counts its file length: parking it must not let a
+        // peer fill the temp directory instead of memory (H3)
+        let bytes: u64 = self
             .deferred_units
             .iter()
-            .map(|unit| unit.bytes.len())
+            .map(|unit| unit.body().len())
             .sum();
-        if bytes.saturating_add(unit.bytes.len()) > PdvAssembler::DEFAULT_MAX_BUFFERED_BYTES {
+        if bytes.saturating_add(unit.body().len()) > PdvAssembler::DEFAULT_MAX_BUFFERED_BYTES as u64
+        {
             return Err(NetworkError::protocol(
                 "queued DIMSE messages exceed the maximum size",
             ));
@@ -1483,6 +1686,24 @@ where
 
     async fn next_pdu(&mut self) -> Result<Option<Pdu>> {
         self.pdu_reader.read_pdu(self.stream).await
+    }
+
+    /// Reads the next PDU, bounded by `ServerOptions::request_timeout` (M8).
+    ///
+    /// Used for the responses to requests *this* SCP issues on the association
+    /// (a reverse C-STORE sub-operation, an N-EVENT-REPORT after N-ACTION). The
+    /// idle dispatcher keeps waiting unbounded, so a quiet peer is not a
+    /// failure. The framer retains a half-read frame, so a dropped read is safe.
+    async fn next_pdu_with_deadline(&mut self, message_id: u16) -> Result<Option<Pdu>> {
+        match self.options.request_timeout {
+            None => self.pdu_reader.read_pdu(self.stream).await,
+            Some(limit) => {
+                match tokio::time::timeout(limit, self.pdu_reader.read_pdu(self.stream)).await {
+                    Ok(pdu) => pdu,
+                    Err(_) => Err(NetworkError::RequestTimedOut { message_id }),
+                }
+            }
+        }
     }
 
     /// Writes one PDU on the connection.
@@ -1579,7 +1800,7 @@ where
             // a half-read frame in it when a provider event won the `select!`
             // (NET-01). Reading the bare socket here would resynchronise
             // mid-frame.
-            let Some(pdu) = self.next_pdu().await? else {
+            let Some(pdu) = self.next_pdu_with_deadline(message_id).await? else {
                 return Err(NetworkError::ClosedPrematurely { source: None });
             };
             match pdu {
@@ -1604,6 +1825,135 @@ where
                 }
             }
         }
+    }
+
+    /// Parks a unit for the outer dispatcher (H2).
+    ///
+    /// Used while this side waits for a response: the unit cannot be handled
+    /// re-entrantly, and [`Self::resume_deferred`] moves it back into the main
+    /// queue once the request completes.
+    fn park(&mut self, unit: MessageUnit) -> Result<()> {
+        let bytes: u64 = self
+            .deferred_units
+            .iter()
+            .map(|unit| unit.body().len())
+            .sum();
+        if bytes.saturating_add(unit.body().len()) > PdvAssembler::DEFAULT_MAX_BUFFERED_BYTES as u64
+        {
+            return Err(NetworkError::protocol(
+                "queued DIMSE messages exceed the maximum size",
+            ));
+        }
+        self.deferred_units.push_back(unit);
+        Ok(())
+    }
+
+    /// Reads the response to an N-service request *this* side sent (H2).
+    ///
+    /// Bounded by `ServerOptions::request_timeout` (M8). Units that are not the
+    /// awaited response are parked for the outer dispatcher.
+    async fn await_n_response(
+        &mut self,
+        message_id: u16,
+        expected: CommandField,
+        syntax: &Arc<radicom::model::transfer_syntax::TransferSyntax>,
+    ) -> Result<(Command, Option<Dataset>)> {
+        let mut pending_command: Option<Command> = None;
+        loop {
+            if let Some(unit) = self.pending_units.pop_front() {
+                match unit.stream {
+                    Stream::Command => {
+                        let command = command_from_bytes(&unit.bytes)?;
+                        if command.field == expected
+                            && command.message_id_being_responded_to == Some(message_id)
+                        {
+                            if command.no_dataset {
+                                return Ok((command, None));
+                            }
+                            pending_command = Some(command);
+                            continue;
+                        }
+                        self.park(unit)?;
+                    }
+                    Stream::Data => {
+                        if let Some(command) = pending_command.take() {
+                            let dataset = crate::message::decode_dataset_with_fallback(
+                                &unit.bytes,
+                                syntax,
+                                self.options.fallback_encoding,
+                            )?;
+                            return Ok((command, Some(dataset)));
+                        }
+                        self.park(unit)?;
+                    }
+                }
+                continue;
+            }
+            let Some(pdu) = self.next_pdu_with_deadline(message_id).await? else {
+                return Err(NetworkError::ClosedPrematurely { source: None });
+            };
+            match pdu {
+                Pdu::PData(pdata) => {
+                    let units = self.assembler.push_pdata(&pdata)?;
+                    self.pending_units.extend(units);
+                }
+                Pdu::Abort(abort) => {
+                    return Err(NetworkError::Abort {
+                        source_code: abort.source.code(),
+                        reason: abort.reason,
+                    })
+                }
+                Pdu::ReleaseRq => {
+                    write_pdu(self.stream, &Pdu::ReleaseRp).await?;
+                    return Err(NetworkError::ClosedPrematurely { source: None });
+                }
+                _ => {
+                    return Err(NetworkError::protocol(
+                        "unexpected PDU while waiting for an N-service response",
+                    ))
+                }
+            }
+        }
+    }
+
+    /// Sends the N-EVENT-REPORT requests a provider queued after N-ACTION (H2).
+    ///
+    /// The peer sees SCP-initiated reports on the same association.
+    ///
+    /// **Ceiling:** a report is only legal when the peer granted this side the
+    /// SCU role for the service class (PS3.7 §10.1). Without that grant the
+    /// report is skipped rather than failing the association: the N-ACTION was
+    /// answered already, and a peer that rejected the role never agreed to be
+    /// notified. A report with no SOP class UID is a provider bug and fails.
+    async fn send_n_event_reports(
+        &mut self,
+        action: &crate::nservice::NServiceRequest,
+    ) -> Result<()> {
+        let events = self.provider.on_send_n_event_report(action).await?;
+        for mut event in events {
+            let Some(sop_class) = event.sop_class_uid.clone() else {
+                return Err(NetworkError::protocol(
+                    "an N-EVENT-REPORT request has no SOP class UID",
+                ));
+            };
+            if !self.accepted.peer_holds_scp_role(&sop_class) {
+                continue;
+            }
+            let context = self.accepted.pick(&sop_class, "")?;
+            let context_id = context.id;
+            let target = transfer_syntax_of(&context.transfer_syntax);
+            let message_id = self.next_reverse_message_id();
+            event.message_id = message_id;
+            let expected = crate::dimse::response_field(event.field)
+                .ok_or_else(|| NetworkError::protocol("N-EVENT-REPORT has no response field"))?;
+            let command = event.to_command();
+            self.send_with_dataset(context_id, &command, event.dataset.as_ref(), &target)
+                .await?;
+            // the response is informational: the N-ACTION was answered already,
+            // so a rejected report must not fail the association
+            let _ = self.await_n_response(message_id, expected, &target).await?;
+        }
+        Ok(())
     }
 
     /// Delivers one instance as a reverse C-STORE sub-operation (§11.4).
@@ -1646,35 +1996,55 @@ where
         request.no_dataset = false;
 
         let command = bytes::Bytes::from(command_bytes(&request)?);
-        // Stream when no transcode is needed (NET-13); a transcode materialises
-        // its output by nature, so that branch stays buffered.
-        if source_syntax.uid() == target.uid() {
-            let max_pdu = self.splitter.max_pdu();
-            let max_pdvs = self.splitter.max_pdvs_per_pdu();
-            crate::message::write_message_streamed(
-                self.stream,
-                context_id,
-                command,
-                dataset.clone(),
-                target.clone(),
-                max_pdu,
-                max_pdvs,
-            )
-            .await?;
+        // The syntax the dataset is actually written in: the negotiated target,
+        // or the instance's own syntax when no codec can convert it and the
+        // caller allows that (L3, fo-dicom IgnoreUnsupportedTransferSyntaxChange).
+        let (send_syntax, transcoded) = if source_syntax.uid() == target.uid() {
+            (target.clone(), None)
         } else {
             let transcoder = transcoder_for(&mut self.transcoder_cache, &source_syntax, &target);
-            let transcoded = transcoder.transcode_dataset(dataset).map_err(|e| {
-                NetworkError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    e.to_string(),
-                ))
-            })?;
-            let payload = bytes::Bytes::from(crate::message::encode_dataset(&transcoded, &target)?);
-            // one vectored write for the whole sub-operation (NET-12)
-            let pdus = self
-                .splitter
-                .split_message_bytes(context_id, command, Some(payload))?;
-            write_pdata_batch(self.stream, pdus).await?;
+            match transcoder.transcode_dataset(dataset) {
+                Ok(transcoded) => (target.clone(), Some(transcoded)),
+                Err(error) if self.options.ignore_unsupported_syntax_change => {
+                    // PixelData is not stripped: the peer gets the bytes in the
+                    // syntax they are in, and decides what to do with them
+                    let _ = error;
+                    (source_syntax.clone(), None)
+                }
+                Err(error) => {
+                    return Err(NetworkError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        error.to_string(),
+                    )))
+                }
+            }
+        };
+        match transcoded {
+            None => {
+                // Stream when no transcode was needed (NET-13): the writer frames
+                // PDUs through a bounded channel
+                let max_pdu = self.splitter.max_pdu();
+                let max_pdvs = self.splitter.max_pdvs_per_pdu();
+                crate::message::write_message_streamed(
+                    self.stream,
+                    context_id,
+                    command,
+                    dataset.clone(),
+                    send_syntax,
+                    max_pdu,
+                    max_pdvs,
+                )
+                .await?;
+            }
+            Some(transcoded) => {
+                let payload =
+                    bytes::Bytes::from(crate::message::encode_dataset(&transcoded, &send_syntax)?);
+                // one vectored write for the whole sub-operation (NET-12)
+                let pdus = self
+                    .splitter
+                    .split_message_bytes(context_id, command, Some(payload))?;
+                write_pdata_batch(self.stream, pdus).await?;
+            }
         }
 
         let (response, cancelled) = self
@@ -1769,10 +2139,24 @@ where
 #[derive(Debug, Clone)]
 pub struct ClientOptions {
     pub max_pdu_length: u32,
+    /// How many PDVs may share one P-DATA-TF this side writes (L7, fo-dicom
+    /// `MaxPDVsPerPDU`).
+    pub max_pdvs_per_pdu: usize,
+    /// Optional cap on one command PDV value this side writes (L7, fo-dicom
+    /// `MaxCommandBuffer`). `None` fills the negotiated PDU.
+    pub max_command_buffer: Option<u32>,
+    /// Optional cap on one dataset PDV value this side writes (L7, fo-dicom
+    /// `MaxDataBuffer`). `None` fills the negotiated PDU.
+    pub max_data_buffer: Option<u32>,
     /// Maximum simultaneous operations this endpoint invokes/performs. Zero
     /// requests unlimited; accepted server windows and echo batches cap at 64.
     pub async_operations: crate::pdu::AsyncOperations,
     pub association_timeout: Duration,
+    /// How long the TCP connect may take before the attempt fails (M7).
+    ///
+    /// `None` keeps the operating system's default, which can be minutes on a
+    /// host that silently drops SYNs.
+    pub connect_timeout: Option<Duration>,
     /// How long the TLS handshake may take before the connection attempt fails
     /// (review #14).
     #[cfg(feature = "tls")]
@@ -1790,6 +2174,27 @@ pub struct ClientOptions {
     pub user_identity: Option<crate::pdu::UserIdentity>,
     /// SOP Class Extended Negotiation items to offer (§11.2).
     pub extended_negotiations: Vec<crate::pdu::ExtendedNegotiation>,
+    /// Send a dataset whose syntax cannot be transcoded as-is, in its own
+    /// source syntax (L3, fo-dicom `IgnoreUnsupportedTransferSyntaxChange`).
+    ///
+    /// The SCU-side counterpart of [`ServerOptions::ignore_unsupported_syntax_change`];
+    /// a C-MOVE SCP forwards its own setting here when it pushes to a
+    /// destination.
+    pub ignore_unsupported_syntax_change: bool,
+    /// Fallback character set for *received* text that carries no (0008,0005),
+    /// as a DICOM Defined Term such as `"ISO_IR 192"` (UTF-8).
+    ///
+    /// Applies to the datasets this SCU parses: reverse C-STORE instances from a
+    /// C-GET, C-FIND/C-MOVE/C-GET response identifiers, and N-service response
+    /// datasets. `None` keeps the default repertoire (ISO-IR 6). Datasets this
+    /// side sends are never re-decoded: the writer uses the dataset's own
+    /// fallback list.
+    pub fallback_encoding: Option<&'static str>,
+    /// SOP Class Common Extended Negotiation to offer (L4, PS3.7 §D.3.3.6).
+    ///
+    /// The item names a service class and its related general SOP classes, so
+    /// an SCP can recognise a familiar family under a new class UID.
+    pub common_extended: Option<crate::pdu::CommonExtended>,
     /// Role selection items to propose (§11.2).
     ///
     /// A peer may only send C-STORE requests to this side when the SCP role for
@@ -1799,14 +2204,23 @@ pub struct ClientOptions {
     /// TLS material; `None` connects over plain TCP (NET-01, `tls` feature).
     #[cfg(feature = "tls")]
     pub tls: Option<crate::tls::TlsOptions>,
+    /// Optional metrics collector (L6, fo-dicom `DicomServiceOptions` metrics).
+    ///
+    /// Counts bytes, connections and associations for this SCU's services, the
+    /// same instrumentation the SCP already had.
+    pub metrics: Option<std::sync::Arc<dyn crate::observability::MetricsCollector>>,
 }
 
 impl Default for ClientOptions {
     fn default() -> Self {
         ClientOptions {
             max_pdu_length: 16384,
+            max_pdvs_per_pdu: 16,
+            max_command_buffer: None,
+            max_data_buffer: None,
             async_operations: crate::pdu::AsyncOperations::default(),
             association_timeout: Duration::from_secs(5),
+            connect_timeout: None,
             #[cfg(feature = "tls")]
             tls_handshake_timeout: Duration::from_secs(10),
             request_timeout: None,
@@ -1814,9 +2228,13 @@ impl Default for ClientOptions {
             tcp: TcpOptions::default(),
             user_identity: None,
             extended_negotiations: Vec::new(),
+            ignore_unsupported_syntax_change: false,
+            fallback_encoding: None,
+            common_extended: None,
             role_selections: Vec::new(),
             #[cfg(feature = "tls")]
             tls: None,
+            metrics: None,
         }
     }
 }
@@ -1883,7 +2301,7 @@ impl tokio::io::AsyncWrite for ClientStream {
 
 /// An open association from the SCU side (§11.4 expert layer).
 pub struct Association {
-    stream: ClientStream,
+    stream: crate::observability::CountingStream<ClientStream>,
     contexts: AcceptedContexts,
     splitter: PduSplitter,
     assembler: PdvAssembler,
@@ -1897,10 +2315,27 @@ pub struct Association {
     request_timeout: Option<Duration>,
     /// Answers reverse C-STORE sub-operations; required for C-GET (§11.4).
     reverse_store: Option<ReverseStoreHandler>,
+    /// Answers an incoming N-EVENT-REPORT-RQ (H2); `None` leaves it to the
+    /// caller, which ignores it as before.
+    n_event: Option<NEventReportHandler>,
+    /// An incoming N-EVENT-REPORT whose dataset has not arrived yet (H2).
+    pending_incoming: Option<(u8, Command)>,
     /// What the peer granted in SOP Class Extended Negotiation (§11.2).
     peer_extended: Vec<crate::pdu::ExtendedNegotiation>,
     /// The peer's user identity response (§11.2).
     peer_identity_response: Option<Vec<u8>>,
+    /// Send an untranscodable dataset in its own syntax instead of failing (L3).
+    ignore_unsupported_syntax_change: bool,
+    /// Fallback charset for received text without (0008,0005) (item 2).
+    fallback_encoding: Option<&'static str>,
+    /// Reports this association's connection open/close to the client metrics.
+    _connection: crate::observability::ConnectionGuard,
+    /// Reports this association's open/close to the client metrics.
+    _association: crate::observability::AssociationGuard,
+    /// The peer's implementation class UID from its user information (L8).
+    peer_implementation_class_uid: Option<String>,
+    /// The peer's implementation version name from its user information (L8).
+    peer_implementation_version_name: Option<String>,
     async_operations: crate::pdu::AsyncOperations,
     /// Cancel-safe framing for every association read (NET-14): a timed-out or
     /// dropped read keeps its half-frame here instead of resynchronising.
@@ -1914,6 +2349,18 @@ pub struct Association {
 /// The SCU-side answer to a reverse C-STORE (§11.4).
 pub type ReverseStoreHandler = Arc<
     dyn Fn(&crate::services::CStoreRequest) -> Result<crate::services::CStoreResponse>
+        + Send
+        + Sync,
+>;
+
+/// Answers an incoming N-EVENT-REPORT-RQ on an SCU association (H2).
+///
+/// Mirrors fo-dicom `DicomClient.OnNEventReportRequest`: the callback returns
+/// the response the SCP receives, so a service-class SCP can push events over
+/// the SCU's own association. `Err` answers ProcessingFailure with the error as
+/// the comment instead of dropping the request.
+pub type NEventReportHandler = Arc<
+    dyn Fn(&crate::nservice::NServiceRequest) -> Result<crate::nservice::NServiceResponse>
         + Send
         + Sync,
 >;
@@ -1944,11 +2391,11 @@ impl Association {
             identity.validate()?;
         }
 
-        let tcp = TcpStream::connect(addr).await.map_err(NetworkError::Io)?;
+        let tcp = connect_with_timeout(TcpStream::connect(addr), options.connect_timeout).await?;
         crate::transport::apply_options(&tcp, &options.tcp)?;
 
         #[cfg(feature = "tls")]
-        let mut stream = match &options.tls {
+        let stream = match &options.tls {
             // a peer that accepts TCP but never answers the handshake must not
             // hang the connect (review #14)
             Some(tls) => ClientStream::Tls(Box::new(
@@ -1961,7 +2408,12 @@ impl Association {
             None => ClientStream::Plain(tcp),
         };
         #[cfg(not(feature = "tls"))]
-        let mut stream = ClientStream::Plain(tcp);
+        let stream = ClientStream::Plain(tcp);
+
+        // L6: count this SCU's bytes the way the SCP already does (fo-dicom
+        // instruments `DicomService`, not just the server); the open/close
+        // guards live in the association, so they fire exactly once.
+        let mut stream = crate::observability::CountingStream::new(stream, options.metrics.clone());
 
         let mut request = Associate::new(called_ae, calling_ae);
         request.application_context = APPLICATION_CONTEXT.to_string();
@@ -1974,6 +2426,9 @@ impl Association {
         );
         user.async_operations = Some(options.async_operations);
         user.extended_negotiations = options.extended_negotiations.clone();
+        // L4: the item is optional and encoded only when configured; without
+        // this the codec's common-extended support was unreachable
+        user.common_extended = options.common_extended.clone();
         user.user_identity = options.user_identity.clone();
         request.user_information = user;
 
@@ -1988,6 +2443,8 @@ impl Association {
         // filled from the AC; both stay empty on a rejection
         let peer_extended;
         let peer_identity_response;
+        let peer_implementation_class_uid;
+        let peer_implementation_version_name;
         let async_operations;
         let (accepted, peer_max_pdu) = match response {
             Some(Pdu::AssociateAc(accept)) => {
@@ -2054,6 +2511,10 @@ impl Association {
                 };
                 peer_extended = accept.user_information.extended_negotiations;
                 peer_identity_response = accept.user_information.user_identity_response;
+                // L8: decoded by the codec but previously dropped
+                peer_implementation_class_uid = accept.user_information.implementation_class_uid;
+                peer_implementation_version_name =
+                    accept.user_information.implementation_version_name;
                 (AcceptedContexts::from_negotiated(negotiated), cap)
             }
             Some(Pdu::AssociateRj(reject)) => {
@@ -2083,15 +2544,28 @@ impl Association {
         Ok(Association {
             stream,
             contexts: accepted,
-            splitter: PduSplitter::new(peer_max_pdu, 16),
+            splitter: PduSplitter::with_limits(
+                peer_max_pdu,
+                options.max_pdvs_per_pdu,
+                options.max_command_buffer.map(|limit| limit as usize),
+                options.max_data_buffer.map(|limit| limit as usize),
+            ),
             assembler: PdvAssembler::new(),
             pending: crate::engine::PendingTable::new(),
             request_cancellation: None,
             release_timeout: options.release_timeout,
             request_timeout: options.request_timeout,
             reverse_store: None,
+            n_event: None,
+            pending_incoming: None,
             peer_extended,
             peer_identity_response,
+            ignore_unsupported_syntax_change: options.ignore_unsupported_syntax_change,
+            fallback_encoding: options.fallback_encoding,
+            _connection: crate::observability::ConnectionGuard::new(options.metrics.clone()),
+            _association: crate::observability::AssociationGuard::new(options.metrics.clone()),
+            peer_implementation_class_uid,
+            peer_implementation_version_name,
             async_operations,
             pdu_reader: crate::transport::PduReader::new(),
             transcoder_cache: std::collections::HashMap::new(),
@@ -2167,6 +2641,11 @@ impl Association {
                 match pdu {
                     Pdu::PData(pdata) => {
                         for unit in self.assembler.push_pdata(&pdata)? {
+                            // H2: answer an incoming N-EVENT-REPORT-RQ instead of
+                            // dropping it, before the response filtering below
+                            if self.intercept_event_report(&unit).await? {
+                                continue;
+                            }
                             if unit.stream != Stream::Command {
                                 return Err(NetworkError::protocol(
                                     "C-ECHO response carries a dataset",
@@ -2227,6 +2706,19 @@ impl Association {
         self.peer_identity_response.as_deref()
     }
 
+    /// The peer's implementation class UID from its user information (L8).
+    ///
+    /// fo-dicom `DicomAssociation.RemoteImplementationClassUid`; `None` when the
+    /// peer sent no implementation identification item.
+    pub fn peer_implementation_class_uid(&self) -> Option<&str> {
+        self.peer_implementation_class_uid.as_deref()
+    }
+
+    /// The peer's implementation version name from its user information (L8).
+    pub fn peer_implementation_version_name(&self) -> Option<&str> {
+        self.peer_implementation_version_name.as_deref()
+    }
+
     /// True when the peer granted `field` of `sop_class` (§11.2).
     ///
     /// A field the peer did not answer, or answered with 0, is not granted.
@@ -2247,6 +2739,128 @@ impl Association {
     /// returns `ReverseStoreHandlerMissing` when none is set.
     pub fn set_reverse_store_handler(&mut self, handler: ReverseStoreHandler) {
         self.reverse_store = Some(handler);
+    }
+
+    /// Registers the handler for incoming N-EVENT-REPORT-RQ (H2).
+    ///
+    /// The peer may report events only when this side was granted the SCP role
+    /// for the service class; the request is answered on the presentation
+    /// context it arrived on. Without a handler such a request stays unhandled,
+    /// which is the previous behaviour.
+    pub fn set_n_event_report_handler(&mut self, handler: NEventReportHandler) {
+        self.n_event = Some(handler);
+    }
+
+    /// Sends one message (command plus optional dataset) on `context_id` (H2).
+    async fn send_message(
+        &mut self,
+        context_id: u8,
+        command: &Command,
+        dataset: Option<&Dataset>,
+        syntax: &Arc<radicom::model::transfer_syntax::TransferSyntax>,
+    ) -> Result<()> {
+        let command_bytes =
+            bytes::Bytes::from(crate::message::encode_command(&command.to_dataset())?);
+        let payload = match dataset {
+            Some(dataset) => Some(bytes::Bytes::from(crate::message::encode_dataset(
+                dataset, syntax,
+            )?)),
+            None => None,
+        };
+        let pdus = self
+            .splitter
+            .split_message_bytes(context_id, command_bytes, payload)?;
+        write_pdata_batch(&mut self.stream, pdus).await
+    }
+
+    /// Consumes `unit` when it belongs to an incoming N-EVENT-REPORT-RQ (H2).
+    ///
+    /// Returns true when the unit was handled: the report goes to the registered
+    /// handler and its response is written back on the same presentation
+    /// context. A report with no handler is left to the caller, so a client
+    /// that never registered one behaves exactly as before.
+    async fn intercept_event_report(&mut self, unit: &MessageUnit) -> Result<bool> {
+        let Some(handler) = self.n_event.clone() else {
+            return Ok(false);
+        };
+        match unit.stream {
+            Stream::Command => {
+                let command = command_from_bytes(&unit.bytes)?;
+                if command.field != CommandField::NEventReportRq {
+                    return Ok(false);
+                }
+                if self.contexts.by_id(unit.context_id).is_none() {
+                    return Err(NetworkError::protocol(
+                        "N-EVENT-REPORT on an unaccepted presentation context",
+                    ));
+                }
+                if command.no_dataset {
+                    self.answer_event_report(unit.context_id, &handler, &command, None)
+                        .await?;
+                } else {
+                    self.pending_incoming = Some((unit.context_id, command));
+                }
+                Ok(true)
+            }
+            Stream::Data => {
+                let Some((context_id, command)) = self.pending_incoming.take() else {
+                    return Ok(false);
+                };
+                if context_id != unit.context_id {
+                    return Err(NetworkError::protocol(
+                        "the N-EVENT-REPORT dataset used another presentation context",
+                    ));
+                }
+                let syntax = transfer_syntax_of(&self.syntax_of(context_id));
+                let dataset = crate::message::decode_dataset_with_fallback(
+                    &unit.bytes,
+                    &syntax,
+                    self.fallback_encoding,
+                )?;
+                self.answer_event_report(context_id, &handler, &command, Some(dataset))
+                    .await?;
+                Ok(true)
+            }
+        }
+    }
+
+    /// The accepted transfer syntax of `context_id`, Explicit VR LE as a fallback.
+    fn syntax_of(&self, context_id: u8) -> String {
+        self.contexts
+            .by_id(context_id)
+            .map(|context| context.transfer_syntax.clone())
+            .unwrap_or_else(|| syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.uid().to_string())
+    }
+
+    /// Writes the handler's answer to an N-EVENT-REPORT-RQ (H2).
+    async fn answer_event_report(
+        &mut self,
+        context_id: u8,
+        handler: &NEventReportHandler,
+        command: &Command,
+        dataset: Option<Dataset>,
+    ) -> Result<()> {
+        let request = crate::nservice::NServiceRequest::from_command(command, dataset);
+        let syntax = transfer_syntax_of(&self.syntax_of(context_id));
+        let (response_command, response_dataset) = match handler(&request) {
+            Ok(response) => (response.to_command(), response.dataset),
+            Err(error) => {
+                let mut failure =
+                    Command::response(command, crate::dimse::status::PROCESSING_FAILURE)
+                        .ok_or_else(|| {
+                            NetworkError::protocol("N-EVENT-REPORT has no response field")
+                        })?;
+                failure.error_comment = Some(crate::dimse::truncate_lo(&error.to_string()));
+                (failure, None)
+            }
+        };
+        self.send_message(
+            context_id,
+            &response_command,
+            response_dataset.as_ref(),
+            &syntax,
+        )
+        .await
     }
 
     /// Registers a reverse C-STORE handler that keeps every received instance.
@@ -2293,6 +2907,10 @@ impl Association {
     /// The dataset travels under the presentation context's accepted syntax;
     /// when that differs from the file's own syntax the dataset is transcoded
     /// through the global codec registry (§11.1).
+    ///
+    /// **Ceiling (L3):** a syntax pair that no registered codec handles fails
+    /// the request instead of falling back to an uncompressed syntax. Offer the
+    /// peer a syntax this side can produce, or register a transcoder first.
     pub async fn send_c_store(
         &mut self,
         file: &radicom::io::file::DicomFile,
@@ -2311,6 +2929,90 @@ impl Association {
         originator_ae: Option<&str>,
         originator_message_id: Option<u16>,
     ) -> Result<CStoreResponse> {
+        let (message_id, context_id, target, command) =
+            self.plan_c_store(file, originator_ae, originator_message_id)?;
+        let dataset = &file.dataset;
+
+        // Stream the dataset when no transcode is needed (NET-13): the writer
+        // frames PDUs through a bounded channel, so a multi-GB instance never
+        // sits in memory as one Vec. A transcode materialises its output by
+        // nature, so that branch keeps the buffered path.
+        let source = dataset.transfer_syntax();
+        // L3: a dataset no codec can convert still goes out, in its own syntax,
+        // when the caller opted in; PixelData is never stripped
+        let send_syntax = if source.uid() == target.uid() {
+            target.clone()
+        } else {
+            let transcoder = transcoder_for(&mut self.transcoder_cache, &source, &target);
+            match transcoder.transcode_dataset(dataset) {
+                Ok(transcoded) => {
+                    let payload =
+                        bytes::Bytes::from(crate::message::encode_dataset(&transcoded, &target)?);
+                    let pdus =
+                        self.splitter
+                            .split_message_bytes(context_id, command, Some(payload))?;
+                    write_pdata_batch(&mut self.stream, pdus).await?;
+                    return self.finish_c_store(message_id).await;
+                }
+                Err(_) if self.ignore_unsupported_syntax_change => source.clone(),
+                Err(error) => {
+                    return Err(NetworkError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        error.to_string(),
+                    )))
+                }
+            }
+        };
+        let max_pdu = self.splitter.max_pdu();
+        let max_pdvs = self.splitter.max_pdvs_per_pdu();
+        crate::message::write_message_streamed(
+            &mut self.stream,
+            context_id,
+            command,
+            dataset.clone(),
+            send_syntax,
+            max_pdu,
+            max_pdvs,
+        )
+        .await?;
+        self.finish_c_store(message_id).await
+    }
+
+    /// Waits for the response of the C-STORE sent as `message_id` (§11.4).
+    async fn finish_c_store(&mut self, message_id: u16) -> Result<CStoreResponse> {
+        self.pending.insert(message_id);
+        let response = self
+            .await_response(message_id, CommandField::CStoreRsp)
+            .await;
+        self.pending.remove(message_id);
+        response.map(|command| {
+            CStoreResponse::from_command(&command).unwrap_or_else(|_| CStoreResponse {
+                message_id_being_responded_to: message_id,
+                status: crate::dimse::status::PROCESSING_FAILURE,
+                affected_sop_class_uid: String::new(),
+                affected_sop_instance_uid: String::new(),
+                error_comment: Some("malformed C-STORE response".into()),
+            })
+        })
+    }
+
+    /// Validates a C-STORE and builds its command, context and target syntax.
+    ///
+    /// Shared by the single-request path, which then streams or transcodes the
+    /// dataset, and by [`Self::send_c_store_batch`], which must encode every
+    /// queued request before the first response arrives (M6).
+    #[allow(clippy::type_complexity)]
+    fn plan_c_store(
+        &mut self,
+        file: &radicom::io::file::DicomFile,
+        originator_ae: Option<&str>,
+        originator_message_id: Option<u16>,
+    ) -> Result<(
+        u16,
+        u8,
+        Arc<radicom::model::transfer_syntax::TransferSyntax>,
+        bytes::Bytes,
+    )> {
         let dataset = &file.dataset;
         let sop_class = dataset
             .try_get_str(radicom::model::tag::Tag::SOP_CLASS_UID)
@@ -2335,56 +3037,291 @@ impl Association {
         request.move_originator_message_id = originator_message_id;
         request.no_dataset = false;
 
-        // Stream the dataset when no transcode is needed (NET-13): the writer
-        // frames PDUs through a bounded channel, so a multi-GB instance never
-        // sits in memory as one Vec. A transcode materialises its output by
-        // nature, so that branch keeps the buffered path.
-        let command = bytes::Bytes::from(command_bytes(&request)?);
-        let source = dataset.transfer_syntax();
-        if source.uid() == target.uid() {
-            let max_pdu = self.splitter.max_pdu();
-            let max_pdvs = self.splitter.max_pdvs_per_pdu();
-            crate::message::write_message_streamed(
-                &mut self.stream,
-                context_id,
-                command,
-                dataset.clone(),
-                target.clone(),
-                max_pdu,
-                max_pdvs,
-            )
-            .await?;
-        } else {
-            let transcoder = transcoder_for(&mut self.transcoder_cache, &source, &target);
-            let transcoded = transcoder.transcode_dataset(dataset).map_err(|e| {
-                NetworkError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    e.to_string(),
-                ))
-            })?;
-            let payload = bytes::Bytes::from(crate::message::encode_dataset(&transcoded, &target)?);
+        Ok((
+            message_id,
+            context_id,
+            target,
+            bytes::Bytes::from(command_bytes(&request)?),
+        ))
+    }
+
+    /// Sends several C-STORE requests before waiting for any response (M6).
+    ///
+    /// fo-dicom gates its send loop on the negotiated `MaxAsyncOpsInvoked`
+    /// (`Network/DicomService.cs:1145-1146`); this is the same window, with at
+    /// most 64 requests outstanding. Every dataset is encoded before the first
+    /// response arrives and responses are matched by message ID, so a peer may
+    /// answer out of order.
+    ///
+    /// **Ceiling:** this crate's SCP still runs providers one at a time (its
+    /// protocol loop owns the socket), so against it a batch removes the
+    /// round-trip stall rather than executing the remote handler in parallel; a
+    /// peer such as fo-dicom does both. One malformed response fails the batch.
+    pub async fn send_c_store_batch(
+        &mut self,
+        files: &[&radicom::io::file::DicomFile],
+    ) -> Result<Vec<CStoreResponse>> {
+        let mut prepared = Vec::with_capacity(files.len());
+        for file in files {
+            let (message_id, context_id, target, command) = self.plan_c_store(file, None, None)?;
+            let dataset = &file.dataset;
+            // the batch queues PDUs while earlier requests are in flight, so the
+            // dataset is materialised once here (the streaming writer cannot be
+            // interleaved with another request's PDUs)
+            let source = dataset.transfer_syntax();
+            let payload = if source.uid() == target.uid() {
+                bytes::Bytes::from(crate::message::encode_dataset(dataset, &target)?)
+            } else {
+                let transcoder = transcoder_for(&mut self.transcoder_cache, &source, &target);
+                match transcoder.transcode_dataset(dataset) {
+                    Ok(transcoded) => {
+                        bytes::Bytes::from(crate::message::encode_dataset(&transcoded, &target)?)
+                    }
+                    // L3: as-is in the instance's own syntax
+                    Err(_) if self.ignore_unsupported_syntax_change => {
+                        bytes::Bytes::from(crate::message::encode_dataset(dataset, &source)?)
+                    }
+                    Err(error) => {
+                        return Err(NetworkError::Io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            error.to_string(),
+                        )))
+                    }
+                }
+            };
             let pdus = self
                 .splitter
                 .split_message_bytes(context_id, command, Some(payload))?;
-            write_pdata_batch(&mut self.stream, pdus).await?;
+            prepared.push((message_id, pdus));
         }
 
-        self.pending.insert(request.message_id);
-        let response = self
-            .await_response(message_id, CommandField::CStoreRsp)
-            .await;
-        self.pending.remove(message_id);
-        response.map(|command| {
-            CStoreResponse::from_command(&command).unwrap_or_else(|_| CStoreResponse {
-                message_id_being_responded_to: message_id,
-                status: crate::dimse::status::PROCESSING_FAILURE,
-                affected_sop_class_uid: String::new(),
-                affected_sop_instance_uid: String::new(),
-                error_comment: Some("malformed C-STORE response".into()),
-            })
-        })
+        let window = self.window();
+        let mut inflight: std::collections::HashMap<u16, usize> = std::collections::HashMap::new();
+        let mut responses: Vec<Option<CStoreResponse>> = vec![None; prepared.len()];
+        let mut next = 0usize;
+        let result = async {
+            while next < prepared.len() || !inflight.is_empty() {
+                while next < prepared.len() && inflight.len() < window {
+                    let (message_id, pdus) = &prepared[next];
+                    write_pdata_batch(&mut self.stream, pdus.clone()).await?;
+                    inflight.insert(*message_id, next);
+                    self.pending.insert(*message_id);
+                    next += 1;
+                }
+                let message_id = *inflight.keys().next().expect("a request is pending");
+                let Some(pdu) = self.read_request_pdu(message_id).await? else {
+                    return Err(NetworkError::ClosedPrematurely { source: None });
+                };
+                match pdu {
+                    Pdu::PData(pdata) => {
+                        for unit in self.assembler.push_pdata(&pdata)? {
+                            // H2: answer an incoming N-EVENT-REPORT-RQ instead of
+                            // mistaking it for a C-STORE response
+                            if self.intercept_event_report(&unit).await? {
+                                continue;
+                            }
+                            if unit.stream != Stream::Command {
+                                return Err(NetworkError::protocol(
+                                    "C-STORE response carries a dataset",
+                                ));
+                            }
+                            let command = command_from_bytes(&unit.bytes)?;
+                            let response = CStoreResponse::from_command(&command)?;
+                            let id = response.message_id_being_responded_to;
+                            let index = inflight.remove(&id).ok_or_else(|| {
+                                NetworkError::protocol(
+                                    "duplicate or unexpected C-STORE batch response ID",
+                                )
+                            })?;
+                            self.pending.remove(id);
+                            responses[index] = Some(response);
+                        }
+                    }
+                    Pdu::Abort(abort) => {
+                        return Err(NetworkError::Abort {
+                            source_code: abort.source.code(),
+                            reason: abort.reason,
+                        })
+                    }
+                    Pdu::ReleaseRq => {
+                        write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
+                        return Err(NetworkError::ClosedPrematurely { source: None });
+                    }
+                    _ => {
+                        return Err(NetworkError::protocol(
+                            "unexpected PDU during a C-STORE batch",
+                        ))
+                    }
+                }
+            }
+            Ok(responses
+                .into_iter()
+                .map(|response| response.expect("every request completed"))
+                .collect())
+        }
+        .await;
+        for id in inflight.keys() {
+            self.pending.remove(*id);
+        }
+        result
     }
 
+    /// Runs several C-FIND requests within the async-operations window (M6).
+    ///
+    /// Results are returned per request, in request order. Responses are
+    /// demultiplexed by message ID, so match rows from different requests may
+    /// interleave; each request's stream ends at its non-pending response.
+    ///
+    /// **Ceiling:** a request in a batch cannot be cancelled (C-CANCEL needs the
+    /// single-request path's registration); use [`Self::send_c_find_stream`].
+    pub async fn send_c_find_batch(
+        &mut self,
+        requests: &[crate::cfind::CFindRequest],
+    ) -> Result<Vec<Vec<crate::cfind::CFindResponse>>> {
+        let mut prepared = Vec::with_capacity(requests.len());
+        for request in requests {
+            let context = self.contexts.pick(&request.sop_class_uid, "")?;
+            self.contexts
+                .validate_request(context.id, &request.to_command(), true)?;
+            let syntax = transfer_syntax_of(&context.transfer_syntax);
+            let payload = bytes::Bytes::from(crate::message::encode_dataset(
+                &request.identifier,
+                &syntax,
+            )?);
+            let pdus = self.splitter.split_message_bytes(
+                context.id,
+                bytes::Bytes::from(command_bytes(&request.to_command())?),
+                Some(payload),
+            )?;
+            prepared.push((syntax, request.message_id, pdus));
+        }
+
+        let window = self.window();
+        let mut inflight: std::collections::HashMap<u16, usize> = std::collections::HashMap::new();
+        let mut responses: Vec<Vec<crate::cfind::CFindResponse>> =
+            requests.iter().map(|_| Vec::new()).collect();
+        let mut awaiting: Option<(Command, usize, u8)> = None;
+        let mut next = 0usize;
+        let result = async {
+            while next < prepared.len() || !inflight.is_empty() {
+                while next < prepared.len() && inflight.len() < window {
+                    let (_, message_id, pdus) = &prepared[next];
+                    write_pdata_batch(&mut self.stream, pdus.clone()).await?;
+                    inflight.insert(*message_id, next);
+                    self.pending.insert(*message_id);
+                    next += 1;
+                }
+                let message_id = *inflight.keys().next().expect("a request is pending");
+                let Some(pdu) = self.read_request_pdu(message_id).await? else {
+                    return Err(NetworkError::ClosedPrematurely { source: None });
+                };
+                match pdu {
+                    Pdu::PData(pdata) => {
+                        for unit in self.assembler.push_pdata(&pdata)? {
+                            if self.intercept_event_report(&unit).await? {
+                                continue;
+                            }
+                            match unit.stream {
+                                Stream::Command => {
+                                    let command = command_from_bytes(&unit.bytes)?;
+                                    let Some(id) = command.message_id_being_responded_to
+                                    else {
+                                        return Err(NetworkError::protocol(
+                                            "C-FIND batch response has no message ID being responded to",
+                                        ));
+                                    };
+                                    let index = *inflight.get(&id).ok_or_else(|| {
+                                        NetworkError::protocol(
+                                            "duplicate or unexpected C-FIND batch response ID",
+                                        )
+                                    })?;
+                                    if command.no_dataset {
+                                        self.record_find_response(
+                                            index,
+                                            command,
+                                            None,
+                                            &mut inflight,
+                                            &mut responses,
+                                        )?;
+                                        continue;
+                                    }
+                                    awaiting = Some((command, index, unit.context_id));
+                                }
+                                Stream::Data => {
+                                    let Some((command, index, context_id)) = awaiting.take() else {
+                                        continue;
+                                    };
+                                    let (syntax, _, _) = &prepared[index];
+                                    let identifier = crate::message::decode_dataset_with_fallback(
+                                        &unit.bytes,
+                                        syntax,
+                                        self.fallback_encoding,
+                                    )?;
+                                    debug_assert_eq!(context_id, unit.context_id);
+                                    self.record_find_response(
+                                        index,
+                                        command,
+                                        Some(identifier),
+                                        &mut inflight,
+                                        &mut responses,
+                                    )?;
+                                }
+                            }
+                        }
+                    }
+                    Pdu::Abort(abort) => {
+                        return Err(NetworkError::Abort {
+                            source_code: abort.source.code(),
+                            reason: abort.reason,
+                        })
+                    }
+                    Pdu::ReleaseRq => {
+                        write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
+                        return Err(NetworkError::ClosedPrematurely { source: None });
+                    }
+                    _ => {
+                        return Err(NetworkError::protocol(
+                            "unexpected PDU during a C-FIND batch",
+                        ))
+                    }
+                }
+            }
+            Ok(responses)
+        }
+        .await;
+        for id in inflight.keys() {
+            self.pending.remove(*id);
+        }
+        result
+    }
+
+    /// Records one C-FIND batch response and closes its request when terminal.
+    fn record_find_response(
+        &mut self,
+        index: usize,
+        command: Command,
+        identifier: Option<Dataset>,
+        inflight: &mut std::collections::HashMap<u16, usize>,
+        responses: &mut [Vec<crate::cfind::CFindResponse>],
+    ) -> Result<()> {
+        let response = crate::cfind::CFindResponse::from_command(&command, identifier)?;
+        let terminal = !response.is_pending();
+        let id = response.message_id_being_responded_to;
+        responses[index].push(response);
+        if terminal {
+            inflight.remove(&id);
+            self.pending.remove(id);
+        }
+        Ok(())
+    }
+
+    /// The async-operations send window: the negotiated invoked count, 64 max.
+    fn window(&self) -> usize {
+        match self.async_operations.invoked {
+            0 => 64,
+            finite => usize::from(finite).min(64),
+        }
+    }
     /// Runs a C-FIND and returns every match plus the terminal response (§11.4).
     ///
     /// Matches are collected because each response carries a full Identifier;
@@ -2435,6 +3372,11 @@ impl Association {
             match pdu {
                 Pdu::PData(pdata) => {
                     for unit in self.assembler.push_pdata(&pdata)? {
+                        // H2: answer an incoming N-EVENT-REPORT-RQ instead of
+                        // dropping it, before the response filtering below
+                        if self.intercept_event_report(&unit).await? {
+                            continue;
+                        }
                         match unit.stream {
                             Stream::Command => {
                                 let command = command_from_bytes(&unit.bytes)?;
@@ -2460,8 +3402,11 @@ impl Association {
                                 let Some(command) = awaiting_command.take() else {
                                     continue;
                                 };
-                                let identifier =
-                                    crate::message::decode_dataset(&unit.bytes, &syntax)?;
+                                let identifier = crate::message::decode_dataset_with_fallback(
+                                    &unit.bytes,
+                                    &syntax,
+                                    self.fallback_encoding,
+                                )?;
                                 let response = crate::cfind::CFindResponse::from_command(
                                     &command,
                                     Some(identifier),
@@ -2540,6 +3485,11 @@ impl Association {
             match pdu {
                 Pdu::PData(pdata) => {
                     for unit in self.assembler.push_pdata(&pdata)? {
+                        // H2: answer an incoming N-EVENT-REPORT-RQ instead of
+                        // dropping it, before the response filtering below
+                        if self.intercept_event_report(&unit).await? {
+                            continue;
+                        }
                         if unit.context_id != context_id {
                             return Err(NetworkError::protocol(
                                 "C-MOVE response on the wrong context",
@@ -2549,9 +3499,10 @@ impl Association {
                             let mut response = awaiting_identifier.take().ok_or_else(|| {
                                 NetworkError::protocol("C-MOVE Identifier without its response")
                             })?;
-                            response.set_identifier(&crate::message::decode_dataset(
+                            response.set_identifier(&crate::message::decode_dataset_with_fallback(
                                 &unit.bytes,
                                 &syntax,
+                                self.fallback_encoding,
                             )?);
                             on_response(response)?;
                             return Ok(());
@@ -2648,6 +3599,11 @@ impl Association {
             match pdu {
                 Pdu::PData(pdata) => {
                     for unit in self.assembler.push_pdata(&pdata)? {
+                        // H2: answer an incoming N-EVENT-REPORT-RQ instead of
+                        // dropping it, before the response filtering below
+                        if self.intercept_event_report(&unit).await? {
+                            continue;
+                        }
                         match unit.stream {
                             Stream::Command => {
                                 let command = command_from_bytes(&unit.bytes)?;
@@ -2721,10 +3677,13 @@ impl Association {
                                                 "C-GET Identifier without its response",
                                             )
                                         })?;
-                                    response.set_identifier(&crate::message::decode_dataset(
-                                        &unit.bytes,
-                                        &syntax,
-                                    )?);
+                                    response.set_identifier(
+                                        &crate::message::decode_dataset_with_fallback(
+                                            &unit.bytes,
+                                            &syntax,
+                                            self.fallback_encoding,
+                                        )?,
+                                    );
                                     on_response(response)?;
                                     return Ok(());
                                 }
@@ -2752,8 +3711,11 @@ impl Association {
                                             "reverse C-STORE on an unaccepted context",
                                         )
                                     })?;
-                                let dataset =
-                                    crate::message::decode_dataset(&unit.bytes, &store_syntax)?;
+                                let dataset = crate::message::decode_dataset_with_fallback(
+                                    &unit.bytes,
+                                    &store_syntax,
+                                    self.fallback_encoding,
+                                )?;
                                 let mut file = radicom::io::file::DicomFile::from_dataset(dataset);
                                 file.dataset.set_transfer_syntax(store_syntax.clone());
                                 let request = crate::store::c_store_request_from_message(
@@ -2845,6 +3807,11 @@ impl Association {
             match pdu {
                 Pdu::PData(pdata) => {
                     for unit in self.assembler.push_pdata(&pdata)? {
+                        // H2: answer an incoming N-EVENT-REPORT-RQ instead of
+                        // dropping it, before the response filtering below
+                        if self.intercept_event_report(&unit).await? {
+                            continue;
+                        }
                         if unit.stream != Stream::Command {
                             continue;
                         }
@@ -2955,6 +3922,11 @@ impl Association {
             match pdu {
                 Pdu::PData(pdata) => {
                     for unit in self.assembler.push_pdata(&pdata)? {
+                        // H2: answer an incoming N-EVENT-REPORT-RQ instead of
+                        // dropping it, before the response filtering below
+                        if self.intercept_event_report(&unit).await? {
+                            continue;
+                        }
                         match unit.stream {
                             Stream::Command => {
                                 let command = command_from_bytes(&unit.bytes)?;
@@ -2969,8 +3941,11 @@ impl Association {
                             }
                             Stream::Data => {
                                 if let Some(command) = pending_command.take() {
-                                    let dataset =
-                                        crate::message::decode_dataset(&unit.bytes, syntax)?;
+                                    let dataset = crate::message::decode_dataset_with_fallback(
+                                        &unit.bytes,
+                                        syntax,
+                                        self.fallback_encoding,
+                                    )?;
                                     return Ok((command, Some(dataset)));
                                 }
                             }
@@ -3029,12 +4004,437 @@ impl Association {
     /// Allocates a message ID for a request this side sends (§11.2).
     ///
     /// IDs still awaiting a response are skipped, so the wrap at 65535 can
+    /// never hand an in-flight ID to a new request. Public because a caller
+    /// building its own N-service request has to stamp one (H2).
+    pub fn next_message_id(&mut self) -> Result<u16> {
+        self.allocate_message_id()
+    }
+
+    /// Allocates a message ID for a request this side sends (§11.2).
+    ///
+    /// IDs still awaiting a response are skipped, so the wrap at 65535 can
     /// never hand an in-flight ID to a new request.
     fn allocate_message_id(&mut self) -> Result<u16> {
         self.pending.allocate_message_id()
     }
 }
 
+/// The hard cap on concurrent request tasks per association (M6).
+///
+/// The negotiated window usually bounds this first; the cap keeps a peer that
+/// claims an unlimited window from spawning without bound.
+const MAX_CONCURRENT_REQUESTS: usize = 64;
+
+/// One request the message loop hands to a task (M6).
+///
+/// Only requests whose answer needs no further read from this association are
+/// dispatched: C-ECHO, C-STORE, C-FIND and the N-services other than N-ACTION.
+/// C-GET and C-MOVE stay on the loop because they interleave sub-operations
+/// with reads of this socket, and N-ACTION stays because it may push
+/// N-EVENT-REPORTs back over it (see the ceiling notes on [`serve_connection`]).
+struct DispatchJob {
+    context_id: u8,
+    command: Command,
+    /// Empty for a request that carries no dataset.
+    body: MessageBody,
+    syntax: Arc<radicom::model::transfer_syntax::TransferSyntax>,
+    /// Present for a C-FIND: the peer may cancel it with C-CANCEL (SRV-08).
+    cancel: Option<CancelSlot>,
+}
+
+/// The cancel table and token of one running request (M6).
+///
+/// Dropping the slot removes the map entry, so the table only holds requests
+/// that are still running.
+type CancelMap =
+    Arc<std::sync::Mutex<std::collections::HashMap<u16, tokio::sync::watch::Sender<bool>>>>;
+
+struct CancelSlot {
+    map: CancelMap,
+    id: u16,
+    rx: tokio::sync::watch::Receiver<bool>,
+}
+
+impl CancelSlot {
+    fn register(map: &CancelMap, id: u16) -> Self {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        map.lock().unwrap().insert(id, tx);
+        CancelSlot {
+            map: map.clone(),
+            id,
+            rx,
+        }
+    }
+
+    /// Resolves when the message loop forwards a C-CANCEL for this request.
+    async fn cancelled(&mut self) {
+        if *self.rx.borrow() {
+            return;
+        }
+        let _ = self.rx.changed().await;
+    }
+}
+
+impl Drop for CancelSlot {
+    fn drop(&mut self) {
+        self.map.lock().unwrap().remove(&self.id);
+    }
+}
+
+impl DispatchJob {
+    /// True when `command` may run on a task instead of the message loop (M6).
+    fn is_concurrent(command: &Command) -> bool {
+        match command.field {
+            CommandField::CEchoRq | CommandField::CStoreRq | CommandField::CFindRq => true,
+            // N-ACTION may send N-EVENT-REPORTs on this same association (H2)
+            CommandField::NActionRq => false,
+            field => crate::nservice::is_n_request(field),
+        }
+    }
+}
+
+/// A response a dispatched task produced, ready for the loop to write.
+///
+/// The loop encodes and writes it in one go, so PDVs of different messages can
+/// never interleave on the wire (§11.1) and the response keeps the request's
+/// message ID whatever order the tasks finish in.
+struct Outgoing {
+    context_id: u8,
+    command: Command,
+    dataset: Option<Dataset>,
+    syntax: Arc<radicom::model::transfer_syntax::TransferSyntax>,
+}
+
+/// A ProcessingFailure answer for `request` (§11.3).
+fn failure_outgoing(
+    context_id: u8,
+    request: &Command,
+    comment: &str,
+    syntax: &Arc<radicom::model::transfer_syntax::TransferSyntax>,
+) -> Outgoing {
+    let mut command = Command::response(request, crate::dimse::status::PROCESSING_FAILURE)
+        .unwrap_or_else(|| Command::request(request.field, request.message_id));
+    command.error_comment = Some(crate::dimse::truncate_lo(comment));
+    Outgoing {
+        context_id,
+        command,
+        dataset: None,
+        syntax: syntax.clone(),
+    }
+}
+
+/// Runs one dispatched request and streams its responses to the loop (M6).
+///
+/// An error from the provider becomes a failure response, exactly like the
+/// inline handlers; the association itself survives it.
+async fn run_job<P: ServiceProvider + 'static>(
+    job: DispatchJob,
+    provider: Arc<P>,
+    options: ServerOptions,
+    tx: tokio::sync::mpsc::Sender<Result<Outgoing>>,
+) {
+    if let Err(error) = execute_job(job, &provider, &options, &tx).await {
+        // the loop is gone when the channel is closed: nothing left to report to
+        let _ = tx.send(Err(error)).await;
+    }
+}
+
+async fn execute_job<P: ServiceProvider>(
+    mut job: DispatchJob,
+    provider: &Arc<P>,
+    options: &ServerOptions,
+    tx: &tokio::sync::mpsc::Sender<Result<Outgoing>>,
+) -> Result<()> {
+    match job.command.field {
+        CommandField::CEchoRq => execute_c_echo(job, provider, tx).await,
+        CommandField::CStoreRq => execute_c_store(job, provider, options, tx).await,
+        CommandField::CFindRq => execute_c_find(&mut job, provider, options, tx).await,
+        field if crate::nservice::is_n_request(field) => {
+            execute_n_service(job, provider, options, tx).await
+        }
+        other => {
+            let comment = format!("not a concurrent request: {other:?}");
+            let outgoing = failure_outgoing(job.context_id, &job.command, &comment, &job.syntax);
+            let _ = tx.send(Ok(outgoing)).await;
+            Ok(())
+        }
+    }
+}
+
+async fn execute_c_echo<P: ServiceProvider>(
+    job: DispatchJob,
+    provider: &Arc<P>,
+    tx: &tokio::sync::mpsc::Sender<Result<Outgoing>>,
+) -> Result<()> {
+    let request = CEchoRequest::from_command(&job.command)?;
+    let outgoing = match provider.on_c_echo(&request).await {
+        Ok(response) => Outgoing {
+            context_id: job.context_id,
+            command: response.to_command(),
+            dataset: None,
+            syntax: job.syntax.clone(),
+        },
+        Err(error) => {
+            let comment = format!("C-ECHO failed: {error}");
+            failure_outgoing(job.context_id, &job.command, &comment, &job.syntax)
+        }
+    };
+    let _ = tx.send(Ok(outgoing)).await;
+    Ok(())
+}
+
+async fn execute_c_store<P: ServiceProvider>(
+    job: DispatchJob,
+    provider: &Arc<P>,
+    options: &ServerOptions,
+    tx: &tokio::sync::mpsc::Sender<Result<Outgoing>>,
+) -> Result<()> {
+    let DispatchJob {
+        context_id,
+        command,
+        body,
+        syntax,
+        // C-STORE and the N-services are not cancellable (§11.4)
+        cancel: _,
+    } = job;
+    // the spool is synchronous file IO: keep it off the runtime thread
+    let sink = options.store_sink.clone();
+    let spool_syntax = syntax.clone();
+    let fallback = options.fallback_encoding;
+    let instance = match tokio::task::spawn_blocking(move || {
+        sink.materialize_body_with_fallback(&body, &spool_syntax, fallback)
+    })
+    .await
+    {
+        Ok(Ok(instance)) => instance,
+        Ok(Err(error)) => {
+            let comment = error.to_string();
+            let outgoing = failure_outgoing(context_id, &command, &comment, &syntax);
+            let _ = tx.send(Ok(outgoing)).await;
+            return Ok(());
+        }
+        Err(join) => {
+            let comment = format!("spool task failed: {join}");
+            let outgoing = failure_outgoing(context_id, &command, &comment, &syntax);
+            let _ = tx.send(Ok(outgoing)).await;
+            return Ok(());
+        }
+    };
+
+    let request = match crate::store::c_store_request_from_message(&command, instance) {
+        Ok(request) => request,
+        Err(error) => {
+            let comment = error.to_string();
+            let outgoing = failure_outgoing(context_id, &command, &comment, &syntax);
+            let _ = tx.send(Ok(outgoing)).await;
+            return Ok(());
+        }
+    };
+
+    // PS3.4 §F.1: the dataset must describe the same instance as the command
+    if let Some(comment) = crate::store::dataset_mismatch(&request) {
+        let response = crate::services::CStoreResponse::failure(
+            &request,
+            crate::store::DATASET_MISMATCH,
+            comment,
+        );
+        let outgoing = Outgoing {
+            context_id,
+            command: response.to_command(),
+            dataset: None,
+            syntax,
+        };
+        let _ = tx.send(Ok(outgoing)).await;
+        return Ok(());
+    }
+
+    let response = match provider.on_c_store(&request).await {
+        Ok(response) => response,
+        Err(error) => crate::store::failure_response(&request, &error),
+    };
+    let outgoing = Outgoing {
+        context_id,
+        command: response.to_command(),
+        dataset: None,
+        syntax,
+    };
+    let _ = tx.send(Ok(outgoing)).await;
+    Ok(())
+}
+
+async fn execute_c_find<P: ServiceProvider>(
+    job: &mut DispatchJob,
+    provider: &Arc<P>,
+    options: &ServerOptions,
+    tx: &tokio::sync::mpsc::Sender<Result<Outgoing>>,
+) -> Result<()> {
+    use futures::StreamExt;
+    let context_id = job.context_id;
+    let command = job.command.clone();
+    let syntax = job.syntax.clone();
+    let dataset_bytes = job.body.read_all()?;
+    let identifier = match crate::message::decode_dataset_with_fallback(
+        &dataset_bytes,
+        &syntax,
+        options.fallback_encoding,
+    ) {
+        Ok(identifier) => identifier,
+        Err(error) => {
+            let comment = error.to_string();
+            let outgoing = failure_outgoing(context_id, &command, &comment, &syntax);
+            let _ = tx.send(Ok(outgoing)).await;
+            return Ok(());
+        }
+    };
+    let request = crate::cfind::CFindRequest {
+        message_id: command.message_id,
+        sop_class_uid: command.affected_sop_class_uid.clone().unwrap_or_default(),
+        priority: command.priority,
+        identifier,
+    };
+
+    let mut stream = provider.on_c_find(&request);
+    let mut matches = 0u16;
+    let mut terminated = false;
+    loop {
+        let next = match &mut job.cancel {
+            Some(cancel) => tokio::select! {
+                biased;
+                // SRV-08: a C-CANCEL forwarded by the message loop wins a
+                // simultaneous provider response, preserving wire order
+                _ = cancel.cancelled() => {
+                    let response = crate::cfind::CFindResponse::failure(
+                        &request,
+                        crate::dimse::status::CANCEL,
+                        "C-FIND cancelled",
+                    );
+                    let outgoing = Outgoing {
+                        context_id,
+                        command: response.to_command(),
+                        dataset: None,
+                        syntax: syntax.clone(),
+                    };
+                    let _ = tx.send(Ok(outgoing)).await;
+                    return Ok(());
+                }
+                response = stream.next() => response,
+            },
+            None => stream.next().await,
+        };
+        let Some(response) = next else { break };
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => crate::cfind::CFindResponse::failure(
+                &request,
+                crate::dimse::status::PROCESSING_FAILURE,
+                error.to_string(),
+            ),
+        };
+        let identifier = response.identifier.clone();
+        if response.is_pending() {
+            matches = matches.saturating_add(1);
+        } else {
+            matches = response.completed;
+            terminated = true;
+        }
+        let outgoing = Outgoing {
+            context_id,
+            command: response.to_command(),
+            dataset: identifier,
+            syntax: syntax.clone(),
+        };
+        let _ = tx.send(Ok(outgoing)).await;
+        if terminated {
+            break;
+        }
+    }
+    if !terminated {
+        // a provider that never terminates still gets a final answer; a
+        // provider that produced nothing must not read as an empty match (NET-09)
+        let mut response = if matches == 0 {
+            crate::cfind::CFindResponse::failure(
+                &request,
+                crate::dimse::status::PROCESSING_FAILURE,
+                "C-FIND provider ended without a response",
+            )
+        } else {
+            crate::cfind::CFindResponse::success(&request, matches)
+        };
+        response.completed = matches;
+        let outgoing = Outgoing {
+            context_id,
+            command: response.to_command(),
+            dataset: None,
+            syntax,
+        };
+        let _ = tx.send(Ok(outgoing)).await;
+    }
+    Ok(())
+}
+async fn execute_n_service<P: ServiceProvider>(
+    job: DispatchJob,
+    provider: &Arc<P>,
+    options: &ServerOptions,
+    tx: &tokio::sync::mpsc::Sender<Result<Outgoing>>,
+) -> Result<()> {
+    use crate::nservice::NServiceRequest;
+    let DispatchJob {
+        context_id,
+        command,
+        body,
+        syntax,
+        // C-STORE and the N-services are not cancellable (§11.4)
+        cancel: _,
+    } = job;
+    let dataset = if body.is_empty() {
+        None
+    } else {
+        let dataset_bytes = body.read_all()?;
+        match crate::message::decode_dataset_with_fallback(
+            &dataset_bytes,
+            &syntax,
+            options.fallback_encoding,
+        ) {
+            Ok(dataset) => Some(dataset),
+            Err(error) => {
+                let comment = error.to_string();
+                let outgoing = failure_outgoing(context_id, &command, &comment, &syntax);
+                let _ = tx.send(Ok(outgoing)).await;
+                return Ok(());
+            }
+        }
+    };
+    let request = NServiceRequest::from_command(&command, dataset);
+    let outcome = match request.field {
+        CommandField::NEventReportRq => provider.on_n_event_report(&request).await,
+        CommandField::NGetRq => provider.on_n_get(&request).await,
+        CommandField::NSetRq => provider.on_n_set(&request).await,
+        CommandField::NCreateRq => provider.on_n_create(&request).await,
+        // N-ACTION is dispatched inline (it may push N-EVENT-REPORTs), and
+        // N-DELETE has no dataset: both answered the same way here
+        CommandField::NDeleteRq => provider.on_n_delete(&request).await,
+        other => {
+            let comment = format!("not an N-service: {other:?}");
+            let outgoing = failure_outgoing(context_id, &command, &comment, &syntax);
+            let _ = tx.send(Ok(outgoing)).await;
+            return Ok(());
+        }
+    };
+    let outgoing = match outcome {
+        Ok(response) => Outgoing {
+            context_id,
+            command: response.to_command(),
+            dataset: response.dataset.clone(),
+            syntax,
+        },
+        Err(error) => {
+            let comment = error.to_string();
+            failure_outgoing(context_id, &command, &comment, &syntax)
+        }
+    };
+    let _ = tx.send(Ok(outgoing)).await;
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3269,7 +4669,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_negotiated_window_queues_an_echo_while_find_is_pending() {
+    async fn a_negotiated_window_answers_an_echo_while_the_find_is_pending() {
         struct Gated {
             done: Arc<tokio::sync::Notify>,
         }
@@ -3371,18 +4771,24 @@ mod tests {
         // The pending Identifier must also be consumed before awaiting another command.
         let pdu = association.read_request_pdu(10).await.unwrap().unwrap();
         assert!(matches!(pdu, Pdu::PData(_)));
+        // M6: the negotiated window lets the SCP answer the C-ECHO while the
+        // C-FIND provider is still gated. Before M6 this response only arrived
+        // after `done`, because the SCP ran one request at a time.
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                association.await_response(11, CommandField::CEchoRsp),
+            )
+            .await
+            .expect("the echo is answered while the find is still pending")
+            .unwrap()
+            .status,
+            Some(0)
+        );
         done.notify_one();
         assert_eq!(
             association
                 .await_response(10, CommandField::CFindRsp)
-                .await
-                .unwrap()
-                .status,
-            Some(0)
-        );
-        assert_eq!(
-            association
-                .await_response(11, CommandField::CEchoRsp)
                 .await
                 .unwrap()
                 .status,
@@ -3488,6 +4894,7 @@ mod tests {
             context_id: 1,
             stream: Stream::Command,
             bytes: command_bytes(&request.to_command()).unwrap().into(),
+            spool: None,
         };
         serving.defer(unit.clone()).unwrap();
         assert!(serving
@@ -4267,6 +5674,9 @@ mod tests {
     /// A provider answering C-FIND with fixed study matches.
     struct QueryProvider {
         matches: Vec<(String, String)>,
+        /// The repertoire the match datasets are written in; they carry no
+        /// (0008,0005), so the client's fallback decides how they are read.
+        charset: Option<&'static str>,
     }
 
     impl QueryProvider {
@@ -4276,7 +5686,13 @@ mod tests {
                     .into_iter()
                     .map(|(a, b)| (a.to_string(), b.to_string()))
                     .collect(),
+                charset: None,
             }
+        }
+
+        fn with_charset(mut self, term: &'static str) -> Self {
+            self.charset = Some(term);
+            self
         }
     }
 
@@ -4299,6 +5715,11 @@ mod tests {
                     let mut item = Dataset::new();
                     item.insert_str(Tag::STUDY_INSTANCE_UID, Vr::Ui, study_uid.clone());
                     item.insert_str(Tag::PATIENT_NAME, Vr::Pn, patient_name.clone());
+                    if let Some(term) = self.charset {
+                        item.set_fallback_encodings(vec![
+                            radicom::encoding::charset::charset_encoding(term),
+                        ]);
+                    }
                     Ok(crate::cfind::CFindResponse::pending(request, item))
                 })
                 .collect();
@@ -7537,11 +8958,13 @@ mod tests {
                     context_id: 1,
                     stream: Stream::Command,
                     bytes: command_bytes(&cancel).unwrap().into(),
+                    spool: None,
                 },
                 crate::assembler::MessageUnit {
                     context_id: if mismatch == 0 { 1 } else { 3 },
                     stream: Stream::Command,
                     bytes: command_bytes(&response).unwrap().into(),
+                    spool: None,
                 },
             ]);
             let mut serving = Serving {
@@ -7961,7 +9384,7 @@ mod tests {
             &mut serving,
             1,
             Command::request(CommandField::CEchoRq, 3),
-            bytes::Bytes::from_static(&[0x00]),
+            crate::assembler::MessageBody::Memory(bytes::Bytes::from_static(&[0x00])),
             &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
         )
         .await
@@ -8042,6 +9465,7 @@ mod tests {
                 context_id: 1,
                 stream: crate::assembler::Stream::Data,
                 bytes: bytes::Bytes::from_static(&[0xAA]),
+                spool: None,
             });
         serving
             .pending_units
@@ -8049,6 +9473,7 @@ mod tests {
                 context_id: 1,
                 stream: crate::assembler::Stream::Command,
                 bytes: command_bytes(&response).unwrap().into(),
+                spool: None,
             });
         let (again, _) = serving.await_store_response(7, 1, 1, 99).await.unwrap();
         assert_eq!(again.field, CommandField::CStoreRsp);
@@ -8687,6 +10112,551 @@ mod tests {
                 anomaly,
             )
             .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_connect_timeout_fires_before_the_socket_answers() {
+        // M7: fo-dicom's ConnectionTimeoutInMs. A connect future that never
+        // resolves models a host that drops the SYN.
+        let never = std::future::pending::<std::io::Result<TcpStream>>();
+        let error = connect_with_timeout(never, Some(Duration::from_millis(25)))
+            .await
+            .expect_err("the timeout fires");
+        assert!(
+            matches!(error, NetworkError::ConnectTimedOut { timeout_ms: 25 }),
+            "{error}"
+        );
+
+        // a refused connect is still an IO error, not a timeout
+        let refused = connect_with_timeout(
+            TcpStream::connect("127.0.0.1:1"),
+            Some(Duration::from_secs(5)),
+        )
+        .await;
+        assert!(matches!(refused, Err(NetworkError::Io(_))), "{refused:?}");
+
+        // the default is no timeout, so the previous behaviour is unchanged
+        assert!(ClientOptions::default().connect_timeout.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_stalled_store_response_times_out_when_the_server_sets_one() {
+        // M8: an SCP-issued request must not wait forever on a silent peer.
+        let (_peer, mut io) = tokio::io::duplex(4096);
+        let provider = Arc::new(VerificationProvider);
+        let options = ServerOptions {
+            request_timeout: Some(Duration::from_millis(30)),
+            ..Default::default()
+        };
+        let accepted = AcceptedContexts::default();
+        let splitter = PduSplitter::new(16384, 16);
+        let mut serving = Serving {
+            stream: &mut io,
+            splitter: &splitter,
+            provider: &provider,
+            options: &options,
+            assembler: PdvAssembler::new(),
+            pending_units: VecDeque::new(),
+            deferred_units: VecDeque::new(),
+            deferred_requests: 0,
+            incoming_window: 1,
+            accepted: &accepted,
+            reverse_message_id: 1,
+            transcoder_cache: std::collections::HashMap::new(),
+            pdu_reader: crate::transport::PduReader::new(),
+        };
+        let started = std::time::Instant::now();
+        let error = serving
+            .await_store_response(7, 1, 1, 99)
+            .await
+            .expect_err("a silent peer is bounded");
+        assert!(
+            matches!(error, NetworkError::RequestTimedOut { message_id: 7 }),
+            "{error}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the deadline is what ends the wait"
+        );
+    }
+
+    // -- batch 2: L4, L6, L8, client fallback, M6 ----------------------------
+
+    #[tokio::test]
+    async fn the_client_sees_the_peers_implementation_identity() {
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(VerificationProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+        let association = Association::open(
+            addr,
+            "SCU",
+            "SCP",
+            vec![echo_context()],
+            ClientOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            association.peer_implementation_class_uid(),
+            Some(IMPLEMENTATION_CLASS_UID)
+        );
+        assert_eq!(
+            association.peer_implementation_version_name(),
+            Some(IMPLEMENTATION_VERSION_NAME)
+        );
+
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_common_extended_negotiation_item_reaches_the_wire() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let Some(Pdu::AssociateRq(rq)) = read_pdu(&mut stream).await.unwrap_or(None) else {
+                return;
+            };
+            let _ = tx.send(rq.user_information.common_extended.clone());
+        });
+
+        let item = crate::pdu::CommonExtended {
+            service_class_uid: "1.2.840.10008.5.1.4.1.1.7".to_string(),
+            related_general_sop_classes: vec!["1.2.840.10008.5.1.4.1.1.7".to_string()],
+        };
+        let options = ClientOptions {
+            common_extended: Some(item.clone()),
+            ..Default::default()
+        };
+        // the peer closes without answering: this test observes the request only
+        let _ = Association::open(addr, "SCU", "SCP", vec![store_context()], options).await;
+        let sent = tokio::time::timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("the request arrives")
+            .unwrap();
+        assert_eq!(sent, Some(item));
+    }
+
+    #[tokio::test]
+    async fn client_metrics_count_the_associations_traffic() {
+        let metrics = Arc::new(crate::observability::CountingMetrics::new());
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(VerificationProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+        let options = ClientOptions {
+            metrics: Some(metrics.clone()),
+            ..Default::default()
+        };
+        let mut association = Association::open(addr, "SCU", "SCP", vec![echo_context()], options)
+            .await
+            .unwrap();
+
+        let opened = metrics.snapshot();
+        assert!(opened.bytes_sent > 0, "the A-ASSOCIATE-RQ is counted");
+        assert!(opened.bytes_received > 0, "the A-ASSOCIATE-AC is counted");
+        assert_eq!(opened.associations_opened, 1);
+        assert_eq!(opened.active_connections(), 1);
+
+        association
+            .send_c_echo(sop_class::VERIFICATION)
+            .await
+            .unwrap();
+        let after_echo = metrics.snapshot();
+        assert!(
+            after_echo.bytes_sent > opened.bytes_sent,
+            "the C-ECHO adds sent bytes"
+        );
+
+        // `release` consumes the association, dropping the metric guards
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+        assert_eq!(
+            metrics.snapshot().active_connections(),
+            0,
+            "the guard closes the connection on drop"
+        );
+    }
+
+    /// A C-FIND match whose PatientName comes back under `fallback`. The
+    /// provider writes UTF-8 without (0008,0005), so only the fallback list
+    /// decides how the text is encoded (H1) and decoded (item 2).
+    async fn find_patient_name_with(fallback: Option<&'static str>) -> String {
+        let provider =
+            Arc::new(QueryProvider::new(vec![("1.2.3.1", "Müller")]).with_charset("ISO_IR 192"));
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            provider,
+            ServerOptions {
+                store_sink: crate::store::StoreSink::Memory,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+        let options = ClientOptions {
+            fallback_encoding: fallback,
+            ..Default::default()
+        };
+        let mut association = Association::open(addr, "SCU", "SCP", vec![find_context()], options)
+            .await
+            .unwrap();
+        let request = crate::cfind::CFindRequest::study_query(1);
+        let responses = association.send_c_find(&request).await.unwrap();
+        let name = responses[0]
+            .identifier
+            .as_ref()
+            .expect("a pending match")
+            .get_str(Tag::PATIENT_NAME)
+            .unwrap_or_default();
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+        name
+    }
+
+    #[tokio::test]
+    async fn a_c_find_match_without_a_charset_decodes_with_the_client_fallback() {
+        assert_eq!(
+            find_patient_name_with(Some("ISO_IR 192")).await,
+            "Müller",
+            "the configured fallback decodes the UTF-8 bytes"
+        );
+        assert_eq!(
+            find_patient_name_with(None).await,
+            "MÃ¼ller",
+            "without a fallback the default repertoire reads single bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_stores_travel_before_the_first_response() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let Some(Pdu::AssociateRq(rq)) = read_pdu(&mut stream).await.unwrap() else {
+                panic!("no A-ASSOCIATE-RQ");
+            };
+            let mut answer = Associate::new(rq.called_ae.clone(), rq.calling_ae.clone());
+            answer.presentation_contexts = rq
+                .presentation_contexts
+                .iter()
+                .map(|pc| PresentationContext {
+                    id: pc.id,
+                    abstract_syntax: String::new(),
+                    transfer_syntaxes: pc.transfer_syntaxes.first().cloned().into_iter().collect(),
+                    result: 0,
+                })
+                .collect();
+            answer.user_information = rq.user_information.clone();
+            write_pdu(&mut stream, &Pdu::AssociateAc(answer))
+                .await
+                .unwrap();
+
+            // Two complete C-STORE requests must arrive before this peer writes
+            // a single response: that is the async-operations window (M6).
+            let splitter = PduSplitter::new(16384, 16);
+            let mut assembler = PdvAssembler::new();
+            let mut commands = Vec::new();
+            let mut datasets = 0;
+            let mut context_id = 0;
+            while commands.len() < 2 || datasets < 2 {
+                let Some(pdu) = read_pdu(&mut stream).await.unwrap() else {
+                    panic!("the peer closed before both requests arrived");
+                };
+                let Pdu::PData(pdata) = pdu else {
+                    panic!("unexpected PDU while reading the requests");
+                };
+                for unit in assembler.push_pdata(&pdata).unwrap() {
+                    context_id = unit.context_id;
+                    match unit.stream {
+                        Stream::Command => {
+                            commands.push(command_from_bytes(&unit.bytes).unwrap());
+                        }
+                        Stream::Data => datasets += 1,
+                    }
+                }
+            }
+            assert!(commands
+                .iter()
+                .all(|command| command.field == CommandField::CStoreRq));
+            assert_eq!(datasets, 2, "both datasets arrived with their commands");
+
+            // answer in reverse order: the batch matches by message ID
+            for command in commands.iter().rev() {
+                let response = Command::response(command, crate::dimse::status::SUCCESS).unwrap();
+                for pdu in splitter
+                    .split(context_id, true, &command_bytes(&response).unwrap())
+                    .unwrap()
+                {
+                    write_pdu(&mut stream, &Pdu::PData(pdu)).await.unwrap();
+                }
+            }
+            if let Some(Pdu::ReleaseRq) = read_pdu(&mut stream).await.unwrap() {
+                write_pdu(&mut stream, &Pdu::ReleaseRp).await.unwrap();
+            }
+        });
+
+        let options = ClientOptions {
+            async_operations: crate::pdu::AsyncOperations {
+                invoked: 2,
+                performed: 2,
+            },
+            ..Default::default()
+        };
+        let mut association = Association::open(addr, "SCU", "SCP", vec![store_context()], options)
+            .await
+            .unwrap();
+        let first = instance_file();
+        let second = instance_file();
+        let responses = tokio::time::timeout(
+            Duration::from_secs(5),
+            association.send_c_store_batch(&[&first, &second]),
+        )
+        .await
+        .expect("a sequential sender would deadlock here")
+        .unwrap();
+        assert_eq!(responses.len(), 2);
+        assert!(responses
+            .iter()
+            .all(|response| response.status == crate::dimse::status::SUCCESS));
+        association.release().await.unwrap();
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_c_find_batch_returns_each_requests_matches() {
+        let provider = Arc::new(QueryProvider::new(vec![
+            ("1.2.3.1", "Doe^John"),
+            ("1.2.3.2", "Roe^Jane"),
+        ]));
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            provider.clone(),
+            ServerOptions {
+                store_sink: crate::store::StoreSink::Memory,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+        let mut association = Association::open(
+            addr,
+            "SCU",
+            "SCP",
+            vec![find_context()],
+            ClientOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        let requests = [
+            crate::cfind::CFindRequest::study_query(1),
+            crate::cfind::CFindRequest::study_query(2),
+        ];
+        let batches = association.send_c_find_batch(&requests).await.unwrap();
+        assert_eq!(batches.len(), 2, "one result list per request");
+        for (index, responses) in batches.iter().enumerate() {
+            assert_eq!(
+                responses.len(),
+                3,
+                "two matches plus the terminal response for request {index}"
+            );
+            assert_eq!(
+                responses[2].message_id_being_responded_to, requests[index].message_id,
+                "the results belong to their own request"
+            );
+            assert_eq!(
+                responses[0]
+                    .identifier
+                    .as_ref()
+                    .unwrap()
+                    .get_str(Tag::PATIENT_NAME)
+                    .unwrap(),
+                "Doe^John"
+            );
+        }
+
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    // -- M6: the SCP runs independent requests concurrently -------------------
+
+    /// A provider that takes 200 ms per C-STORE and counts the attempts.
+    struct SlowStore {
+        seen: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ServiceProvider for SlowStore {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec!["1.2.840.10008.5.1.4.1.1.7".to_string()]
+        }
+        async fn on_c_store(&self, request: &CStoreRequest) -> Result<CStoreResponse> {
+            // a real provider doing real work: the association must not stall
+            // while this runs
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            self.seen
+                .lock()
+                .unwrap()
+                .push(request.instance_uid().to_string());
+            Ok(CStoreResponse::success(request))
+        }
+    }
+
+    #[tokio::test]
+    async fn two_stores_against_a_slow_provider_overlap_on_the_scp() {
+        let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(SlowStore { seen: seen.clone() }),
+            ServerOptions {
+                store_sink: crate::store::StoreSink::Memory,
+                async_operations: crate::pdu::AsyncOperations {
+                    invoked: 2,
+                    performed: 2,
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut association = Association::open(
+            addr,
+            "SCU",
+            "SCP",
+            vec![store_context()],
+            ClientOptions {
+                async_operations: crate::pdu::AsyncOperations {
+                    invoked: 2,
+                    performed: 2,
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let first = instance_file();
+        let mut second = instance_file();
+        second
+            .dataset
+            .insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5.7");
+        let started = std::time::Instant::now();
+        let responses = association
+            .send_c_store_batch(&[&first, &second])
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(responses.len(), 2);
+        assert!(responses
+            .iter()
+            .all(|response| response.status == crate::dimse::status::SUCCESS));
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            2,
+            "both instances reached the provider"
+        );
+        // 200 ms + 200 ms if the SCP ran them one after the other; the test
+        // budget leaves room for scheduling noise but not for serialisation
+        assert!(
+            elapsed < Duration::from_millis(380),
+            "the two stores must overlap, took {elapsed:?}"
+        );
+
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    // -- L3: untranscodable syntax change ------------------------------------
+
+    /// An instance whose PixelData is in a syntax no codec in this build can
+    /// convert (no JPEG decoder is registered).
+    fn jpeg_instance() -> radicom::io::file::DicomFile {
+        let mut dataset = Dataset::new();
+        dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5.9");
+        dataset.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+        dataset.insert_value_with_vr(Tag::ROWS, Vr::Us, 1u16);
+        dataset.insert_value_with_vr(Tag::COLUMNS, Vr::Us, 1u16);
+        dataset.insert_value_with_vr(Tag::PIXEL_DATA, Vr::Ob, vec![0u8; 64]);
+        dataset.set_transfer_syntax(syntaxes::JPEG_PROCESS_1.clone());
+        radicom::io::file::DicomFile::from_dataset(dataset)
+    }
+
+    #[tokio::test]
+    async fn an_untranscodable_store_fails_unless_the_option_allows_it() {
+        for ignore in [false, true] {
+            let server = DicomServer::bind(
+                "127.0.0.1:0",
+                Arc::new(RecordingProvider::new()),
+                ServerOptions {
+                    store_sink: crate::store::StoreSink::Memory,
+                    ignore_unsupported_syntax_change: ignore,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let addr = server.local_addr();
+            let handle = tokio::spawn(async move { server.accept_one().await });
+            let mut association = Association::open(
+                addr,
+                "SCU",
+                "SCP",
+                vec![store_context()],
+                ClientOptions {
+                    ignore_unsupported_syntax_change: ignore,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+            let result = association.send_c_store(&jpeg_instance()).await;
+            if ignore {
+                // the bytes went out in their own syntax: the peer cannot decode
+                // them as the negotiated one, so it answers a failure status
+                let response = result.expect("the option sends the dataset instead of failing");
+                assert_ne!(
+                    response.status,
+                    crate::dimse::status::SUCCESS,
+                    "the peer could not decode a JPEG dataset labelled Implicit VR LE"
+                );
+            } else {
+                assert!(
+                    result.is_err(),
+                    "without the option an untranscodable dataset is an error"
+                );
+            }
+            association.release().await.unwrap();
+            handle.await.unwrap().unwrap();
         }
     }
 }

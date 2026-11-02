@@ -5,9 +5,10 @@
 //! the print SCU would publish; `FilmBox::render_to_image` (PRINT-02) is
 //! feature-gated behind `render`.
 
-use crate::error::Error;
+use crate::error::{DataError, Error};
 use crate::model::dataset::Dataset;
 use crate::model::tag::Tag;
+use crate::model::uid::Uid;
 use crate::model::vr::Vr;
 use crate::print::layout::{FilmSize, ImageDisplayFormat, LayoutCell};
 use crate::print::presentation_lut::{PresentationLut, PresentationLutShape};
@@ -44,6 +45,13 @@ pub mod tags {
     pub const MIN_DENSITY: Tag = Tag::MIN_DENSITY;
     /// (2010,0130) Maximum Density.
     pub const MAX_DENSITY: Tag = Tag::MAX_DENSITY;
+    /// (2010,015E) Illumination.
+    pub const ILLUMINATION: Tag = Tag::ILLUMINATION;
+    /// (2010,0160) Reflected Ambient Light.
+    pub const REFLECTED_AMBIENT_LIGHT: Tag = Tag::REFLECTED_AMBIENT_LIGHT;
+    /// (2020,0050) Requested Resolution ID (Image Box; fo-dicom also exposes it
+    /// on `FilmBox`).
+    pub const REQUESTED_RESOLUTION_ID: Tag = Tag::REQUESTED_RESOLUTION_ID;
     /// (2010,0140) Trim.
     pub const TRIM: Tag = Tag::TRIM;
     /// (2010,0510) Referenced Image Box Sequence (in FilmBox).
@@ -58,6 +66,20 @@ pub mod tags {
     pub const PRESENTATION_LUT_SEQUENCE: Tag = Tag::PRESENTATION_LUT_SEQUENCE;
     /// (2050,0020) Presentation LUT Shape.
     pub const PRESENTATION_LUT_SHAPE: Tag = Tag::PRESENTATION_LUT_SHAPE;
+    /// (2050,0500) Referenced Presentation LUT Sequence (in FilmBox).
+    pub const REFERENCED_PRESENTATION_LUT_SEQUENCE: Tag = Tag::REFERENCED_PRESENTATION_LUT_SEQUENCE;
+    /// (0008,0016) SOP Class UID of an Image Box / Presentation LUT instance.
+    pub const SOP_CLASS_UID: Tag = Tag::SOP_CLASS_UID;
+    /// (0008,0018) SOP Instance UID of an Image Box / Presentation LUT instance.
+    pub const SOP_INSTANCE_UID: Tag = Tag::SOP_INSTANCE_UID;
+    /// (0008,1150) Referenced SOP Class UID (inside a reference item).
+    pub const REFERENCED_SOP_CLASS_UID: Tag = Tag::REFERENCED_SOP_CLASS_UID;
+    /// (0008,1155) Referenced SOP Instance UID (inside a reference item).
+    pub const REFERENCED_SOP_INSTANCE_UID: Tag = Tag::REFERENCED_SOP_INSTANCE_UID;
+    /// (2020,0110) Basic Grayscale Image Sequence.
+    pub const BASIC_GRAYSCALE_IMAGE_SEQUENCE: Tag = Tag::BASIC_GRAYSCALE_IMAGE_SEQUENCE;
+    /// (2020,0111) Basic Color Image Sequence.
+    pub const BASIC_COLOR_IMAGE_SEQUENCE: Tag = Tag::BASIC_COLOR_IMAGE_SEQUENCE;
     /// (0028,3002) LUT Descriptor (inside a Presentation LUT Sequence item).
     pub const LUT_DESCRIPTOR: Tag = Tag::LUT_DESCRIPTOR;
     /// (0028,3006) LUT Data (inside a Presentation LUT Sequence item).
@@ -94,26 +116,37 @@ impl FilmOrientation {
 }
 
 /// A print film session (§12.4): film destination/label/medium/priority/copies.
+///
+/// A session also owns the Presentation LUT SOP instances created for it
+/// (`fo-dicom FilmSession.CreatePresentationLut`), so a film box can reference
+/// one by SOP Instance UID (`(2050,0500)`) instead of embedding the table.
 #[derive(Debug, Clone)]
 pub struct FilmSession {
     dataset: Dataset,
+    presentation_luts: Vec<PresentationLut>,
 }
 
 impl FilmSession {
     pub fn new() -> Self {
         FilmSession {
             dataset: Dataset::new(),
+            presentation_luts: Vec::new(),
         }
     }
 
     pub fn from_dataset(dataset: Dataset) -> Self {
-        FilmSession { dataset }
+        FilmSession {
+            dataset,
+            presentation_luts: Vec::new(),
+        }
     }
 
     pub fn dataset(&self) -> &Dataset {
         &self.dataset
     }
 
+    /// Consumes the session and returns its dataset. The Presentation LUT SOP
+    /// instances are separate objects, so they are not written here.
     pub fn into_dataset(self) -> Dataset {
         self.dataset
     }
@@ -160,6 +193,33 @@ impl FilmSession {
     pub fn destination(&self) -> Option<String> {
         self.dataset.try_get_str(tags::FILM_DESTINATION)
     }
+
+    /// Registers a standalone Presentation LUT SOP instance with this session
+    /// (fo-dicom `FilmSession.CreatePresentationLut`). A film box references it
+    /// through [`FilmBox::set_referenced_presentation_lut`].
+    pub fn add_presentation_lut(&mut self, lut: PresentationLut) {
+        self.presentation_luts.push(lut);
+    }
+
+    /// The Presentation LUT SOP instances created for this session.
+    pub fn presentation_luts(&self) -> &[PresentationLut] {
+        &self.presentation_luts
+    }
+
+    /// Finds a registered Presentation LUT by its SOP Instance UID.
+    pub fn find_presentation_lut(&self, sop_instance_uid: &str) -> Option<&PresentationLut> {
+        self.presentation_luts
+            .iter()
+            .find(|lut| lut.sop_instance_uid().as_deref() == Some(sop_instance_uid))
+    }
+
+    /// Removes a registered Presentation LUT, returning whether it existed.
+    pub fn remove_presentation_lut(&mut self, sop_instance_uid: &str) -> bool {
+        let before = self.presentation_luts.len();
+        self.presentation_luts
+            .retain(|lut| lut.sop_instance_uid().as_deref() != Some(sop_instance_uid));
+        self.presentation_luts.len() != before
+    }
 }
 
 impl Default for FilmSession {
@@ -169,26 +229,39 @@ impl Default for FilmSession {
 }
 
 /// A film box (§12.4): one film's display format and print attributes.
+///
+/// The film box dataset carries only *references* to its Image Box SOP
+/// instances (`(2010,0510)`); the image boxes themselves are separate SOP
+/// instances kept in memory, like fo-dicom's `FilmBox.BasicImageBoxes`.
 #[derive(Debug, Clone)]
 pub struct FilmBox {
     dataset: Dataset,
+    image_boxes: Vec<ImageBox>,
 }
 
 impl FilmBox {
     pub fn new() -> Self {
         FilmBox {
             dataset: Dataset::new(),
+            image_boxes: Vec::new(),
         }
     }
 
     pub fn from_dataset(dataset: Dataset) -> Self {
-        FilmBox { dataset }
+        FilmBox {
+            dataset,
+            image_boxes: Vec::new(),
+        }
     }
 
     pub fn dataset(&self) -> &Dataset {
         &self.dataset
     }
 
+    /// Consumes the film box and returns its dataset. The Image Box SOP
+    /// instances are separate objects: only their `(2010,0510)` references are
+    /// written, so a parsed-back film box has no image payloads until the
+    /// image boxes are reattached with [`Self::add_image_box`].
     pub fn into_dataset(self) -> Dataset {
         self.dataset
     }
@@ -310,6 +383,52 @@ impl FilmBox {
         self.dataset.try_get(tags::MAX_DENSITY)
     }
 
+    /// Sets `(2010,0060)` Magnification Type (Table C.13-3). `REPLICATE` selects
+    /// nearest-neighbour scaling; anything else (including the `BILINEAR`
+    /// default) uses bilinear interpolation. An image box value overrides this
+    /// one (Table C.13-5).
+    pub fn set_magnification_type(&mut self, value: impl Into<String>) {
+        self.dataset
+            .insert_str(tags::MAGNIFICATION_TYPE, Vr::Cs, value);
+    }
+
+    /// The film box's Magnification Type, `BILINEAR` when absent (fo-dicom
+    /// `FilmBox.MagnificationType`).
+    pub fn magnification_type(&self) -> String {
+        self.dataset
+            .try_get_str(tags::MAGNIFICATION_TYPE)
+            .unwrap_or_else(|| "BILINEAR".to_string())
+    }
+
+    /// Sets `(2010,015E)` Illumination (US).
+    pub fn set_illumination(&mut self, value: u16) {
+        self.dataset.insert_value(tags::ILLUMINATION, value);
+    }
+
+    pub fn illumination(&self) -> Option<u16> {
+        self.dataset.try_get(tags::ILLUMINATION)
+    }
+
+    /// Sets `(2010,0160)` Reflected Ambient Light (US).
+    pub fn set_reflected_ambient_light(&mut self, value: u16) {
+        self.dataset
+            .insert_value(tags::REFLECTED_AMBIENT_LIGHT, value);
+    }
+
+    pub fn reflected_ambient_light(&self) -> Option<u16> {
+        self.dataset.try_get(tags::REFLECTED_AMBIENT_LIGHT)
+    }
+
+    /// Sets `(2020,0050)` Requested Resolution ID (CS).
+    pub fn set_requested_resolution_id(&mut self, value: impl Into<String>) {
+        self.dataset
+            .insert_str(tags::REQUESTED_RESOLUTION_ID, Vr::Cs, value);
+    }
+
+    pub fn requested_resolution_id(&self) -> Option<String> {
+        self.dataset.try_get_str(tags::REQUESTED_RESOLUTION_ID)
+    }
+
     /// Lays out this film's image cells, inset by `margin` mm (§12.4).
     ///
     /// Returns an empty vector when the display format or film size is missing
@@ -322,30 +441,82 @@ impl FilmBox {
         }
     }
 
-    /// Initialises the ReferencedImageBoxSequence with `count` image boxes,
-    /// numbering positions 1..=count (§12.4, `initialize`).
-    pub fn initialize_image_boxes(&mut self, count: u32) {
-        let sequence = self
+    /// Creates a Basic Grayscale or Basic Color Image Box SOP instance and adds
+    /// its reference to `(2010,0510)` (fo-dicom `FilmBox.CreateImageBox`).
+    ///
+    /// The image box dataset is a separate SOP instance, so it is kept in
+    /// memory (like fo-dicom's `BasicImageBoxes`); the film box dataset carries
+    /// only the `(0008,1150)`/`(0008,1155)` reference.
+    pub fn create_image_box(&mut self, position: u16, color: bool) -> &mut ImageBox {
+        let index = self.image_boxes.len();
+        self.add_image_box(ImageBox::new(position, color));
+        &mut self.image_boxes[index]
+    }
+
+    /// Adds an existing Image Box SOP instance to this film box and appends its
+    /// `(2010,0510)` reference item.
+    pub fn add_image_box(&mut self, image_box: ImageBox) {
+        self.push_image_box_reference(&image_box);
+        self.image_boxes.push(image_box);
+    }
+
+    fn push_image_box_reference(&mut self, image_box: &ImageBox) {
+        let mut item = Dataset::new();
+        if let Some(uid) = image_box.sop_class_uid() {
+            item.insert_str(tags::REFERENCED_SOP_CLASS_UID, Vr::Ui, uid);
+        }
+        if let Some(uid) = image_box.sop_instance_uid() {
+            item.insert_str(tags::REFERENCED_SOP_INSTANCE_UID, Vr::Ui, uid);
+        }
+        match self
             .dataset
-            .insert_sequence(tags::REFERENCED_IMAGE_BOX_SEQUENCE);
-        sequence.items_mut().clear();
-        for position in 1..=count {
-            let mut boxed = Dataset::new();
-            boxed.insert_value(tags::IMAGE_POSITION, position as u16);
-            sequence.push(boxed);
+            .sequence_mut(tags::REFERENCED_IMAGE_BOX_SEQUENCE)
+        {
+            Some(sequence) => sequence.push(item),
+            None => {
+                self.dataset
+                    .insert_sequence(tags::REFERENCED_IMAGE_BOX_SEQUENCE)
+                    .push(item);
+            }
         }
     }
 
-    /// Number of image boxes currently in the ReferencedImageBoxSequence.
-    pub fn image_box_count(&self) -> usize {
+    /// Initialises the ReferencedImageBoxSequence with `count` Basic Grayscale
+    /// Image Box SOP instances numbered 1..=count (§12.4, `initialize`).
+    pub fn initialize_image_boxes(&mut self, count: u32) {
+        self.image_boxes.clear();
         self.dataset
-            .try_get_sequence(tags::REFERENCED_IMAGE_BOX_SEQUENCE)
-            .map(|sequence| sequence.items().len())
-            .unwrap_or(0)
+            .insert_sequence(tags::REFERENCED_IMAGE_BOX_SEQUENCE)
+            .items_mut()
+            .clear();
+        for position in 1..=count {
+            let image_box = ImageBox::new(position as u16, false);
+            self.push_image_box_reference(&image_box);
+            self.image_boxes.push(image_box);
+        }
     }
 
-    /// The image boxes as owned [`ImageBox`] views (clones the item datasets).
+    /// Number of image boxes currently in the film box.
+    pub fn image_box_count(&self) -> usize {
+        if self.image_boxes.is_empty() {
+            self.dataset
+                .try_get_sequence(tags::REFERENCED_IMAGE_BOX_SEQUENCE)
+                .map(|sequence| sequence.items().len())
+                .unwrap_or(0)
+        } else {
+            self.image_boxes.len()
+        }
+    }
+
+    /// The image boxes as owned [`ImageBox`] views.
+    ///
+    /// Image boxes created through this film box come from memory; for a film
+    /// box parsed from a dataset, the reference items are read as radicom's
+    /// legacy carrier (their nested image sequence).
     pub fn image_boxes(&self) -> Vec<ImageBox> {
+        if !self.image_boxes.is_empty() {
+            return self.image_boxes.clone();
+        }
         self.dataset
             .try_get_sequence(tags::REFERENCED_IMAGE_BOX_SEQUENCE)
             .map(|sequence| {
@@ -371,6 +542,52 @@ impl FilmBox {
         self.dataset
             .insert_str(tags::PRESENTATION_LUT_SHAPE, Vr::Cs, shape.as_str());
     }
+
+    /// Sets `(2050,0500)` Referenced Presentation LUT Sequence to a standalone
+    /// Presentation LUT SOP instance (fo-dicom
+    /// `FilmBox.ReferencedPresentationLutSequence`).
+    pub fn set_referenced_presentation_lut(&mut self, sop_instance_uid: impl Into<String>) {
+        let mut item = Dataset::new();
+        item.insert_str(
+            tags::REFERENCED_SOP_CLASS_UID,
+            Vr::Ui,
+            crate::uids::PRESENTATION_LUT,
+        );
+        item.insert_str(tags::REFERENCED_SOP_INSTANCE_UID, Vr::Ui, sop_instance_uid);
+        let sequence = self
+            .dataset
+            .insert_sequence(tags::REFERENCED_PRESENTATION_LUT_SEQUENCE);
+        sequence.items_mut().clear();
+        sequence.push(item);
+    }
+
+    /// The SOP Instance UID from `(2050,0500)`, when present.
+    pub fn referenced_presentation_lut_uid(&self) -> Option<String> {
+        self.dataset
+            .try_get_sequence(tags::REFERENCED_PRESENTATION_LUT_SEQUENCE)?
+            .items()
+            .first()?
+            .try_get_str(tags::REFERENCED_SOP_INSTANCE_UID)
+    }
+
+    /// Resolves the Presentation LUT this film box prints with: the standalone
+    /// SOP instance referenced through `(2050,0500)`, looked up in `session`,
+    /// otherwise the embedded `(2050,0010)` table / `(2050,0020)` shape.
+    pub fn resolve_presentation_lut(
+        &self,
+        session: &FilmSession,
+    ) -> Result<PresentationLut, Error> {
+        if let Some(uid) = self.referenced_presentation_lut_uid() {
+            return session.find_presentation_lut(&uid).cloned().ok_or_else(|| {
+                Error::Data(DataError::Other {
+                    message: format!(
+                        "referenced Presentation LUT {uid} is not in the film session"
+                    ),
+                })
+            });
+        }
+        self.presentation_lut()
+    }
 }
 
 impl Default for FilmBox {
@@ -386,12 +603,74 @@ pub struct ImageBox {
 }
 
 impl ImageBox {
+    /// Creates a Basic Image Box SOP instance (fo-dicom `ImageBox`): a generated
+    /// SOP Instance UID, the grayscale or colour SOP Class UID and the position.
+    pub fn new(position: u16, color: bool) -> Self {
+        let mut dataset = Dataset::new();
+        dataset.insert_str(tags::SOP_CLASS_UID, Vr::Ui, Self::sop_class_for(color));
+        dataset.insert_str(tags::SOP_INSTANCE_UID, Vr::Ui, Uid::generate_value());
+        dataset.insert_value(tags::IMAGE_POSITION, position);
+        ImageBox { dataset }
+    }
+
+    /// The SOP Class UID for a grayscale or colour image box.
+    fn sop_class_for(color: bool) -> &'static str {
+        if color {
+            crate::uids::BASIC_COLOR_IMAGE_BOX
+        } else {
+            crate::uids::BASIC_GRAYSCALE_IMAGE_BOX
+        }
+    }
+
     pub fn from_dataset(dataset: Dataset) -> Self {
         ImageBox { dataset }
     }
 
     pub fn dataset(&self) -> &Dataset {
         &self.dataset
+    }
+
+    /// `(0008,0016)` SOP Class UID.
+    pub fn sop_class_uid(&self) -> Option<String> {
+        self.dataset.try_get_str(tags::SOP_CLASS_UID)
+    }
+
+    pub fn set_sop_class_uid(&mut self, uid: impl Into<String>) {
+        self.dataset.insert_str(tags::SOP_CLASS_UID, Vr::Ui, uid);
+    }
+
+    /// `(0008,0018)` SOP Instance UID.
+    pub fn sop_instance_uid(&self) -> Option<String> {
+        self.dataset.try_get_str(tags::SOP_INSTANCE_UID)
+    }
+
+    pub fn set_sop_instance_uid(&mut self, uid: impl Into<String>) {
+        self.dataset.insert_str(tags::SOP_INSTANCE_UID, Vr::Ui, uid);
+    }
+
+    /// True for a Basic Color Image Box (its SOP Class UID, or a colour image
+    /// sequence already attached).
+    pub fn is_color(&self) -> bool {
+        self.sop_class_uid().as_deref() == Some(crate::uids::BASIC_COLOR_IMAGE_BOX)
+            || self
+                .dataset
+                .try_get_sequence(tags::BASIC_COLOR_IMAGE_SEQUENCE)
+                .is_some()
+    }
+
+    /// Switches this box between Basic Grayscale and Basic Color (§12.4).
+    pub fn set_color(&mut self, color: bool) {
+        self.set_sop_class_uid(Self::sop_class_for(color));
+    }
+
+    /// The image sequence tag this box writes: `(2020,0111)` for colour,
+    /// `(2020,0110)` otherwise (PS3.3 C.13.6).
+    fn image_sequence_tag(&self) -> Tag {
+        if self.is_color() {
+            tags::BASIC_COLOR_IMAGE_SEQUENCE
+        } else {
+            tags::BASIC_GRAYSCALE_IMAGE_SEQUENCE
+        }
     }
 
     pub fn position(&self) -> Option<u16> {
@@ -425,6 +704,25 @@ impl ImageBox {
         self.dataset.try_get_str(tags::MAGNIFICATION_TYPE)
     }
 
+    /// Sets `(2010,0120)` Min Density on this image box (Table C.13-5); it
+    /// overrides the film box value for this cell.
+    pub fn set_min_density(&mut self, value: u16) {
+        self.dataset.insert_value(tags::MIN_DENSITY, value);
+    }
+
+    pub fn min_density(&self) -> Option<u16> {
+        self.dataset.try_get(tags::MIN_DENSITY)
+    }
+
+    /// Sets `(2010,0130)` Max Density on this image box (Table C.13-5).
+    pub fn set_max_density(&mut self, value: u16) {
+        self.dataset.insert_value(tags::MAX_DENSITY, value);
+    }
+
+    pub fn max_density(&self) -> Option<u16> {
+        self.dataset.try_get(tags::MAX_DENSITY)
+    }
+
     /// Sets `(2010,0080)` on this image box, overriding the film box value
     /// (Table C.13-5). See [`FilmBox::set_smoothing_type`] for the values.
     pub fn set_smoothing_type(&mut self, value: impl Into<String>) {
@@ -446,24 +744,22 @@ impl ImageBox {
             .and_then(|value| value.trim().parse().ok())
     }
 
-    /// Attaches one image (a dataset holding pixel data) to the image sequence.
+    /// Attaches one image to this box's image sequence: `(2020,0111)` for a
+    /// Basic Color Image Box, `(2020,0110)` otherwise.
     pub fn push_image(&mut self, image: Dataset) {
-        self.dataset
-            .insert_sequence(Tag::BASIC_GRAYSCALE_IMAGE_SEQUENCE)
-            .push(image);
+        let tag = self.image_sequence_tag();
+        self.dataset.insert_sequence(tag).push(image);
     }
 
+    /// Number of images attached to this box.
     pub fn image_count(&self) -> usize {
-        self.dataset
-            .try_get_sequence(Tag::BASIC_GRAYSCALE_IMAGE_SEQUENCE)
-            .map(|sequence| sequence.items().len())
-            .unwrap_or(0)
+        self.images().len()
     }
 
-    /// The image datasets attached to this box (its ImageSequence items).
+    /// The image datasets attached to this box (its image sequence items).
     pub fn images(&self) -> &[Dataset] {
         self.dataset
-            .try_get_sequence(Tag::BASIC_GRAYSCALE_IMAGE_SEQUENCE)
+            .try_get_sequence(self.image_sequence_tag())
             .map(|sequence| sequence.items())
             .unwrap_or(&[])
     }
@@ -565,22 +861,147 @@ mod tests {
     }
 
     #[test]
-    fn initialize_creates_numbered_image_boxes() {
+    fn image_boxes_are_sop_instances_referenced_by_the_film_box() {
+        // fo-dicom FilmBox.CreateImageBox: one Basic Image Box SOP instance per
+        // cell, referenced from (2010,0510) by SOP Class/Instance UID.
         let mut film = FilmBox::new();
         film.initialize_image_boxes(3);
         assert_eq!(film.image_box_count(), 3);
+        let boxes = film.image_boxes();
         let sequence = film
             .dataset()
             .try_get_sequence(tags::REFERENCED_IMAGE_BOX_SEQUENCE)
             .unwrap();
+        assert_eq!(sequence.items().len(), 3);
+        for (index, image_box) in boxes.iter().enumerate() {
+            assert_eq!(image_box.position(), Some(index as u16 + 1));
+            assert_eq!(
+                image_box.sop_class_uid().as_deref(),
+                Some(crate::uids::BASIC_GRAYSCALE_IMAGE_BOX)
+            );
+            let reference = &sequence.items()[index];
+            assert_eq!(
+                reference
+                    .try_get_str(tags::REFERENCED_SOP_CLASS_UID)
+                    .as_deref(),
+                image_box.sop_class_uid().as_deref()
+            );
+            assert_eq!(
+                reference.try_get_str(tags::REFERENCED_SOP_INSTANCE_UID),
+                image_box.sop_instance_uid()
+            );
+        }
+    }
+
+    #[test]
+    fn a_color_image_box_uses_the_color_sop_class_and_sequence() {
+        let mut film = FilmBox::new();
+        film.create_image_box(1, true).push_image(Dataset::new());
+        let boxes = film.image_boxes();
         assert_eq!(
-            sequence.items()[0].try_get::<u16>(tags::IMAGE_POSITION),
-            Some(1)
+            boxes[0].sop_class_uid().as_deref(),
+            Some(crate::uids::BASIC_COLOR_IMAGE_BOX)
+        );
+        assert!(boxes[0].is_color());
+        assert_eq!(boxes[0].image_count(), 1);
+        assert!(boxes[0]
+            .dataset()
+            .try_get_sequence(tags::BASIC_COLOR_IMAGE_SEQUENCE)
+            .is_some());
+        assert!(boxes[0]
+            .dataset()
+            .try_get_sequence(tags::BASIC_GRAYSCALE_IMAGE_SEQUENCE)
+            .is_none());
+        // the reference item points at the Basic Color Image Box SOP class
+        let reference = &film
+            .dataset()
+            .try_get_sequence(tags::REFERENCED_IMAGE_BOX_SEQUENCE)
+            .unwrap()
+            .items()[0];
+        assert_eq!(
+            reference
+                .try_get_str(tags::REFERENCED_SOP_CLASS_UID)
+                .as_deref(),
+            Some(crate::uids::BASIC_COLOR_IMAGE_BOX)
+        );
+    }
+
+    #[test]
+    fn a_film_box_resolves_a_referenced_presentation_lut_from_the_session() {
+        // fo-dicom: a film box may reference a standalone Presentation LUT SOP
+        // instance through (2050,0500) instead of embedding (2050,0010).
+        let lut =
+            PresentationLut::from_dataset(&presentation_lut_instance("1.2.3.4.99", &[0])).unwrap();
+        assert_eq!(lut.sop_instance_uid().as_deref(), Some("1.2.3.4.99"));
+        let mut session = FilmSession::new();
+        session.add_presentation_lut(lut);
+        assert!(session.find_presentation_lut("1.2.3.4.99").is_some());
+
+        let mut film = FilmBox::new();
+        film.set_referenced_presentation_lut("1.2.3.4.99");
+        assert_eq!(
+            film.referenced_presentation_lut_uid().as_deref(),
+            Some("1.2.3.4.99")
+        );
+        let reference = &film
+            .dataset()
+            .try_get_sequence(tags::REFERENCED_PRESENTATION_LUT_SEQUENCE)
+            .unwrap()
+            .items()[0];
+        assert_eq!(
+            reference
+                .try_get_str(tags::REFERENCED_SOP_CLASS_UID)
+                .as_deref(),
+            Some(crate::uids::PRESENTATION_LUT)
         );
         assert_eq!(
-            sequence.items()[2].try_get::<u16>(tags::IMAGE_POSITION),
-            Some(3)
+            reference.try_get_str(tags::REFERENCED_SOP_INSTANCE_UID),
+            Some("1.2.3.4.99".to_string())
         );
+
+        let resolved = film.resolve_presentation_lut(&session).unwrap();
+        assert_eq!(resolved.table().unwrap().map_byte(128), 0);
+
+        // an unresolved reference is an error rather than a silent identity
+        assert!(film.resolve_presentation_lut(&FilmSession::new()).is_err());
+        assert!(session.remove_presentation_lut("1.2.3.4.99"));
+        assert!(session.find_presentation_lut("1.2.3.4.99").is_none());
+    }
+
+    /// A Presentation LUT SOP instance dataset: SOP Class/Instance plus a
+    /// `(2050,0010)` table of 16-bit `entries`.
+    fn presentation_lut_instance(uid: &str, entries: &[u16]) -> Dataset {
+        use crate::model::buffer::MemoryBuffer;
+        use crate::model::element::DicomElement;
+        use crate::model::item::DicomItem;
+        use std::sync::Arc;
+
+        let mut dataset = Dataset::new();
+        dataset.insert_str(tags::SOP_CLASS_UID, Vr::Ui, crate::uids::PRESENTATION_LUT);
+        dataset.insert_str(tags::SOP_INSTANCE_UID, Vr::Ui, uid);
+        let mut item = Dataset::new();
+        let mut descriptor = Vec::new();
+        for value in [entries.len() as u16, 0, 16] {
+            descriptor.extend_from_slice(&value.to_le_bytes());
+        }
+        item.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::LUT_DESCRIPTOR,
+            Vr::Us,
+            Arc::new(MemoryBuffer::from(descriptor)),
+        )));
+        let mut data = Vec::new();
+        for value in entries {
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+        item.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::LUT_DATA,
+            Vr::Ow,
+            Arc::new(MemoryBuffer::from(data)),
+        )));
+        dataset
+            .insert_sequence(Tag::PRESENTATION_LUT_SEQUENCE)
+            .push(item);
+        dataset
     }
 
     #[test]

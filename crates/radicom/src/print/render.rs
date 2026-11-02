@@ -10,8 +10,8 @@
 //! so it is the cross-platform replacement for fo-dicom's GDI+ print extensions.
 
 use super::layout::LayoutCell;
-use super::models::FilmBox;
-use super::presentation_lut::{PresentationLutShape, PresentationLutTable};
+use super::models::{FilmBox, FilmSession};
+use super::presentation_lut::{PresentationLut, PresentationLutShape, PresentationLutTable};
 use crate::error::{DataError, Error};
 use crate::pixel::Color32;
 use crate::render::{bilinear_bgra32, render_frame, RawImage};
@@ -75,14 +75,42 @@ impl FilmBox {
     /// Renders the film to an 8-bit [`RawImage`] (PRINT-02).
     ///
     /// `FilmOrientation` LANDSCAPE swaps the canvas and the cell grid, the film
-    /// box's `[MinDensity, MaxDensity]` window maps the rendered greys, and
-    /// `SmoothingType` selects the per-cell filter (Table C.13-3/C.13-5).
+    /// box's `[MinDensity, MaxDensity]` window (or an image box's own values)
+    /// maps the rendered greys, and `SmoothingType` selects the per-cell filter
+    /// (Table C.13-3/C.13-5). `MagnificationType` selects nearest (`REPLICATE`)
+    /// or bilinear scaling, film box first and image box override; it defaults
+    /// to `BILINEAR`.
     /// `BorderDensity` paints the film areas surrounding and between images and
     /// `EmptyImageDensity` paints an image box area that contains no image; both
     /// come from the dataset first (Table C.13-3) and fall back to `empty_density`
     /// when the attribute is absent or unknown.
     pub fn render_to_image(
         &self,
+        margins: f64,
+        scale: RenderScale,
+        empty_density: PrintDensity,
+    ) -> Result<RawImage, Error> {
+        let presentation_lut = self.presentation_lut()?;
+        self.render_with_presentation_lut(&presentation_lut, margins, scale, empty_density)
+    }
+
+    /// Renders the film, resolving a `(2050,0500)` referenced Presentation LUT
+    /// SOP instance through `session`; the embedded `(2050,0010)` path still
+    /// applies when the film box carries no reference.
+    pub fn render_to_image_with_session(
+        &self,
+        session: &FilmSession,
+        margins: f64,
+        scale: RenderScale,
+        empty_density: PrintDensity,
+    ) -> Result<RawImage, Error> {
+        let presentation_lut = self.resolve_presentation_lut(session)?;
+        self.render_with_presentation_lut(&presentation_lut, margins, scale, empty_density)
+    }
+
+    fn render_with_presentation_lut(
+        &self,
+        presentation_lut: &PresentationLut,
         margins: f64,
         scale: RenderScale,
         empty_density: PrintDensity,
@@ -118,7 +146,6 @@ impl FilmBox {
         }
 
         // Parse/validate once: a malformed shape or truncated LUT fails the render.
-        let presentation_lut = self.presentation_lut()?;
         let cells = self.layout(margins);
         let boxes = self.image_boxes();
         for (index, cell) in cells.iter().enumerate() {
@@ -155,15 +182,25 @@ impl FilmBox {
             if image_box.polarity() {
                 invert(&mut patch);
             }
-            apply_density_range(&mut patch, self.min_density(), self.max_density());
+            // Table C.13-5: an image box Min/MaxDensity overrides the film box.
+            apply_density_range(
+                &mut patch,
+                image_box.min_density().or_else(|| self.min_density()),
+                image_box.max_density().or_else(|| self.max_density()),
+            );
             // Table C.13-5: an image box SmoothingType overrides the film box one.
             let smoothing = image_box.smoothing_type().or_else(|| self.smoothing_type());
             apply_smoothing(&mut patch, smoothing.as_deref());
+            // Table C.13-5: an image box MagnificationType overrides the film box
+            // one, which defaults to BILINEAR (fo-dicom FilmBox.MagnificationType).
+            let magnification = image_box
+                .magnification_type()
+                .unwrap_or_else(|| self.magnification_type());
             canvas.blit_scaled(
                 cell,
                 &patch,
                 scale.pixels_per_mm,
-                image_box.magnification_type().as_deref(),
+                Some(magnification.as_str()),
                 image_box.requested_image_size(),
             );
         }
@@ -588,6 +625,99 @@ mod tests {
         );
     }
 
+    #[test]
+    fn created_image_boxes_render_through_the_film_box() {
+        // M9: a film box built through the Image Box SOP-instance API renders
+        // through the same path as one parsed from a dataset.
+        let mut film = FilmBox::new();
+        film.set_image_display_format("STANDARD\\1,1").unwrap();
+        film.set_film_size("A4").unwrap();
+        film.create_image_box(1, false)
+            .push_image(grayscale_image(&[128; 16]));
+        let image = film
+            .render_to_image(
+                10.0,
+                RenderScale { pixels_per_mm: 1.0 },
+                PrintDensity::Black,
+            )
+            .unwrap();
+        assert_eq!(grey_at(&image, 105, 148), 128);
+    }
+
+    /// A Presentation LUT SOP instance dataset with a 16-bit table.
+    fn presentation_lut_instance(uid: &str, entries: &[u16]) -> Dataset {
+        let mut dataset = Dataset::new();
+        dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, crate::uids::PRESENTATION_LUT);
+        dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, uid);
+        let mut item = Dataset::new();
+        let mut descriptor = Vec::new();
+        for value in [entries.len() as u16, 0, 16] {
+            descriptor.extend_from_slice(&value.to_le_bytes());
+        }
+        item.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::LUT_DESCRIPTOR,
+                Vr::Us,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(descriptor)),
+            ),
+        ));
+        let mut data = Vec::new();
+        for value in entries {
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+        item.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::LUT_DATA,
+                Vr::Ow,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(data)),
+            ),
+        ));
+        dataset
+            .insert_sequence(Tag::PRESENTATION_LUT_SEQUENCE)
+            .push(item);
+        dataset
+    }
+
+    #[test]
+    fn a_referenced_presentation_lut_is_applied_from_the_session() {
+        // M10: (2050,0500) resolves a standalone Presentation LUT SOP instance
+        // registered with the film session; the embedded path is unchanged.
+        let mut film = film_with_one_box("", 128);
+        film.set_referenced_presentation_lut("1.2.3.4.99");
+        let mut session = FilmSession::new();
+        session.add_presentation_lut(
+            crate::print::presentation_lut::PresentationLut::from_dataset(
+                &presentation_lut_instance("1.2.3.4.99", &[0]),
+            )
+            .unwrap(),
+        );
+        let plain = film
+            .render_to_image(
+                10.0,
+                RenderScale { pixels_per_mm: 1.0 },
+                PrintDensity::Black,
+            )
+            .unwrap();
+        assert_eq!(
+            grey_at(&plain, 105, 148),
+            128,
+            "the embedded path stays a no-op"
+        );
+        let with_lut = film
+            .render_to_image_with_session(
+                &session,
+                10.0,
+                RenderScale { pixels_per_mm: 1.0 },
+                PrintDensity::Black,
+            )
+            .unwrap();
+        assert_eq!(
+            grey_at(&with_lut, 105, 148),
+            0,
+            "the referenced LUT maps every output byte to 0"
+        );
+    }
+
     /// A film box with one image box carrying explicit density bounds.
     fn film_with_densities(min: u16, max: u16) -> FilmBox {
         let mut film = film_with_one_box("", 128);
@@ -652,6 +782,93 @@ mod tests {
             64,
             "the density window changes the output values"
         );
+    }
+
+    #[test]
+    fn film_level_magnification_selects_the_resampler() {
+        // a 4x4 patch with one lit corner upscales differently under nearest
+        // (REPLICATE) and bilinear, so the resampler choice is observable.
+        let values = [0u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255];
+        let render = |film: FilmBox| {
+            film.render_to_image(
+                10.0,
+                RenderScale { pixels_per_mm: 1.0 },
+                PrintDensity::Black,
+            )
+            .unwrap()
+        };
+        let mut film_replicate = film_with_patch("", &values);
+        film_replicate.set_magnification_type("REPLICATE");
+        let film_replicate = render(film_replicate);
+        let box_replicate = render(with_box_attribute(
+            film_with_patch("", &values),
+            Tag::new(0x2010, 0x0060),
+            Vr::Cs,
+            "REPLICATE",
+        ));
+        let default = render(film_with_patch("", &values));
+        assert_eq!(
+            film_replicate.as_bytes(),
+            box_replicate.as_bytes(),
+            "a film-level REPLICATE is applied like an image-box override"
+        );
+        assert_ne!(
+            film_replicate.as_bytes(),
+            default.as_bytes(),
+            "a film-level REPLICATE must not silently fall back to BILINEAR"
+        );
+    }
+
+    #[test]
+    fn image_box_density_overrides_the_film_box() {
+        // Table C.13-5: the image box's Min/MaxDensity win for its cell.
+        let values = [255u8; 16];
+        let plain = film_with_patch("", &values)
+            .render_to_image(
+                10.0,
+                RenderScale { pixels_per_mm: 1.0 },
+                PrintDensity::Black,
+            )
+            .unwrap();
+        assert_eq!(grey_at(&plain, 105, 148), 255);
+        let boxed = with_box_density(film_with_patch("", &values), 0, 250)
+            .render_to_image(
+                10.0,
+                RenderScale { pixels_per_mm: 1.0 },
+                PrintDensity::Black,
+            )
+            .unwrap();
+        assert_eq!(
+            grey_at(&boxed, 105, 148),
+            128,
+            "the image box density window halves the white patch"
+        );
+    }
+
+    /// Sets a CS attribute on the film's first referenced image box item.
+    fn with_box_attribute(film: FilmBox, tag: Tag, vr: Vr, value: &str) -> FilmBox {
+        let mut dataset = film.into_dataset();
+        {
+            let sequence = dataset
+                .sequence_mut(Tag::new(0x2010, 0x0510))
+                .expect("film has an image box sequence");
+            sequence.items_mut()[0].insert_str(tag, vr, value);
+        }
+        FilmBox::from_dataset(dataset)
+    }
+
+    /// Sets Min/MaxDensity on the film's first referenced image box item.
+    fn with_box_density(film: FilmBox, min: u16, max: u16) -> FilmBox {
+        let mut dataset = film.into_dataset();
+        {
+            let sequence = dataset
+                .sequence_mut(Tag::new(0x2010, 0x0510))
+                .expect("film has an image box sequence");
+            let item = &mut sequence.items_mut()[0];
+            item.insert_value(Tag::new(0x2010, 0x0120), min);
+            item.insert_value(Tag::new(0x2010, 0x0130), max);
+        }
+        FilmBox::from_dataset(dataset)
     }
 
     #[test]

@@ -32,15 +32,21 @@ pub struct ImageData {
 }
 
 impl ImageData {
-    /// Builds an [`ImageData`] from a dataset holding one native MONOCHROME frame.
+    /// Builds an [`ImageData`] from a dataset's first native MONOCHROME frame.
     pub fn from_dataset(dataset: &Dataset) -> Result<ImageData, Error> {
-        let geometry = FrameGeometry::from_dataset(dataset)?;
+        Self::from_dataset_frame(dataset, 0)
+    }
+
+    /// Builds an [`ImageData`] from one frame of a (possibly multi-frame)
+    /// dataset, reading the frame's geometry from the functional groups.
+    pub fn from_dataset_frame(dataset: &Dataset, frame: u32) -> Result<ImageData, Error> {
+        let geometry = FrameGeometry::from_dataset_frame(dataset, frame)?;
         if !geometry.has_geometry_data() {
             return Err(invalid(
                 "slice has no geometry (needs orientation + position)",
             ));
         }
-        let pixels = read_grayscale(dataset)?;
+        let pixels = read_grayscale(dataset, frame)?;
         let width = geometry.width();
         let height = geometry.height();
         if pixels.len() as u32 != width * height {
@@ -119,13 +125,22 @@ pub struct VolumeData {
 impl VolumeData {
     /// Stacks datasets into a volume (fo-dicom `VolumeData(IEnumerable<ImageData>)`).
     ///
+    /// Multi-frame datasets are expanded: every frame becomes one slice, with
+    /// its geometry read from the per-frame functional groups.
+    ///
     /// All slices must share one frame of reference; at least one non-empty
     /// group of slices is required. Slices are sorted along the normal.
     pub fn from_datasets(datasets: &[Dataset]) -> Result<VolumeData, Error> {
         let mut images: Vec<ImageData> = Vec::new();
         for dataset in datasets {
-            if let Ok(image) = ImageData::from_dataset(dataset) {
-                images.push(image);
+            let frames = PixelDataRef::from_dataset(dataset)
+                .map(|pixel| pixel.number_of_frames())
+                .unwrap_or(1)
+                .max(1);
+            for frame in 0..frames {
+                if let Ok(image) = ImageData::from_dataset_frame(dataset, frame) {
+                    images.push(image);
+                }
             }
         }
         if images.is_empty() {
@@ -167,6 +182,11 @@ impl VolumeData {
             bounding_min,
             bounding_max,
         })
+    }
+
+    /// Stacks one dataset (expanding its frames) into a volume.
+    pub fn from_dataset(dataset: &Dataset) -> Result<VolumeData, Error> {
+        Self::from_datasets(std::slice::from_ref(dataset))
     }
 
     /// Volume bounding-box minimum corner (patient space).
@@ -373,11 +393,12 @@ impl Slice {
     }
 }
 
-/// Reads native MONOCHROME samples, rescaled by RescaleSlope/Intercept (0028,1053/1052).
-fn read_grayscale(dataset: &Dataset) -> Result<Vec<f64>, Error> {
+/// Reads native MONOCHROME samples of one frame, rescaled by
+/// RescaleSlope/Intercept (0028,1053/1052).
+fn read_grayscale(dataset: &Dataset, frame: u32) -> Result<Vec<f64>, Error> {
     let pixel = PixelDataRef::from_dataset(dataset)?;
     let slots = (pixel.width() * pixel.height() * pixel.samples_per_pixel() as u32) as usize;
-    let frame = pixel.get_frame(0)?;
+    let frame = pixel.get_frame(frame)?;
     let frame_data = frame.data()?;
     let bytes = frame_data.as_ref();
     let bits = pixel.bits_allocated()?;
@@ -699,6 +720,76 @@ mod tests {
         // sorted ascending by z
         assert_eq!(volume.slices[0].sorting_value(), 0.0);
         assert_eq!(volume.slices[2].sorting_value(), 2.0);
+    }
+
+    /// A 3-frame axial dataset, 4x4 per frame, frame `i` filled with `fills[i]`
+    /// and positioned at z = i by the per-frame functional groups.
+    fn axial_multiframe(fills: &[u16]) -> Dataset {
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16);
+        ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
+        ds.insert_value(Tag::ROWS, 4u16);
+        ds.insert_value(Tag::COLUMNS, 4u16);
+        ds.insert_value(Tag::BITS_ALLOCATED, 16u16);
+        ds.insert_value(Tag::BITS_STORED, 16u16);
+        ds.insert_value(Tag::HIGH_BIT, 15u16);
+        ds.insert_value(Tag::PIXEL_REPRESENTATION, 0u16);
+        ds.insert_str(Tag::PIXEL_SPACING, Vr::Ds, "1\\1");
+        ds.insert_str(Tag::IMAGE_ORIENTATION_PATIENT, Vr::Ds, "1\\0\\0\\0\\1\\0");
+        ds.insert_str(Tag::FRAME_OF_REFERENCE_UID, Vr::Ui, "1.2.3.4");
+        ds.insert_str(Tag::NUMBER_OF_FRAMES, Vr::Is, fills.len().to_string());
+        let per_frame = ds.insert_sequence(Tag::PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE);
+        for frame in 0..fills.len() {
+            let mut group = Dataset::new();
+            let mut position = Dataset::new();
+            position.insert_str(
+                Tag::IMAGE_POSITION_PATIENT,
+                Vr::Ds,
+                format!("0\\0\\{frame}"),
+            );
+            group
+                .insert_sequence(Tag::PLANE_POSITION_SEQUENCE)
+                .push(position);
+            per_frame.push(group);
+        }
+        let mut bytes = Vec::new();
+        for fill in fills {
+            for _ in 0..16 {
+                bytes.extend_from_slice(&fill.to_le_bytes());
+            }
+        }
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::PIXEL_DATA,
+                Vr::Ow,
+                Arc::new(crate::model::buffer::MemoryBuffer::from(bytes)),
+            ),
+        ));
+        ds.set_transfer_syntax(
+            crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
+        ds
+    }
+
+    #[test]
+    fn a_multiframe_dataset_expands_into_a_volume() {
+        // M11: every frame is one slice, with its position from the functional
+        // groups; the reconstruction reads the right frame.
+        let volume = VolumeData::from_dataset(&axial_multiframe(&[100, 200, 300])).unwrap();
+        assert_eq!(volume.len(), 3);
+        let cut = |z: f64| {
+            volume.get_cut(
+                Point3::new(1.0, 1.0, z),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+                1,
+                1,
+                1.0,
+            )
+        };
+        assert_eq!(cut(0.0).output, vec![100.0]);
+        assert_eq!(cut(1.0).output, vec![200.0]);
+        assert_eq!(cut(2.0).output, vec![300.0]);
     }
 
     #[test]

@@ -3,7 +3,10 @@
 //! Mirrors fo-dicom `ColorTable`: a 256-entry `Color32` lookup that maps an
 //! 8-bit grey level to a display colour. MONOCHROME2 is the ascending grey ramp,
 //! MONOCHROME1 the descending one. Colour tables round-trip through the classic
-//! 768-byte R,G,B `.lut` layout (256 entries × 3 channels).
+//! 768-byte `.lut` layout used by fo-dicom `LoadLUT`/`SaveLUT`: **planar**, the
+//! 256 red bytes followed by the 256 green and then the 256 blue bytes. Files
+//! must be exactly 768 bytes; a longer buffer is read as the pre-fix interleaved
+//! layout so old radicom files stay loadable.
 
 use crate::error::{DataError, Error};
 use crate::pixel::Color32;
@@ -52,26 +55,36 @@ impl ColorTable {
         self.entries.reverse();
     }
 
-    /// Builds a table from a 768-byte R,G,B lookup table (256 × 3); `None` when
-    /// the slice is shorter than 768 bytes.
+    /// Builds a table from a 768-byte planar `.lut` (256 red bytes, then 256
+    /// green, then 256 blue; fo-dicom `ColorTable.LoadLUT`). A buffer longer
+    /// than 768 bytes is read as the legacy interleaved R,G,B layout; a shorter
+    /// one is rejected.
     pub fn from_rgb768(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < 768 {
             return None;
         }
         let mut entries = [Color32::new(0, 0, 0); 256];
-        for (i, entry) in entries.iter_mut().enumerate() {
-            *entry = Color32::new(bytes[i * 3], bytes[i * 3 + 1], bytes[i * 3 + 2]);
+        if bytes.len() == 768 {
+            for (i, entry) in entries.iter_mut().enumerate() {
+                *entry = Color32::new(bytes[i], bytes[i + 256], bytes[i + 512]);
+            }
+        } else {
+            // legacy radicom files: interleaved R,G,B per entry
+            for (i, entry) in entries.iter_mut().enumerate() {
+                *entry = Color32::new(bytes[i * 3], bytes[i * 3 + 1], bytes[i * 3 + 2]);
+            }
         }
         Some(ColorTable { entries })
     }
 
-    /// Serialises to a 768-byte R,G,B lookup table (alpha dropped).
+    /// Serialises to a 768-byte planar `.lut` (256 red bytes, then 256 green,
+    /// then 256 blue; fo-dicom `ColorTable.SaveLUT`). Alpha is dropped.
     pub fn to_rgb768(&self) -> [u8; 768] {
         let mut out = [0u8; 768];
         for (i, c) in self.entries.iter().enumerate() {
-            out[i * 3] = c.r;
-            out[i * 3 + 1] = c.g;
-            out[i * 3 + 2] = c.b;
+            out[i] = c.r;
+            out[i + 256] = c.g;
+            out[i + 512] = c.b;
         }
         out
     }
@@ -129,13 +142,33 @@ mod tests {
     }
 
     #[test]
-    fn rgb768_round_trips() {
-        let t = ColorTable::monochrome2();
-        let bytes = t.to_rgb768();
+    fn rgb768_is_the_planar_fo_dicom_layout() {
+        let mut entries = [Color32::new(0, 0, 0); 256];
+        entries[0] = Color32::new(10, 20, 30);
+        entries[1] = Color32::new(40, 50, 60);
+        let table = ColorTable::from_entries(entries);
+        let bytes = table.to_rgb768();
         assert_eq!(bytes.len(), 768);
-        assert_eq!(ColorTable::from_rgb768(&bytes), Some(t));
+        // planar: the R block, then G, then B (fo-dicom LoadLUT/SaveLUT)
+        assert_eq!(&bytes[0..2], &[10, 40], "red block first");
+        assert_eq!(&bytes[256..258], &[20, 50], "green block second");
+        assert_eq!(&bytes[512..514], &[30, 60], "blue block third");
+        assert_eq!(ColorTable::from_rgb768(&bytes), Some(table));
         // short slices are rejected
         assert!(ColorTable::from_rgb768(&bytes[..767]).is_none());
+    }
+
+    #[test]
+    fn a_longer_legacy_interleaved_buffer_is_still_readable() {
+        // pre-fix radicom files were interleaved R,G,B; a buffer longer than the
+        // canonical 768 bytes keeps that read path
+        let mut legacy = vec![0u8; 800];
+        legacy[0] = 10;
+        legacy[1] = 20;
+        legacy[2] = 30;
+        let table = ColorTable::from_rgb768(&legacy).unwrap();
+        assert_eq!(table.get(0), Color32::new(10, 20, 30));
+        assert_eq!(table.get(1), Color32::new(0, 0, 0));
     }
 
     #[test]

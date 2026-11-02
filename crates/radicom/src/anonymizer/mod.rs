@@ -7,7 +7,7 @@
 //! dataset and file anonymized by that instance; a file's media-storage SOP
 //! instance UID is kept in sync with the dataset's SOP instance UID (§12.5).
 
-use crate::anonymizer::profile::{Action, AnonOption, SecurityProfile};
+use crate::anonymizer::profile::{Action, AnonOptions, SecurityProfile};
 use crate::error::Error;
 use crate::io::file::DicomFile;
 use crate::model::dataset::Dataset;
@@ -34,7 +34,7 @@ const MEDIA_STORAGE_SOP_INSTANCE_UID: Tag = Tag::MEDIA_STORAGE_SOP_INSTANCE_UID;
 #[derive(Debug, Clone)]
 pub struct Anonymizer {
     profile: SecurityProfile,
-    option: AnonOption,
+    options: AnonOptions,
     patient_name: Option<String>,
     patient_id: Option<String>,
     /// Original → replacement UID, shared by clones and kept across calls
@@ -45,20 +45,23 @@ pub struct Anonymizer {
 impl Anonymizer {
     /// An anonymizer over the built-in PS3.15 Basic Profile.
     pub fn basic() -> Self {
-        Anonymizer {
-            profile: SecurityProfile::basic(),
-            option: AnonOption::BasicProfile,
-            patient_name: None,
-            patient_id: None,
-            replaced: Arc::new(Mutex::new(HashMap::new())),
-        }
+        Anonymizer::with_profile(SecurityProfile::basic(), AnonOptions::BASIC_PROFILE)
     }
 
-    /// Uses a custom profile under a chosen option.
-    pub fn with_profile(profile: SecurityProfile, option: AnonOption) -> Self {
+    /// Uses the built-in PS3.15 profile under a combination of options.
+    pub fn with_options(options: impl Into<AnonOptions>) -> Self {
+        Anonymizer::with_profile(SecurityProfile::basic(), options)
+    }
+
+    /// Uses a custom profile under a chosen option or option combination.
+    ///
+    /// A single `AnonOption` converts automatically, so the old single-column
+    /// call sites keep working; combine options with `|`:
+    /// `AnonOptions::BASIC_PROFILE | AnonOptions::RETAIN_DEVICE_IDENT`.
+    pub fn with_profile(profile: SecurityProfile, options: impl Into<AnonOptions>) -> Self {
         Anonymizer {
             profile,
-            option,
+            options: options.into(),
             patient_name: None,
             patient_id: None,
             replaced: Arc::new(Mutex::new(HashMap::new())),
@@ -127,7 +130,7 @@ impl Anonymizer {
         let tags: Vec<Tag> = dataset.items().map(|item| item.tag().clone()).collect();
 
         for tag in tags {
-            let action = self.profile.action_for_tag(&tag, self.option);
+            let action = self.profile.action_for_tag_options(&tag, self.options);
 
             // sequences, exactly like fo-dicom `AnonymizeInPlace`: recurse only
             // for a null or K action (K means "cleaned for sequences"); D/Z/U/C
@@ -308,6 +311,7 @@ fn lock(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::anonymizer::profile::AnonOption;
     use crate::model::dataset::Dataset;
     use crate::model::vr::Vr;
 
@@ -798,5 +802,55 @@ mod tests {
                 .as_ref(),
             &[0u8, 0]
         );
+    }
+
+    #[test]
+    fn a_retain_option_combined_with_the_basic_profile_keeps_the_device_serial() {
+        // (0018,1000) DeviceSerialNumber: Basic Profile removes it, the
+        // RetainDeviceIdent column keeps it; only the combination is correct.
+        let mut ds = dataset();
+        ds.insert_str(Tag::new(0x0018, 0x1000), Vr::Lo, "SN-42");
+
+        let mut basic = ds.clone();
+        Anonymizer::basic().anonymize_in_place(&mut basic).unwrap();
+        assert!(
+            !basic.contains(&Tag::new(0x0018, 0x1000)),
+            "Basic Profile alone removes the device serial"
+        );
+        assert_eq!(
+            basic.try_get_str(Tag::PATIENT_NAME).as_deref(),
+            Some(""),
+            "Basic Profile still blanks the patient name"
+        );
+
+        let combined =
+            Anonymizer::with_options(AnonOptions::BASIC_PROFILE | AnonOptions::RETAIN_DEVICE_IDENT);
+        let mut merged = ds.clone();
+        combined.anonymize_in_place(&mut merged).unwrap();
+        assert_eq!(
+            merged.try_get_str(Tag::new(0x0018, 0x1000)).as_deref(),
+            Some("SN-42"),
+            "the retained column wins over the Basic Profile cell"
+        );
+        assert_eq!(
+            merged.try_get_str(Tag::PATIENT_NAME).as_deref(),
+            Some(""),
+            "the Basic Profile still applies to tags the retain column does not name"
+        );
+    }
+
+    #[test]
+    fn the_single_option_constructor_still_matches_the_default_basic_profile() {
+        // the pre-flags API (one AnonOption column) must behave identically; the
+        // SOP instance UID is dropped because a U-action generates a random UID
+        let plain = Anonymizer::basic();
+        let single = Anonymizer::with_profile(SecurityProfile::basic(), AnonOption::BasicProfile);
+        let mut base = dataset();
+        base.remove(Tag::SOP_INSTANCE_UID);
+        let mut a = base.clone();
+        let mut b = base;
+        plain.anonymize_in_place(&mut a).unwrap();
+        single.anonymize_in_place(&mut b).unwrap();
+        assert_eq!(a.to_dump_string(), b.to_dump_string());
     }
 }

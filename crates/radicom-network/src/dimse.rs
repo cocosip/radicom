@@ -276,6 +276,10 @@ impl Command {
     pub fn to_dataset(&self) -> Dataset {
         let mut ds = Dataset::new();
         // required ordering: group length first, then ascending tags
+        // PS3.7 §6.3 requires (0000,0000) in every command set. The writer
+        // recalculates a group length that is present but no longer invents a
+        // missing one (L2), so the placeholder goes in here.
+        insert_us(&mut ds, tag::COMMAND_GROUP_LENGTH, 0);
         insert_us(&mut ds, tag::COMMAND_FIELD, self.field.code());
         if let Some(uid) = &self.affected_sop_class_uid {
             ds.insert_str(tag::AFFECTED_SOP_CLASS_UID, Vr::Ui, uid);
@@ -513,6 +517,14 @@ pub enum StatusServiceClass {
     Storage,
     /// Query/Retrieve service classes (C-FIND, C-GET and C-MOVE).
     QueryRetrieve,
+    /// Print Management service classes (PS3.4 Annex H).
+    ///
+    /// Their exact status codes share the `Bxxx`/`Cxxx` ranges with other
+    /// services (`0xB000` is both a Query/Retrieve sub-operation warning and a
+    /// Print Management warning), so only the service class tells them apart.
+    PrintManagement,
+    /// Media Creation Management (PS3.4 Annex I).
+    MediaCreation,
 }
 
 /// A status code with its classification and optional comment (§11.3).
@@ -663,8 +675,58 @@ pub fn status_description_for_service_class(
     match (code, service_class) {
         (0xA900, StatusServiceClass::Storage) => "Data set does not match SOP class",
         (0xA900, StatusServiceClass::QueryRetrieve) => "Identifier does not match SOP class",
+        (code, StatusServiceClass::PrintManagement) => {
+            print_management_description(code).unwrap_or_else(|| status_description(code))
+        }
+        (code, StatusServiceClass::MediaCreation) => {
+            media_creation_description(code).unwrap_or_else(|| status_description(code))
+        }
         _ => status_description(code),
     }
+}
+
+/// Print Management statuses (PS3.4 H.4, fo-dicom `DicomStatus` print family).
+fn print_management_description(code: u16) -> Option<&'static str> {
+    Some(match code {
+        0xB000 => "Memory allocation not supported",
+        0xB601 => "Film session printing (collation) is not supported",
+        0xB602 => {
+            "Film session SOP instance hierarchy does not contain image box SOP instances (empty page)"
+        }
+        0xB603 => {
+            "Film box SOP instance hierarchy does not contain image box SOP instances (empty page)"
+        }
+        0xB604 => "Image size is larger than image box size, the image has been demagnified",
+        0xB605 => {
+            "Requested min density or max density outside of printer's operating range"
+        }
+        0xB609 => "Image size is larger than the image box size, the Image has been cropped to fit",
+        0xB60A => {
+            "Image size or combined print image size is larger than the image box size, image or combined print image has been decimated to fit"
+        }
+        0xC600 => "Film session SOP instance hierarchy does not contain film box SOP instances",
+        0xC601 => "Unable to create Print Job SOP Instance; print queue is full",
+        0xC603 => "Image size is larger than image box size",
+        0xC605 => "Insufficient memory in printer to store the image",
+        0xC613 => "Combined Print Image size is larger than the Image Box size",
+        0xC616 => {
+            "There is an existing film box that has not been printed and N-ACTION at the Film Session level is not supported."
+        }
+        _ => return None,
+    })
+}
+
+/// Media Creation Management statuses (PS3.4 I.4, fo-dicom `DicomStatus`).
+fn media_creation_description(code: u16) -> Option<&'static str> {
+    Some(match code {
+        0xA510 => {
+            "Refused because an Initiate Media Creation action has already been received for this SOP Instance"
+        }
+        0xC201 => "Media creation request already completed",
+        0xC202 => "Media creation request already in progress and cannot be interrupted",
+        0xC203 => "Cancellation denied for unspecified reason",
+        _ => return None,
+    })
 }
 
 /// Classifies a status code, resolving mask classes best-match (§11.3).
@@ -1364,5 +1426,37 @@ mod tests {
         ));
         let error = Command::from_dataset(&ds).expect_err("3 bytes is not a tag list");
         assert!(error.to_string().contains("invalid length"), "{error}");
+    }
+
+    #[test]
+    fn print_and_media_status_names_are_resolved_per_service_class() {
+        use crate::dimse::{status_description_for_service_class, StatusServiceClass};
+        assert_eq!(
+            status_description_for_service_class(0xB000, StatusServiceClass::PrintManagement),
+            "Memory allocation not supported"
+        );
+        assert_eq!(
+            status_description_for_service_class(0xB000, StatusServiceClass::QueryRetrieve),
+            "Completed with warnings",
+            "the shared B000 keeps the Query/Retrieve wording"
+        );
+        assert_eq!(
+            status_description_for_service_class(0xB603, StatusServiceClass::PrintManagement),
+            "Film box SOP instance hierarchy does not contain image box SOP instances (empty page)"
+        );
+        assert_eq!(
+            status_description_for_service_class(0xC202, StatusServiceClass::MediaCreation),
+            "Media creation request already in progress and cannot be interrupted"
+        );
+        assert_eq!(
+            status_description_for_service_class(0xB6FF, StatusServiceClass::PrintManagement),
+            "Completed with warnings",
+            "an unnamed print warning keeps the generic family wording"
+        );
+        assert_eq!(
+            status_description_for_service_class(0xC605, StatusServiceClass::Storage),
+            "Unable to process",
+            "print failure codes stay generic for storage"
+        );
     }
 }

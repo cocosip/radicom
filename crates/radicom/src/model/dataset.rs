@@ -9,6 +9,7 @@ use crate::model::private_creator::PrivateCreator;
 use crate::model::tag::Tag;
 use crate::model::transfer_syntax::{syntaxes, TransferSyntax};
 use crate::model::vr::Vr;
+use encoding_rs::Encoding;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
@@ -19,6 +20,9 @@ pub struct Dataset {
     items: BTreeMap<Tag, DicomItem>,
     transfer_syntax: Arc<TransferSyntax>,
     validate: bool,
+    /// Charset fallbacks for text that has no (0008,0005) (H1; fo-dicom
+    /// `FallbackEncodings`). Empty means the default repertoire (ISO-IR 6).
+    fallback_encodings: Vec<&'static Encoding>,
     /// Resolved `(group, creator)` → private block memo (CORE-13). A hit is
     /// verified against the creator slot before use, so dataset mutations
     /// cannot make it stale; `clear` drops it.
@@ -31,6 +35,7 @@ impl Clone for Dataset {
             items: self.items.clone(),
             transfer_syntax: self.transfer_syntax.clone(),
             validate: self.validate,
+            fallback_encodings: self.fallback_encodings.clone(),
             private_blocks: Mutex::new(
                 self.private_blocks
                     .lock()
@@ -54,6 +59,7 @@ impl Dataset {
             items: BTreeMap::new(),
             transfer_syntax: syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
             validate: true,
+            fallback_encodings: Vec::new(),
             private_blocks: Mutex::new(HashMap::new()),
         }
     }
@@ -63,6 +69,7 @@ impl Dataset {
             items: BTreeMap::new(),
             transfer_syntax: ts,
             validate: true,
+            fallback_encodings: Vec::new(),
             private_blocks: Mutex::new(HashMap::new()),
         }
     }
@@ -89,6 +96,26 @@ impl Dataset {
 
     pub fn set_validation(&mut self, on: bool) {
         self.validate = on;
+    }
+
+    /// Charset fallbacks used to decode/encode this level's text when it has no
+    /// (0008,0005) (H1; fo-dicom `FallbackEncodings`). Empty means ISO-IR 6.
+    pub fn fallback_encodings(&self) -> &[&'static Encoding] {
+        &self.fallback_encodings
+    }
+
+    /// Replaces the fallback list, cascading into sequence items the way
+    /// [`Self::set_transfer_syntax`] does, so a nested item never decodes
+    /// differently from its container.
+    pub fn set_fallback_encodings(&mut self, encodings: Vec<&'static Encoding>) {
+        for item in self.items.values_mut() {
+            if let DicomItem::Sequence(seq) = item {
+                for ds in seq.items_mut() {
+                    ds.set_fallback_encodings(encodings.clone());
+                }
+            }
+        }
+        self.fallback_encodings = encodings;
     }
 
     pub fn len(&self) -> usize {
@@ -257,8 +284,12 @@ impl Dataset {
     // -- writes (DS-03) ------------------------------------------------------
 
     /// Inserts an item; duplicate tags error (DS-03, fo-dicom Add semantics).
+    ///
+    /// Validates the element when validation is enabled (M3), returning a
+    /// [`Error::Validation`] failure instead of storing an invalid value.
     pub fn insert(&mut self, item: impl Into<DicomItem>) -> Result<&mut Self, Error> {
         let item: DicomItem = item.into();
+        self.check_on_write(&item)?;
         let tag = self.resolve_private_write(item.tag(), false);
         match tag {
             Some(t) => {
@@ -279,8 +310,15 @@ impl Dataset {
     /// Inserts or replaces (fo-dicom AddOrUpdate semantics).
     ///
     /// A dictionary-style private tag allocates its creator block on demand.
+    /// This is the lenient channel: it stores the value as given, because it has
+    /// no way to report a rejection. A validation failure is logged instead of
+    /// dropped (M3), so the invalid write is visible; [`Self::try_insert_or_update`]
+    /// is the channel that returns the failure.
     pub fn insert_or_update(&mut self, item: impl Into<DicomItem>) -> &mut Self {
         let item: DicomItem = item.into();
+        if let Err(error) = self.check_on_write(&item) {
+            tracing::warn!(%error, "invalid value stored; the dataset is not conformant");
+        }
         let (group, element) = (item.tag().group(), item.tag().element());
         if let Some(t) = self.resolve_private_write(item.tag(), true) {
             self.items.insert(t.clone(), item.with_tag(t));
@@ -298,8 +336,11 @@ impl Dataset {
     /// Fallible insert-or-update: a dictionary-style private tag that cannot be
     /// assigned a block (the group has no free creator slot) returns an error
     /// instead of being silently dropped.
+    ///
+    /// Validates the element when validation is enabled (M3).
     pub fn try_insert_or_update(&mut self, item: impl Into<DicomItem>) -> Result<&mut Self, Error> {
         let item: DicomItem = item.into();
+        self.check_on_write(&item)?;
         let (group, element) = (item.tag().group(), item.tag().element());
         match self.resolve_private_write(item.tag(), true) {
             Some(t) => {
@@ -313,13 +354,30 @@ impl Dataset {
     }
 
     /// Typed insert with dictionary VR resolution (DS-03 dispatch).
+    ///
+    /// Does not validate (M3): the value is stored as given and a validation
+    /// failure is only logged. Use [`Self::try_insert_value`] for the channel
+    /// that returns [`Error::Validation`].
     pub fn insert_value<V: IntoElement>(&mut self, tag: Tag, value: V) -> &mut Self {
         let vr = self.resolve_vr(&tag, value.preferred_vr());
         self.insert_or_update(value.into_element(tag, vr))
     }
 
+    /// Validated [`Self::insert_value`] (M3): an invalid value returns
+    /// [`Error::Validation`] and leaves the dataset untouched. Private tags are
+    /// resolved exactly like the infallible version.
+    pub fn try_insert_value<V: IntoElement>(
+        &mut self,
+        tag: Tag,
+        value: V,
+    ) -> Result<&mut Self, Error> {
+        let vr = self.resolve_vr(&tag, value.preferred_vr());
+        self.try_insert_or_update(value.into_element(tag, vr))
+    }
+
     /// Typed insert that forces `vr`, bypassing dictionary resolution
-    /// (fo-dicom `AddOrUpdate(VR, tag, values)`).
+    /// (fo-dicom `AddOrUpdate(VR, tag, values)`). Does not validate (M3); use
+    /// [`Self::try_insert_value_with_vr`] for the validated channel.
     pub fn insert_value_with_vr<V: IntoElement>(
         &mut self,
         tag: Tag,
@@ -329,7 +387,20 @@ impl Dataset {
         self.insert_or_update(value.into_element(tag, vr))
     }
 
+    /// Validated [`Self::insert_value_with_vr`] (M3): an invalid value returns
+    /// [`Error::Validation`] and leaves the dataset untouched.
+    pub fn try_insert_value_with_vr<V: IntoElement>(
+        &mut self,
+        tag: Tag,
+        vr: Vr,
+        value: V,
+    ) -> Result<&mut Self, Error> {
+        self.try_insert_or_update(value.into_element(tag, vr))
+    }
+
     /// Typed insert erroring on duplicate tags (Add semantics).
+    ///
+    /// Validates when validation is enabled (M3), like [`Self::insert`].
     pub fn insert_new<V: IntoElement>(&mut self, tag: Tag, value: V) -> Result<&mut Self, Error> {
         let vr = self.resolve_vr(&tag, value.preferred_vr());
         self.insert(value.into_element(tag, vr))
@@ -337,13 +408,39 @@ impl Dataset {
 
     /// Inserts an empty (zero-length) element — the "null" semantics of
     /// fo-dicom (DS-03).
+    ///
+    /// Does not validate (M3); [`Self::try_insert_empty`] is the fallible
+    /// channel (an empty value is VM-exempt, so it only fails when a private
+    /// tag cannot be resolved).
     pub fn insert_empty(&mut self, tag: Tag, vr: Vr) -> &mut Self {
         self.insert_or_update(DicomElement::new_empty(tag, vr))
     }
 
+    /// Validated [`Self::insert_empty`] (M3): returns an error instead of
+    /// storing when validation rejects the element or a private tag cannot be
+    /// resolved.
+    pub fn try_insert_empty(&mut self, tag: Tag, vr: Vr) -> Result<&mut Self, Error> {
+        self.try_insert_or_update(DicomElement::new_empty(tag, vr))
+    }
+
     /// Convenience: string insert with an explicit VR.
+    ///
+    /// Does not validate (M3): the value is stored as given and a validation
+    /// failure is only logged. Use [`Self::try_insert_str`] for the channel that
+    /// returns [`Error::Validation`].
     pub fn insert_str(&mut self, tag: Tag, vr: Vr, text: impl Into<String>) -> &mut Self {
         self.insert_or_update(DicomElement::new_str(tag, vr, text))
+    }
+
+    /// Validated [`Self::insert_str`] (M3): an invalid value returns
+    /// [`Error::Validation`] and leaves the dataset untouched.
+    pub fn try_insert_str(
+        &mut self,
+        tag: Tag,
+        vr: Vr,
+        text: impl Into<String>,
+    ) -> Result<&mut Self, Error> {
+        self.try_insert_or_update(DicomElement::new_str(tag, vr, text))
     }
 
     /// Appends a sequence and returns it for item population.
@@ -555,14 +652,12 @@ impl Dataset {
     /// Validates every element's content and value multiplicity, recursing into
     /// sequences (VAL-01/02); returns the first [`crate::error::ValidationFailure`].
     ///
-    /// Validation is on demand, mirroring fo-dicom's `Validate()`: the write path
-    /// and the file parser do **not** call it, so tolerant round-trips of
-    /// real-world files keep working. Runs only when the per-dataset flag and the
-    /// global switch are both on (`should_validate`); returns `Ok(())` otherwise.
+    /// An explicit call is never suppressible: it ignores the per-dataset flag
+    /// and the global switch, exactly like fo-dicom `DicomDataset.Validate()`
+    /// (M3). Those switches gate *write-time* validation instead, and the file
+    /// parser deliberately runs with them off so tolerant round-trips keep
+    /// working.
     pub fn validate(&self) -> Result<(), Error> {
-        if !crate::validation::should_validate(self.validate) {
-            return Ok(());
-        }
         self.validate_items()
     }
 
@@ -610,6 +705,23 @@ impl Dataset {
     }
 
     // -- internals ---------------------------------------------------------------
+
+    /// Write-time validation (M3). fo-dicom validates inside `DoAdd` whenever
+    /// the dataset's `ValidateItems` is on and throws on a bad value. The
+    /// infallible insert helpers cannot report that, so enforcement lives on the
+    /// two fallible channels ([`Self::insert`], [`Self::try_insert_or_update`]);
+    /// callers that intentionally store non-conformant data (fixtures, forwarding
+    /// raw source values) opt out with [`Self::set_validation`] off, exactly like
+    /// fo-dicom's internal builders use `NotValidated()`.
+    fn check_on_write(&self, item: &DicomItem) -> Result<(), Error> {
+        if !crate::validation::should_validate(self.validate) {
+            return Ok(());
+        }
+        let DicomItem::Element(element) = item else {
+            return Ok(());
+        };
+        crate::validation::validate_element(element)
+    }
 
     fn resolve_vr(&self, tag: &Tag, preferred: Option<Vr>) -> Vr {
         // The dictionary is authoritative for known tags. The value's own
@@ -739,32 +851,210 @@ mod tests {
     }
 
     #[test]
-    fn dataset_validate_is_on_demand_and_recursive() {
+    fn dataset_validate_is_explicit_and_recursive() {
         let mut ds = Dataset::new();
         ds.insert_str(PATIENT_ID, Vr::Lo, "PID-1");
         // a valid dataset passes
         ds.validate().expect("valid dataset");
 
-        // an invalid AE (>16 chars) fails with a ValidationFailure naming the tag
-        ds.insert_str(Tag::ACCESSION_NUMBER, Vr::Ae, "SEVENTEEN_CHARS_X");
-        let err = ds.validate().unwrap_err();
+        // the per-dataset switch suppresses *write-time* validation only: it
+        // lets a lenient value in, and an explicit validate() still reports it
+        // (M3, fo-dicom `DicomDataset.Validate()`)
+        let mut bad = Dataset::new();
+        bad.set_validation(false);
+        bad.insert_str(Tag::ACCESSION_NUMBER, Vr::Ae, "SEVENTEEN_CHARS_X");
+        let err = bad.validate().unwrap_err();
         assert!(matches!(err, Error::Validation(_)), "{err}");
         assert!(err.to_string().contains("(0008,0050)"), "{err}");
 
         // recursion: a bad value inside a sequence item is caught
         let mut inner = Dataset::new();
+        inner.set_validation(false);
         inner.insert_str(Tag::ACCESSION_NUMBER, Vr::Ae, "SEVENTEEN_CHARS_X");
         let mut outer = Dataset::new();
         let seq = outer.insert_sequence(Tag::REFERENCED_STUDY_SEQUENCE);
         seq.push(inner);
         assert!(outer.validate().is_err(), "invalid nested item is detected");
+    }
 
-        // the per-dataset switch disables validation entirely
+    #[test]
+    fn writes_validate_when_the_dataset_switch_is_on() {
+        // M3: fo-dicom validates inside Add/AddOrUpdate; the fallible insert
+        // channels report the failure instead of storing an invalid value
+        let mut ds = Dataset::new();
+        let err = ds
+            .try_insert_or_update(DicomElement::new_str(
+                Tag::ACCESSION_NUMBER,
+                Vr::Ae,
+                "SEVENTEEN_CHARS_X",
+            ))
+            .unwrap_err();
+        assert!(matches!(err, Error::Validation(_)), "{err}");
+        assert!(!ds.contains(&Tag::ACCESSION_NUMBER), "nothing was stored");
+
+        assert!(matches!(
+            ds.insert(DicomElement::new_str(
+                Tag::ACCESSION_NUMBER,
+                Vr::Ae,
+                "SEVENTEEN_CHARS_X"
+            )),
+            Err(Error::Validation(_))
+        ));
+
+        // with the switch off the same write is accepted, so a caller can keep
+        // forwarding non-conformant source values on purpose
         let mut off = Dataset::new();
         off.set_validation(false);
-        off.insert_str(Tag::ACCESSION_NUMBER, Vr::Ae, "SEVENTEEN_CHARS_X");
-        off.validate()
-            .expect("validation disabled ignores bad values");
+        off.try_insert_or_update(DicomElement::new_str(
+            Tag::ACCESSION_NUMBER,
+            Vr::Ae,
+            "SEVENTEEN_CHARS_X",
+        ))
+        .unwrap();
+        assert!(off.contains(&Tag::ACCESSION_NUMBER));
+    }
+
+    #[test]
+    fn try_insert_value_validates_and_leaves_the_dataset_unchanged() {
+        // PixelSpacing is VM 2, so three values fail validation (M3)
+        let mut ds = Dataset::new();
+        let err = ds
+            .try_insert_value(Tag::PIXEL_SPACING, vec![1.0f64, 2.0, 3.0])
+            .unwrap_err();
+        assert!(matches!(err, Error::Validation(_)), "{err}");
+        assert!(
+            ds.is_empty(),
+            "a rejected write leaves the dataset unchanged"
+        );
+
+        ds.try_insert_value(Tag::PIXEL_SPACING, vec![0.5f64, 0.75])
+            .unwrap();
+        assert_eq!(ds.get_str(Tag::PIXEL_SPACING).unwrap(), "0.5\\0.75");
+
+        // the switch turns enforcement off, like fo-dicom's NotValidated()
+        let mut off = Dataset::new();
+        off.set_validation(false);
+        off.try_insert_value(Tag::PIXEL_SPACING, vec![1.0f64, 2.0, 3.0])
+            .unwrap();
+        assert!(off.contains(&Tag::PIXEL_SPACING));
+
+        // the infallible helper stores the same invalid value (it warns instead
+        // of reporting), which the dataset-level check still flags
+        let mut lenient = Dataset::new();
+        lenient.insert_value(Tag::PIXEL_SPACING, vec![1.0f64, 2.0, 3.0]);
+        assert!(lenient.contains(&Tag::PIXEL_SPACING));
+        assert!(
+            lenient.validate().is_err(),
+            "the stored value is still invalid"
+        );
+    }
+
+    #[test]
+    fn try_insert_value_with_vr_forces_the_vr_and_validates() {
+        let mut ds = Dataset::new();
+        let err = ds
+            .try_insert_value_with_vr(Tag::ACCESSION_NUMBER, Vr::Ae, "SEVENTEEN_CHARS_X")
+            .unwrap_err();
+        assert!(matches!(err, Error::Validation(_)), "{err}");
+        assert!(
+            ds.is_empty(),
+            "a rejected write leaves the dataset unchanged"
+        );
+
+        // the same text is valid as LO, which proves the forced VR is the one
+        // validation saw
+        ds.try_insert_value_with_vr(Tag::ACCESSION_NUMBER, Vr::Lo, "SEVENTEEN_CHARS_X")
+            .unwrap();
+        assert!(matches!(
+            ds.item(&Tag::ACCESSION_NUMBER),
+            Some(crate::model::item::DicomItem::Element(element)) if element.vr() == Vr::Lo
+        ));
+
+        let mut off = Dataset::new();
+        off.set_validation(false);
+        off.try_insert_value_with_vr(Tag::ACCESSION_NUMBER, Vr::Ae, "SEVENTEEN_CHARS_X")
+            .unwrap();
+        assert!(off.contains(&Tag::ACCESSION_NUMBER));
+
+        let mut lenient = Dataset::new();
+        lenient.insert_value_with_vr(Tag::ACCESSION_NUMBER, Vr::Ae, "SEVENTEEN_CHARS_X");
+        assert!(lenient.contains(&Tag::ACCESSION_NUMBER));
+        assert!(lenient.validate().is_err());
+    }
+
+    #[test]
+    fn try_insert_str_validates_and_leaves_the_dataset_unchanged() {
+        // AE is capped at 16 characters
+        let mut ds = Dataset::new();
+        let err = ds
+            .try_insert_str(Tag::ACCESSION_NUMBER, Vr::Ae, "SEVENTEEN_CHARS_X")
+            .unwrap_err();
+        assert!(matches!(err, Error::Validation(_)), "{err}");
+        assert!(
+            ds.is_empty(),
+            "a rejected write leaves the dataset unchanged"
+        );
+
+        ds.try_insert_str(Tag::ACCESSION_NUMBER, Vr::Ae, "ACC-1")
+            .unwrap();
+        assert_eq!(ds.get_str(Tag::ACCESSION_NUMBER).unwrap(), "ACC-1");
+
+        let mut off = Dataset::new();
+        off.set_validation(false);
+        off.try_insert_str(Tag::ACCESSION_NUMBER, Vr::Ae, "SEVENTEEN_CHARS_X")
+            .unwrap();
+        assert!(off.contains(&Tag::ACCESSION_NUMBER));
+
+        let mut lenient = Dataset::new();
+        lenient.insert_str(Tag::ACCESSION_NUMBER, Vr::Ae, "SEVENTEEN_CHARS_X");
+        assert!(lenient.contains(&Tag::ACCESSION_NUMBER));
+        assert!(lenient.validate().is_err());
+    }
+
+    #[test]
+    fn try_insert_empty_resolves_private_tags_and_reports_a_full_group() {
+        // an empty value is VM-exempt, so the validated channel accepts it and
+        // behaves like the infallible one
+        let mut ds = Dataset::new();
+        ds.try_insert_empty(Tag::ACCESSION_NUMBER, Vr::Ae).unwrap();
+        assert!(ds.contains(&Tag::ACCESSION_NUMBER));
+        let mut off = Dataset::new();
+        off.set_validation(false);
+        off.try_insert_empty(Tag::ACCESSION_NUMBER, Vr::Ae).unwrap();
+        assert!(off.contains(&Tag::ACCESSION_NUMBER));
+
+        // a dictionary-style private tag resolves through the same path; when
+        // the creator group is full the fallible channel reports it instead of
+        // dropping the value with a warning
+        let mut full = Dataset::new();
+        for i in 0..300u32 {
+            full.insert_empty(
+                Tag::private(
+                    0x0029,
+                    0x0001,
+                    std::sync::Arc::new(crate::model::private_creator::PrivateCreator::new(
+                        format!("C{i}"),
+                    )),
+                ),
+                Vr::Lo,
+            );
+        }
+        let acme = std::sync::Arc::new(crate::model::private_creator::PrivateCreator::new(
+            String::from("ACME"),
+        ));
+        let before = full.len();
+        let err = full
+            .try_insert_empty(Tag::private(0x0029, 0x0002, acme.clone()), Vr::Lo)
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Data(DataError::PrivateTagResolution { .. })),
+            "{err}"
+        );
+        assert_eq!(full.len(), before, "a rejected write stores nothing");
+
+        // the infallible counterpart drops it with a warning, never panicking
+        full.insert_empty(Tag::private(0x0029, 0x0002, acme), Vr::Lo);
+        assert_eq!(full.len(), before, "the lenient channel drops it too");
     }
 
     #[test]
@@ -1398,6 +1688,10 @@ impl Dataset {
     /// skipped; other items copy whole with insert_or_update semantics.
     pub fn functional_groups(&self, frame: u32) -> Result<Dataset, Error> {
         let mut out = Dataset::with_transfer_syntax(self.transfer_syntax.clone());
+        // a derived view, not a user-built dataset: copied functional groups can
+        // be as lenient as the parsed file they came from (M3; fo-dicom builds
+        // this transient dataset with ValidateItems = false)
+        out.set_validation(false);
         fn push_source(out: &mut Dataset, source: &Dataset) {
             for item in source.items() {
                 if let DicomItem::Sequence(seq) = item {
@@ -1451,15 +1745,33 @@ impl Dataset {
     }
 
     /// Composes a timezone-aware date-time, reading
-    /// TimezoneOffsetFromUTC (0008,0201, `±hhmm`); without it the value is
-    /// presented as UTC.
+    /// TimezoneOffsetFromUTC (0008,0201, `±hhmm`) from this dataset. Without an
+    /// offset the value is placed in the machine's local timezone, matching
+    /// fo-dicom `GetDateTimeOffset` (M5).
     pub fn get_datetime_with_offset(
         &self,
         date_tag: impl AsRef<Tag>,
         time_tag: impl AsRef<Tag>,
     ) -> Result<chrono::DateTime<chrono::FixedOffset>, Error> {
+        self.get_datetime_with_offset_in(None, date_tag, time_tag)
+    }
+
+    /// Like [`Self::get_datetime_with_offset`], but reads (0008,0201) from
+    /// `top_level` when this dataset is a sequence item: enhanced-multiframe
+    /// functional groups carry the date/time while the offset lives on the
+    /// top-level dataset (M5; fo-dicom's `topLevelDataset` argument).
+    pub fn get_datetime_with_offset_in(
+        &self,
+        top_level: Option<&Dataset>,
+        date_tag: impl AsRef<Tag>,
+        time_tag: impl AsRef<Tag>,
+    ) -> Result<chrono::DateTime<chrono::FixedOffset>, Error> {
         let naive = self.get_datetime(date_tag, time_tag)?;
-        let offset = match self.try_get_str(TIMEZONE_OFFSET_FROM_UTC) {
+        use chrono::{Offset as _, TimeZone};
+        let offset = match top_level
+            .unwrap_or(self)
+            .try_get_str(TIMEZONE_OFFSET_FROM_UTC)
+        {
             Some(tz) => {
                 let t = tz.trim();
                 let invalid = || {
@@ -1486,9 +1798,19 @@ impl Dataset {
                 let secs = sign * (h * 3600 + m * 60);
                 chrono::FixedOffset::east_opt(secs).ok_or_else(invalid)?
             }
-            None => chrono::FixedOffset::east_opt(0).expect("zero offset"),
+            // fo-dicom treats a missing offset as local time, not UTC. An
+            // ambiguous wall time (DST fall-back) resolves to its first
+            // occurrence; a nonexistent one (spring-forward gap) is an error.
+            None => match chrono::Local.offset_from_local_datetime(&naive) {
+                chrono::LocalResult::Single(offset) => offset.fix(),
+                chrono::LocalResult::Ambiguous(first, _) => first.fix(),
+                chrono::LocalResult::None => {
+                    return Err(Error::Data(DataError::Other {
+                        message: "date-time does not exist in the local timezone".into(),
+                    }))
+                }
+            },
         };
-        use chrono::TimeZone;
         // the naive value is local time AT the offset (DICOM DT semantics)
         offset.from_local_datetime(&naive).single().ok_or_else(|| {
             Error::Data(DataError::Other {
@@ -1735,13 +2057,28 @@ mod derived_tests {
         assert!(Dataset::new()
             .try_get_datetime(Tag::STUDY_DATE, Tag::STUDY_TIME)
             .is_none());
-        // no TimezoneOffsetFromUTC → presented as UTC
+        // no TimezoneOffsetFromUTC → the machine-local offset (M5); compute the
+        // expectation the same way instead of pinning a concrete zone
+        let expected = {
+            use chrono::{Offset as _, TimeZone};
+            chrono::Local
+                .offset_from_local_datetime(
+                    &chrono::NaiveDate::from_ymd_opt(2024, 3, 5)
+                        .unwrap()
+                        .and_hms_opt(10, 30, 15)
+                        .unwrap(),
+                )
+                .single()
+                .expect("local time exists")
+                .fix()
+                .local_minus_utc()
+        };
         assert_eq!(
             ds.get_datetime_with_offset(Tag::STUDY_DATE, Tag::STUDY_TIME)
                 .unwrap()
                 .offset()
                 .local_minus_utc(),
-            0
+            expected
         );
         // malformed offsets are reported, not silently treated as UTC
         for bad in ["+1", "1 000", "+0x00", "+9911"] {
@@ -1760,6 +2097,43 @@ mod derived_tests {
                 .local_minus_utc(),
             5 * 3600 + 30 * 60
         );
+    }
+
+    #[test]
+    fn timezone_offset_comes_from_the_top_level_dataset() {
+        fn local_offset() -> i32 {
+            use chrono::{Offset as _, TimeZone};
+            chrono::Local
+                .offset_from_local_datetime(
+                    &chrono::NaiveDate::from_ymd_opt(2024, 3, 5)
+                        .unwrap()
+                        .and_hms_opt(10, 30, 15)
+                        .unwrap(),
+                )
+                .single()
+                .expect("local wall time exists")
+                .fix()
+                .local_minus_utc()
+        }
+
+        let mut top = Dataset::new();
+        top.insert_str(TIMEZONE_OFFSET_FROM_UTC, Vr::Sh, "+0530");
+        let mut item = Dataset::new();
+        item.insert_str(Tag::STUDY_DATE, Vr::Da, "20240305");
+        item.insert_str(Tag::STUDY_TIME, Vr::Tm, "103015");
+
+        // an item without its own offset is presented in local time (M5)
+        let alone = item
+            .get_datetime_with_offset(Tag::STUDY_DATE, Tag::STUDY_TIME)
+            .unwrap();
+        assert_eq!(alone.offset().local_minus_utc(), local_offset());
+
+        // a functional-group item takes (0008,0201) from the top-level dataset
+        let with_top = item
+            .get_datetime_with_offset_in(Some(&top), Tag::STUDY_DATE, Tag::STUDY_TIME)
+            .unwrap();
+        assert_eq!(with_top.offset().local_minus_utc(), 5 * 3600 + 30 * 60);
+        assert_eq!(with_top.to_string(), "2024-03-05 10:30:15 +05:30");
     }
 
     #[test]

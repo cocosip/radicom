@@ -298,7 +298,7 @@ fn on_demand_open() {
 
     let on_demand = ReadOptions {
         read: FileReadOption::ReadLargeOnDemand,
-        large_object_size: 64 * 1024,
+        ..ReadOptions::default()
     };
     let iters = 100;
     let ns = time_ops(iters, || {
@@ -308,7 +308,7 @@ fn on_demand_open() {
 
     let read_all = ReadOptions {
         read: FileReadOption::ReadAll,
-        large_object_size: 64 * 1024,
+        ..ReadOptions::default()
     };
     let iters = 20;
     let ns = time_ops(iters, || {

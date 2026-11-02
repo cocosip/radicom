@@ -4,11 +4,14 @@
 //! — with truncation controls. This is the library half of the `radicom-dump`
 //! CLI (INF-07), mirroring fo-dicom's `FO-DICOM.Dump`.
 
+use crate::io::file::DicomFile;
 use crate::model::dataset::Dataset;
 use crate::model::dictionary::{dictionary, Dictionary};
-use crate::model::element::ElementValue;
+use crate::model::element::{DicomElement, ElementValue};
 use crate::model::item::DicomItem;
 use crate::model::tag::Tag;
+use crate::model::uid::Uid;
+use crate::model::vr::Vr;
 
 /// Dump formatting options (INF-04).
 #[derive(Debug, Clone)]
@@ -41,6 +44,16 @@ pub fn dump_dataset(dataset: &Dataset, options: &DumpOptions) -> String {
     out
 }
 
+/// Formats a whole file: the file-meta group (0002) followed by the dataset,
+/// the same walk fo-dicom's `WriteToString(DicomFile)` / `WriteToLog(DicomFile)`
+/// performs (`FO-DICOM.Core/Log/Extensions.cs:18-40`).
+pub fn dump_file(file: &DicomFile, options: &DumpOptions) -> String {
+    let mut out = String::new();
+    write_level(&file.file_meta, 0, options, dictionary(), &mut out);
+    write_level(&file.dataset, 0, options, dictionary(), &mut out);
+    out
+}
+
 /// Formats one element's line at `depth`.
 ///
 /// The dictionary is resolved once per dump, and the tag is borrowed from the
@@ -63,10 +76,11 @@ fn write_level(
         let tag_text = format!("({:04X},{:04X})", tag.group(), tag.element());
         match item {
             DicomItem::Element(e) => {
-                let value = render_value(e.value(), e.vr(), options);
+                let value = with_uid_name(e, render_value(e.value(), e.vr(), options));
                 out.push_str(&format!(
-                    "{pad}{tag_text} {:<2} {name:<30} {value}\n",
-                    e.vr().code()
+                    "{pad}{tag_text} {:<2} {name:<30} {value} # {}\n",
+                    e.vr().code(),
+                    element_length(e.value())
                 ));
             }
             DicomItem::Sequence(s) => {
@@ -83,8 +97,18 @@ fn write_level(
                 }
             }
             DicomItem::Fragments(f) => {
+                let sizes: Vec<String> = f
+                    .fragments()
+                    .iter()
+                    .map(|fragment| fragment.size().to_string())
+                    .collect();
+                let detail = if sizes.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {} bytes", sizes.join(" + "))
+                };
                 out.push_str(&format!(
-                    "{pad}{tag_text} {:<2} {name:<30} ({} fragment(s))\n",
+                    "{pad}{tag_text} {:<2} {name:<30} ({} fragment(s){detail})\n",
                     f.vr().code(),
                     f.fragments().len()
                 ));
@@ -160,6 +184,36 @@ fn render_str(text: &str, options: &DumpOptions) -> String {
         format!("{truncated}… ({} chars)", text.chars().count())
     } else {
         text.to_string()
+    }
+}
+
+/// The element's in-memory byte length (fo-dicom `DicomElement.Length`).
+///
+/// Text is measured as UTF-8 bytes: the formatter does not know the dataset's
+/// character set, so this is exact for binary VRs and for ASCII text.
+fn element_length(value: &ElementValue) -> u64 {
+    match value {
+        ElementValue::Str(text) => text.len() as u64,
+        ElementValue::Bytes(buffer) => buffer.size(),
+    }
+}
+
+/// Appends the UID registry name to a rendered UI value, as fo-dicom's dump
+/// does (`FO-DICOM.Dump/DumpWalker.cs:53-61`).
+fn with_uid_name(element: &DicomElement, rendered: String) -> String {
+    if element.vr() != Vr::Ui {
+        return rendered;
+    }
+    let Some(text) = element.value().as_str() else {
+        return rendered;
+    };
+    let first = text.split('\\').next().unwrap_or("").trim();
+    let Some(uid) = Uid::query(first) else {
+        return rendered;
+    };
+    match uid.name() {
+        Some(name) => format!("{rendered} ({name})"),
+        None => rendered,
     }
 }
 
@@ -455,5 +509,51 @@ mod tests {
             ..DumpOptions::default()
         };
         assert!(dump_dataset(&long, &options).contains("… (10 chars)"));
+    }
+
+    #[test]
+    fn dump_lines_carry_byte_length_uid_names_and_fragment_sizes() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "DOE^JOHN");
+        ds.insert_value(Tag::ROWS, 4u16);
+        let fragments = ds.insert_fragments(Tag::PIXEL_DATA, Vr::Ob);
+        fragments.push_fragment(Arc::new(crate::model::buffer::MemoryBuffer::from(vec![
+            0u8;
+            4
+        ])));
+        let out = dump_dataset(&ds, &DumpOptions::default());
+
+        assert!(
+            out.contains("(Secondary Capture Image Storage)"),
+            "UI values carry the registry name: {out}"
+        );
+        assert!(
+            out.contains("DOE^JOHN # 8"),
+            "the element byte length is printed: {out}"
+        );
+        assert!(out.contains("# 2"), "binary US length is printed: {out}");
+        assert!(
+            out.contains("(1 fragment(s): 4 bytes)"),
+            "per-fragment sizes are printed: {out}"
+        );
+    }
+
+    #[test]
+    fn dump_file_walks_the_file_meta_group_before_the_dataset() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        ds.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5");
+        ds.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID-1");
+        let path =
+            std::env::temp_dir().join(format!("radicom-dump-file-{}.dcm", std::process::id()));
+        DicomFile::from_dataset(ds).save(&path).unwrap();
+        let file = DicomFile::open(&path).unwrap();
+        let out = dump_file(&file, &DumpOptions::default());
+        assert!(out.contains("(0002,0010)"), "group 0002 is dumped: {out}");
+        let meta = out.find("(0002,").expect("meta line");
+        let patient = out.find("(0010,0020)").expect("dataset line");
+        assert!(meta < patient, "file meta precedes the dataset: {out}");
+        std::fs::remove_file(&path).ok();
     }
 }

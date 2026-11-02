@@ -43,6 +43,26 @@ impl Point3 {
     pub fn new(x: f64, y: f64, z: f64) -> Self {
         Point3 { x, y, z }
     }
+
+    /// Distance to another point (fo-dicom `Point3.Distance`).
+    pub fn distance(&self, other: &Point3) -> f64 {
+        Vector3::new(self.x - other.x, self.y - other.y, self.z - other.z).length()
+    }
+
+    /// Moves the point `distance` mm along `axis` (fo-dicom `Point3.Move`).
+    pub fn moved(&self, axis: &Vector3, distance: f64) -> Point3 {
+        let axis = axis.normalize();
+        Point3::new(
+            self.x + axis.x * distance,
+            self.y + axis.y * distance,
+            self.z + axis.z * distance,
+        )
+    }
+
+    /// This point as a vector from the origin.
+    pub fn to_vector(&self) -> Vector3 {
+        Vector3::new(self.x, self.y, self.z)
+    }
 }
 
 /// A 3D vector with `f64` components and the usual vector algebra
@@ -112,6 +132,320 @@ impl Vector3 {
             self.z * other.x - self.x * other.z,
             self.x * other.y - self.y * other.x,
         )
+    }
+
+    /// Distance to another vector's tip (fo-dicom `Vector3.Distance`).
+    pub fn distance(&self, other: &Vector3) -> f64 {
+        Vector3::new(self.x - other.x, self.y - other.y, self.z - other.z).length()
+    }
+
+    /// True when the two vectors are (quasi) perpendicular (fo-dicom
+    /// `Vector3.IsPerpendicular`).
+    pub fn is_perpendicular(&self, other: &Vector3) -> bool {
+        self.dot(other).abs() <= 1e-9
+    }
+
+    /// Rotates this vector about `axis` by `angle` radians (Rodrigues' formula,
+    /// fo-dicom `Vector3.Rotate`; the zero axis leaves the vector unchanged).
+    pub fn rotate(&self, axis: &Vector3, angle: f64) -> Vector3 {
+        let axis = axis.normalize();
+        if axis.is_zero() {
+            return *self;
+        }
+        let dot = self.dot(&axis);
+        let parallel = Vector3::new(axis.x * dot, axis.y * dot, axis.z * dot);
+        let perpendicular = Vector3::new(
+            self.x - parallel.x,
+            self.y - parallel.y,
+            self.z - parallel.z,
+        );
+        let mutual = axis.cross(&perpendicular);
+        let (sin, cos) = angle.sin_cos();
+        Vector3::new(
+            perpendicular.x * cos + mutual.x * sin + parallel.x,
+            perpendicular.y * cos + mutual.y * sin + parallel.y,
+            perpendicular.z * cos + mutual.z * sin + parallel.z,
+        )
+    }
+
+    /// Reflects this vector off the plane whose unit normal is `normal`
+    /// (fo-dicom `Vector3.Reflect`).
+    pub fn reflect(&self, normal: &Vector3) -> Vector3 {
+        let dot = self.dot(normal);
+        Vector3::new(
+            self.x - 2.0 * dot * normal.x,
+            self.y - 2.0 * dot * normal.y,
+            self.z - 2.0 * dot * normal.z,
+        )
+    }
+
+    /// The signed unit axis with the largest absolute component (fo-dicom
+    /// `Vector3.NearestAxis`).
+    pub fn nearest_axis(&self) -> Vector3 {
+        let (x, y, z) = (self.x.abs(), self.y.abs(), self.z.abs());
+        if x >= y && x >= z {
+            Vector3::new(self.x.signum(), 0.0, 0.0)
+        } else if y >= z {
+            Vector3::new(0.0, self.y.signum(), 0.0)
+        } else {
+            Vector3::new(0.0, 0.0, self.z.signum())
+        }
+    }
+
+    /// This vector as a point.
+    pub fn to_point(&self) -> Point3 {
+        Point3::new(self.x, self.y, self.z)
+    }
+}
+
+/// An infinite line: a point and a direction vector (fo-dicom `Line3`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Line3 {
+    pub point: Point3,
+    pub vector: Vector3,
+}
+
+impl Line3 {
+    pub fn new(point: Point3, vector: Vector3) -> Self {
+        Line3 { point, vector }
+    }
+
+    /// The line through two points (fo-dicom `Line3(p1, p2)`).
+    pub fn from_points(a: Point3, b: Point3) -> Self {
+        Line3 {
+            point: a,
+            vector: Vector3::new(b.x - a.x, b.y - a.y, b.z - a.z),
+        }
+    }
+
+    /// Where the line crosses `plane`, or `None` when it is parallel to it.
+    pub fn intersect_plane(&self, plane: &Plane3) -> Option<Point3> {
+        let denominator = self.vector.dot(&plane.normal);
+        if denominator.abs() <= 1e-9 {
+            return None;
+        }
+        let offset = Vector3::new(
+            plane.point.x - self.point.x,
+            plane.point.y - self.point.y,
+            plane.point.z - self.point.z,
+        );
+        let t = offset.dot(&plane.normal) / denominator;
+        Some(Point3::new(
+            self.point.x + self.vector.x * t,
+            self.point.y + self.vector.y * t,
+            self.point.z + self.vector.z * t,
+        ))
+    }
+}
+
+/// A line segment between two points (fo-dicom `Segment3`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Segment3 {
+    pub a: Point3,
+    pub b: Point3,
+}
+
+impl Segment3 {
+    pub fn new(a: Point3, b: Point3) -> Self {
+        Segment3 { a, b }
+    }
+
+    /// Segment length in mm.
+    pub fn length(&self) -> f64 {
+        self.a.distance(&self.b)
+    }
+
+    /// The direction and length of the segment (fo-dicom `Vector`).
+    pub fn vector(&self) -> Vector3 {
+        Vector3::new(
+            self.b.x - self.a.x,
+            self.b.y - self.a.y,
+            self.b.z - self.a.z,
+        )
+    }
+
+    /// The unit direction of the segment (fo-dicom `NormalVector`).
+    pub fn normal_vector(&self) -> Vector3 {
+        self.vector().normalize()
+    }
+
+    /// The point halfway along the segment.
+    pub fn midpoint(&self) -> Point3 {
+        Point3::new(
+            (self.a.x + self.b.x) / 2.0,
+            (self.a.y + self.b.y) / 2.0,
+            (self.a.z + self.b.z) / 2.0,
+        )
+    }
+}
+
+/// A plane: a unit normal and one point on it (fo-dicom `Plane3`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Plane3 {
+    pub normal: Vector3,
+    pub point: Point3,
+}
+
+impl Plane3 {
+    /// Builds a plane, normalising `normal`; a zero normal yields the XY plane.
+    pub fn new(normal: Vector3, point: Point3) -> Self {
+        let normal = if normal.is_zero() {
+            Vector3::AXIS_Z
+        } else {
+            normal.normalize()
+        };
+        Plane3 { normal, point }
+    }
+
+    /// The plane through three points (fo-dicom `Plane3(a, b, c)`); collinear
+    /// points yield the XY plane through `a`.
+    pub fn from_points(a: Point3, b: Point3, c: Point3) -> Self {
+        let normal = Vector3::new(b.x - a.x, b.y - a.y, b.z - a.z).cross(&Vector3::new(
+            c.x - a.x,
+            c.y - a.y,
+            c.z - a.z,
+        ));
+        Self::new(normal, a)
+    }
+
+    /// Signed distance from `point` to the plane; positive on the normal side.
+    pub fn signed_distance(&self, point: &Point3) -> f64 {
+        self.normal.dot(&Vector3::new(
+            point.x - self.point.x,
+            point.y - self.point.y,
+            point.z - self.point.z,
+        ))
+    }
+
+    /// The orthogonal projection of `point` onto the plane.
+    pub fn project(&self, point: &Point3) -> Point3 {
+        let distance = self.signed_distance(point);
+        Point3::new(
+            point.x - self.normal.x * distance,
+            point.y - self.normal.y * distance,
+            point.z - self.normal.z * distance,
+        )
+    }
+}
+
+/// An oriented sample grid on a plane (fo-dicom `Slice3`, expressed like this
+/// crate's [`Slice`](crate::render::Slice) and DICOM `ImageOrientationPatient`):
+/// `row_direction` steps along a row across columns, `column_direction` down a
+/// column across rows, and their cross product is the slice normal.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Slice3 {
+    pub top_left: Point3,
+    pub row_direction: Vector3,
+    pub column_direction: Vector3,
+    pub rows: u32,
+    pub columns: u32,
+    pub spacing: f64,
+}
+
+impl Slice3 {
+    pub fn new(
+        top_left: Point3,
+        row_direction: Vector3,
+        column_direction: Vector3,
+        rows: u32,
+        columns: u32,
+        spacing: f64,
+    ) -> Self {
+        Slice3 {
+            top_left,
+            row_direction,
+            column_direction,
+            rows,
+            columns,
+            spacing,
+        }
+    }
+
+    /// The patient-space point of sample `(row, column)`.
+    pub fn point_at(&self, row: u32, column: u32) -> Point3 {
+        Point3::new(
+            self.top_left.x
+                + self.row_direction.x * column as f64 * self.spacing
+                + self.column_direction.x * row as f64 * self.spacing,
+            self.top_left.y
+                + self.row_direction.y * column as f64 * self.spacing
+                + self.column_direction.y * row as f64 * self.spacing,
+            self.top_left.z
+                + self.row_direction.z * column as f64 * self.spacing
+                + self.column_direction.z * row as f64 * self.spacing,
+        )
+    }
+
+    /// The slice's normal (row × column).
+    pub fn normal(&self) -> Vector3 {
+        self.row_direction.cross(&self.column_direction).normalize()
+    }
+
+    /// The plane this slice lies on.
+    pub fn plane(&self) -> Plane3 {
+        Plane3::new(self.normal(), self.top_left)
+    }
+}
+
+/// The three standard anatomical slice orientations (fo-dicom `Orientation3`):
+/// `row` runs along a row (increasing column index), `column` down a column
+/// (increasing row index), `normal` is their cross product.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Orientation3 {
+    pub row: Vector3,
+    pub column: Vector3,
+    pub normal: Vector3,
+}
+
+impl Orientation3 {
+    pub fn new(row: Vector3, column: Vector3) -> Self {
+        let row = row.normalize();
+        let column = column.normalize();
+        let normal = row.cross(&column).normalize();
+        Orientation3 {
+            row,
+            column,
+            normal,
+        }
+    }
+
+    /// Axial: rows along +X, columns along +Y, normal +Z.
+    pub fn axial() -> Self {
+        Orientation3 {
+            row: Vector3::AXIS_X,
+            column: Vector3::AXIS_Y,
+            normal: Vector3::AXIS_Z,
+        }
+    }
+
+    /// Coronal: rows along +X, columns along +Z, normal −Y.
+    pub fn coronal() -> Self {
+        Orientation3 {
+            row: Vector3::AXIS_X,
+            column: Vector3::AXIS_Z,
+            normal: Vector3::new(0.0, -1.0, 0.0),
+        }
+    }
+
+    /// Sagittal: rows along +Y, columns along +Z, normal +X.
+    pub fn sagittal() -> Self {
+        Orientation3 {
+            row: Vector3::AXIS_Y,
+            column: Vector3::AXIS_Z,
+            normal: Vector3::AXIS_X,
+        }
+    }
+
+    /// The standard orientation whose normal is closest to `normal`.
+    pub fn from_normal(normal: &Vector3) -> Self {
+        let axis = normal.nearest_axis();
+        if axis.x != 0.0 {
+            Self::sagittal()
+        } else if axis.y != 0.0 {
+            Self::coronal()
+        } else {
+            Self::axial()
+        }
     }
 }
 
@@ -568,6 +902,62 @@ mod tests {
         let c = a.normalize().cross(&b.normalize());
         assert!((c.z - 1.0).abs() < 1e-9);
         assert_eq!(Vector3::ZERO.normalize(), Vector3::ZERO);
+    }
+
+    #[test]
+    fn geometry3_utilities_rotate_reflect_and_intersect() {
+        // rotate +X 90° about +Z → +Y
+        let rotated = Vector3::AXIS_X.rotate(&Vector3::AXIS_Z, std::f64::consts::FRAC_PI_2);
+        assert!((rotated.y - 1.0).abs() < 1e-9);
+        // reflect +Y off a plane whose normal is +Y → -Y
+        let reflected = Vector3::AXIS_Y.reflect(&Vector3::AXIS_Y);
+        assert!((reflected.y + 1.0).abs() < 1e-9);
+        assert_eq!(
+            Vector3::new(0.2, -3.0, 0.1).nearest_axis(),
+            Vector3::new(0.0, -1.0, 0.0)
+        );
+        assert!(Vector3::AXIS_X.is_perpendicular(&Vector3::AXIS_Y));
+        assert_eq!(
+            Point3::new(0.0, 0.0, 0.0).distance(&Point3::new(3.0, 4.0, 0.0)),
+            5.0
+        );
+
+        // the z = 2 plane through the origin's normal +Z
+        let plane = Plane3::new(Vector3::AXIS_Z, Point3::new(0.0, 0.0, 2.0));
+        assert_eq!(plane.signed_distance(&Point3::new(1.0, 1.0, 5.0)), 3.0);
+        assert_eq!(
+            plane.project(&Point3::new(1.0, 1.0, 5.0)),
+            Point3::new(1.0, 1.0, 2.0)
+        );
+        let line = Line3::from_points(Point3::new(0.0, 0.0, 0.0), Point3::new(0.0, 0.0, 4.0));
+        assert_eq!(
+            line.intersect_plane(&plane).unwrap(),
+            Point3::new(0.0, 0.0, 2.0)
+        );
+        assert!(
+            Line3::from_points(Point3::new(0.0, 0.0, 4.0), Point3::new(1.0, 0.0, 4.0))
+                .intersect_plane(&plane)
+                .is_none()
+        );
+
+        let segment = Segment3::new(Point3::new(0.0, 0.0, 0.0), Point3::new(0.0, 2.0, 0.0));
+        assert_eq!(segment.length(), 2.0);
+        assert_eq!(segment.midpoint(), Point3::new(0.0, 1.0, 0.0));
+
+        let slice = Slice3::new(
+            Point3::new(0.0, 0.0, 3.0),
+            Vector3::AXIS_X,
+            Vector3::AXIS_Y,
+            4,
+            4,
+            0.5,
+        );
+        assert_eq!(slice.point_at(2, 1), Point3::new(0.5, 1.0, 3.0));
+        assert_eq!(slice.normal(), Vector3::AXIS_Z);
+        assert_eq!(
+            Orientation3::from_normal(&Vector3::new(0.1, -0.2, 0.9)),
+            Orientation3::axial()
+        );
     }
 
     #[test]

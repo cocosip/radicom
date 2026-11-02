@@ -51,6 +51,92 @@ impl AnonOption {
     ];
 }
 
+/// A combination of PS3.15 de-identification options (fo-dicom
+/// `SecurityProfileOptions`, a `[Flags]` enum with values 1..1024).
+///
+/// PS3.15 options are cumulative: the Basic Profile plus any Retain*/Clean*
+/// options. A single [`AnonOption`] converts into this type and variants
+/// combine with `|`:
+///
+/// ```
+/// use radicom::anonymizer::profile::{AnonOptions, SecurityProfile};
+/// let options = AnonOptions::BASIC_PROFILE | AnonOptions::RETAIN_DEVICE_IDENT;
+/// let profile = SecurityProfile::basic();
+/// assert!(profile.action_for_options("0018,1000", options).is_some());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnonOptions(u16);
+
+impl AnonOptions {
+    /// No option at all: the anonymizer leaves every tag untouched.
+    pub const NONE: AnonOptions = AnonOptions(0);
+    pub const BASIC_PROFILE: AnonOptions = AnonOptions(1 << 0);
+    pub const RETAIN_SAFE_PRIVATE: AnonOptions = AnonOptions(1 << 1);
+    pub const RETAIN_UIDS: AnonOptions = AnonOptions(1 << 2);
+    pub const RETAIN_DEVICE_IDENT: AnonOptions = AnonOptions(1 << 3);
+    pub const RETAIN_INSTITUTION_IDENT: AnonOptions = AnonOptions(1 << 4);
+    pub const RETAIN_PATIENT_CHARS: AnonOptions = AnonOptions(1 << 5);
+    pub const RETAIN_LONG_FULL_DATES: AnonOptions = AnonOptions(1 << 6);
+    pub const RETAIN_LONG_MODIF_DATES: AnonOptions = AnonOptions(1 << 7);
+    pub const CLEAN_DESC: AnonOptions = AnonOptions(1 << 8);
+    pub const CLEAN_STRUCTD_CONT: AnonOptions = AnonOptions(1 << 9);
+    pub const CLEAN_GRAPH: AnonOptions = AnonOptions(1 << 10);
+    /// Every option enabled.
+    pub const ALL: AnonOptions = AnonOptions(0x07FF);
+
+    /// The raw flag bits (fo-dicom `(short)options`).
+    pub const fn bits(self) -> u16 {
+        self.0
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// True when `option`'s column takes part in this set.
+    pub const fn contains(self, option: AnonOption) -> bool {
+        self.0 & (1 << option as u16) != 0
+    }
+
+    pub fn union(self, other: AnonOptions) -> AnonOptions {
+        AnonOptions(self.0 | other.0)
+    }
+
+    /// The single option this set names, if it names exactly one.
+    fn single(self) -> Option<AnonOption> {
+        AnonOption::ALL
+            .into_iter()
+            .find(|option| self.0 == 1 << (*option as u16))
+    }
+}
+
+impl Default for AnonOptions {
+    /// fo-dicom's `DicomAnonymizer` default: the Basic Profile alone.
+    fn default() -> Self {
+        AnonOptions::BASIC_PROFILE
+    }
+}
+
+impl From<AnonOption> for AnonOptions {
+    fn from(option: AnonOption) -> Self {
+        AnonOptions(1 << option as u16)
+    }
+}
+
+impl std::ops::BitOr for AnonOptions {
+    type Output = AnonOptions;
+
+    fn bitor(self, rhs: AnonOptions) -> AnonOptions {
+        self.union(rhs)
+    }
+}
+
+impl std::ops::BitOrAssign for AnonOptions {
+    fn bitor_assign(&mut self, rhs: AnonOptions) {
+        *self = self.union(rhs);
+    }
+}
+
 /// One de-identification action (§12.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -242,6 +328,19 @@ impl ProfileRow {
     pub fn action_for(&self, option: AnonOption) -> Option<Action> {
         self.actions[option as usize]
     }
+
+    /// The merged action for a combination of options.
+    ///
+    /// fo-dicom loads a row into the profile once per enabled flag, in column
+    /// order, so the highest enabled column with a cell wins; a row with no
+    /// enabled cell is not in the profile at all.
+    pub fn merged_action(&self, options: AnonOptions) -> Option<Action> {
+        AnonOption::ALL
+            .into_iter()
+            .filter(|option| options.contains(*option))
+            .filter_map(|option| self.actions[option as usize])
+            .next_back()
+    }
 }
 
 /// A parsed de-identification profile (§12.5).
@@ -387,6 +486,33 @@ impl SecurityProfile {
         self.match_wildcard(
             &format!("{:04X},{:04X}", tag.group(), tag.element()),
             option,
+        )
+    }
+
+    /// The action for `tag` under a combination of options (§12.5).
+    ///
+    /// fo-dicom merges the enabled flag columns into one table when the
+    /// profile is loaded and then takes the first matching row, so a row whose
+    /// merged action is `None` (no enabled cell) does not shadow later rows.
+    pub fn action_for_options(&self, tag: &str, options: AnonOptions) -> Option<Action> {
+        if let Some(option) = options.single() {
+            return self.action_for(tag, option);
+        }
+        let text = tag.trim().to_ascii_uppercase();
+        self.inner.rows.iter().find_map(|row| {
+            let action = row.merged_action(options)?;
+            row.pattern.matches(&text).then_some(action)
+        })
+    }
+
+    /// The action for a typed [`Tag`] under a combination of options.
+    pub fn action_for_tag_options(&self, tag: &Tag, options: AnonOptions) -> Option<Action> {
+        if let Some(option) = options.single() {
+            return self.action_for_tag(tag, option);
+        }
+        self.action_for_options(
+            &format!("{:04X},{:04X}", tag.group(), tag.element()),
+            options,
         )
     }
 
@@ -693,6 +819,60 @@ mod tests {
         );
         assert_eq!(
             profile.action_for("0010,0010", AnonOption::BasicProfile),
+            Some(Action::ZeroLength)
+        );
+    }
+
+    #[test]
+    fn option_columns_merge_like_fo_dicom() {
+        let profile = SecurityProfile::basic();
+        // (0018,1000) DeviceSerialNumber: Basic Profile X/Z/D -> Remove,
+        // RetainDeviceIdent -> Keep, so the combination keeps it.
+        assert_eq!(
+            profile.action_for("0018,1000", AnonOption::BasicProfile),
+            Some(Action::Remove)
+        );
+        assert_eq!(
+            profile.action_for("0018,1000", AnonOption::RetainDeviceIdent),
+            Some(Action::Keep)
+        );
+        let retained = AnonOptions::BASIC_PROFILE | AnonOptions::RETAIN_DEVICE_IDENT;
+        assert_eq!(retained.bits(), 0b1001);
+        assert_eq!(
+            profile.action_for_options("0018,1000", retained),
+            Some(Action::Keep),
+            "the higher enabled column wins for the same row"
+        );
+        // a tag with no RetainDeviceIdent cell keeps the Basic action
+        assert_eq!(
+            profile.action_for_options("0010,0010", retained),
+            Some(Action::ZeroLength)
+        );
+        // typed lookup agrees with the textual one
+        assert_eq!(
+            profile.action_for_tag_options(&Tag::new(0x0018, 0x1000), retained),
+            Some(Action::Keep)
+        );
+        // the first matching row wins: the broad odd-private wildcard row is
+        // inserted before the curve row, so its merged Basic action shadows
+        // CleanGraph exactly as fo-dicom's dictionary does.
+        let clean_graph = AnonOptions::BASIC_PROFILE | AnonOptions::CLEAN_GRAPH;
+        assert_eq!(
+            profile.action_for_options("5011,1234", clean_graph),
+            Some(Action::Remove)
+        );
+        assert_eq!(
+            profile.action_for_options("5011,1234", AnonOptions::CLEAN_GRAPH),
+            Some(Action::Clean)
+        );
+        // no option: nothing is anonymized
+        assert_eq!(
+            profile.action_for_options("0010,0010", AnonOptions::NONE),
+            None
+        );
+        // a single option still resolves through the exact index
+        assert_eq!(
+            profile.action_for_options("0010,0010", AnonOption::BasicProfile.into()),
             Some(Action::ZeroLength)
         );
     }

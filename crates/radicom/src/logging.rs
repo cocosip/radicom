@@ -5,7 +5,8 @@
 //! (e.g. `radicom::io=debug`). Also exposes dataset dump-to-log helpers that sit
 //! on top of the INF-04 formatter.
 
-use crate::dump::{dump_dataset, DumpOptions};
+use crate::dump::{dump_dataset, dump_file, DumpOptions};
+use crate::io::file::DicomFile;
 use crate::model::dataset::Dataset;
 
 /// Categorized log targets (§7). Use these in `tracing` macros via `target:`.
@@ -17,7 +18,7 @@ pub mod targets {
     pub const PRINT: &str = "radicom::print";
 }
 
-/// Log level for [`Dataset::write_to_log`].
+/// Log level for [`Dataset::write_to_log`] and [`DicomFile::write_to_log`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
     Trace,
@@ -25,6 +26,16 @@ pub enum LogLevel {
     Info,
     Warn,
     Error,
+}
+
+fn emit(level: LogLevel, text: &str) {
+    match level {
+        LogLevel::Trace => tracing::trace!(target: targets::IO, "{text}"),
+        LogLevel::Debug => tracing::debug!(target: targets::IO, "{text}"),
+        LogLevel::Info => tracing::info!(target: targets::IO, "{text}"),
+        LogLevel::Warn => tracing::warn!(target: targets::IO, "{text}"),
+        LogLevel::Error => tracing::error!(target: targets::IO, "{text}"),
+    }
 }
 
 impl Dataset {
@@ -44,14 +55,27 @@ impl Dataset {
     /// split can format the returned [`to_dump_string`](Dataset::to_dump_string)
     /// themselves.
     pub fn write_to_log(&self, level: LogLevel) {
-        let text = self.to_dump_string();
-        match level {
-            LogLevel::Trace => tracing::trace!(target: targets::IO, "{text}"),
-            LogLevel::Debug => tracing::debug!(target: targets::IO, "{text}"),
-            LogLevel::Info => tracing::info!(target: targets::IO, "{text}"),
-            LogLevel::Warn => tracing::warn!(target: targets::IO, "{text}"),
-            LogLevel::Error => tracing::error!(target: targets::IO, "{text}"),
-        }
+        emit(level, &self.to_dump_string());
+    }
+}
+
+impl DicomFile {
+    /// Renders the whole file — file-meta group then dataset — with the
+    /// default [`DumpOptions`] (INF-03/04).
+    pub fn to_dump_string(&self) -> String {
+        dump_file(self, &DumpOptions::default())
+    }
+
+    /// Renders the whole file with explicit [`DumpOptions`] (INF-03/04).
+    pub fn to_dump_string_with(&self, options: &DumpOptions) -> String {
+        dump_file(self, options)
+    }
+
+    /// Logs the whole file dump at `level` on the `radicom::io` target
+    /// (INF-03), walking the file-meta group like fo-dicom's
+    /// `WriteToLog(DicomFile)`.
+    pub fn write_to_log(&self, level: LogLevel) {
+        emit(level, &self.to_dump_string());
     }
 }
 
@@ -108,6 +132,23 @@ mod tests {
         ] {
             ds.write_to_log(level);
         }
+    }
+
+    #[test]
+    fn a_file_dump_starts_with_the_file_meta_group() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        ds.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5");
+        let path = std::env::temp_dir().join(format!("radicom-log-{}.dcm", std::process::id()));
+        DicomFile::from_dataset(ds).save(&path).unwrap();
+        let file = DicomFile::open(&path).unwrap();
+        let text = file.to_dump_string();
+        assert!(text.contains("(0002,0010)"), "meta is dumped: {text}");
+        let meta = text.find("(0002,").unwrap();
+        let patient = text.find("(0008,0018)").unwrap();
+        assert!(meta < patient, "meta precedes the dataset: {text}");
+        file.write_to_log(LogLevel::Debug);
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

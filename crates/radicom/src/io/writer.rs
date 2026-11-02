@@ -63,6 +63,18 @@ impl Charsets {
             })
         };
         let Some(DicomItem::Element(element)) = ds.item(&Tag::SPECIFIC_CHARACTER_SET) else {
+            // A dataset read with a fallback encoding writes its text back with
+            // that encoding, so a round-trip of a legacy Latin-1/Shift-JIS file
+            // does not silently become UTF-8 without (0008,0005) (H1). No ISO 2022
+            // designation: a fallback has no declared term to derive one from,
+            // and fo-dicom encodes with the bare Encoding too.
+            if let Some((first, rest)) = ds.fallback_encodings().split_first() {
+                return Some(Charsets {
+                    first,
+                    alternates: rest.to_vec(),
+                    first_designator: None,
+                });
+            }
             return inherit();
         };
         let text = element.string_value();
@@ -123,21 +135,25 @@ impl DicomWriter {
         for item in ds.items() {
             let g = item.tag().group();
             let is_group_length = item.tag().element() == 0x0000;
-            if self.options.keep_group_lengths && group != Some(g) {
+            if group != Some(g) {
                 group = Some(g);
-                let len = self.group_length(ds, g, syntax, charset)?;
-                // UL is binary: its bytes follow the target byte order
-                let len_bytes = match syntax.endian() {
-                    Endian::Little => len.to_le_bytes(),
-                    Endian::Big => len.to_be_bytes(),
-                };
-                *written += self.write_leaf(
-                    &Tag::new(g, 0x0000),
-                    Vr::Ul,
-                    ValueRef::Bytes(&len_bytes),
-                    syntax,
-                    out,
-                )?;
+                // recalculate only a length that is present: a group without
+                // (gggg,0000) gets none (L2, fo-dicom parity)
+                if self.options.keep_group_lengths && ds.item(&Tag::new(g, 0x0000)).is_some() {
+                    let len = self.group_length(ds, g, syntax, charset)?;
+                    // UL is binary: its bytes follow the target byte order
+                    let len_bytes = match syntax.endian() {
+                        Endian::Little => len.to_le_bytes(),
+                        Endian::Big => len.to_be_bytes(),
+                    };
+                    *written += self.write_leaf(
+                        &Tag::new(g, 0x0000),
+                        Vr::Ul,
+                        ValueRef::Bytes(&len_bytes),
+                        syntax,
+                        out,
+                    )?;
+                }
             }
             if is_group_length {
                 // removed unless recalculated above (PS3.5 §7.2)
@@ -362,11 +378,14 @@ impl DicomWriter {
         let mut group: Option<u16> = None;
         for item in ds.items() {
             let g = item.tag().group();
-            if self.options.keep_group_lengths && group != Some(g) {
+            if group != Some(g) {
                 group = Some(g);
-                // a UL value is always 4 bytes, so the size does not depend
-                // on the computed length
-                total += leaf_len(&Tag::new(g, 0x0000), Vr::Ul, 4, syntax);
+                // only a present group length is recalculated (L2)
+                if self.options.keep_group_lengths && ds.item(&Tag::new(g, 0x0000)).is_some() {
+                    // a UL value is always 4 bytes, so the size does not depend
+                    // on the computed length
+                    total += leaf_len(&Tag::new(g, 0x0000), Vr::Ul, 4, syntax);
+                }
             }
             if item.tag().element() == 0x0000 {
                 continue;
@@ -443,6 +462,78 @@ impl DicomWriter {
             total += self.item_len(item, syntax, charset)?;
         }
         u32::try_from(total).map_err(|_| length_overflow(&Tag::new(group, 0x0000), total))
+    }
+}
+
+/// Recalculates the `(gggg,0000)` elements already present in `ds`, adding one
+/// for a group that lacks it only when `create_if_missing` is set (L2;
+/// fo-dicom `RecalculateGroupLengths`). Sequences are visited first so a nested
+/// item's final encoding contributes to the enclosing group's length.
+pub fn recalculate_group_lengths(
+    ds: &mut Dataset,
+    syntax: &TransferSyntax,
+    create_if_missing: bool,
+) -> Result<(), Error> {
+    let writer = DicomWriter::default();
+    recalculate_level(&writer, ds, syntax, create_if_missing)
+}
+
+fn recalculate_level(
+    writer: &DicomWriter,
+    ds: &mut Dataset,
+    syntax: &TransferSyntax,
+    create_if_missing: bool,
+) -> Result<(), Error> {
+    let sequences: Vec<Tag> = ds
+        .items()
+        .filter(|item| matches!(item, DicomItem::Sequence(_)))
+        .map(|item| item.tag().clone())
+        .collect();
+    for tag in sequences {
+        if let Some(seq) = ds.sequence_mut(tag) {
+            for item in seq.items_mut() {
+                recalculate_level(writer, item, syntax, create_if_missing)?;
+            }
+        }
+    }
+    let mut groups: Vec<u16> = ds.items().map(|item| item.tag().group()).collect();
+    groups.dedup(); // items are in ascending tag order
+    let charset = Charsets::resolve(ds, None);
+    for group in groups {
+        let tag = Tag::new(group, 0x0000);
+        if ds.item(&tag).is_none() && !create_if_missing {
+            continue;
+        }
+        let length = writer.group_length(ds, group, syntax, charset.as_ref())?;
+        ds.insert_value_with_vr(tag, Vr::Ul, length);
+    }
+    Ok(())
+}
+
+/// Removes every `(gggg,0000)` group length element, or only the dataset's own
+/// when `first_level_only` (L2; fo-dicom `RemoveGroupLengths`).
+pub fn remove_group_lengths(ds: &mut Dataset, first_level_only: bool) {
+    let sequences: Vec<Tag> = ds
+        .items()
+        .filter(|item| matches!(item, DicomItem::Sequence(_)))
+        .map(|item| item.tag().clone())
+        .collect();
+    if !first_level_only {
+        for tag in sequences {
+            if let Some(seq) = ds.sequence_mut(tag) {
+                for item in seq.items_mut() {
+                    remove_group_lengths(item, false);
+                }
+            }
+        }
+    }
+    let tags: Vec<Tag> = ds
+        .items()
+        .filter(|item| item.tag().element() == 0x0000)
+        .map(|item| item.tag().clone())
+        .collect();
+    for tag in tags {
+        ds.remove(tag);
     }
 }
 
@@ -815,11 +906,20 @@ mod tests {
             .item(&Tag::new(0x0010, 0x0000))
             .is_none());
 
-        // keep_group_lengths: one recalculated element per group
+        // keep_group_lengths only recalculates lengths that are already there:
+        // a group without (gggg,0000) gets none (L2, fo-dicom parity)
         let options = WriteOptions {
             keep_group_lengths: true,
             ..Default::default()
         };
+        let invented = encode(&ds, &le(), options.clone());
+        assert!(parse_dataset_bytes(&invented, &le())
+            .unwrap()
+            .item(&Tag::new(0x0010, 0x0000))
+            .is_none());
+
+        // an existing group length element is recalculated
+        ds.insert_value_with_vr(Tag::new(0x0010, 0x0000), Vr::Ul, 0u32);
         let with = encode(&ds, &le(), options.clone());
         let back = parse_dataset_bytes(&with, &le()).unwrap();
         let gl: u32 = back.get(Tag::new(0x0010, 0x0000)).unwrap();
@@ -835,10 +935,72 @@ mod tests {
     }
 
     #[test]
+    fn group_length_helpers_recalculate_and_remove() {
+        // item inside (0008,1140) holds a grid of group-0010 elements with a
+        // stale group length, one level down
+        fn build() -> Dataset {
+            let mut inner = Dataset::new();
+            inner.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID");
+            inner.insert_value_with_vr(Tag::new(0x0010, 0x0000), Vr::Ul, 12_345u32);
+            let mut item = Dataset::new();
+            item.insert_sequence(Tag::new(0x0008, 0x1120)).push(inner);
+            let mut ds = Dataset::new();
+            ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+            ds.insert_value_with_vr(Tag::new(0x0010, 0x0000), Vr::Ul, 999u32);
+            ds.insert_sequence(Tag::new(0x0008, 0x1140)).push(item);
+            ds
+        }
+        fn inner_of(ds: &Dataset) -> &Dataset {
+            &ds.try_get_sequence(Tag::new(0x0008, 0x1140))
+                .unwrap()
+                .items()[0]
+                .try_get_sequence(Tag::new(0x0008, 0x1120))
+                .unwrap()
+                .items()[0]
+        }
+
+        // recalculation touches existing group lengths only (L2), nested included
+        let mut ds = build();
+        recalculate_group_lengths(&mut ds, &le(), false).unwrap();
+        let gl: u32 = ds.get(Tag::new(0x0010, 0x0000)).unwrap();
+        assert_ne!(gl, 999, "the stale length is replaced");
+        assert!(
+            ds.item(&Tag::new(0x0008, 0x0000)).is_none(),
+            "no group length is invented for a group that had none"
+        );
+        let nested_gl: u32 = inner_of(&ds).get(Tag::new(0x0010, 0x0000)).unwrap();
+        assert_ne!(nested_gl, 12_345, "sequence items are recalculated too");
+
+        // and the written group length agrees with the recalculation
+        let options = WriteOptions {
+            keep_group_lengths: true,
+            ..Default::default()
+        };
+        let bytes = encode(&ds, &le(), options);
+        let back = parse_dataset_bytes(&bytes, &le()).unwrap();
+        assert_eq!(back.get::<u32>(Tag::new(0x0010, 0x0000)).unwrap(), gl);
+
+        // create_if_missing adds group lengths to groups that lacked one
+        recalculate_group_lengths(&mut ds, &le(), true).unwrap();
+        assert!(ds.item(&Tag::new(0x0008, 0x0000)).is_some());
+
+        // removal: first_level_only keeps nested lengths, deep removal takes all
+        let mut shallow = ds.clone();
+        remove_group_lengths(&mut shallow, true);
+        assert!(shallow.item(&Tag::new(0x0010, 0x0000)).is_none());
+        assert!(inner_of(&shallow).contains(&Tag::new(0x0010, 0x0000)));
+        remove_group_lengths(&mut ds, false);
+        assert!(ds.items().all(|item| item.tag().element() != 0x0000));
+        assert!(!inner_of(&ds).contains(&Tag::new(0x0010, 0x0000)));
+    }
+
+    #[test]
     fn group_length_uses_target_byte_order() {
         // a big-endian dataset must write its UL group length big-endian too
         let mut ds = Dataset::new();
         ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+        // the writer recalculates a present group length, never invents one (L2)
+        ds.insert_value_with_vr(Tag::new(0x0010, 0x0000), Vr::Ul, 0u32);
         let options = WriteOptions {
             keep_group_lengths: true,
             ..Default::default()
@@ -1181,7 +1343,9 @@ mod tests {
             "{err}"
         );
 
-        // a UL group length has the same ceiling
+        // a UL group length has the same ceiling (the element must exist: the
+        // writer recalculates, but never invents one — L2)
+        ds.insert_value_with_vr(Tag::new(0x7FE0, 0x0000), Vr::Ul, 0u32);
         let options = WriteOptions {
             keep_group_lengths: true,
             ..WriteOptions::default()

@@ -28,7 +28,9 @@ pub mod store;
 pub mod tls;
 pub mod transport;
 
-pub use assembler::{MessageUnit, PduSplitter, PdvAssembler, Stream};
+pub use assembler::{
+    MessageBody, MessageUnit, PduSplitter, PdvAssembler, SpoolConfig, SpoolFile, Stream,
+};
 pub use association::{
     AcceptedContexts, ContextSetBuilder, ContextState, NegotiatedContext, NegotiationPolicy,
     ProposedContext, SyntaxPriority,

@@ -487,7 +487,7 @@ fn no_geometry() -> Error {
 /// `FunctionalGroupValues`: each functional-group macro's first item is expanded
 /// one level (so Pixel Measures `(0028,9110)` contributes its PixelSpacing),
 /// Shared first then Per-Frame so per-frame values win.
-fn functional_group_values(dataset: &Dataset, frame: u32) -> Dataset {
+pub(crate) fn functional_group_values(dataset: &Dataset, frame: u32) -> Dataset {
     fn absorb(out: &mut Dataset, group_item: &Dataset) {
         for item in group_item.items() {
             match item {

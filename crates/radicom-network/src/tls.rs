@@ -11,6 +11,7 @@ use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
 use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
+use tokio_rustls::rustls;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use tokio_rustls::rustls::server::WebPkiClientVerifier;
 use tokio_rustls::rustls::version::{TLS12, TLS13};
@@ -40,7 +41,7 @@ impl TlsVersion {
 }
 
 /// TLS material and policy for one endpoint.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct TlsOptions {
     /// PEM certificate chain to present (server) or to trust (client CA bundle).
     pub cert_file: Option<std::path::PathBuf>,
@@ -55,6 +56,23 @@ pub struct TlsOptions {
     pub client_ca_file: Option<std::path::PathBuf>,
     /// Skip certificate verification (client only, testing).
     pub accept_any: bool,
+    /// Application callback that can override the chain verdict (L5, fo-dicom
+    /// `RemoteCertificateValidationCallback`).
+    ///
+    /// The default verifier runs first; the callback is then asked with the leaf
+    /// DER and the standard result (`errors: None` when the chain validated).
+    /// Returning `false` refuses the peer even when the chain was valid;
+    /// returning `true` accepts a chain the default verifier rejected.
+    ///
+    /// **Security caveat:** a callback that returns `true` on a failed chain
+    /// disables authentication for those peers, which is why it is opt-in and
+    /// never consulted for a configuration that leaves it `None`. Use it to pin
+    /// a known self-signed peer, not to silence verification errors in general.
+    ///
+    /// **Ceilings:** PFX/PKCS#12 bundles and OS revocation (CRL/OCSP) are not
+    /// supported here because both need dependencies this crate does not take;
+    /// supply a PEM chain and a pre-validated chain instead.
+    pub certificate_validator: Option<Arc<dyn Fn(CertValidation) -> bool + Send + Sync>>,
     /// Override the SNI/verification name (client only). When unset the peer's
     /// address is used, never a hardcoded name.
     pub server_name: Option<String>,
@@ -62,6 +80,112 @@ pub struct TlsOptions {
     pub min_version: TlsVersion,
 }
 
+impl std::fmt::Debug for TlsOptions {
+    /// The callback is reduced to "set"/"unset": it carries no printable state.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TlsOptions")
+            .field("cert_file", &self.cert_file)
+            .field("key_file", &self.key_file)
+            .field("client_cert_file", &self.client_cert_file)
+            .field("client_key_file", &self.client_key_file)
+            .field("client_ca_file", &self.client_ca_file)
+            .field("accept_any", &self.accept_any)
+            .field(
+                "certificate_validator",
+                &self.certificate_validator.as_ref().map(|_| "<callback>"),
+            )
+            .field("server_name", &self.server_name)
+            .field("min_version", &self.min_version)
+            .finish()
+    }
+}
+
+/// What the standard verification found, handed to a `certificate_validator`
+/// (L5).
+#[derive(Debug, Clone)]
+pub struct CertValidation {
+    /// The peer's leaf certificate, DER-encoded.
+    pub leaf_der: Vec<u8>,
+    /// `None` when the default verifier accepted the chain; otherwise its error
+    /// message, which the callback may still override.
+    pub errors: Option<String>,
+}
+
+impl CertValidation {
+    /// True when the standard verification accepted the chain.
+    pub fn is_valid(&self) -> bool {
+        self.errors.is_none()
+    }
+}
+
+/// Wraps a verifier so an application callback gets the final say (L5).
+struct CallbackVerifier {
+    inner: Arc<rustls::client::WebPkiServerVerifier>,
+    callback: Arc<dyn Fn(CertValidation) -> bool + Send + Sync>,
+}
+
+impl std::fmt::Debug for CallbackVerifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallbackVerifier").finish()
+    }
+}
+
+impl rustls::client::danger::ServerCertVerifier for CallbackVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: rustls::pki_types::UnixTime,
+    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let standard = self.inner.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ocsp_response,
+            now,
+        );
+        let validation = CertValidation {
+            leaf_der: end_entity.as_ref().to_vec(),
+            errors: standard.as_ref().err().map(|error| error.to_string()),
+        };
+        if (self.callback)(validation) {
+            // the callback overrides a failed chain (fo-dicom semantics) and can
+            // also veto a valid one
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        } else {
+            Err(match standard {
+                Err(error) => error,
+                Ok(_) => rustls::Error::General(
+                    "the certificate_validator callback rejected the peer".to_string(),
+                ),
+            })
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+}
 impl TlsOptions {
     /// Server material from a PEM certificate chain and private key.
     pub fn server(
@@ -87,6 +211,7 @@ impl TlsOptions {
         TlsOptions {
             cert_file: ca_file.map(Into::into),
             accept_any: false,
+            certificate_validator: None,
             ..Default::default()
         }
     }
@@ -154,6 +279,18 @@ impl TlsOptions {
             builder
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(NoVerification))
+        } else if let Some(callback) = self.certificate_validator.clone() {
+            // L5: the default WebPKI verifier still runs; the callback may only
+            // override its verdict, never replace it
+            let roots = Arc::new(roots);
+            let inner = rustls::client::WebPkiServerVerifier::builder(roots)
+                .build()
+                .map_err(|e| {
+                    NetworkError::protocol_tls(format!("cannot build the chain verifier: {e}"))
+                })?;
+            builder
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(CallbackVerifier { inner, callback }))
         } else {
             builder.with_root_certificates(roots)
         };
@@ -1105,5 +1242,129 @@ ZfpRQ7oSMvyXNqCGkIuXOez3UtiQ5pUwnznzQF4hBfzAlhysk9/VTzgwbQxMCjDOEd6m
         record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
         record.extend_from_slice(&handshake);
         record
+    }
+
+    /// Runs one TLS handshake against `server_options` and reports whether it
+    /// succeeded.
+    async fn handshake_with(server_options: TlsOptions, client: TlsOptions) -> bool {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return false;
+            };
+            server_options.accept(stream).await.is_ok()
+        });
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let client = client.connect(stream).await;
+        let client_ok = client.is_ok();
+        let server_ok = server.await.unwrap_or(false);
+        client_ok && server_ok
+    }
+
+    /// Runs one handshake against a fresh self-signed server certificate.
+    async fn handshake_succeeds(client: TlsOptions) -> bool {
+        let (cert, key) = self_signed("validator-server");
+        handshake_with(TlsOptions::server(cert, key), client).await
+    }
+
+    #[tokio::test]
+    async fn a_certificate_validator_can_override_a_failed_chain() {
+        // the client trusts a different self-signed certificate, so the server's
+        // chain fails the standard verification
+        let (decoy_cert, _) = self_signed("decoy");
+        let trusting_decoy = TlsOptions {
+            cert_file: Some(decoy_cert),
+            server_name: Some("localhost".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            !handshake_succeeds(trusting_decoy).await,
+            "without a callback an untrusted chain is refused"
+        );
+
+        let (decoy_cert, _) = self_signed("decoy");
+        let accepted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = accepted.clone();
+        let validating = TlsOptions {
+            cert_file: Some(decoy_cert),
+            server_name: Some("localhost".to_string()),
+            certificate_validator: Some(Arc::new(move |validation: CertValidation| {
+                // the callback sees the failure it is overriding
+                assert!(
+                    validation.errors.is_some(),
+                    "the standard verifier must have rejected the chain"
+                );
+                seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                true
+            })),
+            ..Default::default()
+        };
+        assert!(
+            handshake_succeeds(validating).await,
+            "the callback overrides the failed chain"
+        );
+        assert!(
+            accepted.load(std::sync::atomic::Ordering::SeqCst),
+            "the callback ran"
+        );
+    }
+
+    /// Writes a CA bundle and a certificate signed by it, as PEM paths.
+    fn ca_signed() -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        let mut ca_params = rcgen::CertificateParams::new(vec!["radicom-test-ca".to_string()])
+            .expect("CA parameters");
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca_key = rcgen::KeyPair::generate().expect("CA key");
+        let ca = ca_params.self_signed(&ca_key).expect("CA certificate");
+        let leaf_params =
+            rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("leaf parameters");
+        let leaf_key = rcgen::KeyPair::generate().expect("leaf key");
+        let leaf = leaf_params
+            .signed_by(&leaf_key, &ca, &ca_key)
+            .expect("leaf certificate");
+        let dir = std::env::temp_dir().join(format!("radicom-tls-ca-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ca_path = dir.join("ca.pem");
+        let leaf_path = dir.join("leaf.pem");
+        let key_path = dir.join("leaf-key.pem");
+        std::fs::write(&ca_path, ca.pem()).unwrap();
+        std::fs::write(&leaf_path, leaf.pem()).unwrap();
+        std::fs::write(&key_path, leaf_key.serialize_pem()).unwrap();
+        (ca_path, leaf_path, key_path)
+    }
+
+    #[tokio::test]
+    async fn a_certificate_validator_can_also_refuse_a_valid_chain() {
+        let (ca, leaf, key) = ca_signed();
+        let server_options = TlsOptions::server(leaf, key);
+
+        // the same trust anchors without a callback connect
+        let trusting = TlsOptions {
+            cert_file: Some(ca.clone()),
+            server_name: Some("localhost".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            handshake_with(server_options.clone(), trusting).await,
+            "a CA-signed chain validates by default"
+        );
+
+        let refusing = TlsOptions {
+            cert_file: Some(ca),
+            server_name: Some("localhost".to_string()),
+            certificate_validator: Some(Arc::new(|validation: CertValidation| {
+                assert!(
+                    validation.is_valid(),
+                    "the standard verifier accepted the chain"
+                );
+                false
+            })),
+            ..Default::default()
+        };
+        assert!(
+            !handshake_with(server_options, refusing).await,
+            "the callback has the final say even on a valid chain"
+        );
     }
 }
