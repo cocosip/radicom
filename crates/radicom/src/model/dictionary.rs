@@ -197,7 +197,7 @@ pub struct Dictionary {
     keywords: HashMap<&'static str, u32>,
     private: RwLock<HashMap<String, PrivateSubDict>>,
     creators: Mutex<HashMap<String, Arc<PrivateCreator>>>,
-    keyword_creator: HashMap<&'static str, &'static str>,
+    keyword_creator: HashMap<&'static str, (u16, u16, Arc<PrivateCreator>)>,
 }
 
 impl Dictionary {
@@ -225,7 +225,7 @@ impl Dictionary {
         }
         for raw in PRIVATE_DICTIONARY {
             let creator = dict.intern_creator(raw.creator);
-            let entry = Arc::new(build_entry(raw, Some(creator))?);
+            let entry = Arc::new(build_entry(raw, Some(creator.clone()))?);
             let mut subs = dict.private.write().expect("private lock");
             let sub = subs.entry(raw.creator.to_string()).or_default();
             if entry.mask.is_none() {
@@ -234,9 +234,13 @@ impl Dictionary {
             } else {
                 sub.masked.push(entry);
             }
-            dict.keyword_creator
-                .entry(raw.keyword)
-                .or_insert(raw.creator);
+            if !raw.keyword.is_empty() {
+                dict.keyword_creator.entry(raw.keyword).or_insert((
+                    raw.group,
+                    raw.element,
+                    creator.clone(),
+                ));
+            }
         }
         Ok(dict)
     }
@@ -281,17 +285,17 @@ impl Dictionary {
     }
 
     /// Reverse lookup by keyword: public dictionary first, then private
-    /// rows (their creator is attached to the returned tag).
+    /// rows (their real group/element and creator are attached to the returned
+    /// tag). An empty keyword is never a valid lookup key (CM-05).
     pub fn tag_by_keyword(&self, keyword: &str) -> Option<Tag> {
+        if keyword.is_empty() {
+            return None;
+        }
         if let Some(packed) = self.keywords.get(keyword) {
             return Some(Tag::from_u32(*packed));
         }
-        let creator = self.keyword_creator.get(keyword)?;
-        Some(Tag::private(
-            0x0001, // group is filled by the caller's private resolution; mask 0 keeps it flexible
-            0x0001,
-            self.intern_creator(creator),
-        ))
+        let (group, element, creator) = self.keyword_creator.get(keyword)?;
+        Some(Tag::private(*group, *element, creator.clone()))
     }
 
     /// Merges another dictionary's entries into this one (DICT-03):
@@ -300,7 +304,11 @@ impl Dictionary {
     pub fn merge_runtime(&mut self, entries: Vec<RuntimeEntry>) {
         for e in entries {
             let key = e.entry.tag.to_u32();
+            let keyword = e.entry.keyword;
+            let group = e.entry.tag.group();
+            let element = e.entry.tag.element();
             if let Some(creator) = &e.entry.creator {
+                let creator = creator.clone();
                 let name = creator.as_str().to_string();
                 let mut subs = self.private.write().expect("private lock");
                 let sub = subs.entry(name).or_default();
@@ -308,6 +316,14 @@ impl Dictionary {
                     sub.exact.insert(key, e.entry);
                 } else {
                     sub.masked.push(e.entry);
+                }
+                drop(subs);
+                // Reverse lookup by a runtime private keyword needs the real
+                // (group, element, creator), not a placeholder (CM-05).
+                if !keyword.is_empty() {
+                    self.keyword_creator
+                        .entry(keyword)
+                        .or_insert((group, element, creator));
                 }
             } else if e.entry.mask.is_none() {
                 self.exact.insert(key, e.entry);
@@ -399,6 +415,31 @@ fn leak(s: String) -> &'static str {
     Box::leak(s.into_boxed_str())
 }
 
+fn finish_pending(
+    p: PendingTag,
+    creator: &Option<Arc<PrivateCreator>>,
+    out: &mut Vec<RuntimeEntry>,
+) -> Result<(), Error> {
+    let mask = if p.group_mask != 0xFFFF || p.element_mask != 0xFFFF {
+        Some((p.group_mask, p.element_mask))
+    } else {
+        None
+    };
+    out.push(RuntimeEntry {
+        entry: Arc::new(DictionaryEntry {
+            tag: Tag::new(p.group, p.element),
+            mask,
+            creator: creator.clone(),
+            name: p.name,
+            keyword: p.keyword,
+            vrs: parse_vr_list(p.vr)?,
+            vm: Vm::parse(p.vm)?,
+            retired: p.retired,
+        }),
+    });
+    Ok(())
+}
+
 fn load_xml_stream(reader: impl Read) -> Result<Vec<RuntimeEntry>, Error> {
     use quick_xml::events::Event;
     let mut reader = quick_xml::Reader::from_reader(std::io::BufReader::new(reader));
@@ -429,6 +470,12 @@ fn load_xml_stream(reader: impl Read) -> Result<Vec<RuntimeEntry>, Error> {
                     }
                 }
                 b"tag" => {
+                    // A self-closing <tag/> produces no End event, so flush a
+                    // pending entry from such a tag before starting a new one
+                    // (CM-11).
+                    if let Some(prev) = pending.take() {
+                        finish_pending(prev, &creator, &mut out)?;
+                    }
                     let mut group = None;
                     let mut element = None;
                     let mut keyword = String::new();
@@ -486,27 +533,23 @@ fn load_xml_stream(reader: impl Read) -> Result<Vec<RuntimeEntry>, Error> {
             Ok(Event::End(e)) => {
                 if e.name().as_ref() == b"tag" {
                     if let Some(p) = pending.take() {
-                        let mask = if p.group_mask != 0xFFFF || p.element_mask != 0xFFFF {
-                            Some((p.group_mask, p.element_mask))
-                        } else {
-                            None
-                        };
-                        out.push(RuntimeEntry {
-                            entry: Arc::new(DictionaryEntry {
-                                tag: Tag::new(p.group, p.element),
-                                mask,
-                                creator: creator.clone(),
-                                name: p.name,
-                                keyword: p.keyword,
-                                vrs: parse_vr_list(p.vr)?,
-                                vm: Vm::parse(p.vm)?,
-                                retired: p.retired,
-                            }),
-                        });
+                        finish_pending(p, &creator, &mut out)?;
                     }
+                } else if e.name().as_ref() == b"dictionary" {
+                    // Flush a trailing self-closing tag before the creator is
+                    // reset for the next <dictionary> block (CM-11).
+                    if let Some(p) = pending.take() {
+                        finish_pending(p, &creator, &mut out)?;
+                    }
+                    creator = None;
                 }
             }
-            Ok(Event::Eof) => break,
+            Ok(Event::Eof) => {
+                if let Some(p) = pending.take() {
+                    finish_pending(p, &creator, &mut out)?;
+                }
+                break;
+            }
             Err(e) => return Err(Error::from(e)),
             _ => {}
         }
@@ -829,5 +872,49 @@ mod extra_tests {
         let dict = Dictionary::with_generated().unwrap();
         assert!(dict.tag_by_keyword("NotAKeywordAtAll").is_none());
         assert!(dict.tag_by_keyword("PatientName").is_some());
+    }
+}
+
+#[cfg(test)]
+mod cm_regression {
+    use super::*;
+
+    #[test]
+    fn cm05_empty_keyword_is_none_and_private_coords_are_real() {
+        let mut dict = Dictionary::with_generated().unwrap();
+        assert!(
+            dict.tag_by_keyword("").is_none(),
+            "empty keyword is not a tag"
+        );
+
+        let xml = br#"<dictionary creator="ACME"><tag group="0029" element="1001" keyword="AcmeWidget" vr="LO" vm="1">Widget</tag></dictionary>"#;
+        let entries = load_xml(xml.as_slice()).unwrap();
+        dict.merge_runtime(entries);
+        let tag = dict
+            .tag_by_keyword("AcmeWidget")
+            .expect("private keyword resolves to a real tag");
+        assert_eq!(tag.group(), 0x0029);
+        assert_eq!(tag.element(), 0x1001);
+        assert_eq!(tag.private_creator().map(|c| c.as_str()), Some("ACME"));
+    }
+
+    #[test]
+    fn cm11_self_closing_tag_is_loaded() {
+        let xml = br#"<dictionary><tag group="0010" element="0010" keyword="PatientName" vr="PN" vm="1"/></dictionary>"#;
+        let entries = load_xml(xml.as_slice()).unwrap();
+        assert_eq!(entries.len(), 1, "self-closing <tag/> must not be dropped");
+        assert_eq!(entries[0].entry.keyword, "PatientName");
+        assert_eq!(entries[0].entry.tag, Tag::new(0x0010, 0x0010));
+
+        // A self-closing tag at the end of a private <dictionary> must keep
+        // that block's creator and not leak it into the next dictionary.
+        let xml2 = br#"<dictionaries><dictionary creator="ACME"><tag group="0029" element="1001" keyword="AcmeWidget" vr="LO" vm="1"/></dictionary><dictionary><tag group="0010" element="0010" keyword="PatientName" vr="PN" vm="1"/></dictionary></dictionaries>"#;
+        let entries = load_xml(xml2.as_slice()).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0].entry.creator.as_ref().map(|c| c.as_str()),
+            Some("ACME")
+        );
+        assert!(entries[1].entry.creator.is_none());
     }
 }

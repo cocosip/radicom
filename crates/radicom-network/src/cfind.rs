@@ -225,10 +225,14 @@ fn level_keys(level: QueryRetrieveLevel) -> &'static [(u16, u16, Vr)] {
 #[derive(Debug, Clone)]
 pub struct CFindResponse {
     pub message_id_being_responded_to: u16,
+    /// The abstract syntax echoed back in the required `(0000,0002)` field
+    /// (PS3.7 Table 9.3-4).
+    pub affected_sop_class_uid: String,
     pub status: u16,
     /// Present on Pending responses: one matching item.
     pub identifier: Option<Dataset>,
-    /// Sub-operation counters, meaningful on the terminal response.
+    /// Local bookkeeping only: a C-FIND-RSP carries no sub-operation counters
+    /// (PS3.7 Table 9.3-4 lists none), so these are never written to the wire.
     pub remaining: u16,
     pub completed: u16,
     pub failed: u16,
@@ -241,6 +245,7 @@ impl CFindResponse {
     pub fn pending(request: &CFindRequest, identifier: Dataset) -> Self {
         CFindResponse {
             message_id_being_responded_to: request.message_id,
+            affected_sop_class_uid: request.sop_class_uid.clone(),
             status: status::PENDING,
             identifier: Some(identifier),
             remaining: 0,
@@ -255,6 +260,7 @@ impl CFindResponse {
     pub fn success(request: &CFindRequest, matches: u16) -> Self {
         CFindResponse {
             message_id_being_responded_to: request.message_id,
+            affected_sop_class_uid: request.sop_class_uid.clone(),
             status: status::SUCCESS,
             identifier: None,
             remaining: 0,
@@ -269,6 +275,7 @@ impl CFindResponse {
     pub fn failure(request: &CFindRequest, code: u16, comment: impl Into<String>) -> Self {
         CFindResponse {
             message_id_being_responded_to: request.message_id,
+            affected_sop_class_uid: request.sop_class_uid.clone(),
             status: code,
             identifier: None,
             remaining: 0,
@@ -293,15 +300,14 @@ impl CFindResponse {
         let mut command =
             Command::request(CommandField::CFindRsp, self.message_id_being_responded_to);
         command.message_id_being_responded_to = Some(self.message_id_being_responded_to);
+        // Affected SOP Class UID is required in the C-FIND-RSP command set
+        // (PS3.7 Table 9.3-4), even though a C-FIND is not tied to an instance.
+        command.affected_sop_class_uid = Some(self.affected_sop_class_uid.clone());
         command.status = Some(self.status);
         command.no_dataset = self.identifier.is_none();
         command.error_comment = self.error_comment.clone();
-        if self.completed > 0 || self.failed > 0 || self.warning > 0 || self.remaining > 0 {
-            command.completed_suboperations = Some(self.completed);
-            command.failed_suboperations = Some(self.failed);
-            command.warning_suboperations = Some(self.warning);
-            command.remaining_suboperations = Some(self.remaining);
-        }
+        // No `(0000,1020..1023)` sub-operation counters on a C-FIND-RSP: those
+        // fields belong to C-MOVE-RSP / C-GET-RSP only (PS3.7 Table 9.3-4).
         command
     }
 
@@ -311,6 +317,7 @@ impl CFindResponse {
         }
         Ok(CFindResponse {
             message_id_being_responded_to: command.message_id_being_responded_to.unwrap_or(0),
+            affected_sop_class_uid: command.affected_sop_class_uid.clone().unwrap_or_default(),
             status: command.status.unwrap_or(status::PROCESSING_FAILURE),
             identifier,
             remaining: command.remaining_suboperations.unwrap_or(0),
@@ -529,7 +536,46 @@ mod tests {
         let success = CFindResponse::success(&request, 3);
         let back = CFindResponse::from_command(&success.to_command(), None).unwrap();
         assert_eq!(back.status, status::SUCCESS);
-        assert_eq!(back.completed, 3);
+        assert_eq!(
+            back.affected_sop_class_uid,
+            sop_class::STUDY_ROOT_QR_FIND,
+            "the required (0000,0002) round-trips"
+        );
+        // C-FIND-RSP carries no sub-operation counters (PS3.7 Table 9.3-4).
+        assert_eq!(back.completed, 0);
+    }
+
+    #[test]
+    fn terminal_response_writes_the_required_affected_sop_class_uid() {
+        let request = CFindRequest::study_query(3);
+        let command = CFindResponse::success(&request, 1).to_command();
+        let dataset = command.to_dataset();
+        assert_eq!(
+            dataset
+                .get_str(radicom::model::tag::Tag::AFFECTED_SOP_CLASS_UID)
+                .unwrap(),
+            sop_class::STUDY_ROOT_QR_FIND,
+            "PS3.7 Table 9.3-4 requires (0000,0002) in every C-FIND-RSP"
+        );
+    }
+
+    #[test]
+    fn c_find_response_writes_no_suboperation_counters() {
+        let request = CFindRequest::study_query(3);
+        let dataset = CFindResponse::success(&request, 7)
+            .to_command()
+            .to_dataset();
+        for tag in [
+            radicom::model::tag::Tag::NUMBER_OF_REMAINING_SUBOPERATIONS,
+            radicom::model::tag::Tag::NUMBER_OF_COMPLETED_SUBOPERATIONS,
+            radicom::model::tag::Tag::NUMBER_OF_FAILED_SUBOPERATIONS,
+            radicom::model::tag::Tag::NUMBER_OF_WARNING_SUBOPERATIONS,
+        ] {
+            assert!(
+                !dataset.contains(&tag),
+                "C-FIND-RSP must not carry sub-operation counter {tag:?}"
+            );
+        }
     }
 
     #[test]

@@ -142,8 +142,10 @@ pub fn parse_tm(s: &str) -> Result<Range<NaiveTime>, Error> {
         } else if s.contains('.') {
             let parts: Vec<&str> = s.split('.').collect();
             match parts.len() {
-                2 if parts[0].len() <= 2 => (parts[0].to_string(), parts[1].to_string()), // HH.mm
-                2 => (parts[0].to_string(), parts[1].to_string()), // HHMMSS.f
+                // Lenient dotted forms: fo-dicom `TimeStringRegex` only accepts
+                // digit-only TM or `HHMMSS.F`, so any dotted form here is a
+                // tolerated extension; treat the last segment as the fraction.
+                2 => (parts[0].to_string(), parts[1].to_string()), // main.fraction
                 3 => (
                     format!("{}{}{}", parts[0], parts[1], parts[2]),
                     String::new(),
@@ -321,7 +323,14 @@ pub fn parse_dt(s: &str) -> Result<Range<DtPoint>, Error> {
 /// a trailing suffix as an offset, but a range split can swallow an
 /// out-of-range offset (e.g. `-1500`) as the range end; this pre-check
 /// rejects such inputs outright.
+///
+/// A value that `parse_dt` already accepts is, by definition, not an invalid
+/// offset: the components it genuinely has (including a `YYYY-YYYY` year
+/// range, CM-04) are valid DT values.
 pub fn has_invalid_dt_offset(s: &str) -> bool {
+    if parse_dt(s).is_ok() {
+        return false;
+    }
     let bytes = s.as_bytes();
     for i in 1..bytes.len() {
         if bytes[i] == b'+' || bytes[i] == b'-' {
@@ -572,5 +581,21 @@ mod tests {
             .to_fixed()
             .unwrap();
         assert_eq!(at.to_rfc3339(), "2026-10-29T12:00:00+08:00");
+    }
+}
+
+#[cfg(test)]
+mod cm_regression {
+    use super::*;
+    use crate::model::vr::Vr;
+
+    #[test]
+    fn cm04_year_range_is_not_a_bad_offset() {
+        // "2024-2025" is a valid DT year range, not year 2024 at -20:25.
+        assert!(!has_invalid_dt_offset("2024-2025"));
+        assert!(parse_dt("2024-2025").is_ok());
+        assert!(crate::validation::validate_single(Vr::Dt, "2024-2025").is_ok());
+        // A genuinely out-of-range offset is still rejected.
+        assert!(has_invalid_dt_offset("20240305103015+1500"));
     }
 }

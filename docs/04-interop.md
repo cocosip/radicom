@@ -1,6 +1,8 @@
 # Interop Testing Against Real Peers
 
-> Current alignment, gap-audit and fix status: [03-fo-dicom-alignment.md](03-fo-dicom-alignment.md).
+> Current parity verdict and fix status: [03-fo-dicom-alignment.md](03-fo-dicom-alignment.md).
+> Current defect and fix evidence: [05-code-review-2026-11-02.md](05-code-review-2026-11-02.md).
+> Earlier DONE / coverage statements describe an earlier checkpoint, not proof of complete parity.
 
 How to verify radicom against a **real DICOM peer** — a fo-dicom C-STORE SCP or Q/R SCP, DCMTK,
 dcm4che, or a production PACS.

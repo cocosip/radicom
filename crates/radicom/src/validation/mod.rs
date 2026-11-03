@@ -4,12 +4,21 @@
 //! parsing runs with validation off (read-tolerant policy).
 
 use crate::error::{Error, TagRef, ValidationFailure};
-use crate::model::dicom_datetime::{parse_dt, parse_tm};
+use crate::model::dicom_datetime::{parse_da, parse_dt, parse_tm};
 use crate::model::element::DicomElement;
 use crate::model::vr::Vr;
+use std::cell::Cell;
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static VALIDATION_ENABLED: AtomicBool = AtomicBool::new(true);
+
+// IO-07: a scope guard disables validation for the *current thread* only. Keeping
+// a depth here (rather than saving/restoring the global flag) means overlapping
+// guards on different threads cannot clobber the shared switch or leave it off.
+thread_local! {
+    static SCOPE_DISABLE_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
 
 /// Global validation switch (default on).
 pub fn set_validation_enabled(on: bool) {
@@ -17,27 +26,31 @@ pub fn set_validation_enabled(on: bool) {
 }
 
 pub fn validation_enabled() -> bool {
+    if SCOPE_DISABLE_DEPTH.with(Cell::get) > 0 {
+        return false;
+    }
     VALIDATION_ENABLED.load(Ordering::SeqCst)
 }
 
-/// RAII scope guard: disables validation until dropped (VAL-03), restoring
-/// the previous global state.
+/// RAII scope guard: disables validation on this thread until dropped (VAL-03).
 #[derive(Debug)]
 pub struct ValidationScopeGuard {
-    prev: bool,
+    // a thread-local depth must be unwound on the thread that set it
+    _not_send: PhantomData<*const ()>,
 }
 
 impl ValidationScopeGuard {
     pub fn validation_off() -> Self {
-        let prev = validation_enabled();
-        set_validation_enabled(false);
-        ValidationScopeGuard { prev }
+        SCOPE_DISABLE_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+        ValidationScopeGuard {
+            _not_send: PhantomData,
+        }
     }
 }
 
 impl Drop for ValidationScopeGuard {
     fn drop(&mut self) {
-        set_validation_enabled(self.prev);
+        SCOPE_DISABLE_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
     }
 }
 
@@ -59,31 +72,37 @@ fn fail(vr: Vr, content: &str, reason: impl Into<String>) -> String {
 }
 
 /// DA per PS3.3 C.3.1 / fo-dicom `ValidateDA`: one or two `YYYYMMDD`
-/// components joined by a single `-`, trailing spaces tolerated, month ≤ 12,
-/// day ≤ 31. Partial dates (`YYYY`, `YYYYMM`) and `.`/`/` separators are not
-/// conformant, even though the tolerant date parser accepts them.
+/// components joined by a single `-`, trailing spaces tolerated, and every
+/// component a real calendar date. Partial dates (`YYYY`, `YYYYMM`), `.`/`/`
+/// separators, a missing first component and month/day `00` are not conformant,
+/// even though the tolerant `parse_da` accepts the partial forms.
 fn validate_da(content: &str) -> Result<(), String> {
+    fn component(part: &str) -> Result<(), String> {
+        if part.len() != 8 || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return Err("expected YYYYMMDD".into());
+        }
+        // IO-09: `parse_da` validates the real calendar (month 1-12, day valid
+        // for the month/leap year), rejecting 20240000 / 20240231.
+        parse_da(part)
+            .map(|_| ())
+            .map_err(|_| "not a valid calendar date".to_string())
+    }
+
     let mut parts = content.split('-');
-    let first = parts.next().unwrap_or("");
-    let second = parts.next();
+    let first = parts.next().unwrap_or("").trim_end_matches(' ');
+    let second = parts.next().map(|p| p.trim_end_matches(' '));
     if parts.next().is_some() {
         return Err("more than one range separator".into());
     }
-    for part in std::iter::once(first).chain(second) {
-        let trimmed = part.trim_end_matches(' ');
-        if trimmed.is_empty() {
-            continue;
-        }
-        if trimmed.len() != 8 || !trimmed.bytes().all(|b| b.is_ascii_digit()) {
-            return Err("expected YYYYMMDD".into());
-        }
-        let month: u32 = trimmed[4..6].parse().map_err(|_| "bad month")?;
-        let day: u32 = trimmed[6..8].parse().map_err(|_| "bad day")?;
-        if month > 12 {
-            return Err("month exceeds 12".into());
-        }
-        if day > 31 {
-            return Err("day exceeds 31".into());
+    if first.is_empty() {
+        // rejects "-" and "-YYYYMMDD": a range needs its first component
+        return Err("missing date component".into());
+    }
+    component(first)?;
+    // a trailing separator ("YYYYMMDD-") is still tolerated as an open range
+    if let Some(second) = second {
+        if !second.is_empty() {
+            component(second)?;
         }
     }
     Ok(())
@@ -372,6 +391,10 @@ pub fn validate_element(element: &DicomElement) -> Result<(), Error> {
 mod tests {
     use super::*;
     use crate::model::tag::Tag;
+    use std::sync::Mutex;
+
+    // tests that touch the process-global switch must not run concurrently
+    static GLOBAL_SWITCH_LOCK: Mutex<()> = Mutex::new(());
 
     fn el(vr: Vr, text: &str) -> DicomElement {
         DicomElement::new_str(Tag::PATIENT_NAME, vr, text)
@@ -663,6 +686,7 @@ mod tests {
 
     #[test]
     fn validation_element_and_switches() {
+        let _lock = GLOBAL_SWITCH_LOCK.lock().unwrap();
         // full validation produces a ValidationFailure with context
         let bad = el(Vr::Sh, "WAY_TOO_LONG_ACCESSION_NUMBER");
         let err = validate_element(&bad).unwrap_err();
@@ -700,6 +724,62 @@ mod tests {
         assert!(validate_single(Vr::Da, "a-b-c").is_err());
         assert!(validate_single(Vr::Da, "20240332").is_err(), "day > 31");
         assert!(validate_single(Vr::Da, "2024030X").is_err());
+    }
+
+    #[test]
+    fn da_rejects_empty_components_and_impossible_calendar_dates() {
+        // IO-09: these used to pass the old month<=12/day<=31 check.
+        assert!(validate_single(Vr::Da, "-").is_err(), "lone separator");
+        assert!(
+            validate_single(Vr::Da, "-20240305").is_err(),
+            "leading separator"
+        );
+        assert!(validate_single(Vr::Da, "20240000").is_err(), "month/day 00");
+        assert!(validate_single(Vr::Da, "20240230").is_err(), "Feb 30");
+        assert!(
+            validate_single(Vr::Da, "20230229").is_err(),
+            "not a leap year"
+        );
+        assert!(validate_single(Vr::Da, "20240229").is_ok(), "real leap day");
+        assert!(validate_single(Vr::Da, "20241301").is_err(), "month 13");
+    }
+
+    #[test]
+    fn validation_scope_guard_is_thread_local() {
+        // IO-07: a guard disables validation only on its own thread and does not
+        // clobber the global switch.
+        let _lock = GLOBAL_SWITCH_LOCK.lock().unwrap();
+        set_validation_enabled(true);
+        let guard = ValidationScopeGuard::validation_off();
+        assert!(!validation_enabled(), "current thread disabled");
+        let other = std::thread::spawn(validation_enabled).join().unwrap();
+        assert!(
+            other,
+            "a scope guard on one thread must not disable validation elsewhere"
+        );
+        drop(guard);
+        assert!(
+            validation_enabled(),
+            "dropping the guard restores this thread"
+        );
+    }
+
+    #[test]
+    fn nested_validation_guards_restore_at_the_outermost_drop() {
+        let _lock = GLOBAL_SWITCH_LOCK.lock().unwrap();
+        set_validation_enabled(true);
+        let outer = ValidationScopeGuard::validation_off();
+        assert!(!validation_enabled());
+        {
+            let _inner = ValidationScopeGuard::validation_off();
+            assert!(!validation_enabled());
+        }
+        assert!(
+            !validation_enabled(),
+            "the outer scope still disables after the inner one drops"
+        );
+        drop(outer);
+        assert!(validation_enabled());
     }
 
     #[test]

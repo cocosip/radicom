@@ -518,11 +518,13 @@ where
     let _association = crate::observability::AssociationGuard::new(options.metrics.clone());
 
     let accepted = AcceptedContexts::from_negotiated(negotiated);
-    let peer_max_pdu = if request.user_information.max_pdu_length == 0 {
-        crate::pdu::clamp_max_pdu_length(options.max_pdu_length)
-    } else {
-        request.user_information.max_pdu_length
-    };
+    // The Max-PDU we send must fit what the peer can receive, but a hostile
+    // peer can advertise 0xFFFF_FFFF. Clamp it to our own ceiling so the send
+    // path (PduFramer) never pre-allocates a multi-GiB buffer (PS3.8 §9.3.2).
+    let peer_max_pdu = negotiated_send_max_pdu(
+        request.user_information.max_pdu_length,
+        options.max_pdu_length,
+    );
     let splitter = PduSplitter::with_limits(
         peer_max_pdu,
         options.max_pdvs_per_pdu,
@@ -658,11 +660,16 @@ where
                             {
                                 // M6: the provider runs on its own task while this
                                 // loop keeps reading the association
-                                let syntax = serving
-                                    .accepted
-                                    .by_id(unit.context_id)
-                                    .map(|c| transfer_syntax_of(&c.transfer_syntax))
-                                    .unwrap_or_else(|| syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+                                let syntax = match serving.accepted.by_id(unit.context_id) {
+                                    Some(context) => {
+                                        transfer_syntax_of(&context.transfer_syntax)?
+                                    }
+                                    None => {
+                                        return Err(NetworkError::protocol(
+                                            "command on an unaccepted presentation context",
+                                        ))
+                                    }
+                                };
                                 jobs.spawn(run_job(
                                     DispatchJob {
                                         context_id: unit.context_id,
@@ -691,14 +698,12 @@ where
                             // the PDV names its context: use that context's
                             // accepted syntax, never another context of the
                             // same SOP class (review #15)
-                            let syntax = accepted
-                                .by_id(context_id)
-                                .map(|c| transfer_syntax_of(&c.transfer_syntax))
-                                .ok_or_else(|| {
-                                    NetworkError::protocol(
-                                        "dataset on an unaccepted presentation context",
-                                    )
-                                })?;
+                            let context = accepted.by_id(context_id).ok_or_else(|| {
+                                NetworkError::protocol(
+                                    "dataset on an unaccepted presentation context",
+                                )
+                            })?;
+                            let syntax = transfer_syntax_of(&context.transfer_syntax)?;
                             if DispatchJob::is_concurrent(&command) && jobs.len() < max_jobs {
                                 let cancel = (command.field == CommandField::CFindRq)
                                     .then(|| CancelSlot::register(&cancels, command.message_id));
@@ -778,15 +783,35 @@ where
     }
 }
 
-/// Resolves a UID string to a transfer syntax, defaulting to Explicit VR LE.
-fn transfer_syntax_of(uid: &str) -> Arc<radicom::model::transfer_syntax::TransferSyntax> {
+/// The largest PDU body this server will send to a peer: the peer's advertised
+/// Max-PDU-Length clamped to [`crate::pdu::MAX_PDU_SIZE`]. A value of 0 means
+/// "no maximum" on the wire (PS3.8 §9.3.2), which this implementation cannot
+/// honour, so it falls back to our own configured ceiling. Without the clamp a
+/// hostile `Max-PDU-Length = 0xFFFF_FFFF` would make the streaming framer
+/// pre-allocate a ~4 GiB buffer.
+fn negotiated_send_max_pdu(peer_advertised: u32, local_max_pdu: u32) -> u32 {
+    if peer_advertised == 0 {
+        crate::pdu::clamp_max_pdu_length(local_max_pdu)
+    } else {
+        crate::pdu::clamp_max_pdu_length(peer_advertised)
+    }
+}
+
+/// Resolves a negotiated transfer-syntax UID to its syntax.
+///
+/// The UID always comes from an accepted presentation context (validated
+/// against our supported list at bind time, or the AC verified against what we
+/// proposed), so an unknown UID is an invariant violation: fail loudly rather
+/// than silently decoding with the wrong syntax.
+fn transfer_syntax_of(uid: &str) -> Result<Arc<radicom::model::transfer_syntax::TransferSyntax>> {
     radicom::model::transfer_syntax::parse(uid)
-        .unwrap_or_else(|_| syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone())
+        .map_err(|_| NetworkError::protocol("accepted transfer syntax is not supported"))
 }
 
 /// Validates the presentation contexts of an A-ASSOCIATE-RQ (§9.3.2):
-/// identifiers must be odd, non-zero and unique, an RQ context carries no
-/// result code, and both syntaxes must be present.
+/// identifiers must be odd, non-zero and unique, and both syntaxes must be
+/// present. An RQ has no Result/Reason field (the third byte is reserved and
+/// must not be tested, PS3.8 Table 9-13).
 fn validate_proposed_contexts(contexts: &[PresentationContext]) -> Result<()> {
     let mut seen = std::collections::HashSet::new();
     for pc in contexts {
@@ -808,11 +833,6 @@ fn validate_proposed_contexts(contexts: &[PresentationContext]) -> Result<()> {
         if pc.transfer_syntaxes.is_empty() {
             return Err(NetworkError::protocol(
                 "presentation context has no transfer syntax",
-            ));
-        }
-        if pc.result != 0 {
-            return Err(NetworkError::protocol(
-                "an association request carries no presentation-context result",
             ));
         }
     }
@@ -880,11 +900,10 @@ where
         field if crate::nservice::is_n_request(field) => {
             // responses are written on the request's own context, so they use
             // that context's accepted syntax (review #15)
-            let syntax = serving
-                .accepted
-                .by_id(context_id)
-                .map(|c| transfer_syntax_of(&c.transfer_syntax))
-                .unwrap_or_else(|| syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+            let syntax = match serving.accepted.by_id(context_id) {
+                Some(c) => transfer_syntax_of(&c.transfer_syntax)?,
+                None => syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+            };
             handle_n_service(serving, context_id, command, None, &syntax).await
         }
         other => {
@@ -1941,7 +1960,7 @@ where
             }
             let context = self.accepted.pick(&sop_class, "")?;
             let context_id = context.id;
-            let target = transfer_syntax_of(&context.transfer_syntax);
+            let target = transfer_syntax_of(&context.transfer_syntax)?;
             let message_id = self.next_reverse_message_id();
             event.message_id = message_id;
             let expected = crate::dimse::response_field(event.field)
@@ -1987,7 +2006,7 @@ where
         if !self.accepted.peer_holds_scp_role(&sop_class) {
             return Err(NetworkError::ScuRoleNotNegotiated { sop_class });
         }
-        let target = transfer_syntax_of(&context.transfer_syntax);
+        let target = transfer_syntax_of(&context.transfer_syntax)?;
 
         let message_id = self.next_reverse_message_id();
         let mut request = Command::request(CommandField::CStoreRq, message_id);
@@ -2811,7 +2830,7 @@ impl Association {
                         "the N-EVENT-REPORT dataset used another presentation context",
                     ));
                 }
-                let syntax = transfer_syntax_of(&self.syntax_of(context_id));
+                let syntax = transfer_syntax_of(&self.syntax_of(context_id))?;
                 let dataset = crate::message::decode_dataset_with_fallback(
                     &unit.bytes,
                     &syntax,
@@ -2841,7 +2860,7 @@ impl Association {
         dataset: Option<Dataset>,
     ) -> Result<()> {
         let request = crate::nservice::NServiceRequest::from_command(command, dataset);
-        let syntax = transfer_syntax_of(&self.syntax_of(context_id));
+        let syntax = transfer_syntax_of(&self.syntax_of(context_id))?;
         let (response_command, response_dataset) = match handler(&request) {
             Ok(response) => (response.to_command(), response.dataset),
             Err(error) => {
@@ -3027,7 +3046,7 @@ impl Association {
             .contexts
             .pick(&sop_class, dataset.transfer_syntax().uid())?;
         let context_id = context.id;
-        let target = transfer_syntax_of(&context.transfer_syntax);
+        let target = transfer_syntax_of(&context.transfer_syntax)?;
         let message_id = self.allocate_message_id()?;
 
         let mut request = Command::request(CommandField::CStoreRq, message_id);
@@ -3183,7 +3202,7 @@ impl Association {
             let context = self.contexts.pick(&request.sop_class_uid, "")?;
             self.contexts
                 .validate_request(context.id, &request.to_command(), true)?;
-            let syntax = transfer_syntax_of(&context.transfer_syntax);
+            let syntax = transfer_syntax_of(&context.transfer_syntax)?;
             let payload = bytes::Bytes::from(crate::message::encode_dataset(
                 &request.identifier,
                 &syntax,
@@ -3350,7 +3369,7 @@ impl Association {
     {
         let context = self.contexts.pick(&request.sop_class_uid, "")?;
         let context_id = context.id;
-        let syntax = transfer_syntax_of(&context.transfer_syntax);
+        let syntax = transfer_syntax_of(&context.transfer_syntax)?;
         let message_id = request.message_id;
 
         let command = bytes::Bytes::from(command_bytes(&request.to_command())?);
@@ -3464,7 +3483,7 @@ impl Association {
     {
         let context = self.contexts.pick(&request.sop_class_uid, "")?;
         let context_id = context.id;
-        let syntax = transfer_syntax_of(&context.transfer_syntax);
+        let syntax = transfer_syntax_of(&context.transfer_syntax)?;
         let message_id = request.message_id;
 
         let command = bytes::Bytes::from(command_bytes(&request.to_command())?);
@@ -3576,7 +3595,7 @@ impl Association {
         };
         let context = self.contexts.pick(&request.sop_class_uid, "")?;
         let context_id = context.id;
-        let syntax = transfer_syntax_of(&context.transfer_syntax);
+        let syntax = transfer_syntax_of(&context.transfer_syntax)?;
         let message_id = request.message_id;
 
         let command = bytes::Bytes::from(command_bytes(&request.to_command())?);
@@ -3702,15 +3721,14 @@ impl Association {
                                 // storage context the SCP chose, which is not
                                 // the C-GET request's context: resolve the
                                 // syntax from the PDV's own context id (#15)
-                                let store_syntax = self
-                                    .contexts
-                                    .by_id(unit.context_id)
-                                    .map(|c| transfer_syntax_of(&c.transfer_syntax))
-                                    .ok_or_else(|| {
+                                let store_context =
+                                    self.contexts.by_id(unit.context_id).ok_or_else(|| {
                                         NetworkError::protocol(
                                             "reverse C-STORE on an unaccepted context",
                                         )
                                     })?;
+                                let store_syntax =
+                                    transfer_syntax_of(&store_context.transfer_syntax)?;
                                 let dataset = crate::message::decode_dataset_with_fallback(
                                     &unit.bytes,
                                     &store_syntax,
@@ -3878,7 +3896,7 @@ impl Association {
             .unwrap_or_else(|| syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
         let context = self.contexts.pick(sop_class, request_syntax.uid())?;
         let context_id = context.id;
-        let target = transfer_syntax_of(&context.transfer_syntax);
+        let target = transfer_syntax_of(&context.transfer_syntax)?;
 
         let command = request.to_command();
         let command_bytes =
@@ -4464,6 +4482,23 @@ mod tests {
                 "1.2.840.10008.1.2.1".to_string(),
             ],
         )
+    }
+
+    #[test]
+    fn a_hostile_peer_max_pdu_is_clamped_before_the_splitter() {
+        // NW-04: a peer advertising 0xFFFF_FFFF must not make the streaming
+        // framer pre-allocate ~4 GiB; the send-side splitter is bounded.
+        let clamped = negotiated_send_max_pdu(0xFFFF_FFFF, 16384);
+        assert_eq!(clamped, crate::pdu::MAX_PDU_SIZE);
+        let splitter = PduSplitter::new(clamped, 16);
+        assert!(
+            splitter.max_pdv_value() <= crate::pdu::MAX_PDU_SIZE as usize,
+            "the splitter PDV budget stays bounded"
+        );
+        // 0 means "no maximum" on the wire: fall back to our own ceiling.
+        assert_eq!(negotiated_send_max_pdu(0, 16384), 16384);
+        // A sane peer value passes through unchanged.
+        assert_eq!(negotiated_send_max_pdu(65536, 16384), 65536);
     }
 
     #[test]
@@ -5775,7 +5810,9 @@ mod tests {
         assert_eq!(responses.len(), 3, "two matches plus the terminal response");
         assert!(responses[0].is_pending() && responses[1].is_pending());
         assert_eq!(responses[2].status, crate::dimse::status::SUCCESS);
-        assert_eq!(responses[2].completed, 2);
+        // C-FIND-RSP carries no sub-operation counters (PS3.7 Table 9.3-4); the
+        // match count is the number of Pending responses seen, not a counter.
+        assert_eq!(responses[2].completed, 0);
 
         let first = responses[0].identifier.as_ref().unwrap();
         assert_eq!(first.get_str(Tag::STUDY_INSTANCE_UID).unwrap(), "1.2.3.1");
@@ -5912,7 +5949,7 @@ mod tests {
         .unwrap();
         let request = crate::cfind::CFindRequest::study_query(1);
         let context_id = association.contexts().all()[0].id;
-        let syntax = transfer_syntax_of(&association.contexts().all()[0].transfer_syntax);
+        let syntax = transfer_syntax_of(&association.contexts().all()[0].transfer_syntax).unwrap();
         let command = bytes::Bytes::from(command_bytes(&request.to_command()).unwrap());
         let identifier = bytes::Bytes::from(
             crate::message::encode_dataset(&request.identifier, &syntax).unwrap(),
@@ -6659,7 +6696,7 @@ mod tests {
         .unwrap();
         let request = crate::cget::CGetRequest::study("1.2.3.4", 1);
         let context_id = association.contexts().all()[0].id;
-        let syntax = transfer_syntax_of(&association.contexts().all()[0].transfer_syntax);
+        let syntax = transfer_syntax_of(&association.contexts().all()[0].transfer_syntax).unwrap();
         let command = bytes::Bytes::from(command_bytes(&request.to_command()).unwrap());
         let identifier = bytes::Bytes::from(
             crate::message::encode_dataset(&request.identifier, &syntax).unwrap(),
@@ -6763,7 +6800,7 @@ mod tests {
             .pick(&request.sop_class_uid, "")
             .unwrap()
             .id;
-        let syntax = transfer_syntax_of(&association.contexts().all()[0].transfer_syntax);
+        let syntax = transfer_syntax_of(&association.contexts().all()[0].transfer_syntax).unwrap();
         let command = bytes::Bytes::from(command_bytes(&request.to_command()).unwrap());
         let identifier = bytes::Bytes::from(
             crate::message::encode_dataset(&request.identifier, &syntax).unwrap(),
@@ -8154,7 +8191,7 @@ mod tests {
         .unwrap();
         let request = crate::cmove::CMoveRequest::study("1.2.3.4", "STORE-SCP", 1);
         let context_id = association.contexts().all()[0].id;
-        let syntax = transfer_syntax_of(&association.contexts().all()[0].transfer_syntax);
+        let syntax = transfer_syntax_of(&association.contexts().all()[0].transfer_syntax).unwrap();
         let command = bytes::Bytes::from(command_bytes(&request.to_command()).unwrap());
         let identifier = bytes::Bytes::from(
             crate::message::encode_dataset(&request.identifier, &syntax).unwrap(),
@@ -9255,19 +9292,20 @@ mod tests {
     }
 
     #[test]
-    fn a_request_context_with_a_result_is_rejected() {
-        // The RQ wire format has no result field, so only a hand-built request
-        // can carry one; the validator still refuses it (§9.3.2).
+    fn a_request_context_reserved_byte_is_not_a_result() {
+        // PS3.8 Table 9-13: the third byte of an RQ presentation-context item
+        // is reserved and must not be tested on receive. The wire decoder
+        // leaves `result` at 0 for an RQ, so a (nonconformant but harmless)
+        // nonzero reserved byte never reaches validation and is accepted.
         let context = PresentationContext {
             id: 1,
             abstract_syntax: sop_class::VERIFICATION.to_string(),
             transfer_syntaxes: vec!["1.2.840.10008.1.2".to_string()],
-            result: 1,
+            result: 0,
         };
-        let error = validate_proposed_contexts(&[context]).expect_err("an RQ carries no result");
         assert!(
-            error.to_string().contains("no presentation-context result"),
-            "{error}"
+            validate_proposed_contexts(&[context]).is_ok(),
+            "an RQ context is accepted; it carries no result field"
         );
     }
 
@@ -9835,7 +9873,8 @@ mod tests {
             .unwrap();
         let terminal = responses.last().unwrap();
         assert_eq!(terminal.status, crate::dimse::status::SUCCESS);
-        assert_eq!(terminal.completed, 1);
+        // C-FIND-RSP does not carry sub-operation counters.
+        assert_eq!(terminal.completed, 0);
         association.release().await.unwrap();
         handle.await.unwrap().unwrap();
     }

@@ -265,7 +265,10 @@ impl Uid {
     /// the name to contain "Storage" and not be a "Storage Commitment" SOP
     /// Class, exactly like fo-dicom; the remaining buckets are name-keyed.
     pub fn storage_category(&self) -> StorageCategory {
-        if !self.value.starts_with("1.2.840.10008") {
+        // Component-boundary prefix match: "1.2.840.10008" or
+        // "1.2.840.10008.<...>", not an adjacent arc such as
+        // "1.2.840.100080.1" (CM needs-verification).
+        if &*self.value != "1.2.840.10008" && !self.value.starts_with("1.2.840.10008.") {
             return if self.uid_type == UidType::SopClass {
                 StorageCategory::Private
             } else {
@@ -315,10 +318,11 @@ impl Uid {
     // -- validity (VAL UI rules, spec §5) -------------------------------
 
     /// UI validity: ≤64 chars, digits and dots only, no empty components,
-    /// no component starting with `'0'` (a bare zero is invalid too,
-    /// matching fo-dicom's strict rule). Trailing spaces tolerated.
+    /// no component starting with `'0'` (a single "0" component is allowed, as
+    /// in fo-dicom). Padding — trailing space or NUL — is tolerated, matching
+    /// [`Uid::parse`] (CM-10).
     pub fn is_valid(s: &str) -> bool {
-        let s = s.trim_end_matches(' ');
+        let s = s.trim_matches(|c| c == ' ' || c == '\0');
         if s.is_empty() || s.len() > 64 {
             return false;
         }
@@ -856,5 +860,32 @@ mod tests {
         );
         // a storage SOP class has no meta class
         assert!(UidGenerator::meta_sop_class(&Uid::new("1.2.840.10008.5.1.4.1.1.2")).is_none());
+    }
+}
+
+#[cfg(test)]
+mod cm_regression {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn cm10_nul_padded_uid_is_valid() {
+        assert!(Uid::is_valid("1.2.840.10008.1.2.1\0"));
+        assert!(Uid::is_valid("1.2.840.10008.1.2.1 "));
+        assert!(!Uid::is_valid("1.2.840.10008.1.2.1X"));
+    }
+
+    #[test]
+    fn storage_category_prefix_matches_component_boundary() {
+        let fake = Uid {
+            value: Arc::from("1.2.840.100080.1"),
+            name: Some("Fake Image Storage"),
+            uid_type: UidType::SopClass,
+            retired: false,
+        };
+        assert_eq!(fake.storage_category(), StorageCategory::Private);
+        // A real standard-root SOP class still classifies as image storage.
+        let real = Uid::parse("1.2.840.10008.5.1.4.1.1.2");
+        assert_eq!(real.storage_category(), StorageCategory::Image);
     }
 }

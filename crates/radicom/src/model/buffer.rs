@@ -434,10 +434,35 @@ impl ByteBuffer for EndianBuffer {
             buf.copy_from_slice(slice);
             return Ok(());
         }
-        let mut tmp = vec![0u8; buf.len()];
-        self.inner.get_byte_range(offset, &mut tmp)?;
+        // Cache-cold: byte-swap whole units of the *underlying* buffer, then
+        // return the requested window from it. Swapping only the window would
+        // mis-pair bytes for an unaligned offset or a sub-unit read, disagreeing
+        // with `data()` (CM-07).
+        let _ = checked_range(offset, buf.len(), self.size())?;
+        let unit = self.unit.max(1) as u64;
+        let start = offset - offset % unit;
+        let end = offset + buf.len() as u64; // checked_range proved this fits
+        let aligned_end = end
+            .div_ceil(unit)
+            .checked_mul(unit)
+            .unwrap_or(self.size())
+            .min(self.size());
+        let span = match usize::try_from(aligned_end - start) {
+            Ok(s) => s,
+            Err(_) => {
+                // Larger than the address space: materialize and slice.
+                let data = self.data()?;
+                let s = usize::try_from(offset)
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "offset too large"))?;
+                buf.copy_from_slice(&data[s..s + buf.len()]);
+                return Ok(());
+            }
+        };
+        let mut tmp = vec![0u8; span];
+        self.inner.get_byte_range(start, &mut tmp)?;
         crate::model::endian::Endian::swap_buffer(&mut tmp, self.unit);
-        buf.copy_from_slice(&tmp);
+        let off = (offset - start) as usize;
+        buf.copy_from_slice(&tmp[off..off + buf.len()]);
         Ok(())
     }
 }
@@ -1337,5 +1362,41 @@ mod tests {
         assert!(!range.is_empty());
         assert_eq!(range.inner().size(), 3);
         assert_eq!(&*range.data().unwrap(), &[2, 3]);
+    }
+}
+
+#[cfg(test)]
+mod cm_regression {
+    use super::*;
+    use std::sync::Arc;
+
+    fn mem(bytes: Vec<u8>) -> SharedBuffer {
+        Arc::new(MemoryBuffer::from(bytes))
+    }
+
+    #[test]
+    fn cm07_endian_range_matches_data_for_unaligned_reads() {
+        let inner = mem(vec![1, 2, 3, 4, 5, 6]);
+        // Baseline whole-buffer swap from a separate instance (keeps the
+        // instance under test cache-cold).
+        let baseline = EndianBuffer::new(inner.clone(), 2).data().unwrap().to_vec();
+        for (off, len) in [(0usize, 1usize), (1, 1), (1, 3), (0, 2), (2, 2)] {
+            let fresh = EndianBuffer::new(inner.clone(), 2);
+            let mut out = vec![0u8; len];
+            fresh.get_byte_range(off as u64, &mut out).unwrap();
+            assert_eq!(out, &baseline[off..off + len], "unit2 off={off} len={len}");
+        }
+
+        let inner4 = mem(vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        let baseline4 = EndianBuffer::new(inner4.clone(), 4)
+            .data()
+            .unwrap()
+            .to_vec();
+        for (off, len) in [(1usize, 2usize), (3, 4), (0, 1), (5, 3)] {
+            let fresh = EndianBuffer::new(inner4.clone(), 4);
+            let mut out = vec![0u8; len];
+            fresh.get_byte_range(off as u64, &mut out).unwrap();
+            assert_eq!(out, &baseline4[off..off + len], "unit4 off={off} len={len}");
+        }
     }
 }

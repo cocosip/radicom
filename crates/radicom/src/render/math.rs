@@ -640,17 +640,34 @@ impl Histogram {
     /// Applies an explicit window `[start, end]` in value space
     /// (fo-dicom `ApplyWindow(int start, int end)`).
     pub fn apply_window(&mut self, start: i32, end: i32) {
-        self.wstart = (start + self.offset).max(0) as usize;
-        self.wend = (end + self.offset).min(self.values.len() as i32 - 1) as usize;
-        if self.wstart == 0 && self.wend == self.values.len() - 1 {
+        let len = self.values.len();
+        if len == 0 {
+            self.wstart = 0;
+            self.wend = 0;
+            self.wtotal = 0;
+            self.window = 0;
+            return;
+        }
+        let last = len as i32 - 1;
+        let start_pos = start + self.offset;
+        let end_pos = end + self.offset;
+        // An entirely-out-of-range or inverted window is empty, not a panic
+        // (PR-08: a negative `end` used to become a huge usize).
+        if end_pos < 0 || start_pos > last || start_pos > end_pos {
+            self.wstart = 0;
+            self.wend = 0;
+            self.wtotal = 0;
+            self.window = 0;
+            return;
+        }
+        self.wstart = start_pos.max(0) as usize;
+        self.wend = end_pos.min(last) as usize;
+        if self.wstart == 0 && self.wend == len - 1 {
             self.window = 100;
             self.wtotal = self.total;
             return;
         }
-        self.wtotal = 0;
-        for i in self.wstart..=self.wend {
-            self.wtotal += self.values[i];
-        }
+        self.wtotal = self.values[self.wstart..=self.wend].iter().sum();
         self.window = if self.total > 0 {
             (self.wtotal as f64 / self.total as f64) as i32
         } else {
@@ -1124,6 +1141,31 @@ mod tests {
         // asking for the window total before any window applies 100%
         let mut fresh = Histogram::new(0, 1);
         assert_eq!(fresh.window_total(), 0);
+    }
+
+    #[test]
+    fn explicit_window_out_of_range_or_inverted_is_empty_not_a_panic() {
+        // PR-08: a negative `end` previously cast to usize::MAX and panicked.
+        let mut histogram = Histogram::new(0, 10);
+        for value in 0..=10 {
+            histogram.add(value);
+        }
+        histogram.apply_window(-100, -50);
+        assert_eq!(histogram.window_total(), 0, "entirely below the range");
+
+        let mut histogram = Histogram::new(0, 10);
+        for value in 0..=10 {
+            histogram.add(value);
+        }
+        histogram.apply_window(5, 2);
+        assert_eq!(histogram.window_total(), 0, "inverted window is empty");
+
+        let mut histogram = Histogram::new(0, 10);
+        for value in 0..=10 {
+            histogram.add(value);
+        }
+        histogram.apply_window(0, 10);
+        assert_eq!(histogram.window_total(), histogram.total(), "full window");
     }
 
     #[test]

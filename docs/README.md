@@ -14,14 +14,16 @@ User-facing introduction and usage examples are in the root [README.md](../READM
 | [02-development-guide.md](02-development-guide.md) | You need the feature list with stable IDs, milestone status, what is outstanding, risks, or the testing strategy |
 | [03-fo-dicom-alignment.md](03-fo-dicom-alignment.md) | You need the fo-dicom parity verdict, the 2026-11-02 gap audit and per-finding fix status |
 | [04-interop.md](04-interop.md) | You are testing against a real DICOM peer |
+| [05-code-review-2026-11-02.md](05-code-review-2026-11-02.md) | **Current review and fix ledger.** Independent fresh review against fo-dicom; 44 findings (1 P0, 3 P1, 13 P2, 27 P3), all fixed with regression tests, plus the retained limits |
 
 ```
 docs/
-├── README.md                    ← this index
-├── 01-architecture.md           ← what the code must obey
-├── 02-development-guide.md      ← features, progress, risks, testing
-├── 03-fo-dicom-alignment.md     ← parity verdict, gap audit and fix status
-└── 04-interop.md                ← real-peer testing procedure
+├── README.md                     ← this index
+├── 01-architecture.md            ← what the code must obey
+├── 02-development-guide.md       ← features, progress, risks, testing
+├── 03-fo-dicom-alignment.md      ← parity verdict, gap-audit fix status, known limits, documented divergences
+├── 04-interop.md                 ← real-peer testing procedure
+└── 05-code-review-2026-11-02.md  ← current review and fix ledger
 ```
 
 ## Authority
@@ -40,6 +42,7 @@ at present. Anything listed there is a defect, not a contract.
 | Known deviations from the intended design (currently none) | [01-architecture.md](01-architecture.md) §15 |
 | Outstanding work, environment- or scope-limited | [02-development-guide.md](02-development-guide.md) §3 |
 | Parity gaps and their fix status | [03-fo-dicom-alignment.md](03-fo-dicom-alignment.md) §Fix status |
+| Known limits and documented divergences | [03-fo-dicom-alignment.md](03-fo-dicom-alignment.md) |
 
 ---
 

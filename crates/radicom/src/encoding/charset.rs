@@ -153,6 +153,36 @@ pub fn charset_for_encoding(encoding: &'static Encoding) -> Option<&'static str>
 
 // -- decoding (ENC-02) ------------------------------------------------------
 
+/// Length of a double-byte character led by `b` in `enc_name`, when `b` is a
+/// valid lead byte and a trail byte follows. Used only to stop the raw-byte PN
+/// delimiter scan from landing inside a DBCS character (IO-06).
+fn dbcs_pair_len(enc_name: &str, b: u8, next: Option<u8>) -> Option<usize> {
+    let next = next?;
+    match enc_name {
+        // GBK (the WHATWG alias that `GBK`/`gb2312` both resolve to): lead
+        // 0x81-0xFE, trail 0x40-0xFE (0x5E is a legal trail).
+        "GBK" => (0x81..=0xFE).contains(&b).then_some(2),
+        // GB18030 is GBK plus four-byte sequences (lead 0x81-0xFE, second
+        // 0x30-0x39); a two-byte character's trail may also be 0x5E.
+        "gb18030" => {
+            if (0x81..=0xFE).contains(&b) {
+                if (0x30..=0x39).contains(&next) {
+                    Some(4)
+                } else {
+                    Some(2)
+                }
+            } else {
+                None
+            }
+        }
+        // Shift_JIS: lead 0x81-0x9F / 0xE0-0xFC, trail 0x40-0xFC.
+        "Shift_JIS" => ((0x81..=0x9F).contains(&b) || (0xE0..=0xFC).contains(&b)).then_some(2),
+        // EUC-KR: lead/trail 0xA1-0xFE (no 0x5E trail, but keep pairs consistent).
+        "EUC-KR" => (0xA1..=0xFE).contains(&b).then_some(2),
+        _ => None,
+    }
+}
+
 /// Decodes a possibly multi-charset string: splits at ESC (0x1B) boundaries
 /// and maps known ISO 2022 sequences to their encoding; resets to the first
 /// charset at CR/LF/TAB/FF for text VRs and at `^`/`=` for PN.
@@ -248,6 +278,13 @@ pub fn decode_multi_charset(bytes: &[u8], first: &'static Encoding, pn: bool) ->
                 .is_some_and(|trail| (0x21..=0x7e).contains(trail))
         {
             i += 2;
+            continue;
+        }
+        // IO-06: other DBCS encodings also use byte pairs, and their trail byte
+        // may be 0x5E ('^') — GBK/GB18030 and Shift_JIS both allow it. Advancing
+        // past the pair keeps a trail byte from being mistaken for a PN delimiter.
+        if let Some(pair) = dbcs_pair_len(current.name(), b, bytes.get(i + 1).copied()) {
+            i = (i + pair).min(bytes.len());
             continue;
         }
         let reset = (pn && (b == b'^' || b == b'=')) || matches!(b, b'\r' | b'\n' | b'\t' | 0x0C);
@@ -973,5 +1010,20 @@ mod tests {
         // UTF-8 is not a valid ISO 2022 target (dead arm removed, CORE-26)
         assert_eq!(escape_for_encoding(charset_encoding("ISO_IR 192")), None);
         assert_eq!(escape_for_encoding(encoding_rs::BIG5), None);
+    }
+
+    #[test]
+    fn pn_delimiter_does_not_split_a_dbcs_trail_byte() {
+        // IO-06: U+4E5B '乛' is GBK 0x81 0x5E; the trail byte equals '^' (0x5E).
+        // It must be consumed as part of the character, while a real '^' still
+        // resets the PN segment.
+        let gbk = charset_encoding("GBK");
+        let bytes = [0x81u8, 0x5E, b'^', b'X'];
+        assert_eq!(decode_multi_charset(&bytes, gbk, true), "乛^X");
+        // a genuine delimiter still works
+        assert_eq!(decode_multi_charset(b"Doe^John", gbk, true), "Doe^John");
+        // Shift_JIS shares the 0x5E-trail hazard; verify a normal value survives
+        let sjis = charset_encoding("ISO_IR 13");
+        assert_eq!(decode_multi_charset(b"Doe^John", sjis, true), "Doe^John");
     }
 }

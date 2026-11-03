@@ -70,8 +70,9 @@ impl Vm {
     }
 
     /// Whether `count` values satisfy the min/max bounds. The multiplicity
-    /// step is metadata only (mirrors fo-dicom's ValidateVM which checks
-    /// min/max, not the step).
+    /// step is metadata only: fo-dicom `DicomVM` stores `Minimum`/`Maximum`/
+    /// `Multiplicity` but validates only min/max, so `2-2n` accepts 3 here too
+    /// (review needs-verification: confirmed not a defect vs DicomVM.cs).
     pub fn matches(&self, count: usize) -> bool {
         let count = count as u32;
         count >= self.min && self.max.is_none_or(|max| count <= max)

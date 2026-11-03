@@ -288,7 +288,7 @@ impl DicomDirectory {
             return Err(record_error("DICOMDIR FileSetID must not be empty"));
         }
         let mut dataset = Dataset::new();
-        dataset.insert_str(tags::FILE_SET_ID, Vr::Sh, file_set_id);
+        dataset.insert_str(tags::FILE_SET_ID, Vr::Cs, file_set_id);
         dataset.insert_value(tags::FILE_SET_CONSISTENCY_FLAG, 0u16);
         // a DICOMDIR carries its own SOP Instance UID; setting it once keeps the
         // file identity (and thus every record offset) stable across re-serialisation
@@ -1212,6 +1212,16 @@ mod tests {
                 .try_get_str(Tag::MEDIA_STORAGE_SOP_CLASS_UID)
                 .unwrap(),
             MEDIA_STORAGE_DIRECTORY_SOP_CLASS
+        );
+        // FJ-05: FileSetID (0004,1130) is CS, not SH (PS3.6).
+        assert_eq!(
+            dir.file()
+                .dataset
+                .get_element(tags::FILE_SET_ID)
+                .unwrap()
+                .vr(),
+            Vr::Cs,
+            "FileSetID must be encoded as CS"
         );
     }
 

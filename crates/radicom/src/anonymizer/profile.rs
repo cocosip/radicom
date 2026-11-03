@@ -17,6 +17,7 @@ use crate::error::{DataError, Error};
 use crate::model::tag::Tag;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
+use std::ops::BitOr;
 use std::sync::Arc;
 
 /// The 11 de-identification options, in CSV column order (§12.5).
@@ -51,16 +52,19 @@ impl AnonOption {
     ];
 }
 
-/// A combination of PS3.15 de-identification options (fo-dicom
-/// `SecurityProfileOptions`, a `[Flags]` enum with values 1..1024).
+/// A composable set of PS3.15 de-identification options (fo-dicom
+/// `SecurityProfileOptions`, a `[Flags]` enum with values 1..1024, §12.5).
 ///
-/// PS3.15 options are cumulative: the Basic Profile plus any Retain*/Clean*
-/// options. A single [`AnonOption`] converts into this type and variants
-/// combine with `|`:
+/// PS3.15 options are cumulative: the Basic Profile is the baseline and each
+/// additionally enabled Retain*/Clean* option overrides it where its CSV cell
+/// is non-empty (fo-dicom `SecurityProfile.LoadProfile`). Selecting a single
+/// non-Basic [`AnonOption`] through [`From<AnonOption>`] therefore yields
+/// `BasicProfile | that option`, so a caller cannot accidentally disable the
+/// baseline de-identification. Options combine with `|`:
 ///
 /// ```
-/// use radicom::anonymizer::profile::{AnonOptions, SecurityProfile};
-/// let options = AnonOptions::BASIC_PROFILE | AnonOptions::RETAIN_DEVICE_IDENT;
+/// use radicom::anonymizer::profile::{AnonOption, AnonOptions, SecurityProfile};
+/// let options = AnonOptions::BASIC_PROFILE | AnonOptions::bit(AnonOption::RetainDeviceIdent);
 /// let profile = SecurityProfile::basic();
 /// assert!(profile.action_for_options("0018,1000", options).is_some());
 /// ```
@@ -68,38 +72,33 @@ impl AnonOption {
 pub struct AnonOptions(u16);
 
 impl AnonOptions {
-    /// No option at all: the anonymizer leaves every tag untouched.
+    /// No option at all (nothing is anonymized).
     pub const NONE: AnonOptions = AnonOptions(0);
+    /// The PS3.15 Basic Profile baseline (column 0 of the CSV).
     pub const BASIC_PROFILE: AnonOptions = AnonOptions(1 << 0);
-    pub const RETAIN_SAFE_PRIVATE: AnonOptions = AnonOptions(1 << 1);
-    pub const RETAIN_UIDS: AnonOptions = AnonOptions(1 << 2);
-    pub const RETAIN_DEVICE_IDENT: AnonOptions = AnonOptions(1 << 3);
-    pub const RETAIN_INSTITUTION_IDENT: AnonOptions = AnonOptions(1 << 4);
-    pub const RETAIN_PATIENT_CHARS: AnonOptions = AnonOptions(1 << 5);
-    pub const RETAIN_LONG_FULL_DATES: AnonOptions = AnonOptions(1 << 6);
-    pub const RETAIN_LONG_MODIF_DATES: AnonOptions = AnonOptions(1 << 7);
-    pub const CLEAN_DESC: AnonOptions = AnonOptions(1 << 8);
-    pub const CLEAN_STRUCTD_CONT: AnonOptions = AnonOptions(1 << 9);
-    pub const CLEAN_GRAPH: AnonOptions = AnonOptions(1 << 10);
-    /// Every option enabled.
-    pub const ALL: AnonOptions = AnonOptions(0x07FF);
 
-    /// The raw flag bits (fo-dicom `(short)options`).
+    /// The single bit for `option` (no baseline added).
+    pub const fn bit(option: AnonOption) -> AnonOptions {
+        AnonOptions(1 << option as u16)
+    }
+
+    /// Whether `option` is enabled.
+    pub const fn contains(self, option: AnonOption) -> bool {
+        self.0 & (1 << option as u16) != 0
+    }
+
+    /// The set with `option` added.
+    pub const fn with(self, option: AnonOption) -> AnonOptions {
+        AnonOptions(self.0 | (1 << option as u16))
+    }
+
+    /// The raw bit mask (bit `i` = `AnonOption` with discriminant `i`).
     pub const fn bits(self) -> u16 {
         self.0
     }
 
     pub const fn is_empty(self) -> bool {
         self.0 == 0
-    }
-
-    /// True when `option`'s column takes part in this set.
-    pub const fn contains(self, option: AnonOption) -> bool {
-        self.0 & (1 << option as u16) != 0
-    }
-
-    pub fn union(self, other: AnonOptions) -> AnonOptions {
-        AnonOptions(self.0 | other.0)
     }
 
     /// The single option this set names, if it names exactly one.
@@ -117,23 +116,22 @@ impl Default for AnonOptions {
     }
 }
 
-impl From<AnonOption> for AnonOptions {
-    fn from(option: AnonOption) -> Self {
-        AnonOptions(1 << option as u16)
-    }
-}
-
-impl std::ops::BitOr for AnonOptions {
+impl BitOr for AnonOptions {
     type Output = AnonOptions;
 
     fn bitor(self, rhs: AnonOptions) -> AnonOptions {
-        self.union(rhs)
+        AnonOptions(self.0 | rhs.0)
     }
 }
 
-impl std::ops::BitOrAssign for AnonOptions {
-    fn bitor_assign(&mut self, rhs: AnonOptions) {
-        *self = self.union(rhs);
+impl From<AnonOption> for AnonOptions {
+    /// A single non-Basic option implies the Basic Profile too (fo-dicom callers
+    /// always OR the baseline), so single-option call sites stay safe.
+    fn from(option: AnonOption) -> Self {
+        match option {
+            AnonOption::BasicProfile => AnonOptions::BASIC_PROFILE,
+            other => AnonOptions::BASIC_PROFILE.with(other),
+        }
     }
 }
 
@@ -492,8 +490,10 @@ impl SecurityProfile {
     /// The action for `tag` under a combination of options (§12.5).
     ///
     /// fo-dicom merges the enabled flag columns into one table when the
-    /// profile is loaded and then takes the first matching row, so a row whose
-    /// merged action is `None` (no enabled cell) does not shadow later rows.
+    /// profile is loaded (`SecurityProfile.LoadProfile`: the highest enabled
+    /// column with a non-empty cell wins for a row) and then takes the first
+    /// matching row, so a row whose merged action is `None` (no enabled cell)
+    /// does not shadow later rows.
     pub fn action_for_options(&self, tag: &str, options: AnonOptions) -> Option<Action> {
         if let Some(option) = options.single() {
             return self.action_for(tag, option);
@@ -836,7 +836,7 @@ mod tests {
             profile.action_for("0018,1000", AnonOption::RetainDeviceIdent),
             Some(Action::Keep)
         );
-        let retained = AnonOptions::BASIC_PROFILE | AnonOptions::RETAIN_DEVICE_IDENT;
+        let retained = AnonOptions::BASIC_PROFILE | AnonOptions::bit(AnonOption::RetainDeviceIdent);
         assert_eq!(retained.bits(), 0b1001);
         assert_eq!(
             profile.action_for_options("0018,1000", retained),
@@ -856,13 +856,13 @@ mod tests {
         // the first matching row wins: the broad odd-private wildcard row is
         // inserted before the curve row, so its merged Basic action shadows
         // CleanGraph exactly as fo-dicom's dictionary does.
-        let clean_graph = AnonOptions::BASIC_PROFILE | AnonOptions::CLEAN_GRAPH;
+        let clean_graph = AnonOptions::BASIC_PROFILE | AnonOptions::bit(AnonOption::CleanGraph);
         assert_eq!(
             profile.action_for_options("5011,1234", clean_graph),
             Some(Action::Remove)
         );
         assert_eq!(
-            profile.action_for_options("5011,1234", AnonOptions::CLEAN_GRAPH),
+            profile.action_for_options("5011,1234", AnonOptions::bit(AnonOption::CleanGraph)),
             Some(Action::Clean)
         );
         // no option: nothing is anonymized

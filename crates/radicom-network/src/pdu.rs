@@ -428,8 +428,11 @@ fn decode_associate(body: &[u8], is_rq: bool) -> Result<Associate> {
             item::APPLICATION_CONTEXT => {
                 application_context = decode_string(value);
             }
-            item::PRESENTATION_CONTEXT_RQ | item::PRESENTATION_CONTEXT_AC => {
-                presentation_contexts.push(decode_presentation_context(value)?);
+            item::PRESENTATION_CONTEXT_RQ => {
+                presentation_contexts.push(decode_presentation_context(value, false)?);
+            }
+            item::PRESENTATION_CONTEXT_AC => {
+                presentation_contexts.push(decode_presentation_context(value, true)?);
             }
             item::USER_INFORMATION => {
                 user_information = decode_user_information(value, is_rq)?;
@@ -450,13 +453,19 @@ fn decode_associate(body: &[u8], is_rq: bool) -> Result<Associate> {
     })
 }
 
-fn decode_presentation_context(value: &[u8]) -> Result<PresentationContext> {
+/// Decodes a presentation-context item.
+///
+/// The RQ item (PS3.8 Table 9-13) has three reserved bytes where the AC item
+/// (Table 9-18) has its Result/Reason field; a reserved byte must not be
+/// tested when received, so `result` is only read for an AC item.
+fn decode_presentation_context(value: &[u8], is_ac: bool) -> Result<PresentationContext> {
     if value.len() < 4 {
         return Err(NetworkError::protocol("presentation context is truncated"));
     }
     let id = value[0];
-    // ID(1) Reserved(1) Result/Reason(1) Reserved(1) — PS3.8 §9.3.3.2
-    let result = value[2];
+    // AC: ID(1) Reserved(1) Result/Reason(1) Reserved(1) — PS3.8 §9.3.3.2.
+    // RQ: ID(1) Reserved(1) Reserved(1) Reserved(1) — PS3.8 §9.3.2.2.
+    let result = if is_ac { value[2] } else { 0 };
     let mut abstract_syntax = String::new();
     let mut transfer_syntaxes = Vec::new();
 
@@ -548,6 +557,10 @@ fn decode_user_information(value: &[u8], is_rq: bool) -> Result<UserInformation>
                 // type(1) positive(1) primary_len(2) primary
                 // secondary_len(2) secondary — PS3.8 §D.3.3.7
                 if raw.len() >= 4 {
+                    // Trust boundary: the type is one of 1..=5 (§D.3.3.7).
+                    if !(1..=5).contains(&raw[0]) {
+                        return Err(NetworkError::protocol("user identity type must be 1..=5"));
+                    }
                     let primary_len = u16::from_be_bytes([raw[2], raw[3]]) as usize;
                     let primary = raw
                         .get(4..4 + primary_len)
@@ -959,14 +972,14 @@ mod tests {
 
     #[test]
     fn a_truncated_presentation_context_is_rejected() {
-        let error = decode_presentation_context(&[0x01, 0x00, 0x00])
+        let error = decode_presentation_context(&[0x01, 0x00, 0x00], false)
             .expect_err("three bytes is not a context header");
         assert!(error.to_string().contains("truncated"), "{error}");
 
         // an unknown sub-item is skipped by its length, not fatal
         let mut value = vec![0x01, 0x00, 0x00, 0x00];
         value.extend_from_slice(&[0x99, 0x00, 0x00, 0x02, 0xAA, 0xBB]);
-        let context = decode_presentation_context(&value).unwrap();
+        let context = decode_presentation_context(&value, false).unwrap();
         assert_eq!(context.id, 1);
         assert!(context.abstract_syntax.is_empty());
     }
@@ -1801,6 +1814,35 @@ mod tests {
     }
 
     #[test]
+    fn an_out_of_range_user_identity_type_is_rejected_on_receive() {
+        // PS3.8 §D.3.3.7: the identity type is 1..=5. A received out-of-range
+        // type is a trust-boundary violation, not something to pass through.
+        let mut identity = vec![6u8, 0];
+        identity.extend_from_slice(&0u16.to_be_bytes()); // primary length
+        identity.extend_from_slice(&0u16.to_be_bytes()); // secondary length
+        let frame = associate_frame(
+            0x01,
+            &[
+                item(item::APPLICATION_CONTEXT, APPLICATION_CONTEXT.as_bytes()),
+                item(
+                    item::USER_INFORMATION,
+                    &[
+                        item(item::MAX_PDU_LENGTH, &16384u32.to_be_bytes()),
+                        item(item::USER_IDENTITY_RQ, &identity),
+                    ]
+                    .concat(),
+                ),
+            ],
+        );
+        match decode(&frame) {
+            Err(NetworkError::Protocol(message)) => {
+                assert!(message.contains("user identity type"), "got {message}")
+            }
+            other => panic!("expected a Protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn asynchronous_operation_answers_never_increase_finite_offers() {
         let offer = AsyncOperations {
             invoked: 2,
@@ -1921,6 +1963,37 @@ mod tests {
                 );
             }
             other => panic!("expected AssociateAc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_rq_presentation_context_reserved_byte_is_not_a_result() {
+        // PS3.8 Table 9-13: an RQ presentation-context item has three reserved
+        // bytes where an AC has its Result/Reason; a nonzero reserved byte must
+        // not be decoded (or later tested) as a result.
+        let mut value = vec![0x01, 0x00, 0x7F, 0x00]; // id, reserved, reserved!=0, reserved
+        value.extend_from_slice(&item(item::ABSTRACT_SYNTAX, APPLICATION_CONTEXT.as_bytes()));
+        value.extend_from_slice(&item(item::TRANSFER_SYNTAX, b"1.2.840.10008.1.2"));
+        let frame = associate_frame(
+            0x01,
+            &[
+                item(item::APPLICATION_CONTEXT, APPLICATION_CONTEXT.as_bytes()),
+                item(item::PRESENTATION_CONTEXT_RQ, &value),
+                item(
+                    item::USER_INFORMATION,
+                    &item(item::MAX_PDU_LENGTH, &16384u32.to_be_bytes()),
+                ),
+            ],
+        );
+        match decode(&frame).expect("a nonzero reserved byte is not an error") {
+            Pdu::AssociateRq(rq) => {
+                assert_eq!(rq.presentation_contexts[0].id, 1);
+                assert_eq!(
+                    rq.presentation_contexts[0].result, 0,
+                    "the RQ reserved byte is not a result code"
+                );
+            }
+            other => panic!("expected AssociateRq, got {other:?}"),
         }
     }
 

@@ -7,7 +7,7 @@
 //! dataset and file anonymized by that instance; a file's media-storage SOP
 //! instance UID is kept in sync with the dataset's SOP instance UID (§12.5).
 
-use crate::anonymizer::profile::{Action, AnonOptions, SecurityProfile};
+use crate::anonymizer::profile::{Action, SecurityProfile};
 use crate::error::Error;
 use crate::io::file::DicomFile;
 use crate::model::dataset::Dataset;
@@ -20,6 +20,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 pub mod profile;
+
+pub use profile::{AnonOption, AnonOptions};
 
 /// (0010,0010) PatientName.
 const PATIENT_NAME: Tag = Tag::PATIENT_NAME;
@@ -34,6 +36,8 @@ const MEDIA_STORAGE_SOP_INSTANCE_UID: Tag = Tag::MEDIA_STORAGE_SOP_INSTANCE_UID;
 #[derive(Debug, Clone)]
 pub struct Anonymizer {
     profile: SecurityProfile,
+    /// The composed PS3.15 option set; the Basic Profile is the baseline and any
+    /// further enabled option overrides it per attribute (§12.5).
     options: AnonOptions,
     patient_name: Option<String>,
     patient_id: Option<String>,
@@ -53,11 +57,12 @@ impl Anonymizer {
         Anonymizer::with_profile(SecurityProfile::basic(), options)
     }
 
-    /// Uses a custom profile under a chosen option or option combination.
+    /// Uses a custom profile under a chosen option set.
     ///
-    /// A single `AnonOption` converts automatically, so the old single-column
-    /// call sites keep working; combine options with `|`:
-    /// `AnonOptions::BASIC_PROFILE | AnonOptions::RETAIN_DEVICE_IDENT`.
+    /// Accepts either a single [`AnonOption`] (which implies `BasicProfile | it`,
+    /// fo-dicom style, so the baseline de-identification always runs) or a
+    /// composed [`AnonOptions`] such as
+    /// `AnonOptions::BASIC_PROFILE | AnonOptions::bit(AnonOption::RetainUids)`.
     pub fn with_profile(profile: SecurityProfile, options: impl Into<AnonOptions>) -> Self {
         Anonymizer {
             profile,
@@ -676,8 +681,14 @@ mod tests {
     #[test]
     fn the_clean_graph_option_cleans_private_curve_tags() {
         // CleanGraph must reach the 50xx/60xx rows even though the leading
-        // odd-private-group row matches those tags first
-        let anon = Anonymizer::with_profile(SecurityProfile::basic(), AnonOption::CleanGraph);
+        // odd-private-group row matches those tags first. A bare `AnonOption`
+        // now implies the Basic Profile (FJ-01), and fo-dicom's row order then
+        // makes the odd-private row's Basic action (remove) win; the column is
+        // requested alone here, which is the fo-dicom `CleanGraph`-only call.
+        let anon = Anonymizer::with_profile(
+            SecurityProfile::basic(),
+            AnonOptions::bit(AnonOption::CleanGraph),
+        );
         let mut ds = Dataset::new();
         ds.insert_str(Tag::new(0x5011, 0x1234), Vr::Lo, "raw curve data");
         anon.anonymize_in_place(&mut ds).unwrap();
@@ -823,8 +834,9 @@ mod tests {
             "Basic Profile still blanks the patient name"
         );
 
-        let combined =
-            Anonymizer::with_options(AnonOptions::BASIC_PROFILE | AnonOptions::RETAIN_DEVICE_IDENT);
+        let combined = Anonymizer::with_options(
+            AnonOptions::BASIC_PROFILE | AnonOptions::bit(AnonOption::RetainDeviceIdent),
+        );
         let mut merged = ds.clone();
         combined.anonymize_in_place(&mut merged).unwrap();
         assert_eq!(
@@ -852,5 +864,118 @@ mod tests {
         plain.anonymize_in_place(&mut a).unwrap();
         single.anonymize_in_place(&mut b).unwrap();
         assert_eq!(a.to_dump_string(), b.to_dump_string());
+    }
+    /// FJ-01 regression: every single option still runs the Basic Profile, so
+    /// PatientName and PatientID are de-identified (previously a non-Basic
+    /// option selected only its own column and left the identifiers intact).
+    #[test]
+    fn every_option_still_blank_the_patient_identifiers() {
+        for option in AnonOption::ALL {
+            let anon = Anonymizer::with_profile(SecurityProfile::basic(), option);
+            let mut ds = Dataset::new();
+            ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+            ds.insert_str(Tag::PATIENT_ID, Vr::Lo, "12345");
+            anon.anonymize_in_place(&mut ds).unwrap();
+            assert_eq!(
+                ds.try_get_str(Tag::PATIENT_NAME).as_deref(),
+                Some(""),
+                "PatientName must be blanked under {option:?}"
+            );
+            assert_eq!(
+                ds.try_get_str(Tag::PATIENT_ID).as_deref(),
+                Some(""),
+                "PatientID must be blanked under {option:?}"
+            );
+        }
+    }
+
+    /// FJ-01 regression: `BasicProfile | RetainUids` keeps a UID but still
+    /// blanks PatientName. The combined form and the single-option call site
+    /// (which now implies `BasicProfile | it`) must agree.
+    #[test]
+    fn retain_uids_keeps_uids_but_still_blanks_patient_name() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+        ds.insert_str(Tag::PATIENT_ID, Vr::Lo, "12345");
+        ds.insert_str(Tag::STUDY_INSTANCE_UID, Vr::Ui, "1.2.3.4");
+        ds.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.5");
+
+        let combined = AnonOptions::BASIC_PROFILE | AnonOptions::bit(AnonOption::RetainUids);
+        Anonymizer::with_profile(SecurityProfile::basic(), combined)
+            .anonymize_in_place(&mut ds)
+            .unwrap();
+
+        assert_eq!(
+            ds.try_get_str(Tag::STUDY_INSTANCE_UID).as_deref(),
+            Some("1.2.3.4"),
+            "RetainUids keeps StudyInstanceUID"
+        );
+        assert_eq!(
+            ds.try_get_str(Tag::SOP_INSTANCE_UID).as_deref(),
+            Some("1.2.3.5"),
+            "RetainUids keeps SOPInstanceUID"
+        );
+        assert_eq!(
+            ds.try_get_str(Tag::PATIENT_NAME).as_deref(),
+            Some(""),
+            "the baseline still blanks PatientName"
+        );
+        assert_eq!(ds.try_get_str(Tag::PATIENT_ID).as_deref(), Some(""));
+
+        // the single-option call site must behave the same (Baseline | RetainUids)
+        let mut single = Dataset::new();
+        single.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+        single.insert_str(Tag::STUDY_INSTANCE_UID, Vr::Ui, "1.2.3.4");
+        Anonymizer::with_profile(SecurityProfile::basic(), AnonOption::RetainUids)
+            .anonymize_in_place(&mut single)
+            .unwrap();
+        assert_eq!(
+            single.try_get_str(Tag::STUDY_INSTANCE_UID).as_deref(),
+            Some("1.2.3.4")
+        );
+        assert_eq!(single.try_get_str(Tag::PATIENT_NAME).as_deref(), Some(""));
+    }
+
+    /// FJ-01 regression: `BasicProfile | CleanDesc` cleans StudyDescription,
+    /// while the baseline still blanks PatientName.
+    #[test]
+    fn clean_desc_cleans_study_description_without_losing_the_baseline() {
+        let options = AnonOptions::BASIC_PROFILE | AnonOptions::bit(AnonOption::CleanDesc);
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+        ds.insert_str(Tag::STUDY_DESCRIPTION, Vr::Lo, "Chest CT");
+
+        Anonymizer::with_profile(SecurityProfile::basic(), options)
+            .anonymize_in_place(&mut ds)
+            .unwrap();
+
+        assert_eq!(
+            ds.try_get_str(Tag::STUDY_DESCRIPTION).as_deref(),
+            Some("ANONYMOUS"),
+            "CleanDesc cleans StudyDescription"
+        );
+        assert_eq!(
+            ds.try_get_str(Tag::PATIENT_NAME).as_deref(),
+            Some(""),
+            "the baseline blanks PatientName"
+        );
+    }
+
+    /// FJ-01 regression: the default `basic()` still blanks identifiers and
+    /// removes a description (Basic column X), i.e. nothing changed for callers.
+    #[test]
+    fn default_basic_profile_behaviour_is_unchanged() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+        ds.insert_str(Tag::PATIENT_ID, Vr::Lo, "12345");
+        ds.insert_str(Tag::STUDY_DESCRIPTION, Vr::Lo, "Chest CT");
+        Anonymizer::basic().anonymize_in_place(&mut ds).unwrap();
+
+        assert_eq!(ds.try_get_str(Tag::PATIENT_NAME).as_deref(), Some(""));
+        assert_eq!(ds.try_get_str(Tag::PATIENT_ID).as_deref(), Some(""));
+        assert!(
+            ds.try_get_str(Tag::STUDY_DESCRIPTION).is_none(),
+            "the Basic column removes StudyDescription"
+        );
     }
 }

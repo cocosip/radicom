@@ -566,12 +566,30 @@ impl DicomFile {
                 )));
             }
         }
-        if !meta.contains(&Tag::MEDIA_STORAGE_SOP_INSTANCE_UID) {
-            let uid = self
-                .dataset
-                .try_get_str(Tag::SOP_INSTANCE_UID)
-                .unwrap_or_else(Uid::generate_value);
-            meta.insert_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID, Vr::Ui, uid);
+        // IO-02: the Media Storage SOP Instance must describe the dataset's own
+        // SOP instance on every save (PS3.10 Table 7.1-1), exactly like the class
+        // UID above. Only filling it when absent left a stale instance UID after a
+        // re-save that changed (e.g. regenerated) the dataset's SOPInstanceUID.
+        match (
+            self.dataset.try_get_str(Tag::SOP_INSTANCE_UID),
+            meta.try_get_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID),
+        ) {
+            (Some(instance), Some(existing)) => {
+                if existing != instance.as_str() {
+                    meta.insert_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID, Vr::Ui, instance);
+                }
+            }
+            (Some(instance), None) => {
+                meta.insert_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID, Vr::Ui, instance);
+            }
+            (None, Some(_)) => {}
+            (None, None) => {
+                meta.insert_str(
+                    Tag::MEDIA_STORAGE_SOP_INSTANCE_UID,
+                    Vr::Ui,
+                    Uid::generate_value(),
+                );
+            }
         }
         // the file meta group is always Explicit VR LE; drop the stale length and
         // seed a placeholder, because the writer recalculates a present
@@ -690,7 +708,16 @@ fn read_meta_block(
             file.read_exact(&mut buf[old..])?;
         }
         match scan_meta(&buf) {
-            MetaScan::Run(len) => return Ok((buf[..len].to_vec(), len as u64)),
+            MetaScan::Run(len) => {
+                if len == buf.len() && take < avail {
+                    // IO-08: the window ended exactly on an element boundary but
+                    // more bytes remain, so the meta group may continue past the
+                    // window; grow instead of declaring it complete.
+                    want = take.saturating_mul(2).min(avail);
+                } else {
+                    return Ok((buf[..len].to_vec(), len as u64));
+                }
+            }
             MetaScan::None => return Ok((Vec::new(), 0)),
             MetaScan::More => {
                 if take == avail {
@@ -745,9 +772,14 @@ fn scan_meta(buf: &[u8]) -> MetaScan {
         }
         pos = end;
     }
-    // all buffered bytes consumed and still inside group 0002 (or exactly at the
-    // end); ask for more unless the caller already read to EOF
-    MetaScan::More
+    // all buffered bytes consumed; if that is exactly an element boundary the
+    // run is complete (the caller decides whether more bytes remain), otherwise
+    // a partial header/value is still outstanding
+    if pos == buf.len() && pos > 0 {
+        MetaScan::Run(pos)
+    } else {
+        MetaScan::More
+    }
 }
 
 fn detect(raw: &[u8]) -> Result<Split<'_>, Error> {
@@ -1145,6 +1177,37 @@ mod tests {
     }
 
     #[test]
+    fn resave_derives_media_storage_instance_uid_from_the_dataset() {
+        // IO-02: changing (or regenerating) the dataset SOPInstanceUID and saving
+        // again must refresh (0002,0003), not leave a stale meta instance UID.
+        let bytes = sample_file().to_bytes(&WriteOptions::default()).unwrap();
+        let mut reopened = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
+        assert_eq!(
+            reopened
+                .file_meta
+                .get_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID)
+                .unwrap(),
+            "1.2.3.4.5"
+        );
+        reopened
+            .dataset
+            .insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "9.9.9.9");
+        let out = reopened.to_bytes(&WriteOptions::default()).unwrap();
+        let back = DicomFile::from_bytes(&out, &ReadOptions::default()).unwrap();
+        assert_eq!(
+            back.dataset.get_str(Tag::SOP_INSTANCE_UID).unwrap(),
+            "9.9.9.9"
+        );
+        assert_eq!(
+            back.file_meta
+                .get_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID)
+                .unwrap(),
+            "9.9.9.9",
+            "meta instance UID must track the dataset on every save"
+        );
+    }
+
+    #[test]
     fn saved_files_carry_file_meta_information_version() {
         // PS3.10 Table 7.1-1: (0002,0001) is Type 1 and must be 00\01.
         let bytes = sample_file().to_bytes(&WriteOptions::default()).unwrap();
@@ -1340,12 +1403,13 @@ mod tests {
             scan_meta(&[0, 0, 0, 0, 0, 0, 0, 0]),
             MetaScan::None
         ));
-        // a group-0002 element whose value runs past the buffer needs more
-        let mut partial = vec![0x02, 0x00, 0x10, 0x00, b'U', b'I', 0x02, 0x00];
-        partial.extend_from_slice(b"1.");
+        // a group-0002 element whose declared value runs past the buffer needs more
+        let mut partial = vec![0x02, 0x00, 0x10, 0x00, b'U', b'I', 0x04, 0x00];
+        partial.extend_from_slice(b"1."); // declares 4, only 2 present
         assert!(matches!(scan_meta(&partial), MetaScan::More));
         // a complete meta element followed by a non-0002 group ends the run
-        let mut complete = partial.clone();
+        let mut complete = vec![0x02, 0x00, 0x10, 0x00, b'U', b'I', 0x02, 0x00];
+        complete.extend_from_slice(b"1.");
         complete.extend_from_slice(&[0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
         assert!(matches!(scan_meta(&complete), MetaScan::Run(10)));
     }
@@ -2069,6 +2133,73 @@ mod extra_tests {
             .encoded_prefix_len(&WriteOptions::default())
             .is_err());
         assert!(retired.to_bytes(&WriteOptions::default()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod io08_tests {
+    use super::*;
+
+    /// One Explicit-VR-LE group-0002 element with the given element tag and value.
+    fn meta_ui(elem: u16, value: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&0x0002u16.to_le_bytes());
+        v.extend_from_slice(&elem.to_le_bytes());
+        v.extend_from_slice(b"UI");
+        v.extend_from_slice(&(value.len() as u16).to_le_bytes());
+        v.extend_from_slice(value);
+        v
+    }
+
+    #[test]
+    fn meta_group_ending_exactly_at_eof_is_accepted() {
+        // IO-08: a file whose meta group ends at EOF (empty data set) is complete,
+        // not "truncated".
+        let mut bytes = vec![0u8; 128];
+        bytes.extend_from_slice(b"DICM");
+        bytes.extend_from_slice(&meta_ui(0x0010, b"1.2.840.10008.1.2.1\0"));
+        let path =
+            std::env::temp_dir().join(format!("radicom-io08-eof-{}.dcm", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let file = DicomFile::open(&path).expect("meta-only file is accepted");
+        assert_eq!(
+            file.file_meta.get_str(Tag::TRANSFER_SYNTAX_UID).unwrap(),
+            "1.2.840.10008.1.2.1"
+        );
+        assert!(file.dataset.items().next().is_none(), "empty data set");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn meta_window_ending_on_a_boundary_is_grown_not_truncated() {
+        // IO-08: the first 4 KiB window ends exactly on an element boundary; the
+        // scanner must grow and still see the following dataset element.
+        let meta_len = 4096usize;
+        let mut meta = vec![0u8; meta_len];
+        // (0002,0010) UI with a 4088-byte value: 8-byte header + 4088 = 4096
+        let value = vec![b'1'; meta_len - 8];
+        let elem = meta_ui(0x0010, &value);
+        assert_eq!(elem.len(), meta_len);
+        meta.copy_from_slice(&elem);
+        let mut dataset_elem = Vec::new();
+        dataset_elem.extend_from_slice(&0x0008u16.to_le_bytes());
+        dataset_elem.extend_from_slice(&0x0005u16.to_le_bytes());
+        dataset_elem.extend_from_slice(b"CS");
+        dataset_elem.extend_from_slice(&2u16.to_le_bytes());
+        dataset_elem.extend_from_slice(b"QT");
+
+        let mut bytes = vec![0u8; 128];
+        bytes.extend_from_slice(b"DICM");
+        bytes.extend_from_slice(&meta);
+        bytes.extend_from_slice(&dataset_elem);
+        let path =
+            std::env::temp_dir().join(format!("radicom-io08-window-{}.dcm", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let mut f = std::fs::File::open(&path).unwrap();
+        let (block, len) = read_meta_block(&mut f, 132, bytes.len() as u64).unwrap();
+        assert_eq!(len as usize, meta_len, "meta window grew past the boundary");
+        assert_eq!(block.len(), meta_len);
+        std::fs::remove_file(&path).ok();
     }
 }
 
