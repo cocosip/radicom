@@ -60,7 +60,7 @@ license. Files are used here only as inert test fixtures.
 ## Goldens
 
 `tests-data/goldens/` holds committed snapshots produced by
-`cargo xtask regen-goldens` from deterministic corpus files:
+`cargo run --package xtask -- regen-goldens` from deterministic corpus files:
 
 | Golden | Source | Produced from |
 |---|---|---|

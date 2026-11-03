@@ -2,12 +2,16 @@
 name = "xtask"
 description = "Code generation and maintenance tasks for the radicom workspace"
 version.workspace = true
-edition = "2021"
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+readme.workspace = true
+repository.workspace = true
 publish = false
 
 [dependencies]
 quick-xml = "0.37"
 flate2.workspace = true
-radicom = { path = "../crates/radicom" }
-radicom-json = { path = "../crates/radicom-json" }
-radicom-network = { path = "../crates/radicom-network" }
+radicom.workspace = true
+radicom-json.workspace = true
+radicom-network.workspace = true

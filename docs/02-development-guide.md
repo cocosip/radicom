@@ -320,7 +320,7 @@ preamble / no meta / ACR-NEMA), and golden PDU byte captures.
 - **Semantic round-trip**: where byte equality is impossible (group length removal, padding), compare via
   dataset deep equality.
 - **Goldens**: JSON output, DICOMDIR offsets, dump strings, PDU byte streams — generated once, reviewed,
-  then enforced. Regenerate with `cargo xtask regen-goldens`; CI fails on drift.
+  then enforced. Regenerate with `cargo run --package xtask -- regen-goldens`; CI fails on drift.
 
 ### 5.5 Network testing
 
@@ -376,10 +376,30 @@ different code path.
 | fuzz | local/manual | both fuzz targets |
 | interop | local / self-hosted | DCMTK / fo-dicom matrix |
 | bench | local/manual | `cargo bench` against a baseline |
-| coverage | push to `master`/`main`, pull request, `workflow_dispatch` | `cargo xtask coverage` (runs `cargo llvm-cov`; production lines only — test/bench/example targets and inline `#[cfg(test)]` modules are excluded) with a **95% floor**. `cargo xtask` is the repository alias in `.cargo/config.toml`; CI runs `cargo run --package xtask -- coverage` and publishes the measured numbers, so run it locally for current numbers. |
+| coverage | push to `master`/`main`, pull request, `workflow_dispatch` | `cargo run --package xtask -- coverage` (runs `cargo llvm-cov`; production lines only — test/bench/example targets and inline `#[cfg(test)]` modules are excluded) with a **95% floor**. CI runs the same long form (the repository ships no `.cargo/config.toml` alias) and publishes the measured numbers, so run it locally for current numbers. |
+| release | push of a `v*` tag | `release.yml`: first `verify-tag` (the tag must equal every publishable crate's version, and the publishable set must equal the list `publish` pushes); then the same gates as `ci.yml` — `fmt --check`, clippy and tests with default **and** all features, `cargo doc` with `-D warnings`, `gen-dict --check`, `cargo package --list` proving `LICENSE` + `README.md` ship in every crate — plus the MSRV (1.89) check; only then are `radicom-dict` → `radicom` → `radicom-json` → `radicom-network` published to crates.io, in that dependency order. Versions already on crates.io are skipped, so a failed tag run can be re-run from the same tag. |
 
 ### 5.10 Conventions
 
 - Update the milestone status and any changed architecture statement in the same commit as the code.
 - Record exit-condition verification (test summary or interop notes) with the milestone.
 - Never weaken a test to make it pass; fix the cause.
+
+### 5.11 Versioning and publishing
+
+- The version lives once, in the root `Cargo.toml` under `[workspace.package]`. Every member inherits it, and
+  internal dependencies are declared once under `[workspace.dependencies]` with that same version. Cargo refuses
+  to build when a pin disagrees with the member version, so a half-finished bump fails on the next build instead
+  of failing halfway through a publish.
+- Bumping a release edits two blocks in the root manifest — `[workspace.package] version` and the four internal
+  pins under `[workspace.dependencies]` — followed by the normal checks, a commit, and a `vX.Y.Z` tag. Keep the
+  tag equal to the version: `release.yml` rejects any other tag.
+- Publishing needs a `CARGO_REGISTRY_TOKEN` repository secret (crates.io API token with `publish-new` and
+  `publish-update` scopes). CI reads it from the environment; nothing is written to disk.
+- Dependency order is load-bearing: a crate is publishable only after everything it depends on is on crates.io,
+  so `release.yml` publishes `radicom-dict` → `radicom` → `radicom-json` → `radicom-network`. `xtask` is
+  `publish = false`. `verify-tag` fails if a publishable crate's version differs from the tag or if the set of
+  publishable crates no longer matches that list, so a new crate cannot be added and silently forgotten.
+- The first public release is `v0.1.0`. Before it, `cargo package` verification for `radicom`, `radicom-json`
+  and `radicom-network` cannot resolve their own unpublished dependencies locally; that is expected, and the
+  tag run publishes the crates in dependency order.

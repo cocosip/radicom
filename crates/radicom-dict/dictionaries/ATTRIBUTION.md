@@ -16,7 +16,7 @@ tables under `src/generated/`. The generated files retain this MS-PL
 attribution in their headers. Regenerate after replacing the data files:
 
 ```
-cargo xtask gen-dict
+cargo run --package xtask -- gen-dict
 ```
 
 ## Anonymizer profile

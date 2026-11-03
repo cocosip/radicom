@@ -17,19 +17,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Tag must match the workspace version
+      # The tag, the workspace version and every publishable crate must agree,
+      # and the publishable set must match the list publish actually pushes, so
+      # a crate added to the workspace can never be silently left unpublished.
+      - name: Tag and crate set must match the workspace version
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          version=$(cargo metadata --format-version 1 --no-deps \
-            | python3 -c 'import json,sys; d=json.load(sys.stdin); print({p["name"]: p["version"] for p in d["packages"]}["radicom"])')
-          echo "tag=$tag radicom=$version"
-          if [ "$tag" != "$version" ]; then
-            echo "::error::tag v$tag does not match the radicom version $version"
-            exit 1
-          fi
+          cargo metadata --format-version 1 --no-deps > meta.json
+          python3 - "$tag" <<'PY'
+          import json, sys
+
+          tag = sys.argv[1]
+          packages = json.load(open("meta.json"))["packages"]
+          publishable = {p["name"]: p["version"] for p in packages if p.get("publish") is None}
+          expected = {"radicom-dict", "radicom", "radicom-json", "radicom-network"}
+
+          problems = []
+          if set(publishable) != expected:
+              problems.append(
+                  f"publishable crates {sorted(publishable)} != {sorted(expected)}; "
+                  "update the publish list in release.yml"
+              )
+          for name, version in sorted(publishable.items()):
+              print(f"{name}={version}")
+              if version != tag:
+                  problems.append(f"{name} is {version}, but the tag is v{tag}")
+          if problems:
+              for problem in problems:
+                  print(f"::error::{problem}")
+              sys.exit(1)
+          print(f"tag v{tag} matches all {len(publishable)} publishable crates")
+          PY
 
   test:
-    name: test before release
+    name: checks before release
     needs: verify-tag
     runs-on: ubuntu-latest
     steps:
@@ -41,16 +62,71 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Test
+      # Every gate ci.yml enforces, plus the default-feature build that users
+      # get from `cargo add`: a tag must not publish what CI would reject.
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (default features)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Clippy (all features)
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+
+      - name: Test (default features)
+        run: cargo test --workspace
+
+      - name: Test (all features)
         run: cargo test --workspace --all-features
 
-      - name: Clippy
-        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+      - name: Docs
+        run: cargo doc --workspace --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+      - name: Generated dictionary is up to date
+        run: cargo run --package xtask -- gen-dict --check
+
+      # `--list` only: before the first release the dependents' own path deps
+      # are not on crates.io yet, so `cargo package` cannot resolve them; the
+      # ordered publish below covers their full build. This still proves the
+      # metadata and the shipped file set.
+      - name: Publishable metadata and shipped files
+        run: |
+          for pkg in radicom-dict radicom radicom-json radicom-network; do
+            echo "::group::$pkg"
+            files=$(cargo package -p "$pkg" --list | tr -d '\r')
+            printf '%s\n' "$files"
+            for f in LICENSE README.md; do
+              if ! printf '%s\n' "$files" | grep -qx "$f"; then
+                echo "::error::$pkg does not package $f"
+                exit 1
+              fi
+            done
+            echo "::endgroup::"
+          done
+
+  msrv:
+    name: msrv (1.89)
+    needs: verify-tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.89.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check
+        run: cargo check --workspace --all-features
 
   publish:
     name: publish to crates.io
-    needs: test
+    needs: [test, msrv]
     runs-on: ubuntu-latest
+    env:
+      # verify-tag already proved that this tag equals the crate version.
+      RELEASE_TAG: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -65,6 +141,16 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
+          version="${RELEASE_TAG#v}"
+
+          # A failed tag release is re-run from the same tag, so versions that
+          # already reached crates.io must be skipped rather than retried:
+          # cargo publish refuses to overwrite an existing version.
+          published() {
+            curl -fsS -H "User-Agent: radicom-release-ci (https://github.com/cocosip/radicom)" \
+              "https://crates.io/api/v1/crates/$1/$2" >/dev/null
+          }
+
           # The crates.io index needs a moment to expose a freshly published
           # crate; retry a few times before giving up on an index miss.
           publish() {
@@ -84,7 +170,10 @@ jobs:
             return 1
           }
 
-          publish radicom-dict
-          publish radicom
-          publish radicom-json
-          publish radicom-network
+          for pkg in radicom-dict radicom radicom-json radicom-network; do
+            if published "$pkg" "$version"; then
+              echo "$pkg $version is already on crates.io, skipping"
+            else
+              publish "$pkg"
+            fi
+          done

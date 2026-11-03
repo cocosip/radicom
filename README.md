@@ -578,14 +578,12 @@ cargo llvm-cov --workspace --all-features
 Tag, UID and private dictionary tables are generated from the pinned fo-dicom dictionary XML under `crates/radicom-dict/dictionaries/`:
 
 ```bash
-cargo xtask gen-dict
+cargo run --package xtask -- gen-dict
 ```
 
-`cargo xtask` is a repository alias defined in `.cargo/config.toml`
-(`xtask = "run -p xtask --"`), so it works on a fresh checkout; the long form
-`cargo run -p xtask -- gen-dict` is equivalent. Machine-specific cargo settings
-still belong in your own `.cargo/config.toml`, which is gitignored apart from
-that alias file.
+`xtask` is the workspace's maintenance crate; CI invokes the same long form, and the repository ships no
+`.cargo/config.toml`, so nothing relies on a local alias. Keep machine-specific cargo settings in your own
+untracked `.cargo/` directory.
 
 To move to a newer dictionary baseline, replace both XML files, run the generator, and commit the XML plus all regenerated outputs together.
 
@@ -620,15 +618,21 @@ Third-party data: the DICOM dictionary XML files reused from fo-dicom (and the t
 
 | Trigger | What runs |
 |---|---|
-| push / PR to `master` or `main` | `ci.yml`: clippy, tests, docs and publishable-metadata checks on Linux + Windows, plus an MSRV (1.89) check. **No publishing.** |
-| push of a `v*` tag | `release.yml`: verifies the tag matches the crate version, re-runs tests, then publishes `radicom-dict` → `radicom` → `radicom-json` → `radicom-network` to crates.io |
+| push / PR to `master` or `main` | `ci.yml`: clippy and tests with default **and** all features, docs and publishable-metadata checks on Linux + Windows, plus an MSRV (1.89) check. **No publishing.** |
+| push of a `v*` tag | `release.yml`: the tag must equal every publishable crate's version; the full `ci.yml` gate set re-runs (`fmt --check`, clippy, tests, docs, gen-dict, package metadata, MSRV); then `radicom-dict` → `radicom` → `radicom-json` → `radicom-network` are published to crates.io in that order |
 
-`dev` is intentionally not wired to CI. Publishing requires a `CARGO_REGISTRY_TOKEN` repository secret; releasing is done by pushing a tag:
+`dev` is intentionally not wired to CI. Publishing requires a `CARGO_REGISTRY_TOKEN` repository secret (a
+crates.io API token with `publish-new` and `publish-update` scopes); releasing is done by pushing a tag:
 
 ```pwsh
 git tag v0.1.0
 git push origin v0.1.0
 ```
+
+The version lives once in the root `Cargo.toml` (`[workspace.package] version`, mirrored by the internal
+dependency pins in `[workspace.dependencies]`); every crate inherits it, so there is no per-crate version to
+keep in sync. A failed tag run can be re-run as-is: crates whose version already reached crates.io are skipped
+instead of retried.
 
 ## DICOM Resources
 

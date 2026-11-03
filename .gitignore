@@ -18,8 +18,8 @@ docs/superpowers/
 Thumbs.db
 
 # Local cargo configuration (build target-dir, personal aliases): machine
-# specific, so it stays out of the repository. The exception is config.toml,
-# which carries the shared `xtask` alias the docs and CI invoke.
+# specific, so it stays out of the repository. Documentation and CI always use
+# the long form `cargo run --package xtask -- ...`, never a local alias.
 .cargo/*
 
 # Profiling / coverage output

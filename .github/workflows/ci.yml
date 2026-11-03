@@ -34,10 +34,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Clippy
+      - name: Clippy (default features)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Clippy (all features)
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings
 
-      - name: Test
+      - name: Test (default features)
+        run: cargo test --workspace
+
+      - name: Test (all features)
         run: cargo test --workspace --all-features
 
       - name: Generated dictionary is up to date
