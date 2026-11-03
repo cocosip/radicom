@@ -1,9 +1,5 @@
 # Architecture and Core Contracts
 
-> Current parity verdict and fix status: [03-fo-dicom-alignment.md](03-fo-dicom-alignment.md).
-> Current defect and fix evidence: [05-code-review-2026-11-02.md](05-code-review-2026-11-02.md).
-> Earlier DONE / coverage statements describe an earlier checkpoint, not proof of complete parity.
-
 > This is the **only design reference** when changing code. It records the invariants and design
 > decisions you must not violate — it does not restate the implementation, which is the source of truth.
 > Feature IDs (`TAG-01`, `NET-06`, `T1`–`T10`, ...) are defined in [02-development-guide.md](02-development-guide.md) §2.
@@ -450,6 +446,11 @@ client/server. One tokio task per association. Locks must not be held across `.a
 | D10 | No built-in codecs; `radicom-codecs` provides them | mirrors `FO-DICOM.Core` ↔ `fo-dicom.Codecs` |
 | D11 | No second JSON backend | serde covers it |
 | D12 | No `opentelemetry` dependency; `tracing` field conventions instead | avoid an extra dependency |
+| D13 | JSON `NumberMode::default()` is `PreferablyAsNumber`, not fo-dicom's `AsNumber` | fo-dicom writes `1` for `"0001"` and loses the stored text; `AsNumber` reproduces it when byte compatibility is required |
+| D14 | The two retired MIME/XML transfer syntaxes keep `is_retired = true` | fo-dicom's transfer-syntax initializers omit the flag its own UID dictionary sets |
+| D15 | A streamed C-STORE sends one PDV per P-DATA PDU instead of one buffered dataset | peak memory stays O(max-PDU); the reassembled message is identical, only framing differs |
+| D16 | A deferred buffer is written as JSON `BulkDataURI` only when `JsonOptions::bulk_data_uri` names one | naming a URI means hosting the bytes, which is the caller's job; the default stays byte-compatible with fo-dicom |
+| D17 | Anonymizer selection is the `AnonOptions` bitmask; a single `AnonOption` implies `BasicProfile \| it` | matches fo-dicom's `[Flags]` options and its CSV merge order; a single exclusive column would leave PHI in place |
 
 ---
 

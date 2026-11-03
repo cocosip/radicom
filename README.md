@@ -1,8 +1,5 @@
 # radicom
 
-> Current parity verdict and fix status: [parity audit](docs/03-fo-dicom-alignment.md).
-> Current review and fix evidence: [review ledger](docs/05-code-review-2026-11-02.md).
-
 A pure Rust implementation of the DICOM (Digital Imaging and Communications in Medicine) standard, ported from the [fo-dicom](https://github.com/fo-dicom/fo-dicom) C# library.
 
 [![Crates.io](https://img.shields.io/crates/v/radicom.svg)](https://crates.io/crates/radicom)
@@ -593,20 +590,17 @@ This project is a Rust port inspired by [fo-dicom](https://github.com/fo-dicom/f
 
 The mapping from fo-dicom to radicom — feature parity, intentional divergences and out-of-scope areas — is recorded in:
 
-- [docs/02-development-guide.md](docs/02-development-guide.md) — feature-by-feature mapping with IDs and priorities
-- [docs/01-architecture.md](docs/01-architecture.md) — architecture and divergences D1–D12
-- [docs/03-fo-dicom-alignment.md](docs/03-fo-dicom-alignment.md) — alignment verdict, 2026-11-02 gap audit and per-finding fix status
+- [docs/02-development-guide.md](docs/02-development-guide.md) — feature-by-feature mapping with IDs, progress, outstanding work and known limits
+- [docs/01-architecture.md](docs/01-architecture.md) — architecture and the intentional divergences (§14)
 
 ## Documentation
 
 | Document | Content |
 |---|---|
-| [docs/README.md](docs/README.md) | Documentation index, project background, glossary |
-| [docs/01-architecture.md](docs/01-architecture.md) | **What the code must obey**: Tag ordering, tolerance rules T1–T10, the frozen codec boundary, wire formats, known deviations |
-| [docs/02-development-guide.md](docs/02-development-guide.md) | Feature list with IDs and priorities, milestone status, what is outstanding, test strategy and CI |
-| [docs/03-fo-dicom-alignment.md](docs/03-fo-dicom-alignment.md) | fo-dicom parity verdict, gap audit and per-finding fix status |
-| [docs/04-interop.md](docs/04-interop.md) | Interop testing against real peers |
-| [docs/05-code-review-2026-11-02.md](docs/05-code-review-2026-11-02.md) | Current review and fix ledger: 44 findings, all fixed with regression tests, plus retained limits |
+| [docs/README.md](docs/README.md) | Documentation index, project background, baseline and glossary |
+| [docs/01-architecture.md](docs/01-architecture.md) | **What the code must obey**: tag ordering, tolerance rules T1–T10, the frozen codec boundary, wire formats, divergences |
+| [docs/02-development-guide.md](docs/02-development-guide.md) | Feature list with IDs and priorities, milestone status, outstanding work, known limits, test strategy, CI and publishing |
+| [docs/03-interop.md](docs/03-interop.md) | Interop testing against real peers |
 
 ## License
 

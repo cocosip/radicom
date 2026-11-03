@@ -9,7 +9,7 @@ This repository is a Rust workspace targeting Rust 1.89+:
 - `crates/radicom-json` provides DICOM JSON and Native XML serialization.
 - `crates/radicom-dict` owns generated tag, UID, and private-dictionary tables; do not edit generated files manually.
 - `xtask` contains maintenance commands. Tests, benchmarks, and examples live beside each crate; shared fixtures are in `tests-data/`.
-- Read `docs/01-architecture.md` before changing core behavior. `docs/` records development, interoperability, and review constraints.
+- Read `docs/01-architecture.md` before changing core behavior. `docs/` records the invariants the code must obey, outstanding work, known limits and interoperability checks.
 
 ## Build, Test, and Development Commands
 

@@ -6,7 +6,7 @@
 //!
 //! `external_peer_*` is `#[ignore]`d: it needs `RADICOM_PEER` pointing at a real
 //! DICOM peer, so a plain `cargo test` reports it as ignored rather than a
-//! vacuous pass (docs/04-interop.md).
+//! vacuous pass (docs/03-interop.md).
 
 use async_trait::async_trait;
 use radicom::io::file::DicomFile;

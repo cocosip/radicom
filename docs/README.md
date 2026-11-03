@@ -1,48 +1,28 @@
 # radicom Documentation
 
-The documents below separate architecture, development, interoperability and fo-dicom alignment. Start
-with the architecture document when changing code, and the development guide when working out what is
-left.
-
-User-facing introduction and usage examples are in the root [README.md](../README.md).
+Three documents, one per question: what the code must obey, what is left to do, and how to prove it
+against a real system. Start with the architecture document before changing code. Usage examples live in
+the root [README.md](../README.md).
 
 ## Start Here
 
 | Document | Read it when |
 |---|---|
-| [01-architecture.md](01-architecture.md) | **You are about to change code.** Holds the invariants: Tag ordering semantics, parsing tolerance rules T1–T10, the frozen codec boundary, wire-format details, naming conventions, and the list of known deviations not to copy |
-| [02-development-guide.md](02-development-guide.md) | You need the feature list with stable IDs, milestone status, what is outstanding, risks, or the testing strategy |
-| [03-fo-dicom-alignment.md](03-fo-dicom-alignment.md) | You need the fo-dicom parity verdict, the 2026-11-02 gap audit and per-finding fix status |
-| [04-interop.md](04-interop.md) | You are testing against a real DICOM peer |
-| [05-code-review-2026-11-02.md](05-code-review-2026-11-02.md) | **Current review and fix ledger.** Independent fresh review against fo-dicom; 44 findings (1 P0, 3 P1, 13 P2, 27 P3), all fixed with regression tests, plus the retained limits |
-
-```
-docs/
-├── README.md                     ← this index
-├── 01-architecture.md            ← what the code must obey
-├── 02-development-guide.md       ← features, progress, risks, testing
-├── 03-fo-dicom-alignment.md      ← parity verdict, gap-audit fix status, known limits, documented divergences
-├── 04-interop.md                 ← real-peer testing procedure
-└── 05-code-review-2026-11-02.md  ← current review and fix ledger
-```
+| [01-architecture.md](01-architecture.md) | **You are about to change code.** Invariants: tag ordering, tolerance rules T1–T10, the frozen codec boundary, wire formats, naming, intentional divergences |
+| [02-development-guide.md](02-development-guide.md) | You need the feature list with stable IDs, milestone status, outstanding work, known limits, risks, testing, CI or versioning |
+| [03-interop.md](03-interop.md) | You are testing against a real DICOM peer |
 
 ## Authority
 
-**The code is the source of truth.** These documents record intent, invariants and known deviations. When
-a document disagrees with the implementation, check which is correct against PS3.3/PS3.5/PS3.7/PS3.8 and
+**The code is the source of truth.** These documents record intent, invariants and known limits. When a
+document disagrees with the implementation, check which is correct against PS3.3/PS3.5/PS3.7/PS3.8 and
 fo-dicom's behaviour, then fix the one that is wrong — including the document.
 
 [01-architecture.md](01-architecture.md) §15 records deviations from the intended design; there are none
 at present. Anything listed there is a defect, not a contract.
 
-### Open items at a glance
-
-| What | Where |
-|---|---|
-| Known deviations from the intended design (currently none) | [01-architecture.md](01-architecture.md) §15 |
-| Outstanding work, environment- or scope-limited | [02-development-guide.md](02-development-guide.md) §3 |
-| Parity gaps and their fix status | [03-fo-dicom-alignment.md](03-fo-dicom-alignment.md) §Fix status |
-| Known limits and documented divergences | [03-fo-dicom-alignment.md](03-fo-dicom-alignment.md) |
+Outstanding work, environment- or scope-limited items and deliberate ceilings are all in
+[02-development-guide.md](02-development-guide.md) §3.
 
 ---
 
@@ -52,18 +32,20 @@ radicom is a Rust library for DICOM processing and encoding/decoding, functional
 **fo-dicom** (Fellow Oak DICOM, the most widely used .NET DICOM library). It is organized as a small
 workspace:
 
-- **radicom** — the core library: DICOM data model, file reading/writing, network communication (DIMSE),
-  serialization, media files, structured reports, printing data models, anonymization, pixel data access,
-  codec **interfaces** and the transcoder.
+- **radicom** — the core library: DICOM data model, file reading/writing, serialization, media files,
+  structured reports, printing data models, anonymization, pixel data access, rendering, codec
+  **interfaces** and the transcoder.
+- **radicom-network** — tokio-based DIMSE networking (C- and N-services, SCU/SCP, TLS).
+- **radicom-json** — DICOM JSON (PS3.18) and Native XML.
+- **radicom-dict** — generated tag/UID/private dictionary tables.
 - **radicom-codecs** (a separate project) — the image codec integration package (JPEG, JPEG-LS,
   JPEG 2000, HTJ2K and other native codecs), mirroring the relationship between `FO-DICOM.Core` and its
   external `fo-dicom.Codecs` package.
 
-**Codec implementations are explicitly out of scope for this repository** (zero built-in codecs —
-divergence D10). The following platform facilities have Rust implementations:
-server hosting helper (HOST-01), metrics emission (OBS-02), dump CLI (INF-07), print layout rendering
-(PRINT-02). Only .NET-specific packaging is not carried over (AspNetCore-style hosting packages, a
-Newtonsoft JSON backend, the WPF GUI, four imaging backends) — see divergences D7 and D10–D12 in
+**Codec implementations are explicitly out of scope for this repository** — there are zero built-in
+codecs (divergence D10). The platform facilities fo-dicom reaches through .NET are either implemented
+here (server hosting helper, metrics emission, dump CLI, print layout rendering) or deliberately absent
+(the WPF GUI, four imaging backends, a second JSON backend) — see the divergences in
 [01-architecture.md](01-architecture.md) §14.
 
 ## Goals
@@ -112,7 +94,7 @@ defined in [02-development-guide.md](02-development-guide.md) §2.
 | **VR** | Value Representation: the 34 data types of DICOM attributes |
 | **VM** | Value Multiplicity: how many values an attribute may hold ("1", "1-n", "2-2n") |
 
-## Maintenance Conventions
+## Conventions
 
 - Design changes discovered during implementation flow **back** into
   [01-architecture.md](01-architecture.md) in the same commit as the code — these documents are living,
@@ -120,5 +102,5 @@ defined in [02-development-guide.md](02-development-guide.md) §2.
 - Feature IDs are never renumbered. A superseded feature is marked `Dropped` with a reason.
 - Source comments reference sections as `docs/<file>.md §N`. Moving or renumbering a document means
   updating those references; `grep -r "docs/" crates xtask` finds them all.
-- Historical day-by-day records live in `git log`, not in these documents. The 2026-10-29/30 review
-  ledgers were consolidated away during the 2026-11-02 documentation pass.
+- These documents describe the current state only. Review ledgers, parity audits and per-round evidence
+  are historical and live in `git log`, not here.

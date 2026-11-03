@@ -1,17 +1,13 @@
 # Interop Testing Against Real Peers
 
-> Current parity verdict and fix status: [03-fo-dicom-alignment.md](03-fo-dicom-alignment.md).
-> Current defect and fix evidence: [05-code-review-2026-11-02.md](05-code-review-2026-11-02.md).
-> Earlier DONE / coverage statements describe an earlier checkpoint, not proof of complete parity.
-
 How to verify radicom against a **real DICOM peer** — a fo-dicom C-STORE SCP or Q/R SCP, DCMTK,
 dcm4che, or a production PACS.
 
-> The repository ships SCU/SCP loopback regressions covering C-ECHO/STORE/FIND/MOVE/GET, negotiation,
-> TLS and cancellation. They exercise real local sockets. Cross-implementation acceptance still needs
-> an external peer; the historical peer results below were not repeated in this repair round.
+The repository ships SCU/SCP loopback regressions covering C-ECHO/STORE/FIND/MOVE/GET, negotiation, TLS
+and cancellation. They exercise real local sockets, so a plain `cargo test` verifies radicom against
+itself. Cross-implementation acceptance needs an external peer.
 
-## 0. Offline self-test (runs by default)
+## 1. Offline self-test (runs by default)
 
 The `self_interop_*` cases in `crates/radicom-network/tests/interop.rs` need no peer: they start a
 `DicomServer` on `127.0.0.1` and drive real TCP with a `DicomClient`, verifying C-ECHO and a **real file
@@ -19,7 +15,7 @@ C-STORE over TCP → SCP → read back** with semantic equality (compared elemen
 normalising group lengths; the transfer syntax is preserved). `cargo test --workspace --all-features`
 runs them.
 
-## 1. Interop tool: the `peer_interop` example
+## 2. Interop tool: the `peer_interop` example
 
 Location: `crates/radicom-network/examples/peer_interop.rs`
 
@@ -67,7 +63,7 @@ Arguments:
 - `--move PATIENT|STUDY|SERIES|IMAGE --dest AE` — C-MOVE; `--dest` is the AE the SCP must deliver to
 - FIND/GET/MOVE share the match keys: `--patient-name`, `--patient-id`, `--study-uid`, `--accession`
 
-## 2. Gated interop tests (optional in CI)
+## 3. Gated interop tests (optional in CI)
 
 Location: `crates/radicom-network/tests/interop.rs`
 
@@ -82,7 +78,7 @@ $env:RADICOM_STORE_FILE = "tests-data\explicit-le\GH487.dcm"   # optional C-STOR
 cargo test -p radicom-network --test interop -- --nocapture
 ```
 
-## 3. Acceptance criteria against fo-dicom
+## 4. Acceptance criteria against fo-dicom
 
 | Service | Peer | Acceptance |
 |---|---|---|
@@ -95,32 +91,20 @@ cargo test -p radicom-network --test interop -- --nocapture
 > C-MOVE and C-GET need a destination-AE / reverse-store endpoint. radicom can play that role itself
 > (`collect_reverse_stores` plus `DicomServer`), which the loopback suite already covers.
 
-## 4. Measured results against a real fo-dicom peer
+## 5. Measured results against a real fo-dicom peer (2026-10-28)
 
-Measured 2026-10-28 against SCPs implemented with fo-dicom, after the AE configuration was corrected:
+Against SCPs implemented with fo-dicom, after the AE configuration was corrected:
 
-| Service | Peer | Called / Calling | Result |
-|---|---|---|---|
-| C-ECHO | Q/R SCP `172.16.2.24:31803` | QRGATE / NETPUSH | ✅ status 0x0000 |
-| C-STORE | C-STORE SCP `172.16.2.24:31801` | NETGATE / NETPUSH | ✅ status 0x0000 (SC `…1.1.7`, CT `…1.1.2`) |
-| C-FIND | Q/R SCP `:31803` | QRGATE / NETPUSH | ✅ PATIENT 18 / STUDY 21 / SERIES 1 / IMAGE 1 results, final status 0x0000 |
-| C-GET | Q/R SCP `:31803` | QRGATE / NETPUSH | ✅ one study returned 1 CT; another returned **52 CTs**, sub-ops ok=52 failed=0, final 0x0000 |
-| C-MOVE | Q/R SCP `:31803` | QRGATE / NETPUSH | ⏸️ not tested: the peer did not map the destination AE to this host (a peer-side network configuration issue). The function is covered by loopback; retest when the environment is ready |
+| Service | Peer | Result |
+|---|---|---|
+| C-ECHO | Q/R SCP | ✅ status 0x0000 |
+| C-STORE | C-STORE SCP | ✅ status 0x0000 (SC `…1.1.7`, CT `…1.1.2`) |
+| C-FIND | Q/R SCP | ✅ PATIENT 18 / STUDY 21 / SERIES 1 / IMAGE 1 results, final status 0x0000 |
+| C-GET | Q/R SCP | ✅ one study returned 1 CT; another returned 52 CTs, sub-ops ok=52 failed=0, final 0x0000 |
+| C-MOVE | Q/R SCP | ⏸️ not tested: the peer did not map the destination AE to this host (a peer-side configuration issue); the function is covered by loopback |
 
-> The C-STORE SCP does not accept Verification (C-ECHO returns SopClassNotSupported), which is normal for
-> that class of SCP.
-
-## 5. DUL conformance problems found by real-peer testing
-
-These bugs were completely self-consistent under loopback plus self-generated goldens, and only a **real,
-strict peer** exposed them. All are fixed per PS3.8 with regression tests:
-
-| # | Problem | Standard | Fix |
-|---|---|---|---|
-| 1 | A-ASSOCIATE items were written as `type(1) + length(4)` | PS3.8 §9.3.2: `type(1) + reserved(1) + length(2)` — a 16-bit item length; only a P-DATA PDV uses 32 bits | `push_item` / `item_header` now write the 4-byte header; P-DATA unchanged |
-| 2 | Odd-length item values were not padded to even | §9.3: an item value must be even length; pad an odd value with one `0x00` | the encoder pads; the decoder strips trailing NUL/space |
-| 3 | A-ASSOCIATE-AC re-encoded the abstract syntax | §9.3.3: an AC returns only `result` plus **one** accepted transfer syntax, with no abstract syntax | the AC omits the abstract syntax; the client refills it from its RQ by context ID |
-| 4 | The A-ASSOCIATE-RJ body was missing a reserved byte | the standard RJ body is `reserved(1) + result(1) + source(1) + reason(1)` | the encoder writes the reserved byte; the decoder skips it and validates the 4-byte length |
+The C-STORE SCP does not accept Verification (C-ECHO returns SopClassNotSupported), which is normal for
+that class of SCP.
 
 ## 6. Offline consistency with fo-dicom's corpus
 

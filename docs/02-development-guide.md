@@ -1,9 +1,5 @@
 # Development Guide
 
-> Current parity verdict and fix status: [03-fo-dicom-alignment.md](03-fo-dicom-alignment.md).
-> Current defect and fix evidence: [05-code-review-2026-11-02.md](05-code-review-2026-11-02.md).
-> Earlier DONE / coverage statements describe an earlier checkpoint, not proof of complete parity.
-
 > Planning, feature IDs, progress and testing. Design invariants live in
 > [01-architecture.md](01-architecture.md). Historical day-by-day entries are **not** kept here — use
 > `git log`.
@@ -251,6 +247,7 @@ Outstanding work is environment- or scope-limited, not missing implementation:
 | `image` crate backend | Optional | Not a dependency; PNG/BMP export is covered by the hand-written encoders |
 | Single-consumer trait abstractions from fo-dicom | Form | Rust side has concrete equivalents; empty trait shells are deliberately not created |
 | C-MOVE against a real peer | Environment | The peer did not map the destination AE to this host; loopback covers the function |
+| Print CUBIC / LIN optical-density models | Feature | Print rendering uses a linear density window |
 
 ### 3.1 Definition of done (per feature group)
 
@@ -262,6 +259,27 @@ A group is done when:
 3. round-trip and golden tests are updated and green;
 4. the milestone status above is updated;
 5. [01-architecture.md](01-architecture.md) is corrected where the implementation deviated from it.
+
+### 3.2 Known limits (not defects)
+
+Deliberate, tested ceilings. Change one only together with the tests that describe it.
+
+- The stateless compressed renderer decodes the full dataset once per render; there is no decoded-frame
+  cache.
+- Client batching covers C-ECHO, C-STORE and C-FIND (at most `min(invoked, 64)` outstanding); C-GET,
+  C-MOVE and N-ACTION stay sequential. The SCP dispatches C-ECHO/C-STORE/C-FIND/N-services (except
+  N-ACTION) to tasks but serialises each response through one writer, bounded by the AC window.
+- A received C-STORE spills its PDVs to a temporary file (64 GiB bound) before parsing, but the parse
+  still materialises the dataset once (the core exposes only byte-slice `parse_dataset_bytes`), and the
+  SCU reverse-store (C-GET) path still buffers. Send-side streaming does not imply a file-backed parse.
+- The read-side PDU cap is 256 KiB and applies to A-ASSOCIATE too. PS3.8's Max-PDU-Length formally
+  governs only P-DATA-TF; the cap is a deliberate allocation-safety deviation.
+- An external private sequence written with a *defined* length under Implicit VR still needs a private
+  dictionary to recover its structure (its bytes are preserved).
+- CP-246 (`explicit_vr = false`) is applied to the Big-Endian UN-undefined-length-SQ case only; applying
+  it to Little Endian would break the `t3_un_undefined_length_parsed_as_sq` behaviour and real LE files.
+- Concrete codecs, external peers, print/media hardware and non-Windows behaviour are not established by
+  local tests.
 
 ---
 
