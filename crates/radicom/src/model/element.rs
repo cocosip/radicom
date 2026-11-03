@@ -1453,6 +1453,73 @@ mod cm_regression {
     }
 
     #[test]
+    fn coverage_extra_conversion_branches() {
+        use crate::model::buffer::EmptyBuffer;
+
+        // count() for a binary VR with unit_size 0 (SQ) is zero.
+        let sq = DicomElement {
+            tag: Tag::new(0x7777, 0x0100),
+            vr: Vr::Sq,
+            value: ElementValue::Bytes(EmptyBuffer::shared()),
+        };
+        assert_eq!(sq.count(), 0);
+
+        // string_parts over non-UTF-8 bytes yields no parts.
+        let bad = DicomElement::new_bytes(
+            Tag::new(0x7777, 0x0101),
+            Vr::Lo,
+            Arc::new(MemoryBuffer::from(vec![0xFFu8, 0xFE])),
+        );
+        assert!(bad.string_parts().is_empty());
+
+        // FromLeBytes::from_le reads a native-width little-endian unit.
+        assert_eq!(<u16 as FromLeBytes>::from_le(&[0x34, 0x12]), 0x1234u16);
+        assert_eq!(<u32 as FromLeBytes>::from_le(&[1, 0, 0, 0]), 1u32);
+
+        // a numeric VR holding text falls through to the text parse branch.
+        let numeric_text = DicomElement {
+            tag: Tag::new(0x7777, 0x0102),
+            vr: Vr::Us,
+            value: ElementValue::Str("5".into()),
+        };
+        assert_eq!(numeric_text.get::<u16>(None).unwrap(), 5);
+
+        // f64 over an unexpected binary VR uses the catch-all unit read.
+        let at = DicomElement::new_bytes(
+            Tag::new(0x7777, 0x0103),
+            Vr::At,
+            Arc::new(MemoryBuffer::from(vec![0u8; 4])),
+        );
+        assert!(at.get::<f64>(None).is_ok());
+        // f64 over an ordinary string VR parses as text.
+        let text = DicomElement::new_str(Tag::new(0x7777, 0x0104), Vr::Lo, "1.5");
+        assert_eq!(text.get::<f64>(None).unwrap(), 1.5);
+
+        // Arc<Uid> conversion.
+        let uid_elem = DicomElement::new_str(Tag::new(0x7777, 0x0105), Vr::Ui, "1.2.3");
+        let arc_uid = <Arc<Uid> as FromElement>::from_element(&uid_elem, None).unwrap();
+        assert_eq!(arc_uid.value(), "1.2.3");
+
+        // Tag conversion rejects a non-AT VR and a text value under AT.
+        let wrong_vr = DicomElement::new_bytes(
+            Tag::new(0x7777, 0x0106),
+            Vr::Us,
+            Arc::new(MemoryBuffer::from(vec![0u8; 4])),
+        );
+        assert!(<Tag as FromElement>::from_element(&wrong_vr, None).is_err());
+        let text_at = DicomElement {
+            tag: Tag::new(0x7777, 0x0107),
+            vr: Vr::At,
+            value: ElementValue::Str("00100010".into()),
+        };
+        assert!(<Tag as FromElement>::from_element(&text_at, None).is_err());
+
+        // Vec<T> from an empty string is an empty vector.
+        let empty = DicomElement::new_str(Tag::new(0x7777, 0x0108), Vr::Lo, "");
+        assert!(empty.get::<Vec<u16>>(None).unwrap().is_empty());
+    }
+
+    #[test]
     fn cm08_byte_backed_string_count_and_parts() {
         let multi = bytes(Vr::Lo, b"A\\B\\C");
         assert_eq!(multi.count(), 3);

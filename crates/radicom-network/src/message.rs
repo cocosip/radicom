@@ -873,4 +873,47 @@ mod tests {
         assert_eq!(units[0].bytes, command);
         assert_eq!(units[1].bytes, dataset);
     }
+
+    #[test]
+    fn a_malformed_command_is_a_typed_io_error() {
+        // An element header that claims 16 value bytes but carries none.
+        let truncated = [0x08, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00];
+        match decode_command(&truncated) {
+            Err(NetworkError::Io(_)) => {}
+            other => panic!("expected a typed Io error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_known_fallback_decodes_text_and_surfaces_deflate_errors() {
+        let syntax = &syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN;
+        let encoded = encode_dataset(&sample_dataset(), syntax).unwrap();
+        let decoded = decode_dataset_with_fallback(&encoded, syntax, Some("ISO_IR 100")).unwrap();
+        assert_eq!(decoded.get_str(Tag::PATIENT_NAME).unwrap(), "Doe^John");
+
+        // An unknown fallback term keeps the default repertoire instead of guessing.
+        let explicit = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let plain = encode_dataset(&sample_dataset(), &explicit).unwrap();
+        let back = decode_dataset_with_fallback(&plain, &explicit, Some("NOT_A_CHARSET")).unwrap();
+        assert_eq!(back.get_str(Tag::PATIENT_NAME).unwrap(), "Doe^John");
+
+        // Malformed deflate bytes with a known fallback take the typed error path.
+        assert!(decode_dataset_with_fallback(&[0xDE, 0xAD], syntax, Some("ISO_IR 100")).is_err());
+    }
+
+    #[test]
+    fn the_framer_finish_is_idempotent_and_flush_is_a_noop() {
+        use std::io::Write as _;
+        let emitted = std::cell::Cell::new(0usize);
+        let mut framer = PduFramer::new(1, 16, |_| {
+            emitted.set(emitted.get() + 1);
+            Ok(())
+        });
+        framer.write_all(b"abc").unwrap();
+        framer.flush().unwrap();
+        framer.finish().unwrap();
+        let after_first = emitted.get();
+        framer.finish().unwrap();
+        assert_eq!(emitted.get(), after_first, "a second finish emits nothing");
+    }
 }

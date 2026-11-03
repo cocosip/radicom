@@ -152,6 +152,22 @@ mod tests {
     }
 
     #[test]
+    fn file_to_dump_string_with_custom_options() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        ds.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5");
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "AVERYVERYLONGNAME");
+        let file = DicomFile::from_dataset(ds);
+        let options = DumpOptions {
+            max_value_chars: 4,
+            ..Default::default()
+        };
+        let text = file.to_dump_string_with(&options);
+        assert!(text.contains("(0008,0018)"), "dataset is dumped: {text}");
+        assert!(!text.contains("AVERYVERYLONGNAME"), "value elided: {text}");
+    }
+
+    #[test]
     fn target_constants_are_stable() {
         assert_eq!(targets::NETWORK, "radicom::network");
         assert_eq!(targets::CODEC, "radicom::codec");

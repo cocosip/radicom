@@ -2351,3 +2351,142 @@ mod core22_tests {
         assert!(matches!(scan_meta(&ok), MetaScan::Run(12)));
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::io::writer::WriteOptions;
+
+    /// One Explicit VR Little Endian element (short-form length).
+    fn explicit_elem(group: u16, element: u16, vr: &[u8; 2], value: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&group.to_le_bytes());
+        v.extend_from_slice(&element.to_le_bytes());
+        v.extend_from_slice(vr);
+        v.extend_from_slice(&(value.len() as u16).to_le_bytes());
+        v.extend_from_slice(value);
+        v
+    }
+
+    /// One group-0002 element with a long-form value (OB).
+    fn meta_ob(element: u16, value: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&0x0002u16.to_le_bytes());
+        v.extend_from_slice(&element.to_le_bytes());
+        v.extend_from_slice(b"OB");
+        v.extend_from_slice(&[0, 0]);
+        v.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        v.extend_from_slice(value);
+        v
+    }
+
+    fn tmp_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("radicom-cov-{name}-{}.dcm", std::process::id()))
+    }
+
+    fn sample_dataset() -> Dataset {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        ds.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5");
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+        ds
+    }
+
+    fn sample_with_name() -> Vec<u8> {
+        DicomFile::from_dataset(sample_dataset())
+            .to_bytes(&WriteOptions::default())
+            .unwrap()
+    }
+
+    #[test]
+    fn open_with_encoding_uses_the_fallback_encoding() {
+        let path = tmp_path("enc");
+        std::fs::write(&path, sample_with_name()).unwrap();
+        let file = DicomFile::open_with_encoding(&path, encoding_rs::WINDOWS_1252).unwrap();
+        assert_eq!(
+            file.dataset.get_str(Tag::PATIENT_NAME).unwrap().trim(),
+            "Doe^John"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn bare_dataset_has_no_file_meta_group() {
+        let path = tmp_path("bare");
+        let bytes = explicit_elem(0x0010, 0x0010, b"PN", b"AB");
+        std::fs::write(&path, &bytes).unwrap();
+        let file = DicomFile::open(&path).unwrap();
+        assert_eq!(file.format, FileFormat::Dicom3NoFileMetaInfo);
+        assert!(file.file_meta.items().next().is_none());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn meta_without_preamble_or_transfer_syntax_is_probed() {
+        let path = tmp_path("nopreamble");
+        let mut bytes = meta_ob(0x0001, &[0, 1]); // (0002,0001) version
+        bytes.extend_from_slice(&explicit_elem(0x0010, 0x0010, b"PN", b"AB"));
+        std::fs::write(&path, &bytes).unwrap();
+        let file = DicomFile::open(&path).unwrap();
+        assert_eq!(file.format, FileFormat::Dicom3NoPreamble);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn recognition_code_selects_the_acr_nema_format() {
+        let bytes = explicit_elem(0x0008, 0x0010, b"LO", b"ACR-NEMA 1.0");
+        let path = tmp_path("acr");
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(DicomFile::open(&path).unwrap().format, FileFormat::AcrNema1);
+        std::fs::remove_file(&path).ok();
+
+        // the in-memory parse path applies the same recognition rule
+        let mut cursor = std::io::Cursor::new(bytes);
+        let file = DicomFile::from_reader(&mut cursor, &ReadOptions::default()).unwrap();
+        assert_eq!(file.format, FileFormat::AcrNema1);
+    }
+
+    #[test]
+    fn open_partial_without_meta_uses_probe_syntax() {
+        let path = tmp_path("partial");
+        std::fs::write(&path, explicit_elem(0x0010, 0x0010, b"PN", b"AB")).unwrap();
+        let file = DicomFile::open_partial(&path, &|_| false).unwrap();
+        assert_eq!(file.format, FileFormat::Dicom3NoFileMetaInfo);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn save_with_bare_filename_and_on_a_rename_failure() {
+        let file = DicomFile::from_dataset(sample_dataset());
+        // a bare relative path has an empty parent, resolved to "."
+        let name = format!("radicom-cov-save-{}.dcm", std::process::id());
+        file.save_with(&name, &WriteOptions::default()).unwrap();
+        assert!(Path::new(&name).exists());
+        std::fs::remove_file(&name).ok();
+
+        // renaming the temp file onto an existing directory fails cleanly
+        let dir = std::env::temp_dir().join(format!("radicom-cov-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(file.save_with(&dir, &WriteOptions::default()).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn recognition_code_2_and_unknown_forms() {
+        let path = tmp_path("acr2");
+        std::fs::write(&path, explicit_elem(0x0008, 0x0010, b"LO", b"ACR-NEMA 2.0")).unwrap();
+        assert_eq!(DicomFile::open(&path).unwrap().format, FileFormat::AcrNema2);
+
+        std::fs::write(&path, explicit_elem(0x0008, 0x0010, b"LO", b"NOT-A-CODE")).unwrap();
+        assert_eq!(
+            DicomFile::open(&path).unwrap().format,
+            FileFormat::Dicom3NoFileMetaInfo
+        );
+        std::fs::remove_file(&path).ok();
+
+        // the in-memory parse path leaves an unknown recognition code alone too
+        let mut cursor = std::io::Cursor::new(explicit_elem(0x0008, 0x0010, b"LO", b"OTHER"));
+        let file = DicomFile::from_reader(&mut cursor, &ReadOptions::default()).unwrap();
+        assert_eq!(file.format, FileFormat::Dicom3NoFileMetaInfo);
+    }
+}

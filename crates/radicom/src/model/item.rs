@@ -287,3 +287,48 @@ mod extra_tests {
         assert!(!DicomItem::Fragments(fragments).is_empty_value());
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::model::buffer::{ByteBuffer, SharedBuffer};
+    use std::sync::Arc;
+
+    /// A buffer that only reports a huge size, to push the offset table past
+    /// `u32::MAX` without allocating 4 GiB.
+    #[derive(Debug)]
+    struct HugeBuffer;
+    impl ByteBuffer for HugeBuffer {
+        fn size(&self) -> u64 {
+            u32::MAX as u64
+        }
+        fn is_memory(&self) -> bool {
+            true
+        }
+        fn data(&self) -> std::io::Result<std::borrow::Cow<'_, [u8]>> {
+            Ok(std::borrow::Cow::Borrowed(&[]))
+        }
+    }
+
+    #[test]
+    fn push_fragment_clears_the_offset_table_past_4gib() {
+        let mut fragments = DicomFragmentSequence::new(Tag::PIXEL_DATA, Vr::Ob);
+        let huge: SharedBuffer = Arc::new(HugeBuffer);
+        fragments.push_fragment(huge.clone());
+        assert_eq!(fragments.offset_table().len(), 1);
+        fragments.push_fragment(huge);
+        assert!(
+            fragments.offset_table().is_empty(),
+            "an overflowing offset table is cleared"
+        );
+    }
+
+    #[test]
+    fn item_vr_and_cross_variant_inequality() {
+        let fragments = DicomFragmentSequence::new(Tag::PIXEL_DATA, Vr::Ow);
+        let item = DicomItem::Fragments(fragments);
+        assert_eq!(item.vr(), Vr::Ow);
+        let sequence = DicomItem::Sequence(DicomSequence::new(Tag::PATIENT_ID));
+        assert_ne!(item, sequence, "different variants are never equal");
+    }
+}

@@ -747,3 +747,26 @@ mod extra_tests {
         assert!(lookup(&Uid::parse("1.2.840.10008.1.2.1")).is_ok());
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn a_registered_extension_is_resolved_before_the_builtin_table() {
+        let uid = "1.2.826.0.1.3680043.10.1330.9999.1";
+        let registered = register(uid, "Coverage Transfer Syntax", Endian::Little, true, false);
+        assert_eq!(registered.uid(), uid);
+        let looked_up = lookup(&Uid::parse(uid)).unwrap();
+        assert_eq!(looked_up.uid(), uid);
+        assert!(unregister(uid));
+    }
+
+    #[test]
+    fn equality_is_by_uid() {
+        let a = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let b = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        assert_eq!(a, b, "same uid compares equal");
+        assert_ne!(a, syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone());
+    }
+}

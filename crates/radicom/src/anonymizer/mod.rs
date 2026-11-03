@@ -979,3 +979,22 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::anonymizer::profile::SecurityProfile;
+
+    #[test]
+    fn a_fragment_item_with_an_action_is_skipped_and_left_intact() {
+        let profile = SecurityProfile::parse("7FE0,0010;Z\n").unwrap();
+        let anonymizer = Anonymizer::with_profile(profile, AnonOptions::BASIC_PROFILE);
+        let mut ds = Dataset::new();
+        ds.insert_fragments(Tag::PIXEL_DATA, Vr::Ob);
+        anonymizer.anonymize_in_place(&mut ds).unwrap();
+        assert!(matches!(
+            ds.item(&Tag::PIXEL_DATA),
+            Some(DicomItem::Fragments(_))
+        ));
+    }
+}

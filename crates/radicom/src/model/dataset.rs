@@ -2493,3 +2493,40 @@ mod cm_regression {
         assert!(a.content_equals(&b));
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn fallback_encodings_cascade_into_sequence_items() {
+        let mut ds = Dataset::new();
+        let mut item = Dataset::new();
+        item.insert_str(Tag::PATIENT_NAME, Vr::Pn, "X");
+        ds.insert_sequence(Tag::REFERENCED_IMAGE_SEQUENCE)
+            .push(item);
+        ds.set_fallback_encodings(vec![encoding_rs::WINDOWS_1252]);
+        assert_eq!(ds.fallback_encodings().len(), 1);
+        let sequence = ds.try_get_sequence(Tag::REFERENCED_IMAGE_SEQUENCE).unwrap();
+        assert_eq!(sequence.items()[0].fallback_encodings().len(), 1);
+    }
+
+    #[test]
+    fn claiming_a_second_private_creator_scans_past_the_first_block() {
+        use crate::model::private_creator::PrivateCreator;
+        use std::sync::Arc;
+
+        let mut ds = Dataset::new();
+        let a = Arc::new(PrivateCreator::new("COVERAGE_A"));
+        let b = Arc::new(PrivateCreator::new("COVERAGE_B"));
+        let first = ds
+            .get_private_tag(Tag::private(0x0029, 0x0001, a), true)
+            .expect("first creator claims a block");
+        let second = ds
+            .get_private_tag(Tag::private(0x0029, 0x0001, b), true)
+            .expect("second creator claims the next block");
+        assert_ne!(first, second);
+        assert_eq!(first.element(), 0x1001);
+        assert_eq!(second.element(), 0x1101);
+    }
+}

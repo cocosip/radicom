@@ -1427,4 +1427,106 @@ mod tests {
         let default = PduSplitter::new(512, 16);
         assert_eq!(default.split(1, true, &[0u8; 200]).unwrap().len(), 1);
     }
+
+    #[test]
+    fn message_body_reports_its_shape_without_buffering_a_spill() {
+        // Memory variant: len/is_empty/in_memory/spool/read_all and From<Bytes>.
+        let memory = MessageBody::from(bytes::Bytes::from_static(b"abcd"));
+        assert_eq!(memory.len(), 4);
+        assert!(!memory.is_empty());
+        assert_eq!(memory.in_memory(), Some(&b"abcd"[..]));
+        assert!(memory.spool().is_none());
+        assert_eq!(
+            memory.read_all().unwrap(),
+            bytes::Bytes::from_static(b"abcd")
+        );
+        let empty = MessageBody::from(bytes::Bytes::new());
+        assert!(empty.is_empty());
+
+        // A brand-new SpoolFile has no bytes yet and compares by path.
+        let dir = spill_dir("spoolfile");
+        let first = SpoolFile::new(dir.join("a.dcm"));
+        let same = SpoolFile::new(dir.join("a.dcm"));
+        let other = SpoolFile::new(dir.join("b.dcm"));
+        assert!(first.is_empty());
+        assert_eq!(first.len(), 0);
+        assert_eq!(first, same, "two handles to one path are equal");
+        assert_ne!(first, other, "different paths are not equal");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_spilled_body_reads_back_from_its_spool_file() {
+        let dir = spill_dir("body-read");
+        let mut assembler = PdvAssembler::with_spool(SpoolConfig {
+            memory_threshold: 0,
+            dir: Some(dir.clone()),
+            ..SpoolConfig::default()
+        });
+        assembler.arm_spill(1);
+        let unit = assembler
+            .push_pdv(&dataset_pdv(1, true, 8))
+            .unwrap()
+            .expect("the dataset completes");
+        let body = unit.body();
+        assert_eq!(body.len(), 8);
+        assert!(!body.is_empty());
+        assert!(body.in_memory().is_none(), "a spilled body left memory");
+        assert!(body.spool().is_some(), "the spool file is exposed");
+        assert_eq!(body.read_all().unwrap().len(), 8);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_spill_that_crosses_its_cap_mid_stream_is_dropped() {
+        // The first PDV opens the file; a later PDV that would push it past
+        // `max_message_length` is refused and the writer is discarded.
+        let dir = spill_dir("spill-cap");
+        let mut assembler = PdvAssembler::with_spool(SpoolConfig {
+            memory_threshold: 4,
+            max_message_length: 10,
+            dir: Some(dir.clone()),
+        });
+        assembler.arm_spill(1);
+        assert!(assembler
+            .push_pdv(&dataset_pdv(1, false, 8))
+            .unwrap()
+            .is_none());
+        let error = assembler
+            .push_pdv(&dataset_pdv(1, false, 8))
+            .expect_err("the second PDV crosses the spill cap");
+        assert!(error.to_string().contains("maximum size"), "{error}");
+        assert!(!assembler.is_spilling(1), "the failed spill is torn down");
+        assert!(assembler.is_idle());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_memory_prefix_is_moved_into_the_spool_file() {
+        // A small first PDV stays in memory; when a second one crosses the
+        // threshold the buffered prefix is copied into the new temp file.
+        let dir = spill_dir("prefix");
+        let mut assembler = PdvAssembler::with_spool(SpoolConfig {
+            memory_threshold: 8,
+            max_message_length: 1024,
+            dir: Some(dir.clone()),
+        });
+        assembler.arm_spill(1);
+        assert!(assembler
+            .push_pdv(&dataset_pdv(1, false, 4))
+            .unwrap()
+            .is_none());
+        let unit = assembler
+            .push_pdv(&dataset_pdv(1, true, 8))
+            .unwrap()
+            .expect("the last PDV completes the dataset");
+        let spool = unit
+            .spool
+            .as_ref()
+            .expect("it spilled once it passed the threshold");
+        assert_eq!(spool.len(), 12, "the 4-byte prefix plus 8 bytes");
+        let bytes = unit.body().read_all().unwrap();
+        assert_eq!(bytes.len(), 12);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

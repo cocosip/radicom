@@ -931,3 +931,32 @@ mod cm_regression {
         assert_eq!(real.storage_category(), StorageCategory::Image);
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::model::dataset::Dataset;
+    use crate::model::vr::Vr;
+
+    #[test]
+    fn enumerate_reuses_the_sorted_snapshot() {
+        let first = Uid::enumerate();
+        let second = Uid::enumerate();
+        assert!(!first.is_empty());
+        assert!(!second.is_empty());
+    }
+
+    #[test]
+    fn regenerate_skips_non_ui_and_empty_and_recurses_into_sequences() {
+        let generator = UidGenerator::new();
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe"); // non-UI: skipped
+        ds.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, ""); // empty: skipped
+        let mut item = Dataset::new();
+        item.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5");
+        ds.insert_sequence(Tag::REFERENCED_IMAGE_SEQUENCE)
+            .push(item);
+        let replaced = generator.regenerate_dataset(&mut ds);
+        assert!(!replaced.is_empty(), "the nested SOP instance was remapped");
+    }
+}

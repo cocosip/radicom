@@ -599,3 +599,65 @@ mod cm_regression {
         assert!(has_invalid_dt_offset("20240305103015+1500"));
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn digits_and_empty_range_edges() {
+        // a non-digit dotted component rejects through digits()
+        assert!(parse_da("2024.ab.05").is_err());
+        // an open-ended DA range repeats the min as the max
+        let r = parse_da("20240101-").unwrap();
+        assert_eq!(r.min, r.max);
+    }
+
+    #[test]
+    fn tm_lenient_and_invalid_shapes() {
+        assert!(parse_tm("").is_err(), "empty TM");
+        assert!(parse_tm(":").is_err(), "colon form with no digits");
+        assert_eq!(
+            parse_tm("10.30.15").unwrap().min.to_string(),
+            "10:30:15",
+            "three dotted parts is HH.mm.ss"
+        );
+        assert!(parse_tm("1.2.3.4.5").is_err(), "too many dotted parts");
+        assert!(parse_tm("103015.1234567").is_err(), "fraction too long");
+        assert_eq!(
+            parse_tm(".5").unwrap().min.nanosecond(),
+            500_000_000,
+            "an empty main part is hour zero"
+        );
+    }
+
+    #[test]
+    fn dt_offset_and_shape_variants() {
+        let two_digit = parse_dt("20240305103015+08").unwrap().min;
+        assert_eq!(
+            two_digit.offset.map(|o| o.local_minus_utc()),
+            Some(8 * 3600),
+            "two-digit offset"
+        );
+
+        let date_only = parse_dt("2024.03.05").unwrap().min;
+        assert_eq!(date_only.naive.to_string(), "2024-03-05 00:00:00");
+
+        let hour_only = parse_dt("2024030510").unwrap().min;
+        assert_eq!(hour_only.naive.to_string(), "2024-03-05 10:00:00");
+
+        assert!(parse_dt("20240305103").is_err(), "odd-length hour field");
+    }
+
+    #[test]
+    fn dt_range_with_a_single_offset_is_not_reversed() {
+        let r = parse_dt("20240101120000+0100-20240101130000").unwrap();
+        assert!(r.min.naive < r.max.naive);
+    }
+
+    #[test]
+    fn short_offset_suffix_is_not_treated_as_an_offset() {
+        // a one-digit suffix is neither a 2- nor 4-digit offset; the scan skips it
+        assert!(!has_invalid_dt_offset("2024-2"));
+    }
+}

@@ -1298,3 +1298,45 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::io::reader::{ParseContext, ParseObserver};
+
+    fn ctx() -> ParseContext {
+        ParseContext {
+            position: 0,
+            depth: 0,
+        }
+    }
+
+    #[test]
+    fn default_and_new_build_empty_datasets() {
+        assert!(DatasetBuilder::default()
+            .into_dataset()
+            .items()
+            .next()
+            .is_none());
+        assert!(DatasetBuilder::new()
+            .into_dataset()
+            .items()
+            .next()
+            .is_none());
+    }
+
+    #[test]
+    fn stack_underflow_reports_a_typed_error() {
+        let mut builder = DatasetBuilder::new();
+        assert!(builder.on_end_sequence_item(&ctx()).is_err());
+        assert!(builder.on_end_sequence(&ctx()).is_err());
+    }
+
+    #[test]
+    fn non_ob_ow_fragment_sequence_is_skipped_not_fatal() {
+        let mut builder = DatasetBuilder::new();
+        builder
+            .on_begin_fragment(&ctx(), &Tag::PATIENT_NAME, Vr::Lo, Vec::new())
+            .unwrap();
+    }
+}

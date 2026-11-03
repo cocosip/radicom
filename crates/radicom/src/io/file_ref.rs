@@ -352,3 +352,29 @@ mod extra_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn deleting_a_directory_and_queuing_locked_paths_sweeps_them() {
+        let provider = TempFileProvider::new();
+        let dir = provider.dir().to_path_buf();
+        let sub = dir.join(format!("radicom-cov-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&sub).unwrap();
+
+        // remove_file on a directory is an error other than NotFound
+        assert!(PathFile::new(&sub).delete().is_err());
+
+        // a failed provider delete is queued instead of erroring
+        provider.delete(&PathFile::new(&sub)).unwrap();
+        assert_eq!(provider.pending.lock().unwrap().len(), 1);
+
+        // a queued path that disappears is swept away (NotFound counts too)
+        provider.pending.lock().unwrap().push(dir.join("gone"));
+        assert!(provider.sweep() >= 1);
+
+        std::fs::remove_dir_all(&sub).ok();
+    }
+}

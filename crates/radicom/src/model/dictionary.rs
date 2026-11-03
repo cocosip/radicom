@@ -940,3 +940,50 @@ mod cm_regression {
         assert!(entries[1].entry.creator.is_none());
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn merge_runtime_of_a_masked_public_entry_lands_in_the_masked_list() {
+        let mut dict = Dictionary::with_generated().unwrap();
+        let entry = Arc::new(DictionaryEntry {
+            tag: Tag::new(0x7776, 0x0010),
+            mask: Some((0xFFFF, 0x00F0)),
+            creator: None,
+            name: "CoverageMasked",
+            keyword: "CoverageMasked",
+            vrs: Box::new([Vr::Lo]),
+            vm: Vm::ONE,
+            retired: false,
+        });
+        dict.merge_runtime(vec![RuntimeEntry { entry }]);
+        assert_eq!(
+            dict.entry(&Tag::new(0x7776, 0x0010)).keyword,
+            "CoverageMasked"
+        );
+    }
+
+    #[test]
+    fn back_to_back_self_closing_tags_and_an_unknown_attribute() {
+        // two self-closing siblings exercise the pending-flush-before-next-tag
+        // path; the unexpected attribute exercises the ignored-attribute arm.
+        let xml = br#"<dictionary>
+            <tag group="0010" element="0010" keyword="CovA" vr="PN" vm="1"/>
+            <tag group="0010" element="0020" keyword="CovB" vr="LO" vm="1" extra="ignored"/>
+        </dictionary>"#;
+        let entries = load_xml(xml.as_slice()).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].entry.keyword, "CovA");
+        assert_eq!(entries[1].entry.keyword, "CovB");
+    }
+
+    #[test]
+    fn a_pending_self_closing_tag_is_flushed_at_eof() {
+        let xml = br#"<tag group="0010" element="0010" keyword="CovEof" vr="PN" vm="1"/>"#;
+        let entries = load_xml(xml.as_slice()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].entry.keyword, "CovEof");
+    }
+}

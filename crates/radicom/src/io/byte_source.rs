@@ -436,3 +436,35 @@ mod core22_tests {
         assert_eq!(src.read_buffer(8).unwrap().size(), 8);
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use std::io::{self, Read, Seek, SeekFrom};
+
+    /// A reader whose seeks always fail, so the length probe falls back.
+    struct NoSeek;
+    impl Read for NoSeek {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Ok(0)
+        }
+    }
+    impl Seek for NoSeek {
+        fn seek(&mut self, _pos: SeekFrom) -> io::Result<u64> {
+            Err(io::Error::other("no seek"))
+        }
+    }
+
+    #[test]
+    fn a_source_that_cannot_seek_reports_an_unknown_length() {
+        let src = ByteSourceReader::new(NoSeek, Endian::Little);
+        assert_eq!(src.len, u64::MAX);
+    }
+
+    #[test]
+    fn write_u64_honours_big_endian() {
+        let mut writer = ByteTargetWriter::new(Vec::new(), Endian::Big);
+        writer.write_u64(0x0102_0304_0506_0708).unwrap();
+        assert_eq!(writer.into_inner(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+}

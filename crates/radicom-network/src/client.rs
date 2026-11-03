@@ -2331,4 +2331,12 @@ mod tests {
             "without a fallback the default repertoire reads UTF-8 as single bytes"
         );
     }
+
+    #[tokio::test]
+    async fn empty_batches_short_circuit_without_connecting() {
+        // An empty batch never opens an association and returns no responses.
+        let mut client = DicomClient::new("SCU", "SCP", "127.0.0.1:1");
+        assert!(client.send_c_store_batch(&[]).await.unwrap().is_empty());
+        assert!(client.send_c_find_batch(&[]).await.unwrap().is_empty());
+    }
 }

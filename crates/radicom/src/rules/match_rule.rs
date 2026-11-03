@@ -294,3 +294,16 @@ mod tests {
         assert!(!dicom_wildcard_match("ü", "??"));
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn wildcard_rule_matches_through_the_enum() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::MODALITY, crate::model::vr::Vr::Cs, "CT");
+        assert!(MatchRule::Wildcard(Tag::MODALITY, "C*".into()).matches(&ds));
+        assert!(!MatchRule::Wildcard(Tag::MODALITY, "M*".into()).matches(&ds));
+    }
+}

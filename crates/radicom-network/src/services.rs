@@ -683,4 +683,31 @@ mod tests {
             assert!(response.is_err(), "{field:?} must be refused");
         }
     }
+
+    #[test]
+    fn c_store_transfer_syntaxes_append_new_offers_once() {
+        let source = transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN;
+        let additional = vec![
+            transfer_syntax::EXPLICIT_VR_BIG_ENDIAN.to_string(),
+            // a duplicate of the source and of the previous entry is skipped
+            source.to_string(),
+            transfer_syntax::EXPLICIT_VR_BIG_ENDIAN.to_string(),
+        ];
+        let offered = c_store_transfer_syntaxes(source, &additional, false);
+        assert_eq!(offered[0], source);
+        assert_eq!(
+            offered
+                .iter()
+                .filter(|s| s.as_str() == transfer_syntax::EXPLICIT_VR_BIG_ENDIAN)
+                .count(),
+            1,
+            "a repeated additional syntax is offered once"
+        );
+        assert!(
+            offered
+                .iter()
+                .any(|s| s == transfer_syntax::IMPLICIT_VR_LITTLE_ENDIAN),
+            "implicit VR stays in the offer"
+        );
+    }
 }

@@ -513,3 +513,21 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn format_ds_non_finite_and_tiny_values() {
+        assert_eq!(format_ds(f64::NAN), "0");
+        assert_eq!(format_ds(f64::INFINITY), "0");
+        // a tiny non-zero value collapses in fixed notation; scientific is used
+        let tiny = format_ds(1e-10);
+        assert!(tiny.len() <= 16, "DS must fit 16 chars: {tiny}");
+        assert!(
+            tiny.contains('E') || tiny.contains('e'),
+            "scientific: {tiny}"
+        );
+    }
+}

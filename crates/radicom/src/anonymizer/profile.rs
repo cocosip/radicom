@@ -877,3 +877,36 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn option_set_emptiness_and_default() {
+        assert!(AnonOptions::NONE.is_empty());
+        assert!(!AnonOptions::BASIC_PROFILE.is_empty());
+        assert_eq!(AnonOptions::default(), AnonOptions::BASIC_PROFILE);
+    }
+
+    #[test]
+    fn an_unterminated_character_class_is_an_error() {
+        assert!(TagPattern::new("[ABC").is_err());
+    }
+
+    #[test]
+    fn a_wildcard_row_supplies_an_action_for_a_literal_tag() {
+        // the literal row only fills option column 1; the wildcard row fills
+        // column 0 for the literal tag it matches.
+        let csv = "6000,3000;;X\n60[0-9]0,3000;Z\n";
+        let profile = SecurityProfile::parse(csv).unwrap();
+        assert_eq!(
+            profile.action_for("6000,3000", AnonOption::BasicProfile),
+            Some(Action::ZeroLength)
+        );
+        assert_eq!(
+            profile.action_for("6000,3000", AnonOption::RetainSafePrivate),
+            Some(Action::Remove)
+        );
+    }
+}

@@ -1367,4 +1367,61 @@ ZfpRQ7oSMvyXNqCGkIuXOez3UtiQ5pUwnznzQF4hBfzAlhysk9/VTzgwbQxMCjDOEd6m
             "the callback has the final say even on a valid chain"
         );
     }
+
+    #[test]
+    fn tls_options_debug_shows_fields_and_hides_the_callback() {
+        let options = TlsOptions {
+            cert_file: Some("cert.pem".into()),
+            key_file: Some("key.pem".into()),
+            client_cert_file: Some("client.pem".into()),
+            client_key_file: Some("client.key".into()),
+            client_ca_file: Some("ca.pem".into()),
+            accept_any: true,
+            certificate_validator: Some(Arc::new(|_| true)),
+            server_name: Some("pacs.example".into()),
+            min_version: TlsVersion::Tls13,
+        };
+        let text = format!("{options:?}");
+        assert!(text.contains("TlsOptions"), "{text}");
+        assert!(text.contains("<callback>"), "{text}");
+        assert!(text.contains("pacs.example"), "{text}");
+        assert!(text.contains("Tls13"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_certificate_validator_can_refuse_a_failed_chain() {
+        // The chain already fails the standard verifier and the callback also
+        // says no: the original verification error is returned, not the generic
+        // "callback rejected" one.
+        let (decoy_cert, _) = self_signed("decoy-refuse");
+        let refusing = TlsOptions {
+            cert_file: Some(decoy_cert),
+            server_name: Some("localhost".to_string()),
+            certificate_validator: Some(Arc::new(|_| false)),
+            ..Default::default()
+        };
+        assert!(
+            !handshake_succeeds(refusing).await,
+            "the callback vetoes the untrusted chain"
+        );
+    }
+
+    #[test]
+    fn callback_verifier_debug_is_opaque() {
+        // The wrapper has no printable state; its Debug impl is a bare name.
+        let (ca, _leaf, _key) = ca_signed();
+        let mut roots = RootCertStore::empty();
+        for cert in load_certs(&ca).unwrap() {
+            roots.add(cert).unwrap();
+        }
+        let inner = tokio_rustls::rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
+            .build()
+            .expect("a non-empty trust store builds a verifier");
+        let verifier = CallbackVerifier {
+            inner,
+            callback: Arc::new(|_: CertValidation| true),
+        };
+        let text = format!("{verifier:?}");
+        assert!(text.contains("CallbackVerifier"), "{text}");
+    }
 }

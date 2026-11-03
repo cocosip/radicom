@@ -774,6 +774,129 @@ mod tests {
     }
 
     #[test]
+    fn copy_value_byte_string_and_binary_destinations() {
+        use crate::model::buffer::MemoryBuffer;
+        use crate::model::element::DicomElement;
+
+        fn bytes_element(tag: Tag, vr: Vr, bytes: &[u8]) -> DicomItem {
+            DicomItem::Element(DicomElement::new_bytes(
+                tag,
+                vr,
+                std::sync::Arc::new(MemoryBuffer::from(bytes.to_vec())),
+            ))
+        }
+
+        // a byte-backed string VR copied into a string destination keeps its text
+        let mut ds = Dataset::new();
+        ds.insert_or_update(bytes_element(Tag::OTHER_PATIENT_I_DS, Vr::Sh, b"ACC123"));
+        TransformRule::CopyValue(Tag::OTHER_PATIENT_I_DS, Tag::PATIENT_ID).apply(&mut ds);
+        assert_eq!(ds.try_get_str(Tag::PATIENT_ID).as_deref(), Some("ACC123"));
+
+        // an unreadable byte-backed string is skipped with a warning, not panicked
+        #[derive(Debug)]
+        struct FailingBuffer;
+        impl crate::model::buffer::ByteBuffer for FailingBuffer {
+            fn size(&self) -> u64 {
+                3
+            }
+            fn is_memory(&self) -> bool {
+                false
+            }
+            fn data(&self) -> std::io::Result<std::borrow::Cow<'_, [u8]>> {
+                Err(std::io::Error::other("boom"))
+            }
+        }
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::OTHER_PATIENT_I_DS,
+            Vr::Sh,
+            std::sync::Arc::new(FailingBuffer),
+        )));
+        TransformRule::CopyValue(Tag::OTHER_PATIENT_I_DS, Tag::PATIENT_ID).apply(&mut ds);
+        assert!(ds.get_element(Tag::PATIENT_ID).is_err());
+
+        // source bytes copied to a binary destination keep the raw bytes
+        let mut ds = Dataset::new();
+        ds.insert_or_update(bytes_element(
+            Tag::new(0x7777, 0x0001),
+            Vr::Ow,
+            &[1, 2, 3, 4],
+        ));
+        TransformRule::CopyValue(Tag::new(0x7777, 0x0001), Tag::PIXEL_DATA).apply(&mut ds);
+        let copied = ds.get_element(Tag::PIXEL_DATA).expect("binary target");
+        assert_eq!(copied.value().as_buffer().unwrap().size(), 4);
+    }
+
+    #[test]
+    fn set_value_parses_each_numeric_vr_and_skips_binary() {
+        use crate::model::buffer::EmptyBuffer;
+        use crate::model::element::DicomElement;
+
+        let cases: &[(Vr, &str)] = &[
+            (Vr::Ss, "-7"),
+            (Vr::Ul, "42"),
+            (Vr::Sl, "-42"),
+            (Vr::Uv, "42"),
+            (Vr::Sv, "-42"),
+            (Vr::Fl, "1.5"),
+            (Vr::Fd, "2.5"),
+        ];
+        for (i, (vr, text)) in cases.iter().enumerate() {
+            let tag = Tag::new(0x7777, 0x1000 + i as u16);
+            let mut ds = Dataset::new();
+            ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+                tag.clone(),
+                *vr,
+                EmptyBuffer::shared(),
+            )));
+            TransformRule::SetValue(tag.clone(), (*text).to_string()).apply(&mut ds);
+            assert!(ds.get_element(tag).is_ok(), "{vr:?} value set");
+        }
+
+        // a VR that cannot be represented from text is skipped with a warning
+        let tag = Tag::new(0x7777, 0x2000);
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            tag.clone(),
+            Vr::Ob,
+            EmptyBuffer::shared(),
+        )));
+        TransformRule::SetValue(tag.clone(), "x".into()).apply(&mut ds);
+        assert!(ds.get_element(tag).is_ok());
+    }
+
+    #[test]
+    fn set_value_on_unparseable_numeric_is_a_no_op() {
+        let mut ds = Dataset::new();
+        TransformRule::SetValue(Tag::ROWS, "not-a-number".into()).apply(&mut ds);
+        assert!(ds.get_element(Tag::ROWS).is_err());
+    }
+
+    #[cfg(feature = "regex-rules")]
+    #[test]
+    fn regex_on_an_absent_tag_is_a_no_op() {
+        let mut ds = Dataset::new();
+        TransformRule::Regex(Tag::MODALITY, "x".into(), "y".into()).apply(&mut ds);
+        assert!(ds.items().next().is_none());
+    }
+
+    #[test]
+    fn rule_set_without_conditions_applies_and_records() {
+        let set = TransformRuleSet::new().with(TransformRule::ToUpper(Tag::MODALITY));
+
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::MODALITY, Vr::Cs, "ct");
+        set.apply(&mut ds);
+        assert_eq!(ds.try_get_str(Tag::MODALITY).as_deref(), Some("CT"));
+
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::MODALITY, Vr::Cs, "ct");
+        let mut modified = Dataset::new();
+        set.apply_recording(&mut ds, &mut modified);
+        assert_eq!(modified.try_get_str(Tag::MODALITY).as_deref(), Some("ct"));
+    }
+
+    #[test]
     fn a_transform_with_an_unmatched_condition_is_a_no_op() {
         use crate::rules::match_rule::{MatchOperator, MatchRule};
         let conditions = MatchRuleSet::new(MatchOperator::And).with(MatchRule::Bool(false));

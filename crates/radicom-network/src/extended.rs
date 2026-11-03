@@ -508,4 +508,23 @@ mod tests {
         assert_eq!(user.role_selections.len(), 1);
         assert!(user.user_identity.is_some());
     }
+
+    #[test]
+    fn setting_field_zero_is_ignored_and_a_long_request_stops_at_a_u8() {
+        // A 1-based field of 0 has no index; set_field returns without panic.
+        let mut info = AppInfo::new();
+        info.set_field(0, 1);
+        assert!(info.fields.is_empty(), "field 0 is not addressable");
+
+        // answer() folds a request longer than 255 fields and stops.
+        let mut requested = AppInfo::new();
+        requested.fields = vec![1u8; 300];
+        let answered = AppInfo::answer(&requested, |_, _| Some(1));
+        assert_eq!(
+            answered.fields.len(),
+            255,
+            "u8 field numbering stops at 255"
+        );
+        assert!(answered.fields.iter().all(|v| *v == 1));
+    }
 }

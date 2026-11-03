@@ -10883,4 +10883,849 @@ mod tests {
             handle.await.unwrap().unwrap();
         }
     }
+
+    // -- inline handler paths -------------------------------------------------
+    //
+    // C-FIND and C-STORE normally run on a dispatched task (`execute_*`). The
+    // inline handlers are the fallback when the job window is full, so they are
+    // driven directly here with a transport that never yields input.
+
+    /// An `AsyncRead` that never becomes ready and an `AsyncWrite` that discards.
+    struct NullTransport;
+
+    impl tokio::io::AsyncRead for NullTransport {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    impl tokio::io::AsyncWrite for NullTransport {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    fn accepted_one(abstract_syntax: &str, transfer_syntax: &str) -> AcceptedContexts {
+        AcceptedContexts::from_negotiated(vec![crate::association::NegotiatedContext {
+            id: 1,
+            abstract_syntax: abstract_syntax.into(),
+            transfer_syntax: transfer_syntax.into(),
+            state: crate::association::ContextState::Accept,
+            roles: Vec::new(),
+        }])
+    }
+
+    struct InlineFind;
+
+    impl ServiceProvider for InlineFind {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec![sop_class::STUDY_ROOT_QR_FIND.into()]
+        }
+
+        fn on_c_find<'a>(
+            &'a self,
+            request: &'a crate::cfind::CFindRequest,
+        ) -> futures::stream::BoxStream<'a, Result<crate::cfind::CFindResponse>> {
+            let mut identifier = Dataset::new();
+            identifier.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+            Box::pin(futures::stream::iter(vec![
+                Ok(crate::cfind::CFindResponse::pending(
+                    request,
+                    identifier.clone(),
+                )),
+                Ok(crate::cfind::CFindResponse::success(request, 1)),
+            ]))
+        }
+    }
+
+    /// A C-FIND provider that either ends its stream at once or fails it.
+    struct ScriptedFind {
+        fail: bool,
+    }
+
+    impl ServiceProvider for ScriptedFind {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn on_c_find<'a>(
+            &'a self,
+            _request: &'a crate::cfind::CFindRequest,
+        ) -> futures::stream::BoxStream<'a, Result<crate::cfind::CFindResponse>> {
+            if self.fail {
+                Box::pin(futures::stream::once(async {
+                    Err(NetworkError::protocol("provider blew up"))
+                }))
+            } else {
+                Box::pin(futures::stream::empty())
+            }
+        }
+    }
+
+    struct OkStore;
+
+    #[async_trait::async_trait]
+    impl ServiceProvider for OkStore {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec!["1.2.840.10008.5.1.4.1.1.7".into()]
+        }
+
+        async fn on_c_store(&self, request: &CStoreRequest) -> Result<CStoreResponse> {
+            Ok(CStoreResponse::success(request))
+        }
+    }
+
+    fn store_command(instance_uid: &str) -> Command {
+        let mut command = Command::request(CommandField::CStoreRq, 5);
+        command.affected_sop_class_uid = Some("1.2.840.10008.5.1.4.1.1.7".into());
+        command.affected_sop_instance_uid = Some(instance_uid.into());
+        command.no_dataset = false;
+        command
+    }
+
+    fn store_body(syntax: &Arc<radicom::model::transfer_syntax::TransferSyntax>) -> MessageBody {
+        let mut dataset = Dataset::new();
+        dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5.6");
+        dataset.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+        MessageBody::Memory(bytes::Bytes::from(
+            crate::message::encode_dataset(&dataset, syntax).unwrap(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn the_inline_c_find_forwards_matches_and_terminates() {
+        let mut transport = NullTransport;
+        let splitter = PduSplitter::new(16384, 16);
+        let provider = Arc::new(InlineFind);
+        let options = ServerOptions::default();
+        let accepted = accepted_one(
+            sop_class::STUDY_ROOT_QR_FIND,
+            syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.uid(),
+        );
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let mut serving = Serving {
+            stream: &mut transport,
+            splitter: &splitter,
+            provider: &provider,
+            options: &options,
+            assembler: PdvAssembler::with_spool(options.store_spool.clone()),
+            pending_units: VecDeque::new(),
+            deferred_units: VecDeque::new(),
+            deferred_requests: 0,
+            incoming_window: 1,
+            accepted: &accepted,
+            reverse_message_id: 1,
+            transcoder_cache: std::collections::HashMap::new(),
+            pdu_reader: crate::transport::PduReader::new(),
+        };
+        let command = crate::cfind::CFindRequest::study_query(9).to_command();
+        handle_c_find(&mut serving, 1, command, &[], &syntax)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_inline_c_find_fails_when_the_provider_says_nothing() {
+        for fail in [false, true] {
+            let provider = Arc::new(ScriptedFind { fail });
+            let mut transport = NullTransport;
+            let splitter = PduSplitter::new(16384, 16);
+            let options = ServerOptions::default();
+            let accepted = accepted_one(
+                sop_class::STUDY_ROOT_QR_FIND,
+                syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.uid(),
+            );
+            let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+            let mut serving = Serving {
+                stream: &mut transport,
+                splitter: &splitter,
+                provider: &provider,
+                options: &options,
+                assembler: PdvAssembler::with_spool(options.store_spool.clone()),
+                pending_units: VecDeque::new(),
+                deferred_units: VecDeque::new(),
+                deferred_requests: 0,
+                incoming_window: 1,
+                accepted: &accepted,
+                reverse_message_id: 1,
+                transcoder_cache: std::collections::HashMap::new(),
+                pdu_reader: crate::transport::PduReader::new(),
+            };
+            let command = crate::cfind::CFindRequest::study_query(9).to_command();
+            handle_c_find(&mut serving, 1, command, &[], &syntax)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn the_inline_c_find_honours_a_matching_cancel() {
+        let mut transport = NullTransport;
+        let splitter = PduSplitter::new(16384, 16);
+        let provider = Arc::new(InlineFind);
+        let options = ServerOptions::default();
+        let accepted = accepted_one(
+            sop_class::STUDY_ROOT_QR_FIND,
+            syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.uid(),
+        );
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let mut serving = Serving {
+            stream: &mut transport,
+            splitter: &splitter,
+            provider: &provider,
+            options: &options,
+            assembler: PdvAssembler::with_spool(options.store_spool.clone()),
+            pending_units: VecDeque::new(),
+            deferred_units: VecDeque::new(),
+            deferred_requests: 0,
+            incoming_window: 1,
+            accepted: &accepted,
+            reverse_message_id: 1,
+            transcoder_cache: std::collections::HashMap::new(),
+            pdu_reader: crate::transport::PduReader::new(),
+        };
+        let mut cancel = Command::request(CommandField::CCancelRq, 0);
+        cancel.message_id_being_responded_to = Some(9);
+        serving.pending_units.push_back(MessageUnit {
+            context_id: 1,
+            stream: Stream::Command,
+            bytes: bytes::Bytes::from(command_bytes(&cancel).unwrap()),
+            spool: None,
+        });
+        let command = crate::cfind::CFindRequest::study_query(9).to_command();
+        handle_c_find(&mut serving, 1, command, &[], &syntax)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_inline_c_find_defers_a_non_command_unit() {
+        let mut transport = NullTransport;
+        let splitter = PduSplitter::new(16384, 16);
+        let provider = Arc::new(InlineFind);
+        let options = ServerOptions::default();
+        let accepted = accepted_one(
+            sop_class::STUDY_ROOT_QR_FIND,
+            syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.uid(),
+        );
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let mut serving = Serving {
+            stream: &mut transport,
+            splitter: &splitter,
+            provider: &provider,
+            options: &options,
+            assembler: PdvAssembler::with_spool(options.store_spool.clone()),
+            pending_units: VecDeque::new(),
+            deferred_units: VecDeque::new(),
+            deferred_requests: 0,
+            incoming_window: 1,
+            accepted: &accepted,
+            reverse_message_id: 1,
+            transcoder_cache: std::collections::HashMap::new(),
+            pdu_reader: crate::transport::PduReader::new(),
+        };
+        serving.pending_units.push_back(MessageUnit {
+            context_id: 1,
+            stream: Stream::Data,
+            bytes: bytes::Bytes::new(),
+            spool: None,
+        });
+        let command = crate::cfind::CFindRequest::study_query(9).to_command();
+        // window 1 forbids queueing another message mid-request: it is refused.
+        assert!(handle_c_find(&mut serving, 1, command, &[], &syntax)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn the_inline_c_store_accepts_a_matching_instance() {
+        let mut transport = NullTransport;
+        let splitter = PduSplitter::new(16384, 16);
+        let provider = Arc::new(OkStore);
+        let options = ServerOptions::default();
+        let accepted = accepted_one(
+            "1.2.840.10008.5.1.4.1.1.7",
+            syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.uid(),
+        );
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let mut serving = Serving {
+            stream: &mut transport,
+            splitter: &splitter,
+            provider: &provider,
+            options: &options,
+            assembler: PdvAssembler::with_spool(options.store_spool.clone()),
+            pending_units: VecDeque::new(),
+            deferred_units: VecDeque::new(),
+            deferred_requests: 0,
+            incoming_window: 1,
+            accepted: &accepted,
+            reverse_message_id: 1,
+            transcoder_cache: std::collections::HashMap::new(),
+            pdu_reader: crate::transport::PduReader::new(),
+        };
+        handle_c_store(
+            &mut serving,
+            1,
+            store_command("1.2.3.4.5.6"),
+            store_body(&syntax),
+            &syntax,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_inline_c_store_refuses_a_mismatched_instance() {
+        let mut transport = NullTransport;
+        let splitter = PduSplitter::new(16384, 16);
+        let provider = Arc::new(OkStore);
+        let options = ServerOptions::default();
+        let accepted = accepted_one(
+            "1.2.840.10008.5.1.4.1.1.7",
+            syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.uid(),
+        );
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let mut serving = Serving {
+            stream: &mut transport,
+            splitter: &splitter,
+            provider: &provider,
+            options: &options,
+            assembler: PdvAssembler::with_spool(options.store_spool.clone()),
+            pending_units: VecDeque::new(),
+            deferred_units: VecDeque::new(),
+            deferred_requests: 0,
+            incoming_window: 1,
+            accepted: &accepted,
+            reverse_message_id: 1,
+            transcoder_cache: std::collections::HashMap::new(),
+            pdu_reader: crate::transport::PduReader::new(),
+        };
+        // The command names another instance than the dataset carries.
+        handle_c_store(
+            &mut serving,
+            1,
+            store_command("9.9.9"),
+            store_body(&syntax),
+            &syntax,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_inline_c_store_rejects_a_non_store_command_and_a_bad_dataset() {
+        let mut transport = NullTransport;
+        let splitter = PduSplitter::new(16384, 16);
+        let provider = Arc::new(OkStore);
+        let options = ServerOptions::default();
+        let accepted = accepted_one(
+            "1.2.840.10008.5.1.4.1.1.7",
+            syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.uid(),
+        );
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let mut serving = Serving {
+            stream: &mut transport,
+            splitter: &splitter,
+            provider: &provider,
+            options: &options,
+            assembler: PdvAssembler::with_spool(options.store_spool.clone()),
+            pending_units: VecDeque::new(),
+            deferred_units: VecDeque::new(),
+            deferred_requests: 0,
+            incoming_window: 1,
+            accepted: &accepted,
+            reverse_message_id: 1,
+            transcoder_cache: std::collections::HashMap::new(),
+            pdu_reader: crate::transport::PduReader::new(),
+        };
+
+        // A command that is not a C-STORE is answered, not stored.
+        let not_store = Command::request(CommandField::CEchoRq, 1);
+        handle_c_store(
+            &mut serving,
+            1,
+            not_store,
+            MessageBody::Memory(bytes::Bytes::new()),
+            &syntax,
+        )
+        .await
+        .unwrap();
+
+        // A dataset that does not parse becomes a failure status, not a drop.
+        handle_c_store(
+            &mut serving,
+            1,
+            store_command("1.2.3.4.5.6"),
+            MessageBody::Memory(bytes::Bytes::from_static(&[0xFF, 0x00])),
+            &syntax,
+        )
+        .await
+        .unwrap();
+    }
+
+    // -- small pure branches -------------------------------------------------
+
+    #[test]
+    fn validate_proposed_contexts_checks_ids_and_syntaxes() {
+        let good = PresentationContext::new(1, "1.2.3", vec!["1.2.4".into()]);
+        assert!(validate_proposed_contexts(&[good]).is_ok());
+
+        let mut zero = PresentationContext::new(1, "1.2.3", vec!["1.2.4".into()]);
+        zero.id = 0;
+        assert!(validate_proposed_contexts(&[zero]).is_err(), "id 0");
+
+        let mut even = PresentationContext::new(1, "1.2.3", vec!["1.2.4".into()]);
+        even.id = 2;
+        assert!(validate_proposed_contexts(&[even]).is_err(), "even id");
+
+        let a = PresentationContext::new(1, "1.2.3", vec!["1.2.4".into()]);
+        let b = PresentationContext::new(1, "1.2.5", vec!["1.2.4".into()]);
+        assert!(validate_proposed_contexts(&[a, b]).is_err(), "duplicate id");
+
+        let no_abstract = PresentationContext::new(1, "", vec!["1.2.4".into()]);
+        assert!(
+            validate_proposed_contexts(&[no_abstract]).is_err(),
+            "empty abstract syntax"
+        );
+
+        let no_syntax = PresentationContext::new(1, "1.2.3", Vec::new());
+        assert!(
+            validate_proposed_contexts(&[no_syntax]).is_err(),
+            "no transfer syntax"
+        );
+    }
+
+    #[test]
+    fn user_identity_policy_answers_only_when_a_response_was_asked_for() {
+        use crate::pdu::UserIdentity;
+        let asked = UserIdentity {
+            identity_type: 1,
+            primary: b"user".to_vec(),
+            secondary: Vec::new(),
+            positive_response_requested: true,
+        };
+        let quiet = UserIdentity {
+            positive_response_requested: false,
+            ..asked.clone()
+        };
+        assert!(UserIdentityPolicy::Reject.answer(&asked).is_none());
+        assert_eq!(
+            UserIdentityPolicy::Accept.answer(&asked),
+            Some(Some(Vec::new()))
+        );
+        assert_eq!(UserIdentityPolicy::Accept.answer(&quiet), Some(None));
+        assert_eq!(
+            UserIdentityPolicy::Answer(b"resp".to_vec()).answer(&asked),
+            Some(Some(b"resp".to_vec()))
+        );
+        assert_eq!(
+            UserIdentityPolicy::Answer(b"resp".to_vec()).answer(&quiet),
+            Some(None)
+        );
+    }
+
+    #[tokio::test]
+    async fn run_until_returns_when_shutdown_is_signalled() {
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(VerificationProvider),
+            ServerOptions {
+                max_clients: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let clients = server.connected_clients();
+        assert_eq!(clients.count(), 0);
+        let (shutdown, receiver) = tokio::sync::watch::channel(false);
+        let handle = tokio::spawn(async move { server.run_until(receiver).await });
+        shutdown.send(true).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_until_accepts_a_connection_through_the_limited_slot() {
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(VerificationProvider),
+            ServerOptions {
+                max_clients: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let clients = server.connected_clients();
+        let (shutdown, receiver) = tokio::sync::watch::channel(false);
+        let handle = tokio::spawn(async move { server.run_until(receiver).await });
+        let _peer = tokio::net::TcpStream::connect(addr).await.unwrap();
+        for _ in 0..100 {
+            if clients.count() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(clients.count(), 1, "the accepted connection is counted");
+        shutdown.send(true).unwrap();
+        let _ = handle.await.unwrap();
+    }
+
+    /// A malformed explicit-VR element: `ZZ` is not a valid VR.
+    static MALFORMED_DATASET: [u8; 10] =
+        [0x08, 0x00, 0x00, 0x00, b'Z', b'Z', 0x02, 0x00, 0x00, 0x00];
+
+    macro_rules! inline_serving {
+        ($transport:ident, $splitter:ident, $provider:ident, $options:ident, $accepted:ident, $window:expr) => {
+            Serving {
+                stream: &mut $transport,
+                splitter: &$splitter,
+                provider: &$provider,
+                options: &$options,
+                assembler: PdvAssembler::with_spool($options.store_spool.clone()),
+                pending_units: VecDeque::new(),
+                deferred_units: VecDeque::new(),
+                deferred_requests: 0,
+                incoming_window: $window,
+                accepted: &$accepted,
+                reverse_message_id: 1,
+                transcoder_cache: std::collections::HashMap::new(),
+                pdu_reader: crate::transport::PduReader::new(),
+            }
+        };
+    }
+
+    struct ErrEcho;
+
+    #[async_trait::async_trait]
+    impl ServiceProvider for ErrEcho {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        async fn on_c_echo(&self, _request: &CEchoRequest) -> Result<CEchoResponse> {
+            Err(NetworkError::protocol("echo boom"))
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_command_answers_echo_failure_and_unsupported_requests() {
+        let mut transport = NullTransport;
+        let splitter = PduSplitter::new(16384, 16);
+        let provider = Arc::new(ErrEcho);
+        let options = ServerOptions::default();
+        let accepted = accepted_one(
+            sop_class::VERIFICATION,
+            syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.uid(),
+        );
+        let mut serving = inline_serving!(transport, splitter, provider, options, accepted, 1);
+        // A provider error on C-ECHO becomes a failure response.
+        handle_command(&mut serving, 1, Command::request(CommandField::CEchoRq, 3))
+            .await
+            .unwrap();
+
+        // A request the engine does not serve is answered ProcessingFailure.
+        let mut unsupported = Command::request(CommandField::CStoreRq, 4);
+        unsupported.affected_sop_class_uid = Some("1.2.3".into());
+        handle_command(&mut serving, 1, unsupported).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_command_aborts_on_a_response_field() {
+        let mut transport = NullTransport;
+        let splitter = PduSplitter::new(16384, 16);
+        let provider = Arc::new(OkStore);
+        let options = ServerOptions::default();
+        let accepted = accepted_one(
+            sop_class::VERIFICATION,
+            syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.uid(),
+        );
+        let mut serving = inline_serving!(transport, splitter, provider, options, accepted, 1);
+        let request = Command::request(CommandField::CEchoRq, 1);
+        let response = Command::response(&request, 0).unwrap();
+        assert!(matches!(
+            handle_command(&mut serving, 1, response).await,
+            Err(NetworkError::PeerViolation(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_command_routes_an_n_request_without_a_dataset() {
+        let mut transport = NullTransport;
+        let splitter = PduSplitter::new(16384, 16);
+        let provider = Arc::new(ScriptedFind { fail: false });
+        let options = ServerOptions::default();
+        let accepted = accepted_one(
+            sop_class::STUDY_ROOT_QR_FIND,
+            syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.uid(),
+        );
+        let mut serving = inline_serving!(transport, splitter, provider, options, accepted, 1);
+        // The default provider refuses N-GET, so this becomes a failure response.
+        handle_command(&mut serving, 1, Command::request(CommandField::NGetRq, 5))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_n_service_rejects_a_non_n_command() {
+        let mut transport = NullTransport;
+        let splitter = PduSplitter::new(16384, 16);
+        let provider = Arc::new(OkStore);
+        let options = ServerOptions::default();
+        let accepted = accepted_one(
+            sop_class::VERIFICATION,
+            syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.uid(),
+        );
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let mut serving = inline_serving!(transport, splitter, provider, options, accepted, 1);
+        handle_n_service(
+            &mut serving,
+            1,
+            Command::request(CommandField::CEchoRq, 6),
+            None,
+            &syntax,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_command_with_dataset_rejects_unexpected_payloads() {
+        let mut transport = NullTransport;
+        let splitter = PduSplitter::new(16384, 16);
+        let provider = Arc::new(OkStore);
+        let options = ServerOptions::default();
+        let accepted = accepted_one(
+            sop_class::VERIFICATION,
+            syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.uid(),
+        );
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let mut serving = inline_serving!(transport, splitter, provider, options, accepted, 1);
+
+        // A request that does not carry a dataset is answered, not dispatched.
+        handle_command_with_dataset(
+            &mut serving,
+            1,
+            Command::request(CommandField::CEchoRq, 7),
+            MessageBody::Memory(bytes::Bytes::new()),
+            &syntax,
+        )
+        .await
+        .unwrap();
+
+        // An N-service whose dataset will not decode becomes a failure response.
+        handle_command_with_dataset(
+            &mut serving,
+            1,
+            Command::request(CommandField::NGetRq, 8),
+            MessageBody::Memory(bytes::Bytes::from_static(&MALFORMED_DATASET)),
+            &syntax,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn execute_c_store_reports_bad_bodies_and_missing_uids() {
+        let provider = Arc::new(OkStore);
+        let options = ServerOptions::default();
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Outgoing>>(4);
+
+        let job = DispatchJob {
+            context_id: 1,
+            command: store_command("1.2.3.4.5.6"),
+            body: MessageBody::Memory(bytes::Bytes::from_static(&MALFORMED_DATASET)),
+            syntax: syntax.clone(),
+            cancel: None,
+        };
+        execute_c_store(job, &provider, &options, &tx)
+            .await
+            .unwrap();
+        assert!(matches!(
+            rx.recv().await.unwrap().unwrap().command.field,
+            CommandField::CStoreRsp
+        ));
+
+        let mut command = store_command("1.2.3.4.5.6");
+        command.affected_sop_class_uid = None;
+        let job = DispatchJob {
+            context_id: 1,
+            command,
+            body: store_body(&syntax),
+            syntax: syntax.clone(),
+            cancel: None,
+        };
+        execute_c_store(job, &provider, &options, &tx)
+            .await
+            .unwrap();
+        assert!(matches!(
+            rx.recv().await.unwrap().unwrap().command.field,
+            CommandField::CStoreRsp
+        ));
+    }
+
+    #[tokio::test]
+    async fn execute_c_find_reports_a_malformed_identifier() {
+        let provider = Arc::new(ScriptedFind { fail: false });
+        let options = ServerOptions::default();
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Outgoing>>(4);
+        let mut job = DispatchJob {
+            context_id: 1,
+            command: crate::cfind::CFindRequest::study_query(9).to_command(),
+            body: MessageBody::Memory(bytes::Bytes::from_static(&MALFORMED_DATASET)),
+            syntax,
+            cancel: None,
+        };
+        execute_c_find(&mut job, &provider, &options, &tx)
+            .await
+            .unwrap();
+        assert!(matches!(
+            rx.recv().await.unwrap().unwrap().command.field,
+            CommandField::CFindRsp
+        ));
+    }
+
+    #[tokio::test]
+    async fn execute_n_service_routes_and_reports_errors() {
+        let provider = Arc::new(ScriptedFind { fail: false });
+        let options = ServerOptions::default();
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Outgoing>>(8);
+
+        // N-GET without a dataset reaches the provider (which refuses by default).
+        let job = DispatchJob {
+            context_id: 1,
+            command: Command::request(CommandField::NGetRq, 4),
+            body: MessageBody::Memory(bytes::Bytes::new()),
+            syntax: syntax.clone(),
+            cancel: None,
+        };
+        execute_n_service(job, &provider, &options, &tx)
+            .await
+            .unwrap();
+        assert!(matches!(
+            rx.recv().await.unwrap().unwrap().command.field,
+            CommandField::NGetRsp
+        ));
+
+        // A malformed dataset is answered before the provider is called.
+        let job = DispatchJob {
+            context_id: 1,
+            command: Command::request(CommandField::NSetRq, 5),
+            body: MessageBody::Memory(bytes::Bytes::from_static(&MALFORMED_DATASET)),
+            syntax: syntax.clone(),
+            cancel: None,
+        };
+        execute_n_service(job, &provider, &options, &tx)
+            .await
+            .unwrap();
+        assert!(matches!(
+            rx.recv().await.unwrap().unwrap().command.field,
+            CommandField::NSetRsp
+        ));
+
+        // A non-N command is answered with a failure (direct-call safety).
+        let job = DispatchJob {
+            context_id: 1,
+            command: Command::request(CommandField::CEchoRq, 6),
+            body: MessageBody::Memory(bytes::Bytes::new()),
+            syntax,
+            cancel: None,
+        };
+        execute_n_service(job, &provider, &options, &tx)
+            .await
+            .unwrap();
+        assert!(matches!(
+            rx.recv().await.unwrap().unwrap().command.field,
+            CommandField::CEchoRsp
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_c_get_reports_a_malformed_identifier_and_honours_cancel() {
+        let mut transport = NullTransport;
+        let splitter = PduSplitter::new(16384, 16);
+        let provider = Arc::new(ScriptedFind { fail: false });
+        let options = ServerOptions::default();
+        let accepted = accepted_one(
+            sop_class::STUDY_ROOT_QR_GET,
+            syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.uid(),
+        );
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let mut serving = inline_serving!(transport, splitter, provider, options, accepted, 1);
+        let command = crate::cget::CGetRequest::study("1.2.3", 42).to_command();
+        handle_c_get(&mut serving, 1, command, &MALFORMED_DATASET, &syntax)
+            .await
+            .unwrap();
+
+        let mut cancel = Command::request(CommandField::CCancelRq, 0);
+        cancel.message_id_being_responded_to = Some(42);
+        serving.pending_units.push_back(MessageUnit {
+            context_id: 1,
+            stream: Stream::Command,
+            bytes: bytes::Bytes::from(command_bytes(&cancel).unwrap()),
+            spool: None,
+        });
+        let command = crate::cget::CGetRequest::study("1.2.3", 42).to_command();
+        handle_c_get(&mut serving, 1, command, &[], &syntax)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_c_move_reports_a_malformed_identifier_and_honours_cancel() {
+        let mut transport = NullTransport;
+        let splitter = PduSplitter::new(16384, 16);
+        let provider = Arc::new(ScriptedFind { fail: false });
+        let options = ServerOptions::default();
+        let accepted = accepted_one(
+            sop_class::STUDY_ROOT_QR_MOVE,
+            syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.uid(),
+        );
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let mut serving = inline_serving!(transport, splitter, provider, options, accepted, 1);
+        let command = crate::cmove::CMoveRequest::study("1.2.3", "DEST", 42).to_command();
+        handle_c_move(&mut serving, 1, command, &MALFORMED_DATASET, &syntax)
+            .await
+            .unwrap();
+
+        let mut cancel = Command::request(CommandField::CCancelRq, 0);
+        cancel.message_id_being_responded_to = Some(42);
+        serving.pending_units.push_back(MessageUnit {
+            context_id: 1,
+            stream: Stream::Command,
+            bytes: bytes::Bytes::from(command_bytes(&cancel).unwrap()),
+            spool: None,
+        });
+        let command = crate::cmove::CMoveRequest::study("1.2.3", "DEST", 42).to_command();
+        handle_c_move(&mut serving, 1, command, &[], &syntax)
+            .await
+            .unwrap();
+    }
 }

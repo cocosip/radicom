@@ -1513,3 +1513,27 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn an_item_length_above_4gib_is_a_typed_error() {
+        let mut target = ByteTargetWriter::new(Vec::new(), Endian::Little);
+        let error = write_item_tag(&mut target, (u32::MAX as u64) + 1, true).unwrap_err();
+        assert!(matches!(error, Error::Data(_)));
+    }
+
+    #[test]
+    fn a_text_value_on_a_binary_vr_is_a_typed_error() {
+        use crate::model::transfer_syntax::syntaxes;
+        let element = DicomElement::new_str(Tag::new(0x7777, 0x0001), Vr::Implicit, "x");
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let mut target = ByteTargetWriter::new(Vec::new(), Endian::Little);
+        let error = DicomWriter::default()
+            .write_binary(&element, &syntax, &mut target)
+            .unwrap_err();
+        assert!(matches!(error, Error::Data(_)));
+    }
+}

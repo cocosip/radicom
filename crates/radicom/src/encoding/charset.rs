@@ -1027,3 +1027,24 @@ mod tests {
         assert_eq!(decode_multi_charset(b"Doe^John", sjis, true), "Doe^John");
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn gb18030_pair_length_covers_two_and_four_byte_sequences() {
+        // a 0x30-0x39 second byte is the four-byte GB18030 form
+        assert_eq!(dbcs_pair_len("gb18030", 0x81, Some(0x30)), Some(4));
+        // any other trail is a normal two-byte character
+        assert_eq!(dbcs_pair_len("gb18030", 0x81, Some(0x40)), Some(2));
+        // a non-lead byte never starts a pair
+        assert_eq!(dbcs_pair_len("gb18030", 0x20, Some(0x40)), None);
+    }
+
+    #[test]
+    fn escape_sequence_len_requires_an_escape_prefix() {
+        // not 0x1B: no sequence
+        assert_eq!(escape_sequence_len(&[0x00], 0), None);
+    }
+}

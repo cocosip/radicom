@@ -1473,4 +1473,105 @@ mod tests {
             "print failure codes stay generic for storage"
         );
     }
+
+    #[test]
+    fn truncate_lo_cuts_multibyte_text_on_a_char_boundary() {
+        // Three-byte characters: byte 64 is not a char boundary, so the loop
+        // walks back to the previous one instead of splitting a character.
+        let wide = "中".repeat(50);
+        let truncated = truncate_lo(&wide);
+        assert!(truncated.len() <= 64);
+        assert!(truncated.len() < 64, "it must round down to a boundary");
+        assert!(
+            truncated.chars().all(|c| c == '中'),
+            "no broken character: {truncated:?}"
+        );
+    }
+
+    #[test]
+    fn status_state_pending_predicate() {
+        assert!(StatusState::Pending.is_pending());
+        assert!(!StatusState::Success.is_pending());
+        assert!(!StatusState::Failure.is_pending());
+    }
+
+    #[test]
+    fn every_print_and_media_status_code_has_its_wording() {
+        use StatusServiceClass::{MediaCreation, PrintManagement};
+        let print = [
+            (0xB000u16, "Memory allocation not supported"),
+            (
+                0xB601,
+                "Film session printing (collation) is not supported",
+            ),
+            (
+                0xB602,
+                "Film session SOP instance hierarchy does not contain image box SOP instances (empty page)",
+            ),
+            (
+                0xB603,
+                "Film box SOP instance hierarchy does not contain image box SOP instances (empty page)",
+            ),
+            (
+                0xB604,
+                "Image size is larger than image box size, the image has been demagnified",
+            ),
+            (
+                0xB605,
+                "Requested min density or max density outside of printer's operating range",
+            ),
+            (
+                0xB609,
+                "Image size is larger than the image box size, the Image has been cropped to fit",
+            ),
+            (
+                0xB60A,
+                "Image size or combined print image size is larger than the image box size, image or combined print image has been decimated to fit",
+            ),
+            (
+                0xC600,
+                "Film session SOP instance hierarchy does not contain film box SOP instances",
+            ),
+            (
+                0xC601,
+                "Unable to create Print Job SOP Instance; print queue is full",
+            ),
+            (0xC603, "Image size is larger than image box size"),
+            (0xC605, "Insufficient memory in printer to store the image"),
+            (
+                0xC613,
+                "Combined Print Image size is larger than the Image Box size",
+            ),
+            (
+                0xC616,
+                "There is an existing film box that has not been printed and N-ACTION at the Film Session level is not supported.",
+            ),
+        ];
+        for (code, wording) in print {
+            assert_eq!(
+                status_description_for_service_class(code, PrintManagement),
+                wording,
+                "{code:04X}"
+            );
+        }
+        let media = [
+            (
+                0xA510u16,
+                "Refused because an Initiate Media Creation action has already been received for this SOP Instance",
+            ),
+            (0xC201, "Media creation request already completed"),
+            (
+                0xC202,
+                "Media creation request already in progress and cannot be interrupted",
+            ),
+            (0xC203, "Cancellation denied for unspecified reason"),
+        ];
+        for (code, wording) in media {
+            assert_eq!(
+                status_description_for_service_class(code, MediaCreation),
+                wording,
+                "{code:04X}"
+            );
+        }
+    }
 }

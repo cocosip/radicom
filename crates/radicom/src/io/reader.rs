@@ -1513,3 +1513,178 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::error::ReaderError;
+    use crate::io::byte_source::ByteSourceReader;
+    use crate::io::dataset_builder::DatasetBuilder;
+    use crate::model::dataset::Dataset;
+    use crate::model::transfer_syntax::syntaxes;
+    use std::io::Cursor;
+
+    fn read(bytes: &[u8], options: DicomReader) -> Result<Dataset, Error> {
+        let syntax = (*syntaxes::EXPLICIT_VR_LITTLE_ENDIAN).clone();
+        let mut source = ByteSourceReader::new(Cursor::new(bytes.to_vec()), syntax.endian());
+        let mut builder = DatasetBuilder::with_transfer_syntax(syntax.clone());
+        options.read(&mut source, &syntax, &mut builder, None)?;
+        Ok(builder.into_dataset())
+    }
+
+    /// An observer that inherits the default `on_fragment_skipped` hook.
+    struct NullObserver;
+
+    impl ParseObserver for NullObserver {
+        fn on_element(
+            &mut self,
+            _ctx: &ParseContext,
+            _tag: &Tag,
+            _vr: Vr,
+            _buffer: SharedBuffer,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+        fn on_begin_sequence(
+            &mut self,
+            _ctx: &ParseContext,
+            _tag: &Tag,
+            _defined_length: Option<u32>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+        fn on_begin_sequence_item(
+            &mut self,
+            _ctx: &ParseContext,
+            _defined_length: Option<u32>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+        fn on_end_sequence_item(&mut self, _ctx: &ParseContext) -> Result<(), Error> {
+            Ok(())
+        }
+        fn on_end_sequence(&mut self, _ctx: &ParseContext) -> Result<(), Error> {
+            Ok(())
+        }
+        fn on_begin_fragment(
+            &mut self,
+            _ctx: &ParseContext,
+            _tag: &Tag,
+            _vr: Vr,
+            _offset_table: Vec<u32>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+        fn on_fragment(&mut self, _ctx: &ParseContext, _buffer: SharedBuffer) -> Result<(), Error> {
+            Ok(())
+        }
+        fn on_end_fragment(&mut self, _ctx: &ParseContext) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn default_fragment_skipped_hook_is_a_no_op() {
+        let mut observer = NullObserver;
+        observer
+            .on_fragment_skipped(&ParseContext {
+                position: 0,
+                depth: 0,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn skipped_truncated_value_ends_the_level_cleanly() {
+        // (0010,0010) PN declares 8 bytes but only 2 are present; Skip policy
+        // above the 4-byte threshold must end the level instead of erroring.
+        let mut bytes = vec![0x10, 0x00, 0x10, 0x00, b'P', b'N', 0x08, 0x00];
+        bytes.extend_from_slice(b"AB");
+        for partial in [true, false] {
+            let options = DicomReader {
+                large_object_size: 4,
+                large_policy: LargeValuePolicy::Skip,
+                partial_on_eof: partial,
+                ..DicomReader::default()
+            };
+            assert!(read(&bytes, options).is_ok(), "partial={partial}");
+        }
+    }
+
+    #[test]
+    fn skipped_truncated_fragment_breaks_the_sequence() {
+        let mut bytes = vec![0xE0, 0x7F, 0x10, 0x00, b'O', b'B', 0, 0];
+        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 0, 0, 0, 0]); // empty offset table
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 8, 0, 0, 0]);
+        bytes.extend_from_slice(&[1, 2]); // only 2 of 8 fragment bytes
+        let options = DicomReader {
+            large_object_size: 4,
+            large_policy: LargeValuePolicy::Skip,
+            partial_on_eof: true,
+            ..DicomReader::default()
+        };
+        assert!(read(&bytes, options).is_ok());
+    }
+
+    #[test]
+    fn a_second_fragment_is_delivered_to_the_observer() {
+        let mut bytes = vec![0xE0, 0x7F, 0x10, 0x00, b'O', b'B', 0, 0];
+        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 0, 0, 0, 0]);
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 8, 0, 0, 0]);
+        bytes.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 8, 0, 0, 0]);
+        bytes.extend_from_slice(&[9, 10, 11, 12, 13, 14, 15, 16]);
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0xDD, 0xE0, 0, 0, 0, 0]);
+        let ds = read(&bytes, DicomReader::default()).unwrap();
+        assert_eq!(ds.value_count(Tag::PIXEL_DATA).unwrap(), 2);
+    }
+
+    #[test]
+    fn a_non_multiple_of_four_offset_table_keeps_whole_entries() {
+        let mut bytes = vec![0xE0, 0x7F, 0x10, 0x00, b'O', b'B', 0, 0];
+        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        // basic offset table of 5 bytes: one whole u32 entry, one trailing byte
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 5, 0, 0, 0]);
+        bytes.extend_from_slice(&[1, 2, 3, 4, 5]);
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 4, 0, 0, 0]);
+        bytes.extend_from_slice(&[9, 9, 9, 9]);
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0xDD, 0xE0, 0, 0, 0, 0]);
+        let ds = read(&bytes, DicomReader::default()).unwrap();
+        assert_eq!(ds.value_count(Tag::PIXEL_DATA).unwrap(), 1);
+    }
+
+    #[test]
+    fn cp246_probe_handles_short_and_non_item_content() {
+        // UN undefined-length with only 4 content bytes: the probe's require(8)
+        // fails and it declines the explicit reading.
+        let mut bytes = vec![0x08, 0x00, 0x12, 0x21, b'U', b'N', 0, 0];
+        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        bytes.extend_from_slice(&[1, 2, 3, 4]);
+        let _ = read(&bytes, DicomReader::default());
+
+        // UN undefined-length whose content starts with a non-item tag.
+        let mut bytes = vec![0x08, 0x00, 0x12, 0x21, b'U', b'N', 0, 0];
+        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        bytes.extend_from_slice(&[0x10, 0x00, 0x10, 0x00, 0x02, 0x00, 0x00, 0x00, b'A', b'B']);
+        let _ = read(&bytes, DicomReader::default());
+
+        // an item header claiming fewer than 8 bytes is not a valid item.
+        let mut bytes = vec![0x08, 0x00, 0x12, 0x21, b'U', b'N', 0, 0];
+        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 0, 0, 0, 0]);
+        let _ = read(&bytes, DicomReader::default());
+    }
+
+    #[test]
+    fn inflate_stream_recovers_when_a_zlib_header_does_not_decode() {
+        // header bytes that look like zlib (FCHECK passes) but are not a stream
+        let bytes = vec![0x78u8, 0x9C, 0xFF, 0xFF, 0xFF, 0xFF];
+        let mut source = Cursor::new(bytes);
+        assert!(matches!(
+            inflate_stream(&mut source, 0),
+            Err(Error::Reader(ReaderError::Other(_)))
+        ));
+    }
+}

@@ -460,3 +460,15 @@ mod extra_tests {
         assert!(with_creator > plain);
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_comma_after_splitting_the_creator_is_rejected() {
+        // the string contains ',' (so the JSON branch is skipped), but the
+        // group:element split leaves a body with no ',' separator.
+        assert!(Tag::parse("0010:1234,5678").is_err());
+    }
+}

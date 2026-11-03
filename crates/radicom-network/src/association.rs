@@ -1115,4 +1115,34 @@ mod tests {
         assert!(empty.is_empty());
         assert!(empty.all().is_empty());
     }
+
+    #[test]
+    fn validate_request_rejects_an_unaccepted_context() {
+        let contexts = AcceptedContexts::default();
+        let command = crate::dimse::Command::request(crate::dimse::CommandField::CEchoRq, 1);
+        let error = contexts
+            .validate_request(99, &command, true)
+            .expect_err("no context with id 99");
+        assert!(error.to_string().contains("unaccepted"), "{error}");
+    }
+
+    #[test]
+    fn negotiated_roles_reports_whether_any_role_was_granted() {
+        let mut context = NegotiatedContext {
+            id: 1,
+            abstract_syntax: "1.2.3".into(),
+            transfer_syntax: "1.2.4".into(),
+            state: ContextState::Accept,
+            roles: Vec::new(),
+        };
+        let none = AcceptedContexts::from_negotiated(vec![context.clone()]);
+        assert!(!none.negotiated_roles());
+        context.roles.push(crate::pdu::RoleSelection {
+            sop_class: "1.2.3".into(),
+            scu_role: true,
+            scp_role: false,
+        });
+        let some = AcceptedContexts::from_negotiated(vec![context]);
+        assert!(some.negotiated_roles());
+    }
 }

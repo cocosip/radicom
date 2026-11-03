@@ -1375,6 +1375,119 @@ mod cm_regression {
     }
 
     #[test]
+    fn coverage_extra_branches() {
+        // EmptyBuffer's non-default trait methods
+        assert!(EmptyBuffer.is_memory());
+        assert_eq!(EmptyBuffer.data().unwrap().len(), 0);
+
+        // RangeBuffer over a non-memory inner: is_memory false, as_slice None.
+        let non_mem = shared(FailingBuffer(3));
+        let range = RangeBuffer::new(non_mem, 0, 3);
+        assert!(!range.is_memory());
+        assert!(range.as_slice().is_none());
+
+        // RangeBuffer over a owned-data inner exercises the Cow::Owned arm of
+        // data() and the Cow::Owned arm of as_slice().
+        let owned = shared(OwnedBuffer(vec![1u8, 2, 3, 4]));
+        let owned_range = RangeBuffer::new(owned, 1, 2);
+        assert_eq!(&*owned_range.data().unwrap(), &[2, 3]);
+        assert!(owned_range.as_slice().is_none());
+
+        // same_content: different sizes and unreadable buffers are never equal.
+        let three = shared(MemoryBuffer::from(vec![1u8, 2, 3]));
+        let two = shared(MemoryBuffer::from(vec![1u8, 2]));
+        assert!(!same_content(&three, &two));
+        assert!(!same_content(
+            &shared(FailingBuffer(2)),
+            &shared(FailingBuffer(2))
+        ));
+    }
+
+    #[test]
+    fn composite_as_slice_and_ranged_reads() {
+        // as_slice is None when any part is not in memory.
+        let c = CompositeBuffer::new(vec![
+            shared(FailingBuffer(2)),
+            shared(MemoryBuffer::from(vec![1u8, 2])),
+        ]);
+        assert!(!c.is_memory());
+        assert!(c.as_slice().is_none());
+
+        // an empty range read is a no-op success.
+        let single = CompositeBuffer::new(vec![shared(MemoryBuffer::from(vec![1u8, 2, 3]))]);
+        let mut empty: [u8; 0] = [];
+        single.get_byte_range(0, &mut empty).unwrap();
+
+        // a read that starts in a later part skips whole earlier parts.
+        let split = CompositeBuffer::new(vec![
+            shared(MemoryBuffer::from(vec![1u8])),
+            shared(MemoryBuffer::from(vec![2u8, 3, 4])),
+        ]);
+        let mut out = [0u8; 2];
+        split.get_byte_range(1, &mut out).unwrap();
+        assert_eq!(out, [2, 3]);
+    }
+
+    #[test]
+    fn endian_wrap_and_stream_window_errors() {
+        // wrap_if_needed with unit > 1 builds an EndianBuffer.
+        let wrapped = EndianBuffer::wrap_if_needed(shared(MemoryBuffer::from(vec![1u8, 2])), 2);
+        assert!(wrapped.is_memory());
+        assert_eq!(wrapped.size(), 2);
+
+        // a poisoned source mutex becomes a sticky error, not a panic.
+        let poisoned = StreamWindow::new(Box::new(std::io::Cursor::new(vec![1u8])), 1);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = poisoned.source.lock().unwrap();
+            panic!("poison the stream window mutex");
+        }));
+        assert_eq!(poisoned.data().unwrap_err().kind(), io::ErrorKind::Other);
+
+        // consuming the source twice reports "already consumed".
+        let twice = StreamWindow::new(Box::new(std::io::Cursor::new(vec![1u8, 2])), 2);
+        let _ = twice.spill_source().unwrap();
+        assert_eq!(twice.spill_source().unwrap_err().kind, io::ErrorKind::Other);
+    }
+
+    fn shared<B: ByteBuffer + 'static>(b: B) -> SharedBuffer {
+        Arc::new(b)
+    }
+
+    /// Reports an error from `data()` so `same_content` handling can be tested.
+    #[derive(Debug)]
+    struct FailingBuffer(u64);
+    impl ByteBuffer for FailingBuffer {
+        fn size(&self) -> u64 {
+            self.0
+        }
+        fn is_memory(&self) -> bool {
+            false
+        }
+        fn data(&self) -> io::Result<std::borrow::Cow<'_, [u8]>> {
+            Err(io::Error::other("unreadable"))
+        }
+    }
+
+    /// In-memory per `is_memory` but yields `Cow::Owned` data, like a computed
+    /// value; exercises the owned arms of `RangeBuffer`/`CompositeBuffer`.
+    #[derive(Debug)]
+    struct OwnedBuffer(Vec<u8>);
+    impl ByteBuffer for OwnedBuffer {
+        fn size(&self) -> u64 {
+            self.0.len() as u64
+        }
+        fn is_memory(&self) -> bool {
+            true
+        }
+        fn data(&self) -> io::Result<std::borrow::Cow<'_, [u8]>> {
+            Ok(std::borrow::Cow::Owned(self.0.clone()))
+        }
+        fn as_slice(&self) -> Option<&[u8]> {
+            None
+        }
+    }
+
+    #[test]
     fn cm07_endian_range_matches_data_for_unaligned_reads() {
         let inner = mem(vec![1, 2, 3, 4, 5, 6]);
         // Baseline whole-buffer swap from a separate instance (keeps the

@@ -557,3 +557,93 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::model::buffer::{ByteBuffer, MemoryBuffer};
+    use std::sync::Arc;
+
+    /// Reports a size but fails every range read.
+    #[derive(Debug)]
+    struct UnreadableBuffer;
+    impl ByteBuffer for UnreadableBuffer {
+        fn size(&self) -> u64 {
+            4
+        }
+        fn is_memory(&self) -> bool {
+            false
+        }
+        fn data(&self) -> std::io::Result<std::borrow::Cow<'_, [u8]>> {
+            Ok(std::borrow::Cow::Borrowed(&[0, 0, 0, 0]))
+        }
+        fn get_byte_range(&self, _offset: u64, _buf: &mut [u8]) -> std::io::Result<()> {
+            Err(std::io::Error::other("boom"))
+        }
+    }
+
+    #[test]
+    fn an_empty_fragment_sequence_dumps_without_sizes() {
+        let mut ds = Dataset::new();
+        ds.insert_fragments(Tag::PIXEL_DATA, Vr::Ob);
+        let out = dump_dataset(&ds, &DumpOptions::default());
+        assert!(out.contains("0 fragment(s)"), "{out}");
+    }
+
+    #[test]
+    fn unreadable_empty_long_and_control_other_values_render() {
+        let options = DumpOptions {
+            max_binary_bytes: 8,
+            max_value_chars: 4,
+            ..Default::default()
+        };
+
+        // an unreadable on-demand buffer renders as "(unreadable: …)"
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::new(0x7777, 0x0001),
+            Vr::Ob,
+            Arc::new(UnreadableBuffer),
+        )));
+        assert!(dump_dataset(&ds, &options).contains("unreadable"));
+
+        // an all-NUL string-typed Other value renders as "(empty)"
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::new(0x7777, 0x0002),
+            Vr::Lo,
+            Arc::new(MemoryBuffer::from(vec![0u8, 0])),
+        )));
+        assert!(dump_dataset(&ds, &options).contains("(empty)"));
+
+        // a printable long string-typed Other value is truncated by render_str
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::new(0x7777, 0x0003),
+            Vr::Lo,
+            Arc::new(MemoryBuffer::from(b"ABCDEFGHIJ".to_vec())),
+        )));
+        assert!(dump_dataset(&ds, &options).contains('…'));
+
+        // a control-character Other value falls back to the hex preview
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::new(0x7777, 0x0004),
+            Vr::Lo,
+            Arc::new(MemoryBuffer::from(vec![b'a', 0x01, b'b'])),
+        )));
+        assert!(dump_dataset(&ds, &options).contains("61 01 62"));
+    }
+
+    #[test]
+    fn a_byte_backed_uid_has_no_uid_name_lookup() {
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::SOP_CLASS_UID,
+            Vr::Ui,
+            Arc::new(MemoryBuffer::from(b"1.2.840.10008.5.1.4.1.1.7".to_vec())),
+        )));
+        let out = dump_dataset(&ds, &DumpOptions::default());
+        assert!(out.contains("1.2.840.10008.5.1.4.1.1.7"), "{out}");
+    }
+}

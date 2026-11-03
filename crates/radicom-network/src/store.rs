@@ -611,4 +611,105 @@ mod tests {
         );
         assert_eq!(response.status, status::STORAGE_FAILURE);
     }
+
+    fn spilled_body(
+        syntax: &Arc<TransferSyntax>,
+        tag: &str,
+    ) -> (crate::assembler::MessageBody, std::path::PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("radicom-store-spill-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut assembler =
+            crate::assembler::PdvAssembler::with_spool(crate::assembler::SpoolConfig {
+                memory_threshold: 0,
+                dir: Some(dir.clone()),
+                ..crate::assembler::SpoolConfig::default()
+            });
+        assembler.arm_spill(1);
+        let pdv = crate::pdu::Pdv {
+            context_id: 1,
+            is_command: false,
+            is_last: true,
+            data: bytes::Bytes::from(dataset_bytes(syntax)),
+        };
+        let unit = assembler
+            .push_pdv(&pdv)
+            .unwrap()
+            .expect("one PDV completes the dataset");
+        (unit.body(), dir)
+    }
+
+    #[test]
+    fn materialize_body_handles_an_in_memory_body() {
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let body =
+            crate::assembler::MessageBody::Memory(bytes::Bytes::from(dataset_bytes(&syntax)));
+        let instance = StoreSink::Memory.materialize_body(&body, &syntax).unwrap();
+        assert_eq!(
+            instance.file.dataset.get_str(Tag::PATIENT_NAME).unwrap(),
+            "Doe^John"
+        );
+    }
+
+    #[test]
+    fn materialize_body_handles_a_spilled_body_for_every_sink() {
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+
+        // Memory parses the spool file and lets it die with the body.
+        let (body, dir) = spilled_body(&syntax, "mem");
+        let instance = StoreSink::Memory.materialize_body(&body, &syntax).unwrap();
+        assert_eq!(
+            instance.file.dataset.get_str(Tag::PATIENT_NAME).unwrap(),
+            "Doe^John"
+        );
+        assert!(instance.path.is_none());
+        drop(instance);
+        std::fs::remove_dir_all(&dir).ok();
+
+        // SpoolToTemp adopts the received file instead of copying it.
+        let (body, dir) = spilled_body(&syntax, "temp");
+        let instance = StoreSink::SpoolToTemp
+            .materialize_body(&body, &syntax)
+            .unwrap();
+        assert!(instance.path.is_none());
+        let temp = instance.temp.as_ref().expect("a temp spool").0.clone();
+        assert!(temp.exists(), "the instance adopted the received file");
+        drop(instance);
+        assert!(!temp.exists(), "the adopted file dies with the instance");
+        std::fs::remove_dir_all(&dir).ok();
+
+        // SpoolToDir keeps a copy under the directory.
+        let (body, dir) = spilled_body(&syntax, "dir");
+        let out = std::env::temp_dir().join(format!("radicom-store-out-{}", std::process::id()));
+        let instance = StoreSink::SpoolToDir(out.clone())
+            .materialize_body(&body, &syntax)
+            .unwrap();
+        let kept = instance.path.expect("directory sink reports its path");
+        assert!(kept.exists(), "the spooled copy is kept");
+        std::fs::remove_dir_all(&out).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_malformed_spooled_dataset_is_removed_and_reported() {
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let dir = std::env::temp_dir().join(format!("radicom-store-bad-{}", std::process::id()));
+        let bytes = [0x08u8, 0x00, 0x00, 0x00, b'Z', b'Z', 0x02, 0x00, 0x00, 0x00];
+        let error = StoreSink::SpoolToDir(dir.clone())
+            .materialize(&bytes, &syntax)
+            .expect_err("a bad VR is rejected");
+        assert!(matches!(error, NetworkError::Io(_)), "{error:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_request_without_a_class_uid_is_rejected() {
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let instance = StoreSink::Memory
+            .materialize(&dataset_bytes(&syntax), &syntax)
+            .unwrap();
+        let mut command = c_store_command();
+        command.affected_sop_class_uid = None;
+        assert!(c_store_request_from_message(&command, instance).is_err());
+    }
 }
