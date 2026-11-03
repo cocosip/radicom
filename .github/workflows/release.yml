@@ -1,18 +1,31 @@
 name: Release
 
 # Publishing is tag-driven only: pushing a v* tag is the single trigger.
-# master/main never publishes (see ci.yml).
+# master/main never publishes (see ci.yml). workflow_dispatch only regenerates
+# the GitHub release notes for an existing tag; it never publishes.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing v* tag to generate release notes for (publishing is skipped)"
+        required: true
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  # workflow_dispatch supplies the tag explicitly; a tag push falls back to the
+  # pushed ref. Jobs below read only this variable.
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   verify-tag:
     name: verify tag matches version
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,7 +35,7 @@ jobs:
       # a crate added to the workspace can never be silently left unpublished.
       - name: Tag and crate set must match the workspace version
         run: |
-          tag="${GITHUB_REF_NAME#v}"
+          tag="${RELEASE_TAG#v}"
           cargo metadata --format-version 1 --no-deps > meta.json
           python3 - "$tag" <<'PY'
           import json, sys
@@ -51,6 +64,7 @@ jobs:
 
   test:
     name: checks before release
+    if: github.event_name == 'push'
     needs: verify-tag
     runs-on: ubuntu-latest
     steps:
@@ -108,6 +122,7 @@ jobs:
 
   msrv:
     name: msrv (1.89)
+    if: github.event_name == 'push'
     needs: verify-tag
     runs-on: ubuntu-latest
     steps:
@@ -121,22 +136,32 @@ jobs:
         run: cargo check --workspace --all-features
 
   publish:
-    name: publish to crates.io
+    name: publish to crates.io and write release notes
     needs: [test, msrv]
+    # A skipped need would skip this job too, which is why workflow_dispatch
+    # needs an explicit override; and the checks stay authoritative because
+    # publishing requires both of them to have succeeded. `!cancelled()`
+    # replaces `always()` so a cancelled run can never start publishing.
+    if: "!cancelled() && (github.event_name == 'workflow_dispatch' || (needs.test.result == 'success' && needs.msrv.result == 'success'))"
     runs-on: ubuntu-latest
-    env:
-      # verify-tag already proved that this tag equals the crate version.
-      RELEASE_TAG: ${{ github.ref_name }}
+    # The default token is read-only; writing the GitHub release needs write.
+    permissions:
+      contents: write
     steps:
+      # Full history and every tag: the notes are built from the commit range
+      # between this tag and the previous one.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
 
-      # Dependency order: a crate can only be published after everything it
+      # Dependency order: a crate is publishable only after everything it
       # depends on exists on crates.io. xtask is publish = false.
       - name: Publish crates in dependency order
+        if: github.event_name == 'push'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
@@ -177,3 +202,45 @@ jobs:
               publish "$pkg"
             fi
           done
+
+      # Release notes carry the version's change set: every non-merge commit
+      # subject since the previous tag, plus a compare link. On the first
+      # release there is no previous tag, so the whole history is listed.
+      # workflow_dispatch reaches this step only, which is how notes are
+      # backfilled for a tag that was published before this job existed.
+      - name: Generate release notes from commits
+        run: |
+          set -euo pipefail
+          tag="$RELEASE_TAG"
+          if ! git rev-parse "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "::error::tag $tag is not in this repository"
+            exit 1
+          fi
+          prev=$(git describe --tags --abbrev=0 "${tag}^" 2>/dev/null || true)
+          {
+            echo "## What's Changed"
+            echo ""
+            if [ -n "$prev" ]; then
+              git log "${prev}..${tag}" --pretty=tformat:"- %s" --no-merges
+            else
+              git log "${tag}" --pretty=tformat:"- %s" --no-merges
+            fi
+            echo ""
+            echo "**Crates published**: \`radicom-dict\`, \`radicom\`, \`radicom-json\`, \`radicom-network\` at \`${tag#v}\`."
+            if [ -n "$prev" ]; then
+              echo ""
+              echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${prev}...${tag}"
+            fi
+          } > CHANGELOG_BODY.md
+          echo "::group::release notes"
+          cat CHANGELOG_BODY.md
+          echo "::endgroup::"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
+          body_path: CHANGELOG_BODY.md
+          draft: false
+          prerelease: ${{ contains(env.RELEASE_TAG, '-') }}

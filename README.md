@@ -619,7 +619,7 @@ Third-party data: the DICOM dictionary XML files reused from fo-dicom (and the t
 | Trigger | What runs |
 |---|---|
 | push / PR to `master` or `main` | `ci.yml`: clippy and tests with default **and** all features, docs and publishable-metadata checks on Linux + Windows, plus an MSRV (1.89) check. **No publishing.** |
-| push of a `v*` tag | `release.yml`: the tag must equal every publishable crate's version; the full `ci.yml` gate set re-runs (`fmt --check`, clippy, tests, docs, gen-dict, package metadata, MSRV); then `radicom-dict` → `radicom` → `radicom-json` → `radicom-network` are published to crates.io in that order |
+| push of a `v*` tag | `release.yml`: the tag must equal every publishable crate's version; the full `ci.yml` gate set re-runs (`fmt --check`, clippy, tests, docs, gen-dict, package metadata, MSRV); then `radicom-dict` → `radicom` → `radicom-json` → `radicom-network` are published to crates.io in that order, and finally a GitHub release is created whose notes list the commits since the previous tag |
 
 `dev` is intentionally not wired to CI. Publishing requires a `CARGO_REGISTRY_TOKEN` repository secret (a
 crates.io API token with `publish-new` and `publish-update` scopes); releasing is done by pushing a tag:
@@ -633,6 +633,11 @@ The version lives once in the root `Cargo.toml` (`[workspace.package] version`, 
 dependency pins in `[workspace.dependencies]`); every crate inherits it, so there is no per-crate version to
 keep in sync. A failed tag run can be re-run as-is: crates whose version already reached crates.io are skipped
 instead of retried.
+
+Release notes are generated from the commit history, not written by hand: `release.yml` lists every non-merge
+commit subject between the previous tag and this one, plus a `compare` link (the first release lists the whole
+history and omits the link). To (re)generate the notes for a tag that was already published, run the `Release`
+workflow manually (**Actions → Release → Run workflow**) with that tag — a manual run never publishes crates.
 
 ## DICOM Resources
 

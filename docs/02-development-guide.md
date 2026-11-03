@@ -377,7 +377,7 @@ different code path.
 | interop | local / self-hosted | DCMTK / fo-dicom matrix |
 | bench | local/manual | `cargo bench` against a baseline |
 | coverage | push to `master`/`main`, pull request, `workflow_dispatch` | `cargo run --package xtask -- coverage` (runs `cargo llvm-cov`; production lines only — test/bench/example targets and inline `#[cfg(test)]` modules are excluded) with a **95% floor**. CI runs the same long form (the repository ships no `.cargo/config.toml` alias) and publishes the measured numbers, so run it locally for current numbers. |
-| release | push of a `v*` tag | `release.yml`: first `verify-tag` (the tag must equal every publishable crate's version, and the publishable set must equal the list `publish` pushes); then the same gates as `ci.yml` — `fmt --check`, clippy and tests with default **and** all features, `cargo doc` with `-D warnings`, `gen-dict --check`, `cargo package --list` proving `LICENSE` + `README.md` ship in every crate — plus the MSRV (1.89) check; only then are `radicom-dict` → `radicom` → `radicom-json` → `radicom-network` published to crates.io, in that dependency order. Versions already on crates.io are skipped, so a failed tag run can be re-run from the same tag. |
+| release | push of a `v*` tag | `release.yml`: first `verify-tag` (the tag must equal every publishable crate's version, and the publishable set must equal the list `publish` pushes); then the same gates as `ci.yml` — `fmt --check`, clippy and tests with default **and** all features, `cargo doc` with `-D warnings`, `gen-dict --check`, `cargo package --list` proving `LICENSE` + `README.md` ship in every crate — plus the MSRV (1.89) check; only then are `radicom-dict` → `radicom` → `radicom-json` → `radicom-network` published to crates.io, in that dependency order, and a GitHub release is created with generated notes. Versions already on crates.io are skipped, so a failed tag run can be re-run from the same tag. A manual (`workflow_dispatch`) run with a tag input regenerates the release notes only and never publishes. |
 
 ### 5.10 Conventions
 
@@ -400,6 +400,10 @@ different code path.
   so `release.yml` publishes `radicom-dict` → `radicom` → `radicom-json` → `radicom-network`. `xtask` is
   `publish = false`. `verify-tag` fails if a publishable crate's version differs from the tag or if the set of
   publishable crates no longer matches that list, so a new crate cannot be added and silently forgotten.
+- Release notes are generated, never hand-written: after every crate is on crates.io, `release.yml` lists each
+  non-merge commit subject between the previous tag and this one, plus a `compare` link. The first release lists
+  the whole history instead. A `workflow_dispatch` run with a tag input regenerates those notes for an existing
+  tag without publishing anything, which is how a release that predates the notes job is backfilled.
 - The first public release is `v0.1.0`. Before it, `cargo package` verification for `radicom`, `radicom-json`
   and `radicom-network` cannot resolve their own unpublished dependencies locally; that is expected, and the
   tag run publishes the crates in dependency order.
