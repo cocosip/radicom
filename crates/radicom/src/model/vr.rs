@@ -311,6 +311,45 @@ impl std::fmt::Display for Vr {
     }
 }
 
+/// Formats an `f64` as a DICOM DS value: at most 16 characters, no lower-case
+/// exponent. `format!("{value}")` can print `0.30000000000000004` (19 chars) or
+/// drop tiny values to "0", which produces an invalid DS (PR-11).
+///
+/// Lives in `model` (always compiled) so both the render pipeline and the print
+/// models can share it without making `print` depend on the `render` feature
+/// (PR-C-07).
+pub(crate) fn format_ds(value: f64) -> String {
+    if !value.is_finite() {
+        return "0".to_string();
+    }
+    let mut fixed = format!("{value:.6}");
+    if fixed.contains('.') {
+        while fixed.ends_with('0') {
+            fixed.pop();
+        }
+        if fixed.ends_with('.') {
+            fixed.pop();
+        }
+    }
+    // A fixed form that collapsed a tiny non-zero value to "0" is not usable.
+    let collapsed = value != 0.0
+        && fixed
+            .parse::<f64>()
+            .map(|parsed| parsed == 0.0)
+            .unwrap_or(false);
+    if !collapsed && fixed.len() <= 16 {
+        return fixed;
+    }
+    // Too long, or the fixed form collapsed a tiny non-zero value to "0".
+    for precision in (0..=6).rev() {
+        let exponent = format!("{:.prec$E}", value, prec = precision);
+        if exponent.len() <= 16 {
+            return exponent;
+        }
+    }
+    "0".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

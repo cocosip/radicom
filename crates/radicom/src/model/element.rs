@@ -324,8 +324,13 @@ macro_rules! impl_from_int {
     ($t:ty) => {
         impl FromElement for $t {
             fn from_element(e: &DicomElement, index: Option<usize>) -> Result<Self, Error> {
-                if let ElementValue::Bytes(b) = e.value() {
-                    return read_le_unit::<$t>(e, b, index);
+                // A byte-backed *string* VR (IS/DS/...) is text, not a binary
+                // unit stream: decode it and go through the text parse branch
+                // (CM-A-02). Only binary VRs take the little-endian fast path.
+                if !e.vr().is_string() {
+                    if let ElementValue::Bytes(b) = e.value() {
+                        return read_le_unit::<$t>(e, b, index);
+                    }
                 }
                 let s = select(e, index)?;
                 match e.vr() {
@@ -368,20 +373,24 @@ impl FromElement for f32 {
 
 impl FromElement for f64 {
     fn from_element(e: &DicomElement, index: Option<usize>) -> Result<Self, Error> {
-        if let ElementValue::Bytes(b) = e.value() {
-            // Integer VRs must be widened numerically, not reinterpreted as an
-            // f64 bit pattern.
-            return match e.vr() {
-                Vr::Fl => read_le_unit::<f32>(e, b, index).map(f64::from),
-                Vr::Fd => read_le_unit::<f64>(e, b, index),
-                Vr::Us => read_le_unit::<u16>(e, b, index).map(f64::from),
-                Vr::Ss => read_le_unit::<i16>(e, b, index).map(f64::from),
-                Vr::Ul => read_le_unit::<u32>(e, b, index).map(f64::from),
-                Vr::Sl => read_le_unit::<i32>(e, b, index).map(f64::from),
-                Vr::Uv => read_le_unit::<u64>(e, b, index).map(|v| v as f64),
-                Vr::Sv => read_le_unit::<i64>(e, b, index).map(|v| v as f64),
-                _ => read_le_unit::<f64>(e, b, index),
-            };
+        // Byte-backed string VRs (DS/IS) are text; parse them as such rather
+        // than reading their bytes as an f64 unit (CM-A-02).
+        if !e.vr().is_string() {
+            if let ElementValue::Bytes(b) = e.value() {
+                // Integer VRs must be widened numerically, not reinterpreted as
+                // an f64 bit pattern.
+                return match e.vr() {
+                    Vr::Fl => read_le_unit::<f32>(e, b, index).map(f64::from),
+                    Vr::Fd => read_le_unit::<f64>(e, b, index),
+                    Vr::Us => read_le_unit::<u16>(e, b, index).map(f64::from),
+                    Vr::Ss => read_le_unit::<i16>(e, b, index).map(f64::from),
+                    Vr::Ul => read_le_unit::<u32>(e, b, index).map(f64::from),
+                    Vr::Sl => read_le_unit::<i32>(e, b, index).map(f64::from),
+                    Vr::Uv => read_le_unit::<u64>(e, b, index).map(|v| v as f64),
+                    Vr::Sv => read_le_unit::<i64>(e, b, index).map(|v| v as f64),
+                    _ => read_le_unit::<f64>(e, b, index),
+                };
+            }
         }
         let s = select(e, index)?;
         match e.vr() {
@@ -887,11 +896,43 @@ impl PartialEq for ElementValue {
     }
 }
 
+/// VR-aware content equality between two element values (CM-A-06).
+///
+/// Same-variant values compare as before. For a *string* VR a text-backed value
+/// and a byte-backed value are equal when their decoded text matches, so
+/// `Str("ABC")` and `Bytes(b"ABC")` describe the same value regardless of the
+/// backend that stored it. Non-string VRs keep representation-sensitive
+/// semantics: a text value never equals a binary one.
+pub(crate) fn values_equal(vr: Vr, a: &ElementValue, b: &ElementValue) -> bool {
+    match (a, b) {
+        (ElementValue::Str(x), ElementValue::Str(y)) => x == y,
+        (ElementValue::Bytes(x), ElementValue::Bytes(y)) => {
+            crate::model::buffer::same_content(x, y)
+        }
+        _ if vr.is_string() => {
+            let text = |v: &ElementValue| -> Option<String> {
+                match v {
+                    ElementValue::Str(s) => Some(s.clone()),
+                    ElementValue::Bytes(b) => b
+                        .data()
+                        .ok()
+                        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+                }
+            };
+            matches!((text(a), text(b)), (Some(x), Some(y)) if x == y)
+        }
+        _ => false,
+    }
+}
+
 impl PartialEq for DicomElement {
-    /// Deep content equality: tag + VR + value bytes (recursion happens at
-    /// the item/dataset layers).
+    /// Deep content equality: tag + VR + value content (recursion happens at
+    /// the item/dataset layers). String VRs compare by decoded text so a text-
+    /// and a byte-backed value of the same content are equal (CM-A-06).
     fn eq(&self, other: &Self) -> bool {
-        self.tag == other.tag && self.vr == other.vr && self.value == other.value
+        self.tag == other.tag
+            && self.vr == other.vr
+            && values_equal(self.vr, &self.value, &other.value)
     }
 }
 
@@ -1420,5 +1461,27 @@ mod cm_regression {
         assert_eq!(single.count(), 1);
         assert_eq!(single.string_parts(), vec!["a\\b"]);
         assert!(bytes(Vr::Us, &[1, 0]).string_parts().is_empty());
+    }
+
+    #[test]
+    fn cma02_byte_backed_string_vr_reads_as_text_numbers() {
+        // A byte-backed IS/DS value is text, not a binary unit stream.
+        assert_eq!(bytes(Vr::Is, b"42").get::<i32>(None).unwrap(), 42);
+        assert_eq!(bytes(Vr::Ds, b"1.5").get::<f64>(None).unwrap(), 1.5);
+        assert_eq!(bytes(Vr::Ds, b"1.5").get::<i32>(None).unwrap(), 1);
+        // Binary VRs still read as little-endian units.
+        assert_eq!(bytes(Vr::Us, &[0x2C, 0x01]).get::<u16>(None).unwrap(), 300);
+    }
+
+    #[test]
+    fn cma06_text_and_byte_backed_strings_are_content_equal() {
+        let text = DicomElement::new_str(Tag::new(0x7777, 0x0001), Vr::Lo, "ABC");
+        let raw = bytes(Vr::Lo, b"ABC");
+        assert_eq!(text, raw, "same content, different backend");
+        assert!(values_equal(Vr::Lo, text.value(), raw.value()));
+        // Non-string VRs keep representation-sensitive semantics.
+        let one = ElementValue::Str("1".into());
+        let binary = ElementValue::Bytes(Arc::new(MemoryBuffer::from(vec![1u8, 0])));
+        assert!(!values_equal(Vr::Us, &one, &binary));
     }
 }

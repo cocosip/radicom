@@ -494,41 +494,10 @@ fn invalid(message: &str) -> Error {
     })
 }
 
-/// Formats an `f64` as a DICOM DS value: at most 16 characters, no lower-case
-/// exponent. `format!("{value}")` can print `0.30000000000000004` (19 chars) or
-/// drop tiny values to "0", which produces an invalid DS on a generated series
-/// (PR-11).
-fn format_ds(value: f64) -> String {
-    if !value.is_finite() {
-        return "0".to_string();
-    }
-    let mut fixed = format!("{value:.6}");
-    if fixed.contains('.') {
-        while fixed.ends_with('0') {
-            fixed.pop();
-        }
-        if fixed.ends_with('.') {
-            fixed.pop();
-        }
-    }
-    // A fixed form that collapsed a tiny non-zero value to "0" is not usable.
-    let collapsed = value != 0.0
-        && fixed
-            .parse::<f64>()
-            .map(|parsed| parsed == 0.0)
-            .unwrap_or(false);
-    if !collapsed && fixed.len() <= 16 {
-        return fixed;
-    }
-    // Too long, or the fixed form collapsed a tiny non-zero value to "0".
-    for precision in (0..=6).rev() {
-        let exponent = format!("{:.prec$E}", value, prec = precision);
-        if exponent.len() <= 16 {
-            return exponent;
-        }
-    }
-    "0".to_string()
-}
+/// Re-exported from [`crate::model::vr::format_ds`] (always compiled) so the
+/// render pipeline and the print models share one DS formatter without making
+/// `print` depend on the `render` feature (PR-C-07).
+pub(crate) use crate::model::vr::format_ds;
 
 /// The orthogonal plane a new [`Stack`] is cut along (fo-dicom `StackType`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -548,13 +517,22 @@ pub struct Stack {
 
 impl Stack {
     /// Cuts a new stack out of `volume` at `spacing` in-plane and `slice_distance`
-    /// between slices.
+    /// between slices. Rejects a non-positive or non-finite spacing/slice
+    /// distance instead of dividing by zero (PR-C-06).
     pub fn new(
         volume: &VolumeData,
         stack_type: StackType,
         spacing: f64,
         slice_distance: f64,
-    ) -> Stack {
+    ) -> Result<Stack, Error> {
+        if !(spacing.is_finite() && spacing > 0.0) {
+            return Err(invalid("stack spacing must be a positive finite number"));
+        }
+        if !(slice_distance.is_finite() && slice_distance > 0.0) {
+            return Err(invalid(
+                "stack slice distance must be a positive finite number",
+            ));
+        }
         let min = volume.bounding_min();
         let max = volume.bounding_max();
         let (dx, dy, dz) = (max.x - min.x, max.y - min.y, max.z - min.z);
@@ -599,10 +577,10 @@ impl Stack {
                 top_left.z + step.z,
             );
         }
-        Stack {
+        Ok(Stack {
             slices,
             slice_distance,
-        }
+        })
     }
 
     /// The generated slices.
@@ -1019,7 +997,7 @@ mod tests {
         // 4x4 slices at z = 0..3, spacing 1 mm → an axial stack with spacing 1
         let slices: Vec<Dataset> = (0..4).map(|z| axial_slice(z as f64, 100)).collect();
         let volume = VolumeData::from_datasets(&slices).unwrap();
-        let stack = Stack::new(&volume, StackType::Axial, 1.0, 1.0);
+        let stack = Stack::new(&volume, StackType::Axial, 1.0, 1.0).unwrap();
         assert!(!stack.slices().is_empty(), "at least one slice is produced");
         assert_eq!(stack.slice_distance(), 1.0);
         // every generated cut has the requested geometry
@@ -1029,10 +1007,22 @@ mod tests {
     }
 
     #[test]
+    fn stack_rejects_non_positive_spacing_and_slice_distance() {
+        // PR-C-06: a zero (or negative) spacing/slice distance divides by zero and
+        // saturates the cut dimensions, which would allocate an enormous buffer.
+        let slices: Vec<Dataset> = (0..2).map(|z| axial_slice(z as f64, 100)).collect();
+        let volume = VolumeData::from_datasets(&slices).unwrap();
+        assert!(Stack::new(&volume, StackType::Axial, 0.0, 1.0).is_err());
+        assert!(Stack::new(&volume, StackType::Axial, 1.0, 0.0).is_err());
+        assert!(Stack::new(&volume, StackType::Axial, -1.0, 1.0).is_err());
+        assert!(Stack::new(&volume, StackType::Axial, 1.0, -1.0).is_err());
+    }
+
+    #[test]
     fn dicom_generator_writes_one_dataset_per_slice() {
         let slices: Vec<Dataset> = (0..4).map(|z| axial_slice(z as f64, 100)).collect();
         let volume = VolumeData::from_datasets(&slices).unwrap();
-        let stack = Stack::new(&volume, StackType::Axial, 1.0, 1.0);
+        let stack = Stack::new(&volume, StackType::Axial, 1.0, 1.0).unwrap();
 
         let generator = DicomGenerator::new(slices[0].clone());
         let outputs = generator.store_as_dicom(&stack, "MPR axial").unwrap();
@@ -1093,7 +1083,7 @@ mod tests {
         let mut s1 = axial_slice(1.0, 500);
         s1.insert_str(Tag::RESCALE_INTERCEPT, Vr::Ds, "-1024");
         let volume = VolumeData::from_datasets(&[s0.clone(), s1]).unwrap();
-        let stack = Stack::new(&volume, StackType::Axial, 1.0, 1.0);
+        let stack = Stack::new(&volume, StackType::Axial, 1.0, 1.0).unwrap();
 
         // the common dataset deliberately still carries the source Pixel Data
         let outputs = DicomGenerator::new(s0)
@@ -1187,12 +1177,12 @@ mod tests {
         ];
         let volume = VolumeData::from_datasets(&slices).unwrap();
         for stack_type in [StackType::Coronal, StackType::Sagittal] {
-            let stack = Stack::new(&volume, stack_type, 1.0, 1.0);
+            let stack = Stack::new(&volume, stack_type, 1.0, 1.0).unwrap();
             assert!(!stack.slices().is_empty());
             assert_eq!(stack.slice_distance(), 1.0);
         }
 
-        let stack = Stack::new(&volume, StackType::Axial, 1.0, 1.0);
+        let stack = Stack::new(&volume, StackType::Axial, 1.0, 1.0).unwrap();
         let slice = &stack.slices()[0];
         let unsigned = slice.render_raw_data(2, false);
         assert_eq!(unsigned.len(), slice.pixels().len() * 2);

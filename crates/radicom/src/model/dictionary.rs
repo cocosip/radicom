@@ -327,6 +327,11 @@ impl Dictionary {
                 }
             } else if e.entry.mask.is_none() {
                 self.exact.insert(key, e.entry);
+                // Keep the reverse lookup in sync so a runtime public entry is
+                // reachable by keyword too (CM-A-05).
+                if !keyword.is_empty() {
+                    self.keywords.entry(keyword).or_insert(key);
+                }
             } else {
                 self.masked.push(e.entry);
             }
@@ -896,6 +901,23 @@ mod cm_regression {
         assert_eq!(tag.group(), 0x0029);
         assert_eq!(tag.element(), 0x1001);
         assert_eq!(tag.private_creator().map(|c| c.as_str()), Some("ACME"));
+    }
+
+    #[test]
+    fn cma05_merge_runtime_public_entry_is_keyword_searchable() {
+        let xml = br#"<dictionary><tag group="7776" element="0001" keyword="Cma05RuntimeOwned" vr="LO" vm="1">Owned</tag></dictionary>"#;
+        let entries = load_xml(xml.as_slice()).unwrap();
+        let mut dict = Dictionary::with_generated().unwrap();
+        assert!(
+            dict.tag_by_keyword("Cma05RuntimeOwned").is_none(),
+            "not present before the merge"
+        );
+        dict.merge_runtime(entries);
+        assert_eq!(
+            dict.tag_by_keyword("Cma05RuntimeOwned"),
+            Some(Tag::new(0x7776, 0x0001)),
+            "a merged public entry is reachable by keyword"
+        );
     }
 
     #[test]

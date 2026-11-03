@@ -7,6 +7,7 @@ use crate::io::dataset_builder::{parse_dataset_bytes, DatasetBuilder};
 use crate::io::reader::{DicomReader, LargeValuePolicy};
 use crate::io::writer::{DicomWriter, WriteOptions};
 use crate::model::dataset::Dataset;
+use crate::model::endian::Endian;
 use crate::model::tag::Tag;
 use crate::model::transfer_syntax::{syntaxes, TransferSyntax};
 use crate::model::uid::Uid;
@@ -105,6 +106,9 @@ pub struct DicomFile {
     pub format: FileFormat,
     /// True when a stop predicate ended the parse early.
     pub is_partial: bool,
+    /// The 128-byte preamble as read from disk (zeroes when there was none), so
+    /// a write preserves it instead of always emitting an empty preamble.
+    preamble: [u8; 128],
     /// Identity of the source, used in error context.
     source: Option<PathBuf>,
     /// Owns the temporary file a stream was spooled into (M2). It must outlive
@@ -126,6 +130,7 @@ impl DicomFile {
             dataset,
             format: FileFormat::Dicom3,
             is_partial: false,
+            preamble: [0u8; 128],
             source: None,
             spooled: None,
         }
@@ -173,7 +178,9 @@ impl DicomFile {
         let mut head = vec![0u8; head_len];
         file.read_exact(&mut head)
             .map_err(|e| file_err(path, "read", e))?;
+        let mut preamble = [0u8; 128];
         let (mut format, meta_start) = if head_len >= 132 && &head[128..132] == b"DICM" {
+            preamble.copy_from_slice(&head[..128]);
             (FileFormat::Dicom3, 132u64)
         } else {
             (FileFormat::Dicom3NoFileMetaInfo, 0u64)
@@ -192,13 +199,16 @@ impl DicomFile {
         }
 
         let dataset_offset = meta_start + meta_len;
-        let syntax = file_meta
+        let syntax = match file_meta
             .try_get_str(Tag::TRANSFER_SYNTAX_UID)
             .and_then(|uid| crate::model::transfer_syntax::parse(uid.trim()).ok())
-            .unwrap_or_else(|| {
+        {
+            Some(syntax) => syntax,
+            None => {
                 let probe = read_probe(&mut file, dataset_offset, file_len);
-                dataset_syntax(format, &probe)
-            });
+                dataset_syntax(format, &probe, file_len - dataset_offset)?
+            }
+        };
 
         let (mut dataset, outcome) = if syntax.is_deflate() {
             // Stream the inflate straight from the file: the compressed body is
@@ -254,6 +264,7 @@ impl DicomFile {
             dataset,
             format,
             is_partial: outcome == crate::io::reader::ReadOutcome::Suspended,
+            preamble,
             source: Some(path.to_path_buf()),
             spooled: None,
         })
@@ -305,6 +316,10 @@ impl DicomFile {
     /// Parses a complete file image already in memory.
     fn parse_raw(raw: &[u8], options: &ReadOptions) -> Result<Self, Error> {
         let (format, meta_bytes, dataset_bytes) = detect(raw)?;
+        let mut preamble = [0u8; 128];
+        if format == FileFormat::Dicom3 {
+            preamble.copy_from_slice(&raw[..128]);
+        }
 
         // file meta is always Explicit VR Little Endian
         let file_meta = match meta_bytes {
@@ -312,10 +327,13 @@ impl DicomFile {
             None => Dataset::new(),
         };
 
-        let syntax = file_meta
+        let syntax = match file_meta
             .try_get_str(Tag::TRANSFER_SYNTAX_UID)
             .and_then(|uid| crate::model::transfer_syntax::parse(uid.trim()).ok())
-            .unwrap_or_else(|| dataset_syntax(format, dataset_bytes));
+        {
+            Some(syntax) => syntax,
+            None => dataset_syntax(format, dataset_bytes, dataset_bytes.len() as u64)?,
+        };
 
         let (mut dataset, outcome) = parse_dataset_with(dataset_bytes, &syntax, options)?;
         dataset.set_transfer_syntax(syntax);
@@ -334,6 +352,7 @@ impl DicomFile {
             dataset,
             format,
             is_partial: outcome == crate::io::reader::ReadOutcome::Suspended,
+            preamble,
             source: None,
             spooled: None,
         })
@@ -347,14 +366,21 @@ impl DicomFile {
         let path = path.as_ref();
         let bytes = std::fs::read(path).map_err(|e| file_err(path, "read", e))?;
         let (format, meta_bytes, dataset_bytes) = detect(&bytes).map_err(|e| attach(e, path))?;
+        let mut preamble = [0u8; 128];
+        if format == FileFormat::Dicom3 {
+            preamble.copy_from_slice(&bytes[..128]);
+        }
         let file_meta = match meta_bytes {
             Some(meta) => parse_dataset_bytes(meta, &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN)?,
             None => Dataset::new(),
         };
-        let syntax = file_meta
+        let syntax = match file_meta
             .try_get_str(Tag::TRANSFER_SYNTAX_UID)
             .and_then(|uid| crate::model::transfer_syntax::parse(uid.trim()).ok())
-            .unwrap_or_else(|| dataset_syntax(format, dataset_bytes));
+        {
+            Some(syntax) => syntax,
+            None => dataset_syntax(format, dataset_bytes, dataset_bytes.len() as u64)?,
+        };
 
         let mut source = ByteSourceReader::new(Cursor::new(dataset_bytes), syntax.endian());
         let mut builder = DatasetBuilder::with_transfer_syntax(syntax.clone());
@@ -365,6 +391,7 @@ impl DicomFile {
             dataset: builder.into_dataset(),
             format,
             is_partial: outcome != crate::io::reader::ReadOutcome::Success,
+            preamble,
             source: Some(path.to_path_buf()),
             spooled: None,
         })
@@ -434,7 +461,7 @@ impl DicomFile {
                 self.format
             ))));
         }
-        out.write_all(&[0u8; 128])
+        out.write_all(&self.preamble)
             .and_then(|()| out.write_all(b"DICM"))
             .map_err(|e| Error::File(FileError::Other(format!("write: {e}"))))?;
         let meta = self.refreshed_meta()?;
@@ -862,20 +889,82 @@ fn split_meta(raw: &[u8]) -> Result<(Option<&[u8]>, &[u8]), Error> {
 }
 
 /// Fallback syntax for a dataset with no meta information (FILE-03).
-fn dataset_syntax(format: FileFormat, dataset: &[u8]) -> Arc<TransferSyntax> {
-    let big_endian = format == FileFormat::AcrNema2
-        || (dataset.len() >= 2 && u16::from_le_bytes([dataset[0], dataset[1]]) > 0x00FF);
-    if big_endian {
-        // an implicit big-endian dataset has no registered UID
-        if looks_explicit(dataset) {
-            syntaxes::EXPLICIT_VR_BIG_ENDIAN.clone()
-        } else {
-            syntaxes::IMPLICIT_VR_BIG_ENDIAN.clone()
-        }
-    } else if looks_explicit(dataset) {
-        syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone()
+///
+/// The first tag's group is not a reliable byte-order signal: a dataset may
+/// legitimately start with a large group such as `(7FE0,XXXX)` or a private
+/// group, which a "group > 0x00FF ⇒ Big Endian" heuristic misreads and turns
+/// into an empty dataset. Instead, each plausible syntax is checked against the
+/// first element header; an unparsable bare dataset is an explicit error.
+fn dataset_syntax(
+    format: FileFormat,
+    dataset: &[u8],
+    total_len: u64,
+) -> Result<Arc<TransferSyntax>, Error> {
+    let explicit = looks_explicit(dataset);
+    // ACR-NEMA 2.0 is big-endian; otherwise little-endian is the norm.
+    let order = if format == FileFormat::AcrNema2 {
+        [true, false]
     } else {
-        syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone()
+        [false, true]
+    };
+    for big_endian in order {
+        let syntax = match (explicit, big_endian) {
+            (true, true) => syntaxes::EXPLICIT_VR_BIG_ENDIAN.clone(),
+            (true, false) => syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+            (false, true) => syntaxes::IMPLICIT_VR_BIG_ENDIAN.clone(),
+            (false, false) => syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone(),
+        };
+        if first_element_fits(dataset, &syntax, total_len) {
+            return Ok(syntax);
+        }
+    }
+    Err(Error::File(FileError::InvalidFormat(
+        "cannot determine the transfer syntax of a dataset without file meta information".into(),
+    )))
+}
+
+/// True when the first element header under `syntax` is structurally consistent
+/// with the available byte count. `total_len` is the whole dataset length (the
+/// `dataset` slice may be only a bounded probe).
+fn first_element_fits(dataset: &[u8], syntax: &TransferSyntax, total_len: u64) -> bool {
+    if dataset.len() < 8 || total_len < 8 {
+        return false;
+    }
+    let endian = syntax.endian();
+    let (value_len, header) = if syntax.is_explicit_vr() {
+        let Some(vr) = Vr::try_parse(&[dataset[4], dataset[5]]) else {
+            return false;
+        };
+        if vr.is_16bit_length() {
+            (read_u16(dataset, 6, endian) as u64, 8u64)
+        } else {
+            if dataset.len() < 12 {
+                return false;
+            }
+            (read_u32(dataset, 8, endian) as u64, 12u64)
+        }
+    } else {
+        (read_u32(dataset, 4, endian) as u64, 8u64)
+    };
+    if value_len == 0xFFFF_FFFF {
+        return true;
+    }
+    header + value_len <= total_len
+}
+
+fn read_u16(bytes: &[u8], at: usize, endian: Endian) -> u16 {
+    let pair = [bytes[at], bytes[at + 1]];
+    match endian {
+        Endian::Little => u16::from_le_bytes(pair),
+        Endian::Big => u16::from_be_bytes(pair),
+    }
+}
+
+fn read_u32(bytes: &[u8], at: usize, endian: Endian) -> u32 {
+    let quad = [bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]];
+    match endian {
+        Endian::Little => u32::from_le_bytes(quad),
+        Endian::Big => u32::from_be_bytes(quad),
     }
 }
 
@@ -1034,6 +1123,7 @@ mod tests {
             dataset,
             format: FileFormat::Dicom3,
             is_partial: false,
+            preamble: [0u8; 128],
             source: None,
             spooled: None,
         }
@@ -1058,6 +1148,21 @@ mod tests {
         assert_eq!(back.format, FileFormat::Dicom3);
         assert_eq!(back.get_str(Tag::PATIENT_NAME), "Doe^John");
         assert_eq!(back.get_str(Tag::PATIENT_ID), "PID-1");
+    }
+
+    #[test]
+    fn preamble_round_trips_through_from_bytes_and_to_bytes() {
+        // IO-B-03: the 128-byte preamble is preserved on re-save instead of
+        // always being replaced with zeroes.
+        let mut bytes = sample_file().to_bytes(&WriteOptions::default()).unwrap();
+        bytes[..128].fill(0xAB);
+        let parsed = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
+        let rewritten = parsed.to_bytes(&WriteOptions::default()).unwrap();
+        assert!(
+            rewritten[..128].iter().all(|&b| b == 0xAB),
+            "the preamble survives a parse→write round-trip"
+        );
+        assert_eq!(&rewritten[128..132], b"DICM");
     }
 
     #[test]
@@ -1473,6 +1578,24 @@ mod tests {
         let back = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
         assert_eq!(back.get_str(Tag::PATIENT_ID), "PID-1");
         assert_eq!(back.dataset.transfer_syntax().uid(), "1.2.840.10008.1.2");
+    }
+
+    #[test]
+    fn bare_dataset_starting_with_a_large_group_is_not_misread_as_big_endian() {
+        // IO-B-06: a first tag in a group > 0x00FF (here PixelData, 7FE0) used
+        // to be treated as a big-endian signal, yielding an empty dataset. It is
+        // valid Implicit VR Little Endian and must parse its first element.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x7FE0u16.to_le_bytes()); // group
+        bytes.extend_from_slice(&0x0010u16.to_le_bytes()); // element
+        bytes.extend_from_slice(&4u32.to_le_bytes()); // implicit length
+        bytes.extend_from_slice(&[1, 2, 3, 4]);
+        let file = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
+        assert!(
+            file.dataset.item(&Tag::PIXEL_DATA).is_some(),
+            "the (7FE0,0010) element is parsed, not silently dropped"
+        );
+        assert_eq!(file.dataset.transfer_syntax().uid(), "1.2.840.10008.1.2");
     }
 
     #[test]
@@ -2107,6 +2230,7 @@ mod extra_tests {
             dataset,
             format: FileFormat::Dicom3,
             is_partial: false,
+            preamble: [0u8; 128],
             source: None,
             spooled: None,
         }

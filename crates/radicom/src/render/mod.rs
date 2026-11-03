@@ -159,7 +159,15 @@ impl LutTable {
         let (min, max) = (first as f64, last as f64);
         let width = max - min;
         let center = (max + min) / 2.0;
-        let out = if width < 1.0 {
+        let out = if width == 1.0 {
+            // A one-wide output range (two consecutive entries) is a threshold,
+            // not the general formula: (width - 1) would divide by zero (PR-C-04).
+            if (v as f64) < center {
+                0.0
+            } else {
+                255.0
+            }
+        } else if width < 1.0 {
             linear_exact(v as f64, center, width)
         } else {
             ((v as f64 - (center - 0.5)) / (width - 1.0) + 0.5) * 255.0
@@ -496,9 +504,20 @@ impl GrayscaleRenderOptions {
             (Some(lo), Some(hi)) => (lo, hi),
             _ => return Err(unsupported("no Smallest/LargestImagePixelValue tags")),
         };
+        // The tags are stored values, so build the window in the physical units the
+        // map stage uses; a non-increasing range is not a usable window (PR-C-05).
+        if smallest >= largest {
+            return Err(unsupported(
+                "SmallestImagePixelValue is not less than LargestImagePixelValue",
+            ));
+        }
+        let slope = first_number(dataset, Tag::RESCALE_SLOPE).unwrap_or(1.0);
+        let intercept = first_number(dataset, Tag::RESCALE_INTERCEPT).unwrap_or(0.0);
+        let low = smallest * slope + intercept;
+        let high = largest * slope + intercept;
         let mut base = GrayscaleRenderOptions::from_window_level(
-            (smallest + largest) / 2.0,
-            (largest - smallest).max(1.0),
+            (low + high) / 2.0,
+            (high - low).abs().max(1.0),
         );
         base.apply_dataset_modality_and_invert(dataset);
         Ok(base)
@@ -760,10 +779,10 @@ fn clamp_min_max_to_depth(min: f64, max: f64, depth: &BitDepth) -> (f64, f64) {
 fn window_from_window_level(dataset: &Dataset) -> Option<(f64, f64)> {
     let center = first_number(dataset, Tag::WINDOW_CENTER)?;
     let width = first_number(dataset, Tag::WINDOW_WIDTH)?;
-    // fo-dicom `FromDataset` only uses a top-level window when `WindowWidth >= 1.0`;
-    // a smaller width falls through to the functional/smallest-largest/min-max
-    // sources (PR-10).
-    if !(width.is_finite() && width >= 1.0) {
+    // Only a non-positive or non-finite width is unusable. A width below 1 still
+    // renders through the LINEAR_EXACT branch of `map_rescaled` (PR-C-02), so it
+    // must not be discarded in favour of a coarser source.
+    if !(width.is_finite() && width > 0.0) {
         return None;
     }
     Some((center, width))
@@ -774,8 +793,19 @@ fn window_from_window_level(dataset: &Dataset) -> Option<(f64, f64)> {
 fn window_from_pixel_value_range(dataset: &Dataset) -> Option<(f64, f64)> {
     let smallest = first_number(dataset, Tag::SMALLEST_IMAGE_PIXEL_VALUE)?;
     let largest = first_number(dataset, Tag::LARGEST_IMAGE_PIXEL_VALUE)?;
-    let center = (smallest + largest) / 2.0;
-    let width = (largest - smallest).max(1.0);
+    // A degenerate or inverted range is not a window; fall through to FromMinMax
+    // (PR-C-05).
+    if smallest >= largest {
+        return None;
+    }
+    // The tags are stored values: convert to the physical units `map()` works in,
+    // exactly like FromBitRange does (PR-C-05).
+    let slope = first_number(dataset, Tag::RESCALE_SLOPE).unwrap_or(1.0);
+    let intercept = first_number(dataset, Tag::RESCALE_INTERCEPT).unwrap_or(0.0);
+    let low = smallest * slope + intercept;
+    let high = largest * slope + intercept;
+    let center = (low + high) / 2.0;
+    let width = (high - low).abs().max(1.0);
     Some((center, width))
 }
 
@@ -1351,8 +1381,13 @@ fn render_grayscale_with_threshold(
 
     let signed = pixel.pixel_representation() != 0;
     // Normalise to the low `bits_stored` bits (docs §5) via BitDepth: left-align
-    // on the high bit, then drop the sub-bit padding.
-    let depth = BitDepth::new(bits, pixel.bits_stored(), pixel.high_bit(), signed);
+    // on the high bit, then drop the sub-bit padding. Clamp a malformed BitsStored
+    // to BitsAllocated first, like `frame_sample_buffer` (PR-C-09).
+    let stored = match pixel.bits_stored() {
+        0 => bits,
+        s => s.min(bits),
+    };
+    let depth = BitDepth::new(bits, stored, pixel.high_bit(), signed);
     let count = (width as usize) * (height as usize);
 
     // 32-bit samples have a value domain far too large for an occurring-range
@@ -1559,7 +1594,8 @@ fn decode_for_render(dataset: &Dataset) -> Result<Dataset, Error> {
 /// Renders one frame, choosing the pipeline by photometric interpretation
 /// (REND-02, docs §2): MONOCHROME → grayscale window; RGB → colour assembly;
 /// PALETTE COLOR → palette index lookup; YBR_FULL / YBR_FULL_422 /
-/// YBR_PARTIAL_422 → YCbCr→RGB conversion. Other PIs error.
+/// YBR_PARTIAL_422 → YCbCr→RGB conversion; YBR_PARTIAL_420 → planar 4:2:0 with
+/// 2×2 chroma groups. Other PIs error.
 pub fn render_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error> {
     if dataset.transfer_syntax().is_encapsulated() {
         return render_frame(&decode_for_render(dataset)?, frame);
@@ -1574,9 +1610,10 @@ pub fn render_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error> {
         Pi::Monochrome1 | Pi::Monochrome2 => render_grayscale_frame(dataset, frame),
         Pi::Rgb => render_rgb_frame(dataset, frame),
         Pi::PaletteColor => render_palette_frame(dataset, frame),
-        Pi::YbrFull => render_ybr_frame(dataset, frame, false, false),
-        Pi::YbrFull422 => render_ybr_frame(dataset, frame, false, true),
-        Pi::YbrPartial422 => render_ybr_frame(dataset, frame, true, true),
+        Pi::YbrFull => render_ybr_frame(dataset, frame, false, YbrSampling::Full),
+        Pi::YbrFull422 => render_ybr_frame(dataset, frame, false, YbrSampling::H2),
+        Pi::YbrPartial422 => render_ybr_frame(dataset, frame, true, YbrSampling::H2),
+        Pi::YbrPartial420 => render_ybr_frame(dataset, frame, true, YbrSampling::H2V2),
         _ => Err(unsupported(
             "this photometric interpretation is not rendered yet",
         )),
@@ -1832,8 +1869,11 @@ impl DicomImage {
                 options.voi_lut = None;
                 options.voi_lut_function = VoiFunction::Linear;
             }
-            if let Some(invert) = self.invert_override {
-                options.invert = invert;
+            if let Some(user) = self.invert_override {
+                // The base flag already encodes PI polarity (MONOCHROME1 ⇒ true),
+                // so the user's control toggles it rather than replacing it:
+                // MONOCHROME1 + invert(false) stays inverted (PR-C-03).
+                options.invert ^= user;
             }
             render_grayscale_with_options(&self.dataset, frame, &options)?
         } else {
@@ -2008,21 +2048,35 @@ fn render_palette_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error
     Ok(RawImage::new(width, height, bytes))
 }
 
+/// How a YCbCr frame's chroma is subsampled.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum YbrSampling {
+    /// 4:4:4: one Cb/Cr pair per pixel.
+    Full,
+    /// 4:2:2: one Cb/Cr pair per 2 horizontally adjacent pixels (interleaved).
+    H2,
+    /// 4:2:0: one Cb/Cr pair per 2×2 pixel group (stored as Y, Cb, Cr planes).
+    H2V2,
+}
+
 /// YCbCr → RGB pipelines (docs §2, PS3.3 C.7.6.3.1.2): YBR_FULL (4:4:4 full
-/// range), YBR_FULL_422 (4:2:2, full range) and YBR_PARTIAL_422 (4:2:2,
-/// studio/limited range). Compressed YBR_ICT/RCT reach here only via the codec
-/// layer, so this handles native 8/16-bit 4:4:4 and 4:2:2 data.
+/// range), YBR_FULL_422 (4:2:2, full range), YBR_PARTIAL_422 (4:2:2,
+/// studio/limited range) and YBR_PARTIAL_420 (4:2:0, studio range). Compressed
+/// YBR_ICT/RCT reach here only via the codec layer, so this handles native
+/// 8/16-bit 4:4:4, 4:2:2 and 4:2:0 data.
 fn render_ybr_frame(
     dataset: &Dataset,
     frame: u32,
     partial: bool,
-    subsampled: bool,
+    sampling: YbrSampling,
 ) -> Result<RawImage, Error> {
     let pixel = PixelDataRef::from_dataset(dataset)?;
-    // PS3.3 C.7.6.3.1.3: YBR_FULL may be planar (configuration 1); subsampled
-    // YBR (4:2:2) is defined only interleaved.
+    // PS3.3 C.7.6.3.1.3: YBR_FULL may be planar (configuration 1); 4:2:2 is
+    // defined only interleaved. 4:2:0 is always stored as Y/Cb/Cr planes (the
+    // frame-size rule in `pixel::uncompressed_frame_size`), so Planar
+    // Configuration does not select its layout.
     let planar = pixel.planar_configuration() == 1;
-    if planar && subsampled {
+    if planar && sampling == YbrSampling::H2 {
         return Err(unsupported(
             "subsampled YBR must be interleaved (planar configuration 0)",
         ));
@@ -2081,52 +2135,85 @@ fn render_ybr_frame(
     };
 
     let mut bytes = Vec::with_capacity(count * 4);
-    if subsampled {
-        // 4:2:2: per 2 pixels a group of Y1, Y2, Cb, Cr; every row is padded to
-        // an even pixel count in the stored data.
-        let row_bytes = (width as usize).div_ceil(2) * 4 * unit;
-        if raw.len() < row_bytes * height as usize {
-            return Err(unsupported(
-                "4:2:2 frame is shorter than its subsampled layout",
-            ));
+    match sampling {
+        YbrSampling::H2 => {
+            // 4:2:2: per 2 pixels a group of Y1, Y2, Cb, Cr; every row is padded
+            // to an even pixel count in the stored data.
+            let row_bytes = (width as usize).div_ceil(2) * 4 * unit;
+            if raw.len() < row_bytes * height as usize {
+                return Err(unsupported(
+                    "4:2:2 frame is shorter than its subsampled layout",
+                ));
+            }
+            for row in 0..height as usize {
+                let row_start = row * row_bytes;
+                for col in 0..width as usize {
+                    let group = col / 2;
+                    let base = row_start + group * 4 * unit;
+                    let y = read(base + (col % 2) * unit);
+                    let cb = read(base + 2 * unit);
+                    let cr = read(base + 3 * unit);
+                    let (r, g, b) = to_rgb(y, cb, cr);
+                    bytes.extend_from_slice(&[b, g, r, 0xFF]);
+                }
+            }
         }
-        for row in 0..height as usize {
-            let row_start = row * row_bytes;
-            for col in 0..width as usize {
-                let group = col / 2;
-                let base = row_start + group * 4 * unit;
-                let y = read(base + (col % 2) * unit);
-                let cb = read(base + 2 * unit);
-                let cr = read(base + 3 * unit);
+        YbrSampling::H2V2 => {
+            // 4:2:0: the Y plane (rows padded to an even width) then Cb and Cr
+            // planes of ceil(cols/2) × ceil(rows/2) samples. Each 2×2 luma group
+            // shares one Cb/Cr pair (PS3.3 C.7.6.3.1.3).
+            let cols = (width as usize).div_ceil(2) * 2;
+            let rows = height as usize;
+            let chroma_cols = cols / 2;
+            let chroma_rows = rows.div_ceil(2);
+            let luma_samples = cols * rows;
+            let chroma_samples = chroma_cols * chroma_rows;
+            let total_bytes = (luma_samples + 2 * chroma_samples) * unit;
+            if raw.len() < total_bytes {
+                return Err(unsupported(
+                    "4:2:0 frame is shorter than its subsampled layout",
+                ));
+            }
+            let cb_plane = luma_samples * unit;
+            let cr_plane = (luma_samples + chroma_samples) * unit;
+            for row in 0..rows {
+                for col in 0..width as usize {
+                    let y = read((row * cols + col) * unit);
+                    let chroma = (row / 2) * chroma_cols + col / 2;
+                    let cb = read(cb_plane + chroma * unit);
+                    let cr = read(cr_plane + chroma * unit);
+                    let (r, g, b) = to_rgb(y, cb, cr);
+                    bytes.extend_from_slice(&[b, g, r, 0xFF]);
+                }
+            }
+        }
+        YbrSampling::Full if planar => {
+            // 4:4:4 planar (PS3.3 C.7.6.3.1.3): the Y plane, then Cb, then Cr, each
+            // holding `count` samples.
+            if raw.len() < count * 3 * unit {
+                return Err(unsupported("planar YBR frame is shorter than three planes"));
+            }
+            for i in 0..count {
+                let y = read(i * unit);
+                let cb = read((count + i) * unit);
+                let cr = read((2 * count + i) * unit);
                 let (r, g, b) = to_rgb(y, cb, cr);
                 bytes.extend_from_slice(&[b, g, r, 0xFF]);
             }
         }
-    } else if planar {
-        // 4:4:4 planar (PS3.3 C.7.6.3.1.3): the Y plane, then Cb, then Cr, each
-        // holding `count` samples.
-        if raw.len() < count * 3 * unit {
-            return Err(unsupported("planar YBR frame is shorter than three planes"));
-        }
-        for i in 0..count {
-            let y = read(i * unit);
-            let cb = read((count + i) * unit);
-            let cr = read((2 * count + i) * unit);
-            let (r, g, b) = to_rgb(y, cb, cr);
-            bytes.extend_from_slice(&[b, g, r, 0xFF]);
-        }
-    } else {
-        // 4:4:4: interleaved Y, Cb, Cr per pixel
-        if raw.len() < count * 3 * unit {
-            return Err(unsupported("frame is shorter than rows×cols×3 samples"));
-        }
-        for i in 0..count {
-            let base = i * 3 * unit;
-            let y = read(base);
-            let cb = read(base + unit);
-            let cr = read(base + 2 * unit);
-            let (r, g, b) = to_rgb(y, cb, cr);
-            bytes.extend_from_slice(&[b, g, r, 0xFF]);
+        YbrSampling::Full => {
+            // 4:4:4: interleaved Y, Cb, Cr per pixel
+            if raw.len() < count * 3 * unit {
+                return Err(unsupported("frame is shorter than rows×cols×3 samples"));
+            }
+            for i in 0..count {
+                let base = i * 3 * unit;
+                let y = read(base);
+                let cb = read(base + unit);
+                let cr = read(base + 2 * unit);
+                let (r, g, b) = to_rgb(y, cb, cr);
+                bytes.extend_from_slice(&[b, g, r, 0xFF]);
+            }
         }
     }
     Ok(RawImage::new(width, height, bytes))
@@ -2220,6 +2307,32 @@ mod tests {
 
         image.clear_invert();
         assert_eq!(image.render().unwrap().as_bytes()[0], 0);
+    }
+
+    #[test]
+    fn monochrome1_invert_override_toggles_the_pi_polarity() {
+        // PR-C-03: the override is a toggle on top of the PI-derived inversion,
+        // not a replacement. MONOCHROME1 value 0 renders white by default.
+        let mut ds = gray_image(1, 2, 8, &[0, 255], Some(127.5), Some(255.0));
+        ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME1");
+        let mut image = DicomImage::from_dataset(&ds).unwrap();
+        assert_eq!(
+            image.render().unwrap().as_bytes()[0],
+            255,
+            "MONOCHROME1 default: value 0 → white"
+        );
+        image.set_invert(false);
+        assert_eq!(
+            image.render().unwrap().as_bytes()[0],
+            255,
+            "invert(false) keeps the MONOCHROME1 polarity"
+        );
+        image.set_invert(true);
+        assert_eq!(
+            image.render().unwrap().as_bytes()[0],
+            0,
+            "invert(true) cancels the MONOCHROME1 polarity"
+        );
     }
 
     #[test]
@@ -3101,14 +3214,18 @@ mod tests {
     }
 
     #[test]
-    fn sub_one_window_width_falls_through_to_smallest_largest() {
-        // PR-10: fo-dicom ignores a WindowWidth < 1 and uses the next source.
+    fn sub_one_window_width_is_used_instead_of_falling_through() {
+        // PR-C-02: a positive width below 1 is a real window (rendered with
+        // LINEAR_EXACT), not a reason to fall back to Smallest/Largest.
         let mut ds = gray_image(2, 1, 8, &[0, 100], Some(100.0), Some(0.5));
         ds.insert_value(Tag::SMALLEST_IMAGE_PIXEL_VALUE, 0u16);
         ds.insert_value(Tag::LARGEST_IMAGE_PIXEL_VALUE, 255u16);
         let options = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
-        assert_eq!(options.window_width, 255.0);
-        assert_eq!(options.window_center, 127.5);
+        assert_eq!(options.window_width, 0.5, "the sub-1 width is adopted");
+        assert_eq!(options.window_center, 100.0);
+        // and the render maps through it: stored 0 is far below the window → black
+        let image = render_frame(&ds, 0).unwrap();
+        assert_eq!(image.as_bytes()[0], 0);
     }
 
     #[test]
@@ -3172,6 +3289,19 @@ mod tests {
     }
 
     #[test]
+    fn voi_lut_output_width_of_one_does_not_divide_by_zero() {
+        // PR-C-04: two entries differing by 1 give an output range of width 1;
+        // the re-window used `(width - 1.0)` and divided by zero. It must act as
+        // a threshold instead: the low entry maps black, the high entry white.
+        let mut ds = gray_image(1, 1, 8, &[0], None, None);
+        put_voi_lut(&mut ds, 0, &[10, 11]);
+        let item = &ds.try_get_sequence(Tag::VOILUT_SEQUENCE).unwrap().items()[0];
+        let table = super::LutTable::from_item(item).unwrap();
+        assert_eq!(table.map_byte(0.0), 0, "entry 10 → black");
+        assert_eq!(table.map_byte(1.0), 255, "entry 11 → white");
+    }
+
+    #[test]
     fn bit_range_clamp_bounds_the_min_max_window() {
         let unsigned = BitDepth::new(16, 12, 11, false);
         assert_eq!(
@@ -3194,9 +3324,40 @@ mod tests {
         assert_eq!(o.window_center, 500.0);
         assert_eq!(o.window_width, 1000.0);
 
+        // PR-C-05: the stored range is converted to physical units through rescale.
+        ds.insert_str(Tag::RESCALE_SLOPE, Vr::Ds, "2");
+        let o = GrayscaleRenderOptions::from_image_pixel_value_tags(&ds).unwrap();
+        assert_eq!(o.window_center, 1000.0);
+        assert_eq!(o.window_width, 2000.0);
+
+        // PR-C-05: a non-increasing range is not a window.
+        ds.insert_value(Tag::SMALLEST_IMAGE_PIXEL_VALUE, 1000u16);
+        ds.insert_value(Tag::LARGEST_IMAGE_PIXEL_VALUE, 0u16);
+        assert!(GrayscaleRenderOptions::from_image_pixel_value_tags(&ds).is_err());
+
         // absent tags → error
         let bare = gray_image(1, 1, 8, &[0], None, None);
         assert!(GrayscaleRenderOptions::from_image_pixel_value_tags(&bare).is_err());
+    }
+
+    #[test]
+    fn window_from_pixel_value_range_requires_an_increasing_physical_range() {
+        // PR-C-05: smallest >= largest must not produce a window.
+        let mut ds = gray_image(1, 1, 8, &[0], None, None);
+        ds.insert_value(Tag::SMALLEST_IMAGE_PIXEL_VALUE, 200u16);
+        ds.insert_value(Tag::LARGEST_IMAGE_PIXEL_VALUE, 100u16);
+        assert!(super::window_from_pixel_value_range(&ds).is_none());
+
+        // A slope ≠ 1 scales both bounds into the map() domain.
+        let mut ds = gray_image(1, 1, 16, &[0], None, None);
+        ds.insert_value(Tag::SMALLEST_IMAGE_PIXEL_VALUE, 100u16);
+        ds.insert_value(Tag::LARGEST_IMAGE_PIXEL_VALUE, 200u16);
+        ds.insert_str(Tag::RESCALE_SLOPE, Vr::Ds, "3");
+        ds.insert_str(Tag::RESCALE_INTERCEPT, Vr::Ds, "-10");
+        let (center, width) = super::window_from_pixel_value_range(&ds).unwrap();
+        // stored [100,200] → physical [290,590]: centre 440, width 300
+        assert_eq!(center, 440.0);
+        assert_eq!(width, 300.0);
     }
 
     #[test]
@@ -3230,6 +3391,21 @@ mod tests {
         assert!(
             g.abs_diff(128) <= 1,
             "0x7FF0 normalises to 2047 → mid grey: {g}"
+        );
+    }
+
+    #[test]
+    fn malformed_bits_stored_is_clamped_to_bits_allocated() {
+        // PR-C-09: BitsStored 9 on 8-bit signed data must clamp to 8 so 0xFF
+        // sign-extends to -1 (black), not read as +255 (white).
+        let mut ds = gray_image(1, 1, 8, &[255], Some(127.5), Some(255.0));
+        ds.insert_value(Tag::BITS_STORED, 9u16);
+        ds.insert_value(Tag::PIXEL_REPRESENTATION, 1u16);
+        let image = render_frame(&ds, 0).unwrap();
+        assert_eq!(
+            image.as_bytes()[0],
+            0,
+            "0xFF is -1 under an 8-bit signed depth"
         );
     }
 
@@ -3409,6 +3585,45 @@ mod tests {
             crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
         );
         ds
+    }
+
+    /// Builds a native YBR_PARTIAL_420 image: Y plane (rows padded to an even
+    /// width), then a ceil(cols/2) × ceil(rows/2) Cb plane and Cr plane.
+    fn ybr420_image(width: u16, height: u16, bytes: &[u8]) -> Dataset {
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::SAMPLES_PER_PIXEL, 3u16);
+        ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "YBR_PARTIAL_420");
+        ds.insert_value(Tag::ROWS, height);
+        ds.insert_value(Tag::COLUMNS, width);
+        ds.insert_value(Tag::BITS_ALLOCATED, 8u16);
+        ds.insert_value(Tag::BITS_STORED, 8u16);
+        ds.insert_value(Tag::HIGH_BIT, 7u16);
+        ds.insert_value(Tag::PIXEL_REPRESENTATION, 0u16);
+        ds.insert_value(Tag::PLANAR_CONFIGURATION, 0u16);
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::PIXEL_DATA,
+                Vr::Ob,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(bytes.to_vec())),
+            ),
+        ));
+        ds.set_transfer_syntax(
+            crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
+        ds
+    }
+
+    #[test]
+    fn a_native_ybr_partial_420_frame_expands_2x2_chroma_groups() {
+        // 2×2: Y plane [16,235 / 16,235] row-major, then neutral Cb=128, Cr=128.
+        // Studio-range 16 → black and 235 → white, with no colour cast.
+        let ds = ybr420_image(2, 2, &[16, 235, 16, 235, 128, 128]);
+        let image = render_frame(&ds, 0).unwrap();
+        let b = image.as_bytes();
+        assert_eq!(&b[0..4], &[0, 0, 0, 0xFF], "top-left black");
+        assert_eq!(&b[4..8], &[255, 255, 255, 0xFF], "top-right white");
+        assert_eq!(&b[8..12], &[0, 0, 0, 0xFF], "bottom-left black");
+        assert_eq!(&b[12..16], &[255, 255, 255, 0xFF], "bottom-right white");
     }
 
     #[test]
@@ -3605,6 +3820,39 @@ mod tests {
             &[255, 0, 0, 255],
             "value 200 (> last) clamps to entry 1 blue"
         );
+    }
+
+    #[test]
+    fn a_legacy_palette_frame_without_photometric_interpretation_renders() {
+        // PR-C-01: ACR-NEMA files may omit (0028,0004). One sample plus the three
+        // palette descriptors must still render through the palette pipeline.
+        let mut ds = color_image("PALETTE COLOR", 1, 8, &[0, 1], 0);
+        ds.remove(Tag::PHOTOMETRIC_INTERPRETATION);
+        for (desc_tag, data_tag, vals) in [
+            (0x1101u16, 0x1201u16, [255u8, 0]), // red: entry0=red, entry1=black
+            (0x1102, 0x1202, [0u8, 0]),         // green
+            (0x1103, 0x1203, [0u8, 255]),       // blue: entry0=black, entry1=blue
+        ] {
+            ds.insert_or_update(crate::model::item::DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(
+                    Tag::new(0x0028, desc_tag),
+                    Vr::Us,
+                    us_bytes(&[2, 0, 8]),
+                ),
+            ));
+            ds.insert_or_update(crate::model::item::DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(
+                    Tag::new(0x0028, data_tag),
+                    Vr::Ow,
+                    std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vals.to_vec()))
+                        as crate::model::buffer::SharedBuffer,
+                ),
+            ));
+        }
+        let image = render_frame(&ds, 0).unwrap();
+        let b = image.as_bytes();
+        assert_eq!(&b[0..4], &[0, 0, 255, 255], "index 0 is red");
+        assert_eq!(&b[4..8], &[255, 0, 0, 255], "index 1 is blue");
     }
 
     #[test]

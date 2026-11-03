@@ -488,8 +488,10 @@ impl DicomClient {
         if files.is_empty() {
             return Ok(Vec::new());
         }
-        let mut seen = std::collections::HashSet::new();
-        let mut contexts = Vec::new();
+        // One context per distinct (SOP class, syntax); the builder allocates
+        // unique odd IDs, so a batch of two classes does not propose two
+        // contexts with the same ID (PS3.8 §9.3.2).
+        let mut context_set = crate::association::ContextSetBuilder::new();
         for file in files {
             let sop_class = file
                 .dataset
@@ -497,15 +499,12 @@ impl DicomClient {
                 .map(|s| s.trim().to_string())
                 .ok_or(NetworkError::protocol("instance has no SOP class UID"))?;
             let syntax = file.dataset.transfer_syntax().uid().to_string();
-            if !seen.insert((sop_class.clone(), syntax.clone())) {
-                continue;
-            }
-            contexts.push(PresentationContext::new(
-                1,
+            context_set.add(
                 sop_class,
                 crate::services::c_store_transfer_syntaxes(&syntax, &[], false),
-            ));
+            )?;
         }
+        let contexts = context_set.to_wire();
         let result = {
             let association = self.ensure_association(contexts).await?;
             association.send_c_store_batch(files).await
@@ -528,26 +527,30 @@ impl DicomClient {
         if requests.is_empty() {
             return Ok(Vec::new());
         }
-        let mut seen = std::collections::HashSet::new();
-        let mut contexts = Vec::new();
+        // The builder hands out unique odd IDs; hard-coding id 1 for every
+        // class would repeat a presentation-context ID (PS3.8 §9.3.2).
+        let mut context_set = crate::association::ContextSetBuilder::new();
         for request in requests {
-            if !seen.insert(request.sop_class_uid.clone()) {
-                continue;
-            }
-            contexts.push(PresentationContext::new(
-                1,
+            context_set.add(
                 request.sop_class_uid.clone(),
                 vec![
                     crate::association::transfer_syntax::IMPLICIT_VR_LITTLE_ENDIAN.to_string(),
                     crate::association::transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN.to_string(),
                 ],
-            ));
+            )?;
         }
+        let contexts = context_set.to_wire();
         let result = {
             let association = self.ensure_association(contexts).await?;
             association.send_c_find_batch(requests).await
         };
-        self.finish_request(result).await
+        let result = self.finish_request(result).await;
+        // Count every query group like the C-STORE batch does, so the
+        // per-association quota sees these requests (NW-E-04).
+        if let Ok(responses) = &result {
+            self.sent_on_association += responses.len();
+        }
+        result
     }
     /// Runs a C-FIND and collects every response (§11.4).
     pub async fn send_c_find(&mut self, request: &CFindRequest) -> Result<Vec<CFindResponse>> {
@@ -1462,6 +1465,135 @@ mod tests {
             radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
         );
         DicomFile::from_dataset(dataset)
+    }
+
+    /// A stored instance of `sop_class` with the given SOP Instance UID.
+    fn store_instance(sop_class: &str, sop_instance_uid: &str) -> DicomFile {
+        let mut dataset = radicom::model::dataset::Dataset::new();
+        dataset.insert_str(
+            radicom::model::tag::Tag::SOP_CLASS_UID,
+            radicom::model::vr::Vr::Ui,
+            sop_class,
+        );
+        dataset.insert_str(
+            radicom::model::tag::Tag::SOP_INSTANCE_UID,
+            radicom::model::vr::Vr::Ui,
+            sop_instance_uid,
+        );
+        dataset.set_transfer_syntax(
+            radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
+        DicomFile::from_dataset(dataset)
+    }
+
+    #[tokio::test]
+    async fn a_store_batch_proposes_a_unique_context_per_sop_class() {
+        // NW-E-01: two classes in one batch used to propose two contexts with
+        // ID 1, which the SCP rejects (PS3.8 §9.3.2); the association then
+        // never came up. The builder now hands out unique odd IDs.
+        struct CtAndMr;
+        #[async_trait::async_trait]
+        impl ServiceProvider for CtAndMr {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![
+                    "1.2.840.10008.5.1.4.1.1.2".to_string(),
+                    "1.2.840.10008.5.1.4.1.1.4".to_string(),
+                ]
+            }
+            async fn on_c_store(&self, request: &CStoreRequest) -> Result<CStoreResponse> {
+                Ok(CStoreResponse::success(request))
+            }
+        }
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(CtAndMr),
+            ServerOptions {
+                store_sink: StoreSink::Memory,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let ct = store_instance("1.2.840.10008.5.1.4.1.1.2", "1.2.3.4.5.6");
+        let mr = store_instance("1.2.840.10008.5.1.4.1.1.4", "1.2.3.4.5.7");
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string());
+        let responses = client.send_c_store_batch(&[&ct, &mr]).await.unwrap();
+        assert_eq!(responses.len(), 2, "one response per instance");
+        assert!(
+            responses
+                .iter()
+                .all(|response| response.status == crate::dimse::status::SUCCESS),
+            "both classes were stored on the one association",
+        );
+        client.release().await;
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_find_batch_counts_against_the_association_quota() {
+        // NW-E-04: the Ok path returned without bumping `sent_on_association`,
+        // so a batch of queries never triggered the quota. With a quota of one,
+        // two calls must reopen the association (two accepted events).
+        struct FindProvider;
+        #[async_trait::async_trait]
+        impl ServiceProvider for FindProvider {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![sop_class::STUDY_ROOT_QR_FIND.to_string()]
+            }
+            fn on_c_find<'a>(
+                &'a self,
+                request: &'a CFindRequest,
+            ) -> futures::stream::BoxStream<'a, Result<CFindResponse>> {
+                Box::pin(futures::stream::once(async move {
+                    Ok(CFindResponse::success(request, 0))
+                }))
+            }
+        }
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(FindProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = accepted.clone();
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
+            .with_options(DicomClientOptions {
+                max_requests_per_association: Some(1),
+                quota_cooldown: Duration::from_millis(0),
+                ..Default::default()
+            })
+            .with_event_handler(Arc::new(move |event| {
+                if matches!(event, ClientEvent::AssociationAccepted { .. }) {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }));
+
+        for round in 0..2 {
+            client
+                .send_c_find_batch(&[CFindRequest::study_query(round + 1)])
+                .await
+                .unwrap();
+            assert_eq!(
+                client.sent_on_association, 1,
+                "the batch is counted against the quota"
+            );
+        }
+        assert_eq!(
+            accepted.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "each quota-exhausted batch opens a fresh association"
+        );
+        client.release().await;
     }
 
     /// A peer that accepts connections and then does nothing, so the client

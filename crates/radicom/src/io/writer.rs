@@ -10,7 +10,7 @@ use crate::error::{DataError, Error};
 use crate::io::byte_source::ByteTargetWriter;
 use crate::model::buffer::ByteBuffer;
 use crate::model::dataset::Dataset;
-use crate::model::element::DicomElement;
+use crate::model::element::{DicomElement, ElementValue};
 use crate::model::endian::Endian;
 use crate::model::item::{DicomFragmentSequence, DicomItem, DicomSequence};
 use crate::model::tag::Tag;
@@ -173,8 +173,7 @@ impl DicomWriter {
     ) -> Result<u64, Error> {
         match item {
             DicomItem::Element(e) => {
-                let bytes = encode_value(e, charset);
-                match bytes {
+                match encode_value(e, charset)? {
                     Some(value) => {
                         self.write_leaf(e.tag(), e.vr(), ValueRef::Bytes(&value), syntax, out)
                     }
@@ -406,7 +405,7 @@ impl DicomWriter {
     ) -> Result<u64, Error> {
         Ok(match item {
             DicomItem::Element(e) => {
-                let value_len = match encode_value(e, charset) {
+                let value_len = match encode_value(e, charset)? {
                     Some(bytes) => bytes.len() as u64,
                     None => {
                         let size = e.value().as_buffer().map(|b| b.size()).unwrap_or(0);
@@ -565,25 +564,45 @@ impl ValueRef<'_> {
 
 /// Encodes a string value with the level's charset; `None` for binary VRs,
 /// which are streamed straight from their buffer.
-fn encode_value(e: &DicomElement, charset: Option<&Charsets>) -> Option<Vec<u8>> {
+///
+/// A byte-backed string VR passes its buffer bytes through (padded to an even
+/// length like a text value) instead of going through `string_value()` (which is
+/// empty for `Bytes`, the IO-01 root cause). Both the declared length
+/// (`item_len`) and the bytes actually written come from this one function, so
+/// they always agree.
+fn encode_value(e: &DicomElement, charset: Option<&Charsets>) -> Result<Option<Vec<u8>>, Error> {
     if !e.vr().is_string() {
-        return None;
+        return Ok(None);
     }
-    let text = e.string_value();
-    let mut bytes = match charset {
-        Some(c) if e.vr().is_character_encoded() => encode_multi_charset_with(
-            text,
-            c.first,
-            &c.alternates,
-            e.vr() == Vr::Pn,
-            c.first_designator,
-        ),
-        _ => text.as_bytes().to_vec(),
-    };
-    if bytes.len() % 2 == 1 {
-        bytes.push(e.vr().padding());
+    match e.value() {
+        ElementValue::Str(text) => {
+            let mut bytes = match charset {
+                Some(c) if e.vr().is_character_encoded() => encode_multi_charset_with(
+                    text,
+                    c.first,
+                    &c.alternates,
+                    e.vr() == Vr::Pn,
+                    c.first_designator,
+                ),
+                _ => text.as_bytes().to_vec(),
+            };
+            if bytes.len() % 2 == 1 {
+                bytes.push(e.vr().padding());
+            }
+            Ok(Some(bytes))
+        }
+        // Already encoded: write the buffer bytes, padding an odd length to even
+        // so the emitted value stays a legal (even-length) DICOM string. An
+        // unreadable lazy buffer is a real write failure, never a silent empty
+        // value.
+        ElementValue::Bytes(buffer) => {
+            let mut bytes = buffer.data()?.into_owned();
+            if bytes.len() % 2 == 1 {
+                bytes.push(e.vr().padding());
+            }
+            Ok(Some(bytes))
+        }
     }
-    Some(bytes)
 }
 
 /// CP-1066 guard: a value too long for a 16-bit length field is demoted to
@@ -1091,6 +1110,34 @@ mod tests {
             "padded to even length"
         );
         assert_eq!(bytes[bytes.len() - 1], b' ', "space padding for string VRs");
+    }
+
+    #[test]
+    fn byte_backed_string_vr_writes_its_bytes() {
+        // IO-01: a string VR held as `ElementValue::Bytes` must be written from
+        // its buffer, not from `string_value()` (which is empty). The declared
+        // length and the written bytes both come from `encode_value`.
+        let mut ds = Dataset::new();
+        ds.insert(crate::model::element::DicomElement::new_bytes(
+            Tag::PATIENT_ID,
+            Vr::Lo,
+            Arc::new(MemoryBuffer::from(b"PID-1".to_vec())),
+        ))
+        .unwrap();
+        let bytes = encode(&ds, &le(), WriteOptions::default());
+        // "PID-1" is 5 bytes; a byte-backed string value is padded to even length.
+        let declared = u16::from_le_bytes([bytes[6], bytes[7]]);
+        assert_eq!(
+            declared, 6,
+            "the declared length is the padded buffer length"
+        );
+        assert_eq!(
+            DicomWriter::default().dataset_length(&ds, &le()).unwrap(),
+            bytes.len() as u64,
+            "declared length matches the emitted bytes"
+        );
+        let back = parse_dataset_bytes(&bytes, &le()).unwrap();
+        assert_eq!(back.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
     }
 
     #[test]

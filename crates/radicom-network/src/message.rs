@@ -265,6 +265,7 @@ impl<F: FnMut(bytes::Bytes) -> std::io::Result<()>> std::io::Write for PduFramer
 /// On any failure once the command PDUs are on the wire the peer holds a partial
 /// message, so this sends A-ABORT (§9.3.4) and returns a fatal error: the
 /// association must be dropped, not reused.
+#[allow(clippy::too_many_arguments)]
 pub async fn write_message_streamed<W>(
     stream: &mut W,
     context_id: u8,
@@ -273,6 +274,8 @@ pub async fn write_message_streamed<W>(
     syntax: std::sync::Arc<TransferSyntax>,
     max_pdu: u32,
     max_pdvs_per_pdu: usize,
+    max_command_pdv: Option<usize>,
+    max_data_pdv: Option<usize>,
 ) -> Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -285,6 +288,8 @@ where
         syntax,
         max_pdu,
         max_pdvs_per_pdu,
+        max_command_pdv,
+        max_data_pdv,
     )
     .await;
     if result.is_err() {
@@ -295,6 +300,7 @@ where
 }
 
 /// Encodes the command, then streams the dataset; see [`write_message_streamed`].
+#[allow(clippy::too_many_arguments)]
 async fn write_streamed_inner<W>(
     stream: &mut W,
     context_id: u8,
@@ -303,13 +309,23 @@ async fn write_streamed_inner<W>(
     syntax: std::sync::Arc<TransferSyntax>,
     max_pdu: u32,
     max_pdvs_per_pdu: usize,
+    max_command_pdv: Option<usize>,
+    max_data_pdv: Option<usize>,
 ) -> Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
     use tokio::io::AsyncWriteExt as _;
 
-    let splitter = crate::assembler::PduSplitter::new(max_pdu, max_pdvs_per_pdu);
+    // Honour the interop caps (fo-dicom MaxCommandBuffer/MaxDataBuffer) on the
+    // streamed path too: the command splitter applies both; the dataset framer
+    // is capped by max_data_pdv below.
+    let splitter = crate::assembler::PduSplitter::with_limits(
+        max_pdu,
+        max_pdvs_per_pdu,
+        max_command_pdv,
+        max_data_pdv,
+    );
     // the command always fits one PDU in practice, but stay within the limit
     for pdu in splitter.split_message_bytes(context_id, command, None)? {
         let mut bytes = Vec::new();
@@ -317,7 +333,10 @@ where
         stream.write_all(&bytes).await.map_err(NetworkError::Io)?;
     }
 
-    let pdv_value = splitter.max_pdv_value();
+    let pdv_value = match max_data_pdv {
+        Some(cap) => splitter.max_pdv_value().min(cap),
+        None => splitter.max_pdv_value(),
+    };
     let (tx, mut rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(2);
     let encoder = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         let mut framer = PduFramer::new(context_id, pdv_value, |frame: bytes::Bytes| {
@@ -403,6 +422,8 @@ mod tests {
             syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone(),
             32,
             1,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -551,6 +572,8 @@ mod tests {
             syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
             256,
             16,
+            None,
+            None,
         )
         .await;
         assert!(error.is_err(), "a write failure is reported");
@@ -625,6 +648,8 @@ mod tests {
             syntax.clone(),
             128,
             1,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -728,6 +753,8 @@ mod tests {
             syntax.clone(),
             1024,
             1,
+            None,
+            None,
         )
         .await
         .unwrap();

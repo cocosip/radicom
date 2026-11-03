@@ -265,6 +265,12 @@ impl Command {
         out.message_id_being_responded_to = Some(request.message_id);
         out.status = Some(status);
         out.affected_sop_class_uid = request.affected_sop_class_uid.clone();
+        // PS3.7 Table 9.3-2: a C-STORE-RSP must name the instance in
+        // (0000,1000), including on the failure path. Mirror the request's
+        // requested UIDs too when present (N-services name them as Requested).
+        out.affected_sop_instance_uid = request.affected_sop_instance_uid.clone();
+        out.requested_sop_class_uid = request.requested_sop_class_uid.clone();
+        out.requested_sop_instance_uid = request.requested_sop_instance_uid.clone();
         out.no_dataset = true;
         Some(out)
     }

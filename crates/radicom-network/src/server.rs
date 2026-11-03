@@ -2052,6 +2052,8 @@ where
                     send_syntax,
                     max_pdu,
                     max_pdvs,
+                    self.splitter.max_command_pdv(),
+                    self.splitter.max_data_pdv(),
                 )
                 .await?;
             }
@@ -2992,6 +2994,8 @@ impl Association {
             send_syntax,
             max_pdu,
             max_pdvs,
+            self.splitter.max_command_pdv(),
+            self.splitter.max_data_pdv(),
         )
         .await?;
         self.finish_c_store(message_id).await
@@ -5512,6 +5516,77 @@ mod tests {
             }
         }
         assert_eq!(echoed, Some(crate::dimse::status::SUCCESS));
+        write_pdu(&mut tcp, &Pdu::ReleaseRq).await.unwrap();
+        assert!(matches!(
+            read_pdu(&mut tcp).await.unwrap(),
+            Some(Pdu::ReleaseRp)
+        ));
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_store_response_names_the_affected_instance() {
+        // NW-E-02: C-STORE parsing/落盘 failure answers through
+        // `Command::response`; the response must still carry (0000,1000)
+        // (PS3.7 Table 9.3-2).
+        use tokio::io::AsyncWriteExt as _;
+        let provider = Arc::new(RecordingProvider::new());
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            provider,
+            ServerOptions {
+                store_sink: crate::store::StoreSink::Memory,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut tcp = TcpStream::connect(addr).await.unwrap();
+        let mut open = Associate::new("CALLED-SCP", "CALLING-SCU");
+        open.presentation_contexts = vec![store_context()];
+        write_pdu(&mut tcp, &Pdu::AssociateRq(open)).await.unwrap();
+        assert!(matches!(
+            read_pdu(&mut tcp).await.unwrap(),
+            Some(Pdu::AssociateAc(_))
+        ));
+
+        let store_id = 3;
+        let mut command = Command::request(CommandField::CStoreRq, 5);
+        command.affected_sop_class_uid = Some("1.2.840.10008.5.1.4.1.1.7".into());
+        command.affected_sop_instance_uid = Some("1.2.3.4.5.6".into());
+        command.no_dataset = false;
+        // implicit VR LE element (0010,0010) claiming 8 bytes but cut short:
+        // the dataset does not parse, forcing the failure path
+        let truncated = vec![0x10, 0x00, 0x10, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let mut wire =
+            crate::pdu::encode(&pdata(store_id, true, command_bytes(&command).unwrap())).unwrap();
+        wire.extend_from_slice(&crate::pdu::encode(&pdata(store_id, false, truncated)).unwrap());
+        tcp.write_all(&wire).await.unwrap();
+
+        let mut response = None;
+        while response.is_none() {
+            if let Some(Pdu::PData(pdata)) = read_pdu(&mut tcp).await.unwrap() {
+                let reply = command_from_bytes(&pdata.pdvs.first().unwrap().data).unwrap();
+                if reply.field == CommandField::CStoreRsp {
+                    response = Some(reply);
+                }
+            }
+        }
+        let response = response.unwrap();
+        assert_ne!(
+            response.status,
+            Some(crate::dimse::status::SUCCESS),
+            "a truncated dataset is refused"
+        );
+        assert_eq!(
+            response.affected_sop_instance_uid.as_deref(),
+            Some("1.2.3.4.5.6"),
+            "a failure response names the affected instance (PS3.7 Table 9.3-2)"
+        );
+
         write_pdu(&mut tcp, &Pdu::ReleaseRq).await.unwrap();
         assert!(matches!(
             read_pdu(&mut tcp).await.unwrap(),
@@ -10480,6 +10555,116 @@ mod tests {
             .all(|response| response.status == crate::dimse::status::SUCCESS));
         association.release().await.unwrap();
         peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_streamed_dataset_respects_the_configured_max_data_buffer() {
+        // NW-E-03: the streamed send path ignored MaxDataBuffer. A raw peer keeps
+        // the explicit syntax (no transcode) so the dataset takes the streaming
+        // framer, then records the largest dataset PDV it saw.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let Some(Pdu::AssociateRq(rq)) = read_pdu(&mut stream).await.unwrap() else {
+                panic!("no A-ASSOCIATE-RQ");
+            };
+            let mut answer = Associate::new(rq.called_ae.clone(), rq.calling_ae.clone());
+            answer.presentation_contexts = rq
+                .presentation_contexts
+                .iter()
+                .map(|pc| PresentationContext {
+                    id: pc.id,
+                    abstract_syntax: String::new(),
+                    transfer_syntaxes: vec!["1.2.840.10008.1.2.1".to_string()],
+                    result: 0,
+                })
+                .collect();
+            answer.user_information = rq.user_information.clone();
+            write_pdu(&mut stream, &Pdu::AssociateAc(answer))
+                .await
+                .unwrap();
+
+            let mut assembler = PdvAssembler::new();
+            let mut command: Option<Command> = None;
+            let mut max_data_pdv = 0usize;
+            let mut responded = false;
+            while !responded {
+                let Some(pdu) = read_pdu(&mut stream).await.unwrap() else {
+                    panic!("the peer closed before the dataset arrived");
+                };
+                let Pdu::PData(pdata) = pdu else {
+                    panic!("unexpected PDU while reading the C-STORE");
+                };
+                for pdv in &pdata.pdvs {
+                    if !pdv.is_command {
+                        max_data_pdv = max_data_pdv.max(pdv.data.len());
+                    }
+                }
+                for unit in assembler.push_pdata(&pdata).unwrap() {
+                    let context_id = unit.context_id;
+                    match unit.stream {
+                        Stream::Command => command = Some(command_from_bytes(&unit.bytes).unwrap()),
+                        Stream::Data => {
+                            let command = command.as_ref().expect("command precedes the dataset");
+                            let response =
+                                Command::response(command, crate::dimse::status::SUCCESS).unwrap();
+                            for pdu in PduSplitter::new(16384, 16)
+                                .split(context_id, true, &command_bytes(&response).unwrap())
+                                .unwrap()
+                            {
+                                write_pdu(&mut stream, &Pdu::PData(pdu)).await.unwrap();
+                            }
+                            responded = true;
+                        }
+                    }
+                }
+            }
+            if let Some(Pdu::ReleaseRq) = read_pdu(&mut stream).await.unwrap() {
+                write_pdu(&mut stream, &Pdu::ReleaseRp).await.unwrap();
+            }
+            max_data_pdv
+        });
+
+        const CAP: usize = 64;
+        let mut association = Association::open(
+            addr,
+            "SCU",
+            "SCP",
+            vec![PresentationContext::new(
+                3,
+                "1.2.840.10008.5.1.4.1.1.7",
+                vec!["1.2.840.10008.1.2.1".to_string()],
+            )],
+            ClientOptions {
+                max_data_buffer: Some(CAP as u32),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut file = instance_file();
+        file.dataset
+            .insert_or_update(radicom::model::item::DicomItem::Element(
+                radicom::model::element::DicomElement::new_bytes(
+                    Tag::PIXEL_DATA,
+                    Vr::Ob,
+                    std::sync::Arc::new(radicom::model::buffer::MemoryBuffer::from(vec![
+                        0x5Au8;
+                        64 * 1024
+                    ])),
+                ),
+            ));
+        let response = association.send_c_store(&file).await.unwrap();
+        assert_eq!(response.status, crate::dimse::status::SUCCESS);
+        association.release().await.unwrap();
+
+        let observed = peer.await.unwrap();
+        assert!(
+            observed <= CAP,
+            "the streamed dataset ignored max_data_buffer: a {observed}-byte PDV exceeded {CAP}"
+        );
     }
 
     #[tokio::test]

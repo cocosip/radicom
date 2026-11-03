@@ -734,8 +734,13 @@ impl ImageBox {
     }
 
     pub fn set_requested_image_size(&mut self, value: f64) {
-        self.dataset
-            .insert_str(tags::REQUESTED_IMAGE_SIZE, Vr::Ds, value.to_string());
+        // Reuse the shared DS formatter: `f64::to_string` can exceed the 16-byte
+        // DS limit or use a lower-case exponent (PR-C-07).
+        self.dataset.insert_str(
+            tags::REQUESTED_IMAGE_SIZE,
+            Vr::Ds,
+            crate::model::vr::format_ds(value),
+        );
     }
 
     pub fn requested_image_size(&self) -> Option<f64> {
@@ -1055,6 +1060,29 @@ mod tests {
 
         image_box.push_image(Dataset::new());
         assert_eq!(image_box.image_count(), 1);
+    }
+
+    #[test]
+    fn requested_image_size_is_written_as_a_valid_short_ds() {
+        // PR-C-07: `f64::to_string` can exceed 16 chars or use a lower-case `e`.
+        let mut image_box = ImageBox::from_dataset(Dataset::new());
+        for value in [
+            0.300_000_000_000_000_04,
+            1.234_567_890_123_456_7e-7,
+            1e20,
+            -1e-9,
+        ] {
+            image_box.set_requested_image_size(value);
+            let ds = image_box
+                .dataset()
+                .try_get_str(tags::REQUESTED_IMAGE_SIZE)
+                .unwrap();
+            assert!(ds.len() <= 16, "{value} -> {ds:?} exceeds the DS cap");
+            assert!(!ds.contains('e'), "{value} -> {ds:?} lower-case exponent");
+            assert!(ds.parse::<f64>().is_ok(), "{value} -> {ds:?} not numeric");
+        }
+        image_box.set_requested_image_size(25.5);
+        assert_eq!(image_box.requested_image_size(), Some(25.5));
     }
 
     #[test]

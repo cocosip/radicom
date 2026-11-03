@@ -231,12 +231,14 @@ where
         }
 
         summary.files_seen += 1;
-        let name = match path.file_name().and_then(|n| n.to_str()) {
-            Some(name) => name,
-            None => continue,
-        };
+        // Only matching needs the file name; a name that is not valid UTF-8 is
+        // matched lossily instead of being skipped, and with no matcher every
+        // readable file is kept regardless of its name encoding.
         if let Some(matcher) = matcher {
-            if !matcher.matches(name) {
+            let Some(file_name) = path.file_name() else {
+                continue;
+            };
+            if !matcher.matches(file_name.to_string_lossy().as_ref()) {
                 continue;
             }
         }
@@ -340,10 +342,13 @@ where
     Ok(directory)
 }
 
-/// A glob matcher supporting `*`, `?` and `**` (§12.2).
+/// A glob matcher for a single file name supporting `*` and `?` (§12.2).
 ///
-/// `*` matches within one path segment, `?` one character, `**` across
-/// segments. The grammar is small and standard-library-free.
+/// The pattern is always applied to one file name, never a full path: `*`
+/// matches any run of characters (including none), `?` matches exactly one
+/// character. `**` is accepted but collapses to `*`; it does not cross
+/// directory separators because matching never sees a path. The grammar is
+/// small and standard-library-free.
 #[derive(Debug, Clone)]
 pub struct Glob {
     pattern: String,
@@ -369,9 +374,10 @@ impl Glob {
 
 /// Iterative glob match with backtracking for `*`.
 ///
-/// `*` matches any run of characters except `/`, so it stays within one path
-/// segment; `**` collapses to `*` here because matches are applied to a single
-/// file name. `?` matches one non-`/` character.
+/// `*` matches any run of characters (including none) except `/`, so it stays
+/// within one path segment; `**` collapses to `*` here because matches are
+/// applied to a single file name, so it never crosses directories. `?` matches
+/// one non-`/` character.
 fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
     let (mut p, mut t) = (0usize, 0usize);
     // the last `*` position and the text position it was matched at
@@ -382,12 +388,15 @@ fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
             Some(&c) if c == text[t] && c != b'*' => true,
             Some(&b'?') if text[t] != b'/' => true,
             Some(&b'*') => {
-                // collapse `**` to `*` for single-segment names
+                // collapse `**` to `*` for single-segment names, remember where
+                // backtracking may resume, and try the rest of the pattern right
+                // here first: this is what lets `*` match zero characters
+                // (`a*.txt` must match `a.txt`).
                 while pattern.get(p) == Some(&b'*') {
                     p += 1;
                 }
                 star = Some((p, t));
-                false
+                continue;
             }
             _ => false,
         };
@@ -447,6 +456,26 @@ mod tests {
     }
 
     #[test]
+    fn glob_star_matches_zero_characters() {
+        // FJ-D-01: `*` must be allowed to match nothing, so the literal after it
+        // can line up immediately instead of consuming a character first.
+        assert!(Glob::new("a*.txt").unwrap().matches("a.txt"));
+        assert!(Glob::new("IMG*.dcm").unwrap().matches("IMG.dcm"));
+        assert!(Glob::new("*b").unwrap().matches("b"));
+        // and it still consumes when the rest does not line up
+        assert!(Glob::new("a*.txt").unwrap().matches("abc.txt"));
+        assert!(!Glob::new("a*.txt").unwrap().matches("a.txt.bak"));
+    }
+
+    #[test]
+    fn glob_double_star_is_a_single_segment() {
+        // FJ-D-10: `**` is documented as collapsing to `*`; matching only ever
+        // sees a file name, so it must not behave like a cross-directory glob.
+        assert!(Glob::new("**.dcm").unwrap().matches("a.dcm"));
+        assert!(!Glob::new("**.dcm").unwrap().matches("dir/a.dcm"));
+    }
+
+    #[test]
     fn a_flat_scan_finds_matching_files() {
         let dir = temp_dir("flat");
         touch(&dir.join("a.dcm"));
@@ -467,6 +496,30 @@ mod tests {
         assert_eq!(summary.files_seen, 3, "all files seen");
         assert_eq!(summary.files_matched, 2, "only .dcm matched");
         assert_eq!(seen.len(), 2);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_file_name_is_not_skipped_without_a_matcher() {
+        // FJ-D-09: without a glob there is no reason to require UTF-8; a
+        // readable file must not vanish just because its name is not UTF-8.
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = temp_dir("non-utf8");
+        let name = OsStr::from_bytes(b"weird-\xff.dcm");
+        touch(&dir.join(name));
+
+        let options = ScanOptions::default();
+        let mut matched = 0usize;
+        let summary = scan_directory(&dir, &options, &mut |_| {}, |_| {
+            matched += 1;
+            Ok::<(), Error>(())
+        })
+        .unwrap();
+        assert_eq!(summary.files_seen, 1);
+        assert_eq!(matched, 1, "the non-UTF-8 file is still offered");
         let _ = fs::remove_dir_all(dir);
     }
 

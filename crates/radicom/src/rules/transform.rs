@@ -7,10 +7,12 @@
 //! Attributes Sequence item before changing it.
 
 use crate::model::dataset::Dataset;
+use crate::model::element::ElementValue;
 use crate::model::item::DicomItem;
 use crate::model::masked_tag::MaskedTag;
 use crate::model::tag::Tag;
 use crate::model::uid::Uid;
+use crate::model::vr::Vr;
 use crate::rules::match_rule::MatchRuleSet;
 
 /// Which end(s) to trim.
@@ -83,27 +85,50 @@ impl TransformRule {
             }
             TransformRule::SetValue(tag, value) => {
                 record(&mut modified, dataset, tag);
-                dataset.insert_str(tag.clone(), tag_vr_or(dataset, tag.clone()), value.clone());
+                let vr = tag_vr_or(dataset, tag.clone());
+                insert_text_value(dataset, tag.clone(), vr, value.clone());
             }
             TransformRule::MapValue(tag, from, to) => {
                 if dataset.try_get_str(tag).as_deref() == Some(from.as_str()) {
                     record(&mut modified, dataset, tag);
-                    dataset.insert_str(tag.clone(), tag_vr_or(dataset, tag.clone()), to.clone());
+                    let vr = tag_vr_or(dataset, tag.clone());
+                    insert_text_value(dataset, tag.clone(), vr, to.clone());
                 }
             }
             TransformRule::CopyValue(src, dst) => {
                 let found = dataset.items().find(|i| i.tag() == src).cloned();
-                if let Some(item) = found {
+                if let Some(DicomItem::Element(e)) = found {
                     record(&mut modified, dataset, dst);
-                    if let DicomItem::Element(e) = &item {
-                        // IO-01: copy the value *representation*, not its encoded
-                        // bytes. Rebuilding a byte-backed element under a string VR
-                        // loses the text (the writer encodes strings from
-                        // `string_value()`, which is empty for a byte value), so a
-                        // cloned-and-retagged element keeps text, charset and binary
-                        // values intact through serialization.
-                        dataset
-                            .insert_or_update(DicomItem::Element(e.clone().with_tag(dst.clone())));
+                    let dst_vr = tag_vr_or(dataset, dst.clone());
+                    match e.value() {
+                        // IO-B-05: rebuild under the *destination* VR instead of
+                        // carrying the source VR (which left an SH value tagged
+                        // as LO, etc.).
+                        ElementValue::Str(text) => {
+                            insert_text_value(dataset, dst.clone(), dst_vr, text.clone());
+                        }
+                        ElementValue::Bytes(buffer) if dst_vr.is_string() => {
+                            // IO-01: a byte-backed string value keeps its text
+                            // through a write→reparse round-trip.
+                            match buffer.data() {
+                                Ok(data) => {
+                                    let text = String::from_utf8_lossy(&data).into_owned();
+                                    insert_text_value(dataset, dst.clone(), dst_vr, text);
+                                }
+                                Err(error) => {
+                                    tracing::warn!(?dst, %error, "copy source unreadable; skipped")
+                                }
+                            }
+                        }
+                        ElementValue::Bytes(buffer) => {
+                            dataset.insert_or_update(DicomItem::Element(
+                                crate::model::element::DicomElement::new_bytes(
+                                    dst.clone(),
+                                    dst_vr,
+                                    buffer.clone(),
+                                ),
+                            ));
+                        }
                     }
                 }
             }
@@ -113,28 +138,23 @@ impl TransformRule {
                     if let Ok(re) = regex::Regex::new(pattern) {
                         record(&mut modified, dataset, tag);
                         let replaced = re.replace_all(&value, replacement.as_str()).into_owned();
-                        dataset.insert_str(tag.clone(), tag_vr_or(dataset, tag.clone()), replaced);
+                        let vr = tag_vr_or(dataset, tag.clone());
+                        insert_text_value(dataset, tag.clone(), vr, replaced);
                     }
                 }
             }
             TransformRule::Prefix(tag, prefix) => {
                 if let Some(value) = dataset.try_get_str(tag) {
                     record(&mut modified, dataset, tag);
-                    dataset.insert_str(
-                        tag.clone(),
-                        tag_vr_or(dataset, tag.clone()),
-                        format!("{prefix}{value}"),
-                    );
+                    let vr = tag_vr_or(dataset, tag.clone());
+                    insert_text_value(dataset, tag.clone(), vr, format!("{prefix}{value}"));
                 }
             }
             TransformRule::Append(tag, suffix) => {
                 if let Some(value) = dataset.try_get_str(tag) {
                     record(&mut modified, dataset, tag);
-                    dataset.insert_str(
-                        tag.clone(),
-                        tag_vr_or(dataset, tag.clone()),
-                        format!("{value}{suffix}"),
-                    );
+                    let vr = tag_vr_or(dataset, tag.clone());
+                    insert_text_value(dataset, tag.clone(), vr, format!("{value}{suffix}"));
                 }
             }
             TransformRule::TrimString(tag, position, trim) => {
@@ -154,7 +174,8 @@ impl TransformRule {
                             value.truncate(value.len() - trim.len());
                         }
                     }
-                    dataset.insert_str(tag.clone(), tag_vr_or(dataset, tag.clone()), value);
+                    let vr = tag_vr_or(dataset, tag.clone());
+                    insert_text_value(dataset, tag.clone(), vr, value);
                 }
             }
             TransformRule::TrimCharacters(tag, position, chars) => {
@@ -173,14 +194,16 @@ impl TransformRule {
                         },
                     }
                     .to_string();
-                    dataset.insert_str(tag.clone(), tag_vr_or(dataset, tag.clone()), trimmed);
+                    let vr = tag_vr_or(dataset, tag.clone());
+                    insert_text_value(dataset, tag.clone(), vr, trimmed);
                 }
             }
             TransformRule::PadString(tag, total_length, pad) => {
                 if let Some(value) = dataset.try_get_str(tag) {
                     record(&mut modified, dataset, tag);
                     let padded = pad_to_width(&value, *total_length, *pad);
-                    dataset.insert_str(tag.clone(), tag_vr_or(dataset, tag.clone()), padded);
+                    let vr = tag_vr_or(dataset, tag.clone());
+                    insert_text_value(dataset, tag.clone(), vr, padded);
                 }
             }
             TransformRule::Truncate(tag, length) => {
@@ -191,7 +214,8 @@ impl TransformRule {
                         .map(|part| part.chars().take(*length).collect::<String>())
                         .collect::<Vec<_>>()
                         .join("\\");
-                    dataset.insert_str(tag.clone(), tag_vr_or(dataset, tag.clone()), truncated);
+                    let vr = tag_vr_or(dataset, tag.clone());
+                    insert_text_value(dataset, tag.clone(), vr, truncated);
                 }
             }
             TransformRule::SplitFormat(tag, separators, format) => {
@@ -199,37 +223,29 @@ impl TransformRule {
                     record(&mut modified, dataset, tag);
                     let parts: Vec<&str> = value.split(|c| separators.contains(&c)).collect();
                     let formatted = format_parts(format, &parts);
-                    dataset.insert_str(tag.clone(), tag_vr_or(dataset, tag.clone()), formatted);
+                    let vr = tag_vr_or(dataset, tag.clone());
+                    insert_text_value(dataset, tag.clone(), vr, formatted);
                 }
             }
             TransformRule::ToUpper(tag) => {
                 if let Some(value) = dataset.try_get_str(tag) {
                     record(&mut modified, dataset, tag);
-                    dataset.insert_str(
-                        tag.clone(),
-                        tag_vr_or(dataset, tag.clone()),
-                        value.to_uppercase(),
-                    );
+                    let vr = tag_vr_or(dataset, tag.clone());
+                    insert_text_value(dataset, tag.clone(), vr, value.to_uppercase());
                 }
             }
             TransformRule::ToLower(tag) => {
                 if let Some(value) = dataset.try_get_str(tag) {
                     record(&mut modified, dataset, tag);
-                    dataset.insert_str(
-                        tag.clone(),
-                        tag_vr_or(dataset, tag.clone()),
-                        value.to_lowercase(),
-                    );
+                    let vr = tag_vr_or(dataset, tag.clone());
+                    insert_text_value(dataset, tag.clone(), vr, value.to_lowercase());
                 }
             }
             TransformRule::GenerateUid(tag) => {
                 if dataset.contains(tag) {
                     record(&mut modified, dataset, tag);
-                    dataset.insert_str(
-                        tag.clone(),
-                        tag_vr_or(dataset, tag.clone()),
-                        Uid::generate_value(),
-                    );
+                    let vr = tag_vr_or(dataset, tag.clone());
+                    insert_text_value(dataset, tag.clone(), vr, Uid::generate_value());
                 }
             }
         }
@@ -366,6 +382,51 @@ fn format_parts(format: &str, parts: &[&str]) -> String {
     out
 }
 
+/// Writes a text value into `tag` according to its VR.
+///
+/// String VRs store the text directly. Numeric VRs parse the text into typed
+/// values (a numeric tag such as Rows=US must never reach `insert_str`, whose
+/// `new_str` debug-asserts on a non-string VR). Anything else cannot be
+/// represented from text and is skipped with a warning instead of panicking.
+fn insert_text_value(dataset: &mut Dataset, tag: Tag, vr: Vr, text: String) {
+    if vr.is_string() || vr == Vr::Implicit {
+        dataset.insert_str(tag, vr, text);
+        return;
+    }
+    match vr {
+        Vr::Us => insert_parsed::<u16>(dataset, tag, vr, &text),
+        Vr::Ss => insert_parsed::<i16>(dataset, tag, vr, &text),
+        Vr::Ul => insert_parsed::<u32>(dataset, tag, vr, &text),
+        Vr::Sl => insert_parsed::<i32>(dataset, tag, vr, &text),
+        Vr::Uv => insert_parsed::<u64>(dataset, tag, vr, &text),
+        Vr::Sv => insert_parsed::<i64>(dataset, tag, vr, &text),
+        Vr::Fl => insert_parsed::<f32>(dataset, tag, vr, &text),
+        Vr::Fd => insert_parsed::<f64>(dataset, tag, vr, &text),
+        _ => tracing::warn!(
+            ?tag,
+            %vr,
+            "text value cannot be represented as this VR; transform skipped"
+        ),
+    }
+}
+
+fn insert_parsed<T>(dataset: &mut Dataset, tag: Tag, vr: Vr, text: &str)
+where
+    T: std::str::FromStr,
+    Vec<T>: crate::model::element::IntoElement,
+{
+    match text
+        .split('\\')
+        .map(|part| part.trim().parse::<T>())
+        .collect::<Result<Vec<T>, _>>()
+    {
+        Ok(values) if !values.is_empty() => {
+            dataset.insert_value_with_vr(tag, vr, values);
+        }
+        _ => tracing::warn!(?tag, %vr, "text value does not parse; transform skipped"),
+    }
+}
+
 /// The dataset's own VR for the tag when present, else the dictionary VR, else LO.
 fn tag_vr_or(dataset: &Dataset, tag: Tag) -> crate::model::vr::Vr {
     if let Ok(element) = dataset.get_element(&tag) {
@@ -416,6 +477,35 @@ mod tests {
         let mut ds = dataset();
         TransformRule::CopyValue(Tag::OTHER_PATIENT_I_DS, Tag::PATIENT_ID).apply(&mut ds);
         assert_eq!(value(&ds, 0x0010, 0x0020).as_deref(), Some("ACC123"));
+    }
+
+    #[test]
+    fn copy_value_uses_the_destination_vr() {
+        // IO-B-05: the copied element must take the destination's VR, not the
+        // source SH VR.
+        let mut ds = dataset();
+        TransformRule::CopyValue(Tag::OTHER_PATIENT_I_DS, Tag::PATIENT_ID).apply(&mut ds);
+        let element = ds.get_element(Tag::PATIENT_ID).expect("copied");
+        assert_eq!(element.vr(), Vr::Lo);
+        assert_eq!(element.string_value(), "ACC123");
+    }
+
+    #[test]
+    fn set_value_on_a_numeric_vr_does_not_panic_and_round_trips() {
+        // IO-B-04: SetValue(Rows=US, "512") used to panic inside `new_str`'s
+        // debug assertion (or save as a bogus value in release).
+        use crate::io::dataset_builder::parse_dataset_bytes;
+        use crate::io::writer::{DicomWriter, WriteOptions};
+        use crate::model::transfer_syntax::syntaxes;
+        let mut ds = Dataset::new();
+        TransformRule::SetValue(Tag::ROWS, "512".into()).apply(&mut ds);
+        assert_eq!(ds.get::<u16>(Tag::ROWS).unwrap(), 512);
+        let mut out = Vec::new();
+        DicomWriter::new(WriteOptions::default())
+            .write_dataset(&ds, &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN, &mut out)
+            .expect("encode");
+        let back = parse_dataset_bytes(&out, &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN).expect("decode");
+        assert_eq!(back.get::<u16>(Tag::ROWS).unwrap(), 512);
     }
 
     #[test]

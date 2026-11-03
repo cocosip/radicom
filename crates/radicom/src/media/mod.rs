@@ -514,7 +514,13 @@ impl DicomDirectory {
         generator: Option<&dyn IconGenerator>,
     ) -> Result<DicomDirectoryEntry, Error> {
         let dataset = &file.dataset;
-        let patient_id = dataset.try_get_str(tags::PATIENT_ID).unwrap_or_default();
+        // trim like `find_patient` compares, else "P1 " and "P1" become two
+        // distinct patient records (duplicated hierarchy)
+        let patient_id = dataset
+            .try_get_str(tags::PATIENT_ID)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
         let study_uid = required(dataset, tags::STUDY_INSTANCE_UID, "Study Instance UID")?;
         let series_uid = required(dataset, tags::SERIES_INSTANCE_UID, "Series Instance UID")?;
         let sop_class = required(dataset, tags::SOP_CLASS_UID, "SOP Class UID")?;
@@ -1254,6 +1260,28 @@ mod tests {
         assert_eq!(dir.children(1), vec![2]);
         assert_eq!(dir.children(2), vec![3]);
         assert!(dir.children(3).is_empty());
+    }
+
+    #[test]
+    fn a_trailing_space_in_the_patient_id_does_not_duplicate_the_hierarchy() {
+        // FJ-D-03: `find_patient` compares trimmed IDs, so the key must be
+        // trimmed before lookup/insertion or "P1 " creates a second patient.
+        let mut dir = DicomDirectory::new("MYFS");
+        for _ in 0..2 {
+            dir.add_file(
+                &instance("P1 ", "1.2.3", "1.2.3.4", CT, "1.2.3.4.5"),
+                "IMG0001",
+            )
+            .unwrap();
+        }
+
+        assert_eq!(dir.records().len(), 4, "one PATIENT/STUDY/SERIES/IMAGE set");
+        assert_eq!(dir.roots().len(), 1);
+        assert_eq!(
+            dir.records()[0].dataset.get_str(tags::PATIENT_ID).unwrap(),
+            "P1",
+            "the stored patient ID is trimmed"
+        );
     }
 
     #[test]

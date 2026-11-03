@@ -277,13 +277,18 @@ fn element_to_value(element: &DicomElement, options: &JsonOptions) -> Result<Val
     let mut object = Map::new();
     object.insert("vr".to_string(), Value::String(vr.code().to_string()));
 
+    // A BulkDataURI is legal on any VR that can carry a buffer (PS3.18 F.2.2),
+    // not just the binary ones: check it first so a DS/IS/UT/... URI is not
+    // silently dropped by the value path below.
+    if let Some(buffer) = element.value().as_buffer() {
+        if let Some(uri) = buffer.bulk_uri() {
+            object.insert("BulkDataURI".to_string(), Value::String(uri.to_string()));
+            return Ok(Value::Object(object));
+        }
+    }
+
     if is_binary(vr) {
         if let Some(buffer) = element.value().as_buffer() {
-            // a BulkDataUri buffer emits the URI, not its (absent) bytes (§12.1)
-            if let Some(uri) = buffer.bulk_uri() {
-                object.insert("BulkDataURI".to_string(), Value::String(uri.to_string()));
-                return Ok(Value::Object(object));
-            }
             // a deferred value goes out as a URI when the caller names one, and
             // is never materialised for it (§12.1). An empty value has nothing to
             // defer and a blank URI is not a carrier, so both fall through.
@@ -327,7 +332,7 @@ fn element_values(element: &DicomElement, vr: Vr, options: &JsonOptions) -> Resu
     // bytes that are not a binary VR come from a parsed element (e.g. US);
     // strings are the other possible representation
     if let Some(raw) = element.value().as_buffer() {
-        return raw_value_array(raw, vr, element.tag());
+        return raw_value_array(raw, vr, element.tag(), options);
     }
     let text = element.string_value();
     if text.is_empty() {
@@ -335,7 +340,17 @@ fn element_values(element: &DicomElement, vr: Vr, options: &JsonOptions) -> Resu
     }
 
     match vr {
-        Vr::Pn => Ok(text.split('\\').map(person_name_value).collect()),
+        // an empty PN value component is `null`, not an empty object
+        Vr::Pn => Ok(text
+            .split('\\')
+            .map(|part| {
+                if part.is_empty() {
+                    Value::Null
+                } else {
+                    person_name_value(part)
+                }
+            })
+            .collect()),
         Vr::At => Ok(text
             .split('\\')
             .filter(|part| !part.is_empty())
@@ -343,7 +358,7 @@ fn element_values(element: &DicomElement, vr: Vr, options: &JsonOptions) -> Resu
             .collect()),
         // A zero-length component is `null`, not `""` (§12.1, PS3.18 Annex F),
         // for the numeric VRs too — dropping it would silently change the VM.
-        Vr::Is | Vr::Ds | Vr::Sv | Vr::Uv => Ok(text
+        Vr::Is | Vr::Ds => Ok(text
             .split('\\')
             .map(|part| {
                 if part.trim().is_empty() {
@@ -353,26 +368,16 @@ fn element_values(element: &DicomElement, vr: Vr, options: &JsonOptions) -> Resu
                 }
             })
             .collect()),
+        // The fixed-width binary numeric VRs are always byte-backed (see
+        // `DicomElement::new_str`, which forbids them), so they are handled by
+        // `raw_value_array` and never reach this text path. Keep the text form
+        // without a `null` branch: a zero-length component cannot be represented
+        // for a fixed-width VR and the read side rightly rejects it (FJ-D-06).
         Vr::Us | Vr::Ul | Vr::Sl | Vr::Ss => Ok(text
             .split('\\')
-            .map(|part| {
-                if part.trim().is_empty() {
-                    Value::Null
-                } else {
-                    parse_int_value(part, vr)
-                }
-            })
+            .map(|part| parse_int_value(part, vr))
             .collect()),
-        Vr::Fl | Vr::Fd => Ok(text
-            .split('\\')
-            .map(|part| {
-                if part.trim().is_empty() {
-                    Value::Null
-                } else {
-                    parse_float_value(part)
-                }
-            })
-            .collect()),
+        Vr::Fl | Vr::Fd => Ok(text.split('\\').map(parse_float_value).collect()),
         // a zero-length component is `null`, not `""` (§12.1, PS3.18 Annex F)
         _ => Ok(text
             .split(|c| c == '\\' && vr.is_multi_value())
@@ -388,7 +393,12 @@ fn element_values(element: &DicomElement, vr: Vr, options: &JsonOptions) -> Resu
 }
 
 /// Value arrays for elements held as bytes (parsed binary VRs).
-fn raw_value_array(raw: &SharedBuffer, vr: Vr, _tag: &Tag) -> Result<Vec<Value>> {
+fn raw_value_array(
+    raw: &SharedBuffer,
+    vr: Vr,
+    _tag: &Tag,
+    options: &JsonOptions,
+) -> Result<Vec<Value>> {
     let bytes = raw.data()?;
     let bytes: &[u8] = bytes.as_ref();
     let unit = vr.unit_size().max(1);
@@ -412,7 +422,16 @@ fn raw_value_array(raw: &SharedBuffer, vr: Vr, _tag: &Tag) -> Result<Vec<Value>>
             // PN must use the three-group object form even when byte-backed
             // (§12.1, PS3.18 Annex F.3.1) — a plain string array is not PN.
             if vr == Vr::Pn {
-                return Ok(text.split('\\').map(person_name_value).collect());
+                return Ok(text
+                    .split('\\')
+                    .map(|part| {
+                        if part.is_empty() {
+                            Value::Null
+                        } else {
+                            person_name_value(part)
+                        }
+                    })
+                    .collect());
             }
             // a zero-length component is `null`, not `""` (§12.1, PS3.18 Annex
             // F), exactly like the Str-backed path above: dropping it would
@@ -421,6 +440,10 @@ fn raw_value_array(raw: &SharedBuffer, vr: Vr, _tag: &Tag) -> Result<Vec<Value>>
                 .map(|part| {
                     if part.is_empty() {
                         Value::Null
+                    } else if matches!(vr, Vr::Is | Vr::Ds | Vr::Sv | Vr::Uv) {
+                        // numeric text honors JsonOptions::numbers like the
+                        // Str-backed path (FJ-D-05)
+                        numeric_value(part, options.numbers)
                     } else {
                         Value::String(part.to_string())
                     }
@@ -2187,6 +2210,99 @@ mod tests {
             again["00180050"]["Value"],
             serde_json::json!(["1.50", null])
         );
+    }
+
+    #[test]
+    fn a_non_binary_bulk_data_uri_survives_a_round_trip() {
+        // FJ-D-02: BulkDataURI is legal for DS/IS/... too (PS3.18 F.2.2); the
+        // reader keeps it as a BulkDataUri buffer and the writer must re-emit
+        // it instead of dropping it as an empty value.
+        let json = r#"{"00180050":{"vr":"DS","BulkDataURI":"http://example/ds"}}"#;
+        let ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
+        let value = dataset_to_value(&ds, &JsonOptions::default()).unwrap();
+        assert_eq!(
+            value["00180050"]["BulkDataURI"], "http://example/ds",
+            "the DS URI survives"
+        );
+        assert!(
+            value["00180050"].get("Value").is_none(),
+            "a URI carrier has no Value"
+        );
+
+        // the binary case keeps working too
+        let ob = r#"{"7FE00010":{"vr":"OB","BulkDataURI":"http://example/ob"}}"#;
+        let ds = json_to_dataset(ob, &JsonOptions::default()).unwrap();
+        let value = dataset_to_value(&ds, &JsonOptions::default()).unwrap();
+        assert_eq!(value["7FE00010"]["BulkDataURI"], "http://example/ob");
+    }
+
+    #[test]
+    fn an_empty_person_name_component_is_null() {
+        // FJ-D-04: a trailing empty PN component is null, matching the string
+        // and numeric paths, instead of an empty `{}` object.
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John\\");
+        let value = dataset_to_value(&ds, &JsonOptions::default()).unwrap();
+        assert_eq!(
+            value["00100010"]["Value"],
+            serde_json::json!([{"Alphabetic": "Doe^John"}, null])
+        );
+
+        // the byte backend takes the same route
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::PATIENT_NAME,
+            Vr::Pn,
+            Arc::new(MemoryBuffer::from(b"Doe^John\\".to_vec())),
+        )));
+        let value = dataset_to_value(&ds, &JsonOptions::default()).unwrap();
+        assert_eq!(
+            value["00100010"]["Value"],
+            serde_json::json!([{"Alphabetic": "Doe^John"}, null])
+        );
+    }
+
+    #[test]
+    fn a_byte_backed_ds_honors_number_mode() {
+        // FJ-D-05: the byte backend dropped JsonOptions::numbers and always
+        // wrote a string.
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::SLICE_THICKNESS,
+            Vr::Ds,
+            Arc::new(MemoryBuffer::from(b"42".to_vec())),
+        )));
+
+        let as_number = JsonOptions {
+            numbers: NumberMode::AsNumber,
+            ..Default::default()
+        };
+        let value = dataset_to_value(&ds, &as_number).unwrap();
+        assert_eq!(value["00180050"]["Value"][0], serde_json::json!(42));
+
+        let as_string = JsonOptions {
+            numbers: NumberMode::AsString,
+            ..Default::default()
+        };
+        let value = dataset_to_value(&ds, &as_string).unwrap();
+        assert_eq!(value["00180050"]["Value"][0], serde_json::json!("42"));
+    }
+
+    #[test]
+    fn binary_numeric_json_from_this_library_reads_back() {
+        // FJ-D-06: the writer never emits `null` for a fixed-width binary
+        // numeric VR (they are byte-backed), so its own output is readable.
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::ROWS,
+            Vr::Us,
+            Arc::new(MemoryBuffer::from(vec![5u8, 0, 7u8, 0])),
+        )));
+        let value = dataset_to_value(&ds, &JsonOptions::default()).unwrap();
+        assert_eq!(value["00280010"]["Value"], serde_json::json!([5, 7]));
+        let json = serde_json::to_string(&value).unwrap();
+        let back = json_to_dataset(&json, &JsonOptions::default()).unwrap();
+        assert_eq!(back.get::<Vec<u16>>(Tag::ROWS).unwrap(), vec![5, 7]);
     }
 
     #[test]

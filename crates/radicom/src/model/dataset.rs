@@ -1693,7 +1693,9 @@ fn items_content_equal(a: &DicomItem, b: &DicomItem) -> bool {
             if skips_unresolved_bulk(x) || skips_unresolved_bulk(y) {
                 return true;
             }
-            x.value() == y.value()
+            // String VRs compare by decoded text, so a text- and a byte-backed
+            // value with the same content are equal (CM-A-06).
+            crate::model::element::values_equal(x.vr(), x.value(), y.value())
         }
         (DicomItem::Sequence(x), DicomItem::Sequence(y)) => {
             x.tag() == y.tag()
@@ -1772,13 +1774,16 @@ impl Dataset {
         time_tag: impl AsRef<Tag>,
     ) -> Result<chrono::NaiveDateTime, Error> {
         let date: chrono::NaiveDate = self.get(date_tag)?;
-        let time: chrono::NaiveTime = match self.get::<chrono::NaiveTime>(time_tag.as_ref()) {
-            Ok(t) => t,
-            // A missing time defaults to midnight; a *present* but malformed TM
-            // is a data problem and must surface rather than silently become
-            // midnight (CM-09).
-            Err(Error::Data(DataError::TagNotFound { .. })) => chrono::NaiveTime::MIN,
-            Err(error) => return Err(error),
+        // A missing *or present-but-empty* time defaults to midnight; only a
+        // present, non-empty but malformed TM is a data problem that must
+        // surface rather than silently become midnight (CM-09, CM-A-04).
+        let time: chrono::NaiveTime = match self.get_element(time_tag.as_ref()) {
+            Ok(element) if element.is_empty() => chrono::NaiveTime::MIN,
+            _ => match self.get::<chrono::NaiveTime>(time_tag.as_ref()) {
+                Ok(t) => t,
+                Err(Error::Data(DataError::TagNotFound { .. })) => chrono::NaiveTime::MIN,
+                Err(error) => return Err(error),
+            },
         };
         Ok(chrono::NaiveDateTime::new(date, time))
     }
@@ -1819,7 +1824,9 @@ impl Dataset {
             .unwrap_or(self)
             .try_get_str(TIMEZONE_OFFSET_FROM_UTC)
         {
-            Some(tz) => {
+            // A blank offset string means "not present" (CM-A-04), so fall
+            // through to the local-time branch instead of rejecting it.
+            Some(tz) if !tz.trim().is_empty() => {
                 let t = tz.trim();
                 let invalid = || {
                     Error::Data(DataError::Other {
@@ -1848,7 +1855,7 @@ impl Dataset {
             // fo-dicom treats a missing offset as local time, not UTC. An
             // ambiguous wall time (DST fall-back) resolves to its first
             // occurrence; a nonexistent one (spring-forward gap) is an error.
-            None => match chrono::Local.offset_from_local_datetime(&naive) {
+            _ => match chrono::Local.offset_from_local_datetime(&naive) {
                 chrono::LocalResult::Single(offset) => offset.fix(),
                 chrono::LocalResult::Ambiguous(first, _) => first.fix(),
                 chrono::LocalResult::None => {
@@ -2426,5 +2433,63 @@ mod cm_regression {
         src.copy_tags(&mut dest, std::slice::from_ref(&dict_tag));
         assert_eq!(dest.len(), 2, "private item + its creator slot are copied");
         assert_eq!(dest.get_str(dict_tag).unwrap(), "v");
+    }
+
+    #[test]
+    fn cma04_empty_tm_is_midnight_and_blank_timezone_is_local() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::STUDY_DATE, Vr::Da, "20240305");
+        // Present but empty TM behaves like a missing one → midnight.
+        ds.insert_str(Tag::STUDY_TIME, Vr::Tm, "");
+        assert_eq!(
+            ds.get_datetime(Tag::STUDY_DATE, Tag::STUDY_TIME)
+                .unwrap()
+                .to_string(),
+            "2024-03-05 00:00:00"
+        );
+
+        // A blank TimezoneOffsetFromUTC is treated as missing → local time.
+        ds.insert_str(Tag::STUDY_TIME, Vr::Tm, "103015");
+        ds.insert_str(TIMEZONE_OFFSET_FROM_UTC, Vr::Sh, "   ");
+        let expected = {
+            use chrono::{Offset as _, TimeZone};
+            chrono::Local
+                .offset_from_local_datetime(
+                    &chrono::NaiveDate::from_ymd_opt(2024, 3, 5)
+                        .unwrap()
+                        .and_hms_opt(10, 30, 15)
+                        .unwrap(),
+                )
+                .single()
+                .expect("local wall time exists")
+                .fix()
+                .local_minus_utc()
+        };
+        assert_eq!(
+            ds.get_datetime_with_offset(Tag::STUDY_DATE, Tag::STUDY_TIME)
+                .unwrap()
+                .offset()
+                .local_minus_utc(),
+            expected
+        );
+    }
+
+    #[test]
+    fn cma06_content_equals_text_and_byte_backed_strings() {
+        use crate::model::buffer::MemoryBuffer;
+
+        let tag = Tag::new(0x7777, 0x0001);
+        let mut a = Dataset::new();
+        a.insert(DicomElement::new_str(tag.clone(), Vr::Lo, "ABC"))
+            .unwrap();
+        let mut b = Dataset::new();
+        b.insert(DicomElement::new_bytes(
+            tag,
+            Vr::Lo,
+            Arc::new(MemoryBuffer::from(b"ABC".to_vec())),
+        ))
+        .unwrap();
+        assert_eq!(a, b, "text- and byte-backed values compare equal");
+        assert!(a.content_equals(&b));
     }
 }

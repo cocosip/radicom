@@ -188,9 +188,19 @@ fn raw_units_text(raw: &radicom::model::buffer::SharedBuffer, vr: Vr) -> Result<
 /// elements `<FamilyName>`/`<GivenName>`/`<MiddleName>`/`<NamePrefix>`/`<NameSuffix>`.
 fn write_person_name(out: &mut String, element: &DicomElement, depth: usize) -> Result<(), Error> {
     let text = match element.value().as_buffer() {
-        Some(raw) => String::from_utf8_lossy(raw.data()?.as_ref()).into_owned(),
-        None => element.string_value().to_string(),
+        // drop the even-length padding a byte-backed VR may carry (FJ-D-08)
+        Some(raw) => String::from_utf8_lossy(raw.data()?.as_ref())
+            .trim_end_matches(['\0', ' '])
+            .to_string(),
+        None => element
+            .string_value()
+            .trim_end_matches(['\0', ' '])
+            .to_string(),
     };
+    // an empty PN has no value at all: do not emit an empty <PersonName> (FJ-D-07)
+    if text.is_empty() {
+        return Ok(());
+    }
     const GROUPS: [&str; 3] = ["Alphabetic", "Ideographic", "Phonetic"];
     const COMPONENTS: [&str; 5] = [
         "FamilyName",
@@ -792,6 +802,32 @@ mod tests {
         let xml = dataset_to_xml(&ds).unwrap();
         assert!(xml.contains("<FamilyName>Doe</FamilyName>"), "{xml}");
         assert!(xml.contains("<GivenName>Jane</GivenName>"), "{xml}");
+    }
+
+    #[test]
+    fn an_empty_person_name_writes_no_value_element() {
+        // FJ-D-07: an empty PN must not produce a nameless <PersonName>.
+        let mut ds = Dataset::new();
+        ds.insert_empty(Tag::PATIENT_NAME, Vr::Pn);
+        let xml = dataset_to_xml(&ds).unwrap();
+        assert!(!xml.contains("<PersonName"), "{xml}");
+    }
+
+    #[test]
+    fn a_byte_backed_person_name_drops_even_length_padding() {
+        // FJ-D-08: the encoded PN is padded to even length with a space; that
+        // padding must not leak into the value text.
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::PATIENT_NAME,
+            Vr::Pn,
+            Arc::new(radicom::model::buffer::MemoryBuffer::from(
+                b"Doe^Jan ".to_vec(),
+            )),
+        )));
+        let xml = dataset_to_xml(&ds).unwrap();
+        assert!(xml.contains("<GivenName>Jan</GivenName>"), "{xml}");
+        assert!(!xml.contains("<GivenName>Jan </GivenName>"), "{xml}");
     }
 
     #[test]

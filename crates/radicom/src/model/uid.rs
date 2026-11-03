@@ -431,24 +431,43 @@ impl UidGenerator {
     }
 
     fn regenerate_level(&self, dataset: &mut Dataset, replaced: &mut Vec<Arc<Uid>>) {
-        let targets: Vec<(Tag, Arc<Uid>)> = dataset
-            .items()
-            .filter_map(|item| {
-                let DicomItem::Element(element) = item else {
-                    return None;
-                };
-                if element.vr() != Vr::Ui {
-                    return None;
+        // Collect first: rewriting while iterating needs a mutable borrow. Each
+        // element keeps its value count and order; only SOP-instance/unknown
+        // UIDs are mapped, string VRs written back as a `\`-joined multi-value
+        // (CM-A-03).
+        let mut targets: Vec<(Tag, String, Vec<Arc<Uid>>)> = Vec::new();
+        for item in dataset.items() {
+            let DicomItem::Element(element) = item else {
+                continue;
+            };
+            if element.vr() != Vr::Ui {
+                continue;
+            }
+            let parts = element.string_parts();
+            if parts.is_empty() {
+                continue;
+            }
+            let mut rewrote = false;
+            let mut mapped = Vec::new();
+            let mut values = Vec::with_capacity(parts.len());
+            for part in &parts {
+                let uid = Uid::parse(part);
+                if matches!(uid.uid_type(), UidType::SopInstance | UidType::Unknown) {
+                    let replacement = self.map(&uid);
+                    values.push((*replacement).to_string());
+                    mapped.push(replacement);
+                    rewrote = true;
+                } else {
+                    values.push((*part).to_string());
                 }
-                let uid = element.first::<Arc<Uid>>().ok()?;
-                matches!(uid.uid_type(), UidType::SopInstance | UidType::Unknown)
-                    .then(|| (element.tag().clone(), uid))
-            })
-            .collect();
-        for (tag, uid) in targets {
-            let replacement = self.map(&uid);
-            dataset.insert_value_with_vr(tag, Vr::Ui, (*replacement).clone());
-            replaced.push(replacement);
+            }
+            if rewrote {
+                targets.push((element.tag().clone(), values.join("\\"), mapped));
+            }
+        }
+        for (tag, value, mapped) in targets {
+            dataset.insert_value_with_vr(tag, Vr::Ui, value);
+            replaced.extend(mapped);
         }
         let sequences: Vec<Tag> = dataset
             .items()
@@ -839,6 +858,29 @@ mod tests {
             "1.2.840.10008.5.1.4.1.1.2",
             "a SOP class is not an instance UID"
         );
+    }
+
+    #[test]
+    fn cma03_regenerate_dataset_preserves_multi_value_ui() {
+        use crate::model::dataset::Dataset;
+        use crate::model::vr::Vr;
+
+        let a = "1.2.3.4.5";
+        let b = "1.2.3.4.6";
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, format!("{a}\\{b}"));
+
+        let generator = UidGenerator::new();
+        let replaced = generator.regenerate_dataset(&mut ds);
+        assert_eq!(replaced.len(), 2, "both values are rewritten");
+
+        let value = ds.try_get_str(Tag::SOP_INSTANCE_UID).unwrap();
+        let parts: Vec<&str> = value.split('\\').collect();
+        assert_eq!(parts.len(), 2, "the multi-value count is preserved");
+        assert_eq!(parts[0], replaced[0].value());
+        assert_eq!(parts[1], replaced[1].value());
+        // the same source maps consistently
+        assert_eq!(&generator.map(&Uid::parse(a)), &replaced[0]);
     }
 
     #[test]

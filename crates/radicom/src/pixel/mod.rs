@@ -428,7 +428,16 @@ macro_rules! pixel_read_methods {
         /// Resolves `PALETTE COLOR` LUTs, validating each descriptor and data length
         /// (/ PS3.3 C.7.6.3.1.5) instead of fabricating zero entries.
         pub fn palette_color_lut_checked(&self) -> Result<Vec<Color32>, Error> {
-            if self.photometric_interpretation() != Some(PhotometricInterpretation::PaletteColor) {
+            let pi = self.photometric_interpretation();
+            // Legacy (ACR-NEMA) files may omit (0028,0004). A single-sample image
+            // carrying all three palette descriptors is PALETTE COLOR by the same
+            // inference the renderer applies (PR-C-01), so accept it here too.
+            let legacy_palette = pi.is_none()
+                && self.samples_per_pixel() == 1
+                && self.dataset.contains(&RED_DESCRIPTOR)
+                && self.dataset.contains(&GREEN_DESCRIPTOR)
+                && self.dataset.contains(&BLUE_DESCRIPTOR);
+            if pi != Some(PhotometricInterpretation::PaletteColor) && !legacy_palette {
                 return Err(pixel_err(
                     "palette LUT requested for a non-PALETTE COLOR image",
                 ));

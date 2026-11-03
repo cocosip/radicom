@@ -324,6 +324,65 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         Ok(Vr::try_parse(&[probe[4], probe[5]]).is_some())
     }
 
+    /// CP-246 content is Implicit VR Little Endian, so a conformant item is read
+    /// implicitly. Only when the first inner element cannot be implicit — its
+    /// 32-bit implicit length would run past the item — but does fit as an
+    /// explicit-VR header, is a non-conformant explicit item read as explicit
+    /// (keeps legacy UN sequences whose inner content was written explicitly).
+    ///
+    /// Must be called with the little-endian content byte order already set.
+    fn cp246_inner_is_explicit(&mut self) -> Result<bool, Error> {
+        let pos = self.position()?;
+        let result = self.cp246_inner_is_explicit_at(pos);
+        self.source.goto(pos).map_err(|e| io_err(e, pos))?;
+        result
+    }
+
+    fn cp246_inner_is_explicit_at(&mut self, pos: u64) -> Result<bool, Error> {
+        if self.source.require(8).is_err() {
+            return Ok(false);
+        }
+        let g = self.source.read_u16().map_err(|e| io_err_need(e, pos, 2))?;
+        let e = self
+            .source
+            .read_u16()
+            .map_err(|e| io_err_need(e, pos + 2, 2))?;
+        if (g, e) != (0xFFFE, 0xE000) {
+            return Ok(false);
+        }
+        let item_len = self
+            .source
+            .read_u32()
+            .map_err(|e| io_err_need(e, pos + 4, 4))? as u64;
+        if item_len < 8 || self.source.require(12).is_err() {
+            return Ok(false);
+        }
+        let mut head = [0u8; 12];
+        self.source
+            .read_exact(&mut head)
+            .map_err(|e| io_err_need(e, pos + 8, 12))?;
+        let vr = Vr::try_parse(&[head[4], head[5]]);
+        if item_len == 0xFFFF_FFFF {
+            // Undefined-length item: an explicit undefined-length SQ header is a
+            // clear explicit signal; otherwise the CP-246 content is implicit.
+            let undefined_sq = matches!(vr, Some(v) if !v.is_16bit_length())
+                && u32::from_le_bytes([head[8], head[9], head[10], head[11]]) == 0xFFFF_FFFF;
+            return Ok(undefined_sq);
+        }
+        let implicit_len = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as u64;
+        let implicit_fits = implicit_len == 0xFFFF_FFFF || 8 + implicit_len <= item_len;
+        let explicit_fits = match vr {
+            Some(vr) if vr.is_16bit_length() => {
+                8 + u16::from_le_bytes([head[6], head[7]]) as u64 <= item_len
+            }
+            Some(_) => {
+                12 + u32::from_le_bytes([head[8], head[9], head[10], head[11]]) as u64 <= item_len
+            }
+            None => false,
+        };
+        Ok(!implicit_fits && explicit_fits)
+    }
+
     /// fo-dicom `IsPrivateSequence`: true when the value at the current
     /// position starts with an item or a sequence delimiter tag.
     fn next_is_item_or_delimiter(&mut self) -> Result<bool, Error> {
@@ -756,11 +815,12 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                         observer.on_fragment_skipped(&self.ctx(pos))?;
                         continue;
                     }
-                    // Fragment 0 is the basic offset table: its entries are
-                    // 32-bit values in transfer-syntax byte order, so read it
-                    // without the pixel VR's word swap and decode it explicitly
-                    // (a malformed odd length must not trigger a unit swap).
-                    let read_vr = if first { Vr::Ob } else { vr };
+                    // Every fragment payload (the basic offset table and the
+                    // data fragments) is an opaque byte stream. Reading it with
+                    // the pixel VR's unit size would byte-swap an OW fragment on
+                    // a big-endian host and corrupt the compressed frame, so
+                    // both are read as OB (unit 1), matching the writer.
+                    let read_vr = Vr::Ob;
                     let buffer = match self.read_value_buffer(read_vr, length as u64, pos) {
                         Ok(buffer) => buffer,
                         Err(Error::Reader(ReaderError::Eof { .. }))
@@ -917,14 +977,15 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                         if !saved_explicit && self.explicit_vr {
                             self.set_byte_order(false);
                         }
-                    } else if cp246 && self.big_endian {
-                        // IO-04: CP-246 content of a UN-encoded SQ is Implicit VR
-                        // Little Endian, so clear `explicit_vr` too (not just the
-                        // byte order). Relying on the per-element T2 fallback broke
-                        // for a large inner element whose leading implicit-length
-                        // bytes happen to spell a VR code (e.g. 0x4E50 = "PN").
-                        self.explicit_vr = false;
+                    } else if cp246 {
+                        // PS3.5 CP-246 (IO-04/IO-B-02): UN + undefined-length
+                        // content is Implicit VR Little Endian regardless of the
+                        // dataset's byte order, so both `explicit_vr` and the byte
+                        // order are reset. A non-conformant explicitly-encoded
+                        // item is still read explicitly (see the probe), which
+                        // keeps older files parseable.
                         self.set_byte_order(false);
+                        self.explicit_vr = self.cp246_inner_is_explicit()?;
                     }
                     self.enter()?;
                     let inner = match defined {
@@ -1193,6 +1254,47 @@ mod tests {
         let mut builder = DatasetBuilder::with_transfer_syntax(syntax.clone());
         DicomReader::default().read(&mut source, &syntax, &mut builder, None)?;
         Ok(builder.into_dataset())
+    }
+
+    #[test]
+    fn cp246_in_explicit_vr_le_reads_implicit_inner_content() {
+        // IO-B-02: CP-246 applies in Explicit VR LE too, not only Big Endian.
+        // The inner element's implicit length (0x4E50) has low bytes that spell
+        // the VR "PN"; treating the content as explicit would misread it.
+        let vlen = 0x4E50usize;
+        let mut inner = Vec::new();
+        inner.extend_from_slice(&0x0010u16.to_le_bytes());
+        inner.extend_from_slice(&0x0020u16.to_le_bytes());
+        inner.extend_from_slice(&(vlen as u32).to_le_bytes());
+        inner.extend_from_slice(&vec![b'A'; vlen]);
+
+        let mut bytes = Vec::new();
+        // (0008,2112) UN, undefined length, Explicit VR Little Endian header
+        bytes.extend_from_slice(&0x0008u16.to_le_bytes());
+        bytes.extend_from_slice(&0x2112u16.to_le_bytes());
+        bytes.extend_from_slice(b"UN");
+        bytes.extend_from_slice(&[0, 0]);
+        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        // item header/body in little endian
+        bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        bytes.extend_from_slice(&0xE000u16.to_le_bytes());
+        bytes.extend_from_slice(&(inner.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&inner);
+        // sequence delimiter
+        bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        bytes.extend_from_slice(&0xE0DDu16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+
+        let ds = read_with(&bytes, DicomReader::default()).unwrap();
+        let seq = ds
+            .get_sequence(Tag::SOURCE_IMAGE_SEQUENCE)
+            .expect("CP-246 sequence");
+        assert_eq!(seq.len(), 1);
+        assert_eq!(
+            seq.items()[0].get_str(Tag::PATIENT_ID).unwrap().len(),
+            vlen,
+            "the implicit inner value was read with its real length"
+        );
     }
 
     #[test]
