@@ -237,6 +237,10 @@ Changing it breaks `radicom-codecs`.
 
 - `PixelData` is the **single** read/write gate for pixel data. Codecs, the transcoder and the renderer
   must all go through it; nothing may touch `(7FE0,0010)` directly.
+- Pixel Data VR is the core's decision, never the codec's: encapsulated output is `OB` regardless of
+  Bits Allocated (PS3.5 §8.2), native output is `OW` above 8 bits. `PixelDataVrMode::Compatible`
+  preserves fo-dicom 5.x's legacy `OW` fragments for byte-identical output. Codecs only append frames;
+  a codec that rebuilds the fragment sequence to change its VR is wrong.
 - A `Codec` implementation must:
   - touch the dataset only through `PixelData` property setters, never other elements;
   - map every failure to `Error::Codec` and **never panic**;

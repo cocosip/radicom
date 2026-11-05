@@ -7,13 +7,13 @@
 use crate::error::{CodecError, Error};
 use crate::model::buffer::SharedBuffer;
 use crate::model::dataset::Dataset;
-use crate::model::item::{DicomFragmentSequence, DicomItem};
+use crate::model::item::DicomItem;
 use crate::model::tag::Tag;
 use crate::model::transfer_syntax::TransferSyntax;
 use crate::model::vr::Vr;
 use crate::pixel::codec::{codec_registry, CodecParams};
 use crate::pixel::overlay::extract_overlays;
-use crate::pixel::{PixelData, PixelDataRef, PIXEL_DATA};
+use crate::pixel::{PixelData, PixelDataRef, PixelDataVrMode, PIXEL_DATA};
 use std::sync::Arc;
 
 /// `(0028,2110)` Lossy Image Compression.
@@ -30,12 +30,18 @@ pub struct Transcoder {
     to: Arc<TransferSyntax>,
     in_params: Option<CodecParams>,
     out_params: Option<CodecParams>,
+    pixel_data_read_mode: PixelDataVrMode,
+    pixel_data_write_mode: PixelDataVrMode,
 }
 
 impl Transcoder {
     /// Builds a transcoder; codecs are resolved lazily at use time (§9.1).
     /// Omitted parameters use the codec's defaults; `Some(CodecParams::None)`
     /// explicitly passes no parameters.
+    ///
+    /// Reads are tolerant (`Compatible`) and writes are standard (`Standard`):
+    /// non-conformant input VRs are warned about, never refused, while output
+    /// follows PS3.5 §8.2 (go-dicom's default read/write VR modes).
     pub fn new(
         from: Arc<TransferSyntax>,
         to: Arc<TransferSyntax>,
@@ -47,7 +53,37 @@ impl Transcoder {
             to,
             in_params,
             out_params,
+            pixel_data_read_mode: PixelDataVrMode::Compatible,
+            pixel_data_write_mode: PixelDataVrMode::Standard,
         }
+    }
+
+    /// How strictly the input's Pixel Data VR is checked (§8.2 read rules).
+    pub fn with_pixel_data_read_mode(mut self, mode: PixelDataVrMode) -> Self {
+        self.pixel_data_read_mode = mode;
+        self
+    }
+
+    /// The VR mode used for encapsulated output.
+    ///
+    /// `Compatible` reproduces the `OW` fragments of fo-dicom 5.x for
+    /// byte-for-byte identical files; `Standard` is the default.
+    pub fn with_pixel_data_write_mode(mut self, mode: PixelDataVrMode) -> Self {
+        self.pixel_data_write_mode = mode;
+        self
+    }
+
+    /// Sets both read and write modes: `true` is `Standard` everywhere,
+    /// `false` is `Compatible` everywhere.
+    pub fn with_strict_dicom_vr(mut self, strict: bool) -> Self {
+        let mode = if strict {
+            PixelDataVrMode::Standard
+        } else {
+            PixelDataVrMode::Compatible
+        };
+        self.pixel_data_read_mode = mode;
+        self.pixel_data_write_mode = mode;
+        self
     }
 
     pub fn from_syntax(&self) -> &TransferSyntax {
@@ -67,6 +103,7 @@ impl Transcoder {
             source.set_transfer_syntax(self.to.clone());
             return Ok(source);
         }
+        self.validate_pixel_data_read(ds)?;
         if !self.from.is_encapsulated() {
             extract_overlays(&mut source)?;
         }
@@ -90,7 +127,6 @@ impl Transcoder {
         };
         out.set_transfer_syntax(self.to.clone());
         let encoded_bytes = PixelDataRef::from_dataset(&out)?.get_frame(0)?.size();
-        self.finish(&mut out)?;
         // (0028,2110) marks the output lossy when the target syntax compresses
         // with loss (PS3.3 C.7.6.4; fo-dicom Transcoder write-lossy bookkeeping).
         if self.to.is_lossy() {
@@ -120,6 +156,7 @@ impl Transcoder {
         ds: &Dataset,
         frame: u32,
     ) -> Result<crate::model::buffer::SharedBuffer, Error> {
+        self.validate_pixel_data_read(ds)?;
         if !self.from.is_encapsulated() {
             return PixelDataRef::from_dataset(ds)?.get_frame(frame);
         }
@@ -180,7 +217,8 @@ impl Transcoder {
         encoded.remove(Tag::NUMBER_OF_FRAMES);
         {
             let src = PixelDataRef::from_dataset(ds)?;
-            let mut dst = PixelData::create_new(&mut encoded)?;
+            let mut dst =
+                PixelData::create_new_with_vr_mode(&mut encoded, self.pixel_data_write_mode)?;
             let params = self
                 .out_params
                 .clone()
@@ -212,23 +250,44 @@ impl Transcoder {
         Ok(decoded)
     }
 
-    /// §9.1 bookkeeping: encapsulated VR semantics and overlay extraction.
-    fn finish(&self, out: &mut Dataset) -> Result<(), Error> {
-        // encapsulated output always stores pixel data as OB
-        if self.to.is_encapsulated() {
-            let existing = out.item(&PIXEL_DATA).cloned();
-            if let Some(DicomItem::Fragments(f)) = existing {
-                if f.vr() != Vr::Ob {
-                    let mut ob = DicomFragmentSequence::new(f.tag().clone(), Vr::Ob);
-                    for fragment in f.fragments() {
-                        ob.push_fragment(fragment.clone());
-                    }
-                    ob.set_offset_table(f.offset_table().to_vec());
-                    out.insert_or_update(DicomItem::Fragments(ob));
+    /// PS3.5 §8.2 read rules (go-dicom `validatePixelDataReadVR`): encapsulated
+    /// Pixel Data is `OB`, and native Pixel Data is `OW` unless it holds at
+    /// most 8 bits in an explicit-VR syntax. `Standard` refuses such a dataset;
+    /// `Compatible` warns and keeps reading, because a non-conformant VR must
+    /// never stop a file from being opened.
+    fn validate_pixel_data_read(&self, ds: &Dataset) -> Result<(), Error> {
+        let problem = match ds.item(&PIXEL_DATA) {
+            Some(DicomItem::Fragments(fragments)) if fragments.vr() == Vr::Ow => {
+                Some("encapsulated Pixel Data is OW; PS3.5 8.2 requires OB".to_string())
+            }
+            Some(DicomItem::Element(element)) if element.vr() == Vr::Ob => {
+                let syntax = ds.transfer_syntax();
+                let bits = ds.get_or(crate::pixel::BITS_ALLOCATED, 8u16);
+                if !syntax.is_explicit_vr() && !syntax.is_encapsulated() {
+                    Some(
+                        "native Pixel Data is OB under Implicit VR; PS3.5 8.2 requires OW"
+                            .to_string(),
+                    )
+                } else if bits > 8 {
+                    Some(format!(
+                        "native Pixel Data is OB with {bits} bits allocated; PS3.5 8.2 requires OW"
+                    ))
+                } else {
+                    None
                 }
             }
+            _ => None,
+        };
+        match problem {
+            Some(message) if self.pixel_data_read_mode == PixelDataVrMode::Standard => {
+                Err(crate::pixel::pixel_err(message))
+            }
+            Some(message) => {
+                tracing::warn!("{message}; reading anyway (compatible mode)");
+                Ok(())
+            }
+            None => Ok(()),
         }
-        Ok(())
     }
 
     /// Records lossy compression on `out` (§9.1), given the original and
@@ -753,6 +812,129 @@ mod tests {
             other => panic!("expected fragments, got {other:?}"),
         }
         crate::pixel::codec::reset_codec_registry();
+    }
+
+    #[test]
+    fn compatible_write_mode_emits_ow_for_16_bit_encapsulation() {
+        let _guard = crate::pixel::codec::lock_registry();
+        set_codec_registry(Arc::new(MockRegistry {
+            syntaxes: vec![&syntaxes::JPEG_2000_LOSSLESS],
+        }));
+        let ds = with_pixels(16, 2, 1, &[&[1u8, 0, 2, 0]]);
+        let tr = Transcoder::new(
+            syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+            syntaxes::JPEG_2000_LOSSLESS.clone(),
+            None,
+            None,
+        );
+        assert_eq!(
+            tr.transcode_dataset(&ds)
+                .unwrap()
+                .item(&PIXEL_DATA)
+                .unwrap()
+                .vr(),
+            Vr::Ob,
+            "standard writes are OB at any allocation"
+        );
+        let compatible = tr
+            .with_pixel_data_write_mode(PixelDataVrMode::Compatible)
+            .transcode_dataset(&ds)
+            .unwrap();
+        assert_eq!(
+            compatible.item(&PIXEL_DATA).unwrap().vr(),
+            Vr::Ow,
+            "compatible writes keep the fo-dicom 5.x OW fragments"
+        );
+        crate::pixel::codec::reset_codec_registry();
+    }
+
+    fn ow_encapsulated_source() -> Dataset {
+        let mut ds = dataset(8, 2, 2);
+        ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
+        ds.insert_fragments(PIXEL_DATA, Vr::Ow)
+            .push_fragment(Arc::new(MemoryBuffer::from(vec![0xFEu8, 0xFD, 0xFC, 0xFB])));
+        ds
+    }
+
+    #[test]
+    fn standard_read_mode_rejects_ow_encapsulated_input() {
+        let _guard = crate::pixel::codec::lock_registry();
+        set_codec_registry(Arc::new(MockRegistry {
+            syntaxes: vec![&syntaxes::JPEG_2000_LOSSLESS],
+        }));
+        let ds = ow_encapsulated_source();
+        let tr = Transcoder::new(
+            syntaxes::JPEG_2000_LOSSLESS.clone(),
+            syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+            None,
+            None,
+        );
+        // tolerant by default: the old fo-dicom 5.x VR still decodes
+        assert_eq!(
+            frames_of(&tr.transcode_dataset(&ds).unwrap()),
+            vec![vec![1, 2, 3, 4]]
+        );
+        // strict read mode refuses the same file
+        let err = tr
+            .clone()
+            .with_pixel_data_read_mode(PixelDataVrMode::Standard)
+            .transcode_dataset(&ds)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("OB"), "{err}");
+        assert!(tr
+            .clone()
+            .with_strict_dicom_vr(true)
+            .transcode_dataset(&ds)
+            .is_err());
+        crate::pixel::codec::reset_codec_registry();
+    }
+
+    #[test]
+    fn standard_read_mode_rejects_native_ob_that_must_be_ow() {
+        let scenery = |bits: u16, syntax: Arc<TransferSyntax>| {
+            let mut ds = dataset(bits, 2, 1);
+            ds.set_transfer_syntax(syntax);
+            ds.insert_or_update(DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(
+                    PIXEL_DATA,
+                    Vr::Ob,
+                    Arc::new(MemoryBuffer::from(vec![1u8, 0, 2, 0])),
+                ),
+            ));
+            ds
+        };
+        // explicit VR with more than 8 bits allocated must be OW
+        let explicit = scenery(16, syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        let tr = Transcoder::new(
+            syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+            syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone(),
+            None,
+            None,
+        );
+        assert!(
+            tr.transcode_dataset(&explicit).is_ok(),
+            "compatible read mode warns only"
+        );
+        assert!(tr
+            .clone()
+            .with_strict_dicom_vr(true)
+            .transcode_dataset(&explicit)
+            .is_err());
+
+        // implicit VR cannot express OB at all, even at 8 bits
+        let implicit = scenery(8, syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone());
+        let tr = Transcoder::new(
+            syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone(),
+            syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+            None,
+            None,
+        );
+        assert!(tr.transcode_dataset(&implicit).is_ok());
+        assert!(tr
+            .with_strict_dicom_vr(true)
+            .transcode_dataset(&implicit)
+            .is_err());
     }
 
     #[test]

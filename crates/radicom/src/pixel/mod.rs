@@ -49,6 +49,31 @@ pub const RED_DATA: Tag = Tag::RED_PALETTE_COLOR_LOOKUP_TABLE_DATA;
 pub const GREEN_DATA: Tag = Tag::GREEN_PALETTE_COLOR_LOOKUP_TABLE_DATA;
 pub const BLUE_DATA: Tag = Tag::BLUE_PALETTE_COLOR_LOOKUP_TABLE_DATA;
 
+/// VR policy for an encapsulated (fragment-sequence) Pixel Data element.
+///
+/// PS3.5 §8.2 requires `OB` for encapsulated Pixel Data regardless of Bits
+/// Allocated: the compressed stream is a byte stream, never words. fo-dicom
+/// 5.x wrote `OW` when more than 8 bits were allocated; `Compatible` keeps those
+/// bytes for byte-for-byte interoperability with that output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PixelDataVrMode {
+    /// Always `OB`, as the standard requires.
+    #[default]
+    Standard,
+    /// `OW` when more than 8 bits are allocated, as fo-dicom 5.x wrote.
+    Compatible,
+}
+
+/// The VR an encapsulated element takes under `mode`, resolved once at
+/// creation so `add_frame` never re-decides it.
+fn resolve_encapsulated_vr(mode: PixelDataVrMode, bits: u16) -> Vr {
+    match mode {
+        PixelDataVrMode::Standard => Vr::Ob,
+        PixelDataVrMode::Compatible if bits <= 8 => Vr::Ob,
+        PixelDataVrMode::Compatible => Vr::Ow,
+    }
+}
+
 /// Storage kind of the pixel data element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelDataKind {
@@ -79,6 +104,10 @@ impl Color32 {
 pub struct PixelData<'a> {
     dataset: &'a mut Dataset,
     kind: PixelDataKind,
+    vr_mode: PixelDataVrMode,
+    /// VR resolved for an encapsulated element at creation; unused for the
+    /// native kinds, whose VR follows the storage kind.
+    encapsulated_vr: Vr,
 }
 
 macro_rules! pixel_read_methods {
@@ -555,8 +584,20 @@ pub struct PixelDataRef<'a> {
 
 impl<'a> PixelData<'a> {
     /// Chooses the storage kind for a dataset that is about to receive pixel
-    /// data (§9.1).
+    /// data (§9.1), with the standard `OB` VR for encapsulated data.
     pub fn create_new(ds: &'a mut Dataset) -> Result<Self, Error> {
+        Self::create_new_with_vr_mode(ds, PixelDataVrMode::Standard)
+    }
+
+    /// Chooses the storage kind and the encapsulated VR policy (§9.1).
+    ///
+    /// The encapsulated VR is resolved here, once, and never re-decided by
+    /// `add_frame`; codecs only append fragments (fo-dicom
+    /// `DicomPixelData.CreateNew`, go-dicom `buildFragmentSequence`).
+    pub fn create_new_with_vr_mode(
+        ds: &'a mut Dataset,
+        mode: PixelDataVrMode,
+    ) -> Result<Self, Error> {
         let syntax = ds.transfer_syntax();
         let bits = ds.get_or(BITS_ALLOCATED, 8u16);
         let kind = if syntax.is_encapsulated() {
@@ -571,17 +612,52 @@ impl<'a> PixelData<'a> {
         } else {
             PixelDataKind::OtherByte
         };
-        Ok(PixelData { dataset: ds, kind })
+        Ok(PixelData {
+            dataset: ds,
+            kind,
+            vr_mode: mode,
+            encapsulated_vr: resolve_encapsulated_vr(mode, bits),
+        })
     }
 
     /// Binds to an existing pixel data element, dispatching on its kind.
+    ///
+    /// An existing fragment sequence keeps its own VR, whatever the default
+    /// mode: a file read as `OW` must be written back as `OW` (round-trip
+    /// fidelity). The parser is deliberately tolerant of either VR.
     pub fn from_dataset(ds: &'a mut Dataset) -> Result<Self, Error> {
         let kind = kind_of(ds)?;
-        Ok(PixelData { dataset: ds, kind })
+        let vr_mode = PixelDataVrMode::default();
+        let encapsulated_vr = match ds.item(&PIXEL_DATA) {
+            Some(DicomItem::Fragments(fragments)) => fragments.vr(),
+            _ => resolve_encapsulated_vr(vr_mode, ds.get_or(BITS_ALLOCATED, 8u16)),
+        };
+        Ok(PixelData {
+            dataset: ds,
+            kind,
+            vr_mode,
+            encapsulated_vr,
+        })
     }
 
     pub fn dataset_mut(&mut self) -> &mut Dataset {
         self.dataset
+    }
+
+    /// Re-reads the storage kind after a codec changed allocation or syntax
+    /// through `dataset_mut`. An existing fragment sequence keeps its VR; a
+    /// new one takes the VR resolved at creation.
+    fn refresh_kind(&mut self) -> Result<(), Error> {
+        let next = PixelData::create_new_with_vr_mode(self.dataset, self.vr_mode)?;
+        let (kind, vr) = (next.kind, next.encapsulated_vr);
+        self.kind = kind;
+        if !matches!(
+            self.dataset.item(&PIXEL_DATA),
+            Some(DicomItem::Fragments(_))
+        ) {
+            self.encapsulated_vr = vr;
+        }
+        Ok(())
     }
 
     /// Appends a frame, returning its index (§9.1).
@@ -592,7 +668,7 @@ impl<'a> PixelData<'a> {
     /// dropped first (§9.1, review #4).
     pub fn add_frame(&mut self, data: impl AsRef<[u8]>) -> Result<u32, Error> {
         // A codec may update allocation through dataset_mut before writing.
-        self.kind = PixelData::create_new(self.dataset)?.kind;
+        self.refresh_kind()?;
         // the index comes from the frames actually stored, not from
         // `(0028,0008)`, which reads as 1 when absent
         let index = self.stored_frame_count();
@@ -602,11 +678,7 @@ impl<'a> PixelData<'a> {
                 if bytes.len() % 2 == 1 {
                     bytes.push(0);
                 }
-                let vr = if self.bits_allocated().unwrap_or(8) <= 8 {
-                    Vr::Ob
-                } else {
-                    Vr::Ow
-                };
+                let vr = self.encapsulated_vr;
                 let buffer: SharedBuffer = Arc::new(MemoryBuffer::from(bytes));
                 self.append_encapsulated(buffer, vr)?;
                 self.bump_frame_count(index + 1);
@@ -681,7 +753,7 @@ impl<'a> PixelData<'a> {
     /// This is the zero-copy path for transcoding, where frames are already
     /// shared windows over the source (PIX-02).
     pub fn add_frame_buffer(&mut self, frame: SharedBuffer) -> Result<u32, Error> {
-        self.kind = PixelData::create_new(self.dataset)?.kind;
+        self.refresh_kind()?;
         if !frame.size().is_multiple_of(2) {
             // odd frames need padding, which `add_frame` handles by copying
             return self.add_frame(frame.data()?);
@@ -689,11 +761,7 @@ impl<'a> PixelData<'a> {
         let index = self.stored_frame_count();
         match self.kind {
             PixelDataKind::Encapsulated => {
-                let vr = if self.bits_allocated().unwrap_or(8) <= 8 {
-                    Vr::Ob
-                } else {
-                    Vr::Ow
-                };
+                let vr = self.encapsulated_vr;
                 self.append_encapsulated(frame, vr)?;
                 self.bump_frame_count(index + 1);
                 Ok(index)
@@ -820,7 +888,7 @@ fn kind_of(ds: &Dataset) -> Result<PixelDataKind, Error> {
         }
     }
 }
-fn pixel_err(message: impl Into<String>) -> Error {
+pub(crate) fn pixel_err(message: impl Into<String>) -> Error {
     Error::Imaging(ImagingError(message.into()))
 }
 
@@ -1794,7 +1862,7 @@ mod tests {
         let mut ds = mono_dataset(1, 1, 16, 1);
         ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
         let mut pd = PixelData::from_dataset(&mut ds).unwrap();
-        // 16-bit encapsulated data stores OW fragments
+        // encapsulated data is OB even at 16 bits (PS3.5 §8.2)
         assert_eq!(pd.add_frame([1u8, 2]).unwrap(), 0);
         assert_eq!(pd.add_frame([3u8]).unwrap(), 1, "odd frame is padded");
         let frags = match pd.dataset().item(&PIXEL_DATA) {
@@ -1802,6 +1870,11 @@ mod tests {
             _ => 0,
         };
         assert_eq!(frags, 2, "both frames kept");
+        assert_eq!(
+            pd.dataset().item(&PIXEL_DATA).unwrap().vr(),
+            Vr::Ob,
+            "default standard mode writes OB"
+        );
         assert_eq!(pd.get_frame(1).unwrap().size(), 2);
 
         // an Element under an encapsulated kind is not a fragment sequence
@@ -1968,5 +2041,96 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("bits per entry"), "{err}");
+    }
+
+    /// Appends one encapsulated frame and reports the VR the sequence got.
+    fn encapsulated_vr_after_add(bits: u16, mode: PixelDataVrMode, owned: bool) -> Vr {
+        let mut ds = mono_dataset(2, 1, bits, 1);
+        ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
+        let mut pd = PixelData::create_new_with_vr_mode(&mut ds, mode).unwrap();
+        let frame: SharedBuffer = Arc::new(MemoryBuffer::from(vec![1u8, 2]));
+        if owned {
+            pd.add_frame_buffer(frame).unwrap();
+        } else {
+            pd.add_frame([1u8, 2]).unwrap();
+        }
+        pd.dataset().item(&PIXEL_DATA).unwrap().vr()
+    }
+
+    #[test]
+    fn standard_vr_mode_writes_ob_fragments_at_every_allocation() {
+        for bits in [8u16, 16] {
+            for owned in [false, true] {
+                assert_eq!(
+                    encapsulated_vr_after_add(bits, PixelDataVrMode::Standard, owned),
+                    Vr::Ob,
+                    "encapsulated data is OB at {bits} bits (PS3.5 8.2)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compatible_vr_mode_keeps_the_fo_dicom_ow_fragments() {
+        assert_eq!(
+            encapsulated_vr_after_add(8, PixelDataVrMode::Compatible, false),
+            Vr::Ob,
+            "8-bit encapsulated data is OB in both modes"
+        );
+        assert_eq!(
+            encapsulated_vr_after_add(16, PixelDataVrMode::Compatible, false),
+            Vr::Ow
+        );
+        assert_eq!(
+            encapsulated_vr_after_add(16, PixelDataVrMode::Compatible, true),
+            Vr::Ow
+        );
+    }
+
+    #[test]
+    fn from_dataset_keeps_an_existing_fragment_sequences_vr() {
+        let mut ds = mono_dataset(1, 1, 16, 1);
+        ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
+        ds.insert_fragments(PIXEL_DATA, Vr::Ow)
+            .push_fragment(Arc::new(MemoryBuffer::from(vec![1u8, 2])));
+        let mut pd = PixelData::from_dataset(&mut ds).unwrap();
+        assert_eq!(
+            pd.kind(),
+            PixelDataKind::Encapsulated,
+            "the VR never selects the storage kind"
+        );
+        assert_eq!(pd.get_frame(0).unwrap().size(), 2);
+        // appending must not rewrite the existing sequence's VR
+        pd.add_frame([3u8, 4]).unwrap();
+        assert_eq!(pd.dataset().item(&PIXEL_DATA).unwrap().vr(), Vr::Ow);
+    }
+
+    #[test]
+    fn an_ow_encapsulated_file_round_trips_as_ow() {
+        let mut ds = mono_dataset(1, 1, 16, 1);
+        ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
+        ds.insert_fragments(PIXEL_DATA, Vr::Ow)
+            .push_fragment(Arc::new(MemoryBuffer::from(vec![1u8, 2])));
+        let bytes = crate::io::file::DicomFile::from_dataset(ds)
+            .to_bytes(&crate::io::writer::WriteOptions::default())
+            .unwrap();
+        let back = crate::io::file::DicomFile::from_bytes(
+            &bytes,
+            &crate::io::file::ReadOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            back.dataset.item(&PIXEL_DATA).unwrap().vr(),
+            Vr::Ow,
+            "a read fragment sequence keeps the VR it was written with"
+        );
+        assert_eq!(
+            PixelDataRef::from_dataset(&back.dataset)
+                .unwrap()
+                .get_frame(0)
+                .unwrap()
+                .size(),
+            2
+        );
     }
 }
