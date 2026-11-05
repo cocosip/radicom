@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- The DICOM **Implementation Version Name** now derives from the workspace version — `RADICOM 0.1.2` instead of
+  the fixed `RADICOM_0_1` — in both file meta (0002,0013) and association user information, so a release bump
+  updates the peer-visible identity automatically. A compile-time check rejects a name longer than the 16-byte
+  SH limit.
+
 ## [0.1.2] - 2026-11-05
 
 ### Changed

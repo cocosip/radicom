@@ -68,9 +68,10 @@ fn fixture_pdata_cecho() -> Vec<u8> {
     encode(&Pdu::PData(PData { pdvs: vec![pdv] })).expect("encode")
 }
 
-/// The association request as `Association::open` builds it (user information
-/// included): pins that a real RQ carries Implementation Class UID (0x52) and
-/// Version Name (0x55), not an empty user item.
+/// An association request carrying user information: pins that an RQ carries
+/// Implementation Class UID (0x52) and Version Name (0x55), not an empty user
+/// item. The name is a fixed fixture value, not the crate version, so this
+/// golden pins the wire format instead of changing on every release bump.
 fn fixture_associate_rq_user_info() -> Vec<u8> {
     let mut associate = Associate::new("RADICOM_SCP", "RADICOM_SCU");
     associate

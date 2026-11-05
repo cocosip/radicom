@@ -22,9 +22,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 
-/// Implementation identity written into user information (§11.2).
+/// Implementation Class UID written into user information (§11.2).
 pub const IMPLEMENTATION_CLASS_UID: &str = "1.2.826.0.1.3680043.10.1330.2";
-pub const IMPLEMENTATION_VERSION_NAME: &str = "RADICOM_0_1";
+
+/// Implementation Version Name written into user information (§11.2). It is the
+/// core crate's constant, which embeds the workspace version, so the file meta
+/// and network identities always agree.
+pub use radicom::io::file::IMPLEMENTATION_VERSION_NAME;
 
 /// Server options (§11.4).
 #[derive(Debug, Clone)]

@@ -17,8 +17,22 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Implementation identity written into the file meta group (FILE-04).
+///
+/// The version name embeds the workspace version at compile time, so a release
+/// bump renames the identity a peer sees without a second edit. The space and
+/// dots are inside the SH repertoire (PS3.5 §6.2), matching the
+/// `PYDICOM 3.0.1` / `fo-dicom 5.16.7` convention; the network crate reuses
+/// this constant for its user information (§11.2), so both identities agree.
 pub const IMPLEMENTATION_CLASS_UID: &str = "1.2.826.0.1.3680043.10.1330.1";
-pub const IMPLEMENTATION_VERSION_NAME: &str = "RADICOM_0_1";
+pub const IMPLEMENTATION_VERSION_NAME: &str = concat!("RADICOM ", env!("CARGO_PKG_VERSION"));
+
+// (0002,0013) is SH: 16 bytes maximum. A pre-release version does not fit
+// ("RADICOM 1.0.0-rc.1"), so fail the build instead of writing a non-conformant
+// value to every saved file.
+const _: () = assert!(
+    IMPLEMENTATION_VERSION_NAME.len() <= 16,
+    "Implementation Version Name exceeds the SH limit of 16 bytes"
+);
 
 /// On-disk layout detected while opening (FILE-03).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -412,6 +412,9 @@ different code path.
 - Bumping a release edits two blocks in the root manifest — `[workspace.package] version` and the four internal
   pins under `[workspace.dependencies]` — followed by the normal checks, a commit, and a `vX.Y.Z` tag. Keep the
   tag equal to the version: `release.yml` rejects any other tag.
+- A bump also renames the peer-visible Implementation Version Name (`RADICOM 0.1.2`): file meta (`radicom`) and
+  association user information (`radicom-network`) both derive it from `CARGO_PKG_VERSION`, and a compile-time
+  check rejects any name longer than the 16-byte SH limit, so a pre-release version must be shortened first.
 - Publishing needs a `CARGO_REGISTRY_TOKEN` repository secret (crates.io API token with `publish-new` and
   `publish-update` scopes). CI reads it from the environment; nothing is written to disk.
 - Dependency order is load-bearing: a crate is publishable only after everything it depends on is on crates.io,
