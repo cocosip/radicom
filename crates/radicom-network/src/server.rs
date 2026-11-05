@@ -5321,6 +5321,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn loopback_c_store_implicit_vr_little_endian_round_trips() {
+        // The default policy accepts Implicit VR LE, so a dataset in that
+        // syntax exercises the receive-side decode along a branch distinct from
+        // the explicit VR LE case above.
+        let provider = Arc::new(RecordingProvider::new());
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            provider.clone(),
+            ServerOptions {
+                store_sink: crate::store::StoreSink::Memory,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut file = instance_file();
+        file.dataset
+            .set_transfer_syntax(syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone());
+
+        let mut association = Association::open(
+            addr,
+            "SCU",
+            "SCP",
+            vec![PresentationContext::new(
+                1,
+                "1.2.840.10008.5.1.4.1.1.7",
+                vec![syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.uid().to_string()],
+            )],
+            ClientOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        let response = association.send_c_store(&file).await.unwrap();
+        assert_eq!(response.status, crate::dimse::status::SUCCESS);
+        assert_eq!(provider.instance_uids(), vec!["1.2.3.4.5.6".to_string()]);
+        assert_eq!(
+            provider.patient_names(),
+            vec!["Doe^John".to_string()],
+            "the implicit VR dataset decoded on the receive side"
+        );
+
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn loopback_c_store_explicit_vr_big_endian_round_trips() {
+        // Big-endian is a different byte order, so a store in it exercises the
+        // receive-side decode under a non-little-endian negotiated syntax.
+        let provider = Arc::new(RecordingProvider::new());
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            provider.clone(),
+            ServerOptions {
+                supported_transfer_syntaxes: vec![syntaxes::EXPLICIT_VR_BIG_ENDIAN
+                    .uid()
+                    .to_string()],
+                syntax_priority: crate::association::SyntaxPriority::Preferred,
+                store_sink: crate::store::StoreSink::Memory,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut file = instance_file();
+        file.dataset
+            .set_transfer_syntax(syntaxes::EXPLICIT_VR_BIG_ENDIAN.clone());
+
+        let mut association = Association::open(
+            addr,
+            "SCU",
+            "SCP",
+            vec![PresentationContext::new(
+                1,
+                "1.2.840.10008.5.1.4.1.1.7",
+                vec![syntaxes::EXPLICIT_VR_BIG_ENDIAN.uid().to_string()],
+            )],
+            ClientOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        let response = association.send_c_store(&file).await.unwrap();
+        assert_eq!(response.status, crate::dimse::status::SUCCESS);
+        assert_eq!(provider.instance_uids(), vec!["1.2.3.4.5.6".to_string()]);
+        assert_eq!(
+            provider.patient_names(),
+            vec!["Doe^John".to_string()],
+            "the big-endian dataset decoded on the receive side"
+        );
+
+        association.release().await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn loopback_c_store_preserves_the_dataset() {
         let provider = Arc::new(RecordingProvider::new());
         let server = DicomServer::bind(

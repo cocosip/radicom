@@ -10,10 +10,16 @@
 
 use async_trait::async_trait;
 use radicom::io::file::DicomFile;
+use radicom::model::dataset::Dataset;
 use radicom::model::tag::Tag;
+use radicom::model::transfer_syntax::syntaxes;
+use radicom::model::vr::Vr;
 use radicom_network::association::sop_class;
+use radicom_network::cfind::{CFindRequest, CFindResponse};
+use radicom_network::cget::{CGetEvent, CGetRequest};
 use radicom_network::client::DicomClient;
-use radicom_network::server::{DicomServer, ServerOptions};
+use radicom_network::cmove::{CMoveRequest, CMoveResponse};
+use radicom_network::server::{ClientOptions, DicomServer, ServerOptions};
 use radicom_network::services::{
     CEchoRequest, CEchoResponse, CStoreRequest, CStoreResponse, ServiceProvider,
 };
@@ -195,4 +201,239 @@ async fn external_peer_c_echo_and_optional_c_store() {
         );
         client.release().await;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Query/Retrieve self-interop (SCU <-> SCP over real TCP, no external peer).
+//
+// The three tests below complete the C-series coverage in this integration
+// suite: `self_interop_c_echo_over_tcp` and `self_interop_c_store_real_file_*`
+// already exercise C-ECHO and C-STORE, so C-FIND / C-GET / C-MOVE are the
+// remaining upper-layer commands that need a real client+server pair.
+// ---------------------------------------------------------------------------
+
+fn instance(uid: &str) -> DicomFile {
+    let mut dataset = Dataset::new();
+    dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+    dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, uid);
+    dataset.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+    dataset.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+    DicomFile::from_dataset(dataset)
+}
+
+/// An SCP that answers a C-FIND with one Pending item per match, then Success.
+struct FindProvider {
+    matches: Vec<String>,
+}
+
+#[async_trait]
+impl ServiceProvider for FindProvider {
+    fn supported_sop_classes(&self) -> Vec<String> {
+        vec![sop_class::STUDY_ROOT_QR_FIND.to_string()]
+    }
+    fn on_c_find<'a>(
+        &'a self,
+        request: &'a CFindRequest,
+    ) -> futures::stream::BoxStream<'a, radicom_network::Result<CFindResponse>> {
+        let total = self.matches.len() as u16;
+        let mut responses = Vec::with_capacity(self.matches.len() + 1);
+        for uid in &self.matches {
+            let mut identifier = Dataset::new();
+            identifier.insert_str(Tag::STUDY_INSTANCE_UID, Vr::Ui, uid.clone());
+            identifier.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+            responses.push(Ok(CFindResponse::pending(request, identifier)));
+        }
+        responses.push(Ok(CFindResponse::success(request, total)));
+        Box::pin(futures::stream::iter(responses))
+    }
+}
+
+#[tokio::test]
+async fn self_interop_c_find_returns_every_match_over_tcp() {
+    let provider = Arc::new(FindProvider {
+        matches: vec!["1.2.3.4.1".to_string(), "1.2.3.4.2".to_string()],
+    });
+    let server = DicomServer::bind("127.0.0.1:0", provider, ServerOptions::default())
+        .await
+        .expect("bind");
+    let addr = server.local_addr();
+    let handle = tokio::spawn(async move { server.accept_one().await });
+
+    let mut client = DicomClient::new("SCU", "SCP", addr.to_string());
+    let responses = client
+        .send_c_find(&CFindRequest::study_query(1))
+        .await
+        .expect("C-FIND");
+
+    let matches: Vec<String> = responses
+        .iter()
+        .filter_map(|response| response.identifier.as_ref())
+        .filter_map(|identifier| identifier.try_get_str(Tag::STUDY_INSTANCE_UID))
+        .map(|uid| uid.trim().to_string())
+        .collect();
+    assert_eq!(
+        matches,
+        vec!["1.2.3.4.1".to_string(), "1.2.3.4.2".to_string()],
+        "every match crosses the wire"
+    );
+    assert_eq!(responses.last().unwrap().status, 0x0000, "C-FIND completes");
+
+    client.release().await;
+    handle.await.unwrap().unwrap();
+}
+
+/// A C-GET SCP that hands back every instance it holds.
+struct GetInstanceProvider {
+    instances: Vec<DicomFile>,
+}
+
+#[async_trait]
+impl ServiceProvider for GetInstanceProvider {
+    fn supported_sop_classes(&self) -> Vec<String> {
+        vec![
+            sop_class::STUDY_ROOT_QR_GET.to_string(),
+            // the storage class the reverse C-STOREs travel on (§11.4)
+            "1.2.840.10008.5.1.4.1.1.7".to_string(),
+        ]
+    }
+    fn on_c_get<'a>(
+        &'a self,
+        _request: &'a CGetRequest,
+    ) -> futures::stream::BoxStream<'a, radicom_network::Result<CGetEvent>> {
+        let events: Vec<_> = self
+            .instances
+            .iter()
+            .cloned()
+            .map(|file| Ok(CGetEvent::instance(file)))
+            .collect();
+        Box::pin(futures::stream::iter(events))
+    }
+}
+
+#[tokio::test]
+async fn self_interop_c_get_receives_instances_over_tcp() {
+    let provider = Arc::new(GetInstanceProvider {
+        instances: vec![instance("1.2.3.4.5.1"), instance("1.2.3.4.5.2")],
+    });
+    let server = DicomServer::bind("127.0.0.1:0", provider, ServerOptions::default())
+        .await
+        .expect("bind");
+    let addr = server.local_addr();
+    let handle = tokio::spawn(async move { server.accept_one().await });
+
+    let received: Arc<Mutex<Vec<DicomFile>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut client =
+        DicomClient::new("SCU", "SCP", addr.to_string()).collect_reverse_stores(received.clone());
+    let storage = vec!["1.2.840.10008.5.1.4.1.1.7".to_string()];
+    let responses = client
+        .send_c_get(&CGetRequest::study("1.2.3.4", 1), &storage)
+        .await
+        .expect("C-GET");
+
+    assert_eq!(
+        received.lock().unwrap().len(),
+        2,
+        "both instances arrived as reverse C-STOREs"
+    );
+    let terminal = responses.last().unwrap();
+    assert_eq!(terminal.status, 0x0000, "C-GET completes");
+    assert_eq!(terminal.summary.completed, 2);
+
+    client.release().await;
+    handle.await.unwrap().unwrap();
+}
+
+/// An SCP that performs C-MOVE by pushing every instance to a destination.
+struct MoveToDestinationProvider {
+    destination: std::net::SocketAddr,
+    instances: Vec<DicomFile>,
+}
+
+#[async_trait]
+impl ServiceProvider for MoveToDestinationProvider {
+    fn supported_sop_classes(&self) -> Vec<String> {
+        vec![sop_class::STUDY_ROOT_QR_MOVE.to_string()]
+    }
+    fn on_c_move<'a>(
+        &'a self,
+        request: &'a CMoveRequest,
+    ) -> futures::stream::BoxStream<'a, radicom_network::Result<CMoveResponse>> {
+        let destination = self.destination;
+        let instances = self.instances.clone();
+        Box::pin(futures::stream::once(async move {
+            let (summary, error) = radicom_network::cmove::store_to_destination(
+                destination,
+                "MOVE-SCP",
+                "STORE-SCP",
+                &instances,
+                None,
+                ClientOptions::default(),
+            )
+            .await?;
+            let response = match error {
+                None => CMoveResponse::completed(request, summary),
+                Some(error) => {
+                    let mut response = CMoveResponse::failure(
+                        request,
+                        radicom_network::dimse::status::PROCESSING_FAILURE,
+                        error.to_string(),
+                    );
+                    response.summary = summary;
+                    response
+                }
+            };
+            Ok(response)
+        }))
+    }
+}
+
+#[tokio::test]
+async fn self_interop_c_move_delivers_instances_to_a_destination_over_tcp() {
+    // The destination is a real, separate C-STORE SCP on loopback.
+    let destination_provider = Arc::new(CaptureProvider::new(vec![
+        "1.2.840.10008.5.1.4.1.1.7".to_string()
+    ]));
+    let destination = DicomServer::bind(
+        "127.0.0.1:0",
+        destination_provider.clone(),
+        ServerOptions {
+            store_sink: StoreSink::Memory,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("bind destination");
+    let destination_addr = destination.local_addr();
+    tokio::spawn(async move {
+        let _ = destination.run().await;
+    });
+
+    let provider = Arc::new(MoveToDestinationProvider {
+        destination: destination_addr,
+        instances: vec![instance("1.2.3.4.5.1"), instance("1.2.3.4.5.2")],
+    });
+    let server = DicomServer::bind("127.0.0.1:0", provider, ServerOptions::default())
+        .await
+        .expect("bind");
+    let addr = server.local_addr();
+    let handle = tokio::spawn(async move { server.accept_one().await });
+
+    let mut client = DicomClient::new("SCU", "SCP", addr.to_string());
+    let responses = client
+        .send_c_move(&CMoveRequest::study("1.2.3.4", "STORE-SCP", 1))
+        .await
+        .expect("C-MOVE");
+
+    let terminal = responses.last().unwrap();
+    assert_eq!(terminal.status, 0x0000, "C-MOVE completes");
+    assert_eq!(terminal.summary.completed, 2, "both sub-operations counted");
+    assert_eq!(terminal.remaining, 0);
+    assert_eq!(
+        destination_provider.files.lock().unwrap().len(),
+        2,
+        "the destination received every pushed instance"
+    );
+
+    client.release().await;
+    handle.await.unwrap().unwrap();
 }
