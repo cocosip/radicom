@@ -26,7 +26,7 @@ The concrete image codec implementations (JPEG, JPEG-LS, JPEG 2000, HTJ2K, RLE n
 - **DICOM File I/O** — Part 10 file parsing and writing: explicit/implicit VR, both endiannesses, sequences, fragments, large-value streaming (`ReadLargeOnDemand` / `SkipLargeTags` / `ReadAll`), deflate
 - **Transfer Syntax Support** — Explicit/Implicit VR, Big/Little Endian, plus a registry for application-defined syntaxes
 - **Character Encoding** — Multi-byte and ISO 2022 escape-sequence handling (UTF-8, Latin, Chinese, Japanese, Korean, Greek, Arabic, Hebrew, Cyrillic, Thai)
-- **Fragment Sequences** — Read and write encapsulated pixel data with offset tables; compressed syntaxes are supplied by `radicom-codecs`
+- **Fragment Sequences** — Read and write encapsulated pixel data with offset tables; encapsulated output is `OB` by default (`PixelDataVrMode::Compatible` reproduces fo-dicom 5.x's legacy `OW`); compressed syntaxes are supplied by `radicom-codecs`
 - **Dataset Operations** — Rich typed access (`get` / `try_get` / `get_or` / `get_str`), masked-tag matching, walkers, copy
 - **DICOMDIR Media** — Create, read, stitch and save media directories, with optional generated icons
 - **File Scanning** — Cancellable metadata-only directory scanning with bounded concurrency
@@ -70,9 +70,9 @@ Legend: ✅ implemented and tested in this workspace; ⛔ deliberately out of sc
 
 ```toml
 [dependencies]
-radicom = "0.1"
-radicom-network = "0.1"   # only if you need DIMSE networking
-radicom-json = "0.1"      # only if you need DICOM JSON / XML
+radicom = "0.1.2"
+radicom-network = "0.1.2"   # only if you need DIMSE networking
+radicom-json = "0.1.2"      # only if you need DICOM JSON / XML
 ```
 
 Optional features of `radicom`:
@@ -83,7 +83,7 @@ Optional features of `radicom`:
 | `anonymize` | PS3.15 anonymization profiles (`radicom::anonymizer`, pulls in `regex`) |
 
 ```toml
-radicom = { version = "0.1", features = ["render", "anonymize"] }
+radicom = { version = "0.1.2", features = ["render", "anonymize"] }
 ```
 
 Other workspace features:
@@ -164,6 +164,7 @@ use radicom::Tag;
 let options = ReadOptions {
     read: FileReadOption::SkipLargeTags,
     large_object_size: 128 * 1024, // 128 KiB threshold
+    ..Default::default()
 };
 let file = DicomFile::open_with_options("large_image.dcm", &options)?;
 assert!(file.dataset.item(&Tag::PIXEL_DATA).is_none());
@@ -190,6 +191,44 @@ fn main() -> Result<(), radicom::Error> {
     Ok(())
 }
 ```
+
+### Transcoding and Pixel Data VR
+
+`Transcoder` and the `clone_with_syntax` convenience APIs move pixel data between transfer syntaxes
+through the codec registry. This repository ships no codecs, so compressed targets need implementations
+registered from [`radicom-codecs`](https://github.com/cocosip/radicom-codecs); uncompressed-to-uncompressed
+transcoding works standalone.
+
+```rust
+use radicom::io::file::DicomFile;
+use radicom::model::transfer_syntax::syntaxes;
+use radicom::pixel::PixelDataVrMode;
+
+fn main() -> Result<(), radicom::Error> {
+    let file = DicomFile::open("ct_image.dcm")?;
+
+    // Same pixels, Explicit VR Little Endian encoding.
+    let uncompressed =
+        file.clone_with_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(), None)?;
+
+    // Encapsulated output is OB at every bit depth (PS3.5 §8.2). `Compatible`
+    // writes the legacy OW fragments of fo-dicom 5.x for byte-identical files.
+    let legacy = file.clone_with_syntax_and_vr_mode(
+        syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        None,
+        PixelDataVrMode::Compatible,
+    )?;
+
+    uncompressed.save("uncompressed.dcm")?;
+    legacy.save("legacy_vr.dcm")?;
+    Ok(())
+}
+```
+
+Reading stays tolerant: an existing `OW` fragment sequence is kept and round-trips unchanged.
+`Transcoder::with_pixel_data_read_mode(PixelDataVrMode::Standard)` opts into strict input validation,
+while `Transcoder::with_strict_dicom_vr(bool)` is the go-dicom-style alias that changes only the
+**write** mode (`true` = `Standard`, `false` = `Compatible`).
 
 ### Rendering to an Image
 
@@ -255,8 +294,13 @@ let options = WriteOptions {
     explicit_length_sequences: true,      // defined instead of undefined length
     explicit_length_sequence_items: true,
     keep_group_lengths: false,            // recalculate rather than strip (GGGG,0000)
+    ..Default::default()
 };
 ```
+
+Saved files identify the implementation as `RADICOM <version>` in `(0002,0013) Implementation Version
+Name`; the value is derived from the package version at build time, so a release bump renames it
+automatically. Association user information advertises the same name.
 
 ### Character Encoding
 
@@ -334,18 +378,31 @@ fn main() -> Result<(), radicom::Error> {
 ### File Scanning
 
 ```rust
-use radicom::media::scanner::{DicomFileScanner, ScannerOptions};
+use radicom::media::{scan_directory, ScanEvent, ScanOptions};
 
-let scanner = DicomFileScanner::new(ScannerOptions::default());
-for result in scanner.scan("studies/") {
-    match result {
-        Ok(entry) => println!("{}", entry.path.display()),
-        Err(e) => eprintln!("unreadable: {e}"),
-    }
+fn main() -> Result<(), radicom::Error> {
+    let options = ScanOptions {
+        glob: Some("*.dcm".to_string()),
+        ..Default::default()
+    };
+    let summary = scan_directory(
+        "studies/",
+        &options,
+        &mut |event| {
+            if let ScanEvent::File { path, .. } = event {
+                println!("{}", path.display());
+            }
+        },
+        |_path| Ok(()),
+    )?;
+    println!("{} files matched", summary.files_matched);
+    Ok(())
 }
 ```
 
 > Scanning is metadata-only and stops before Pixel Data; results are delivered deterministically.
+> Use `ScanControl` with `scan_directory_with_control` to cancel a running scan, or
+> `DicomDirectoryBuilder` to feed the matches straight into a DICOMDIR.
 
 ## DICOM Networking
 
@@ -458,12 +515,19 @@ class back.
 
 ### TLS
 
+Requires the `tls` feature. TLS material lives in the connection options:
+
 ```rust
+use radicom_network::client::{DicomClient, DicomClientOptions};
+use radicom_network::server::ClientOptions;
 use radicom_network::tls::TlsOptions;
 
 let client = DicomClient::new("MY-SCU", "SECURE-SCP", "pacs.example.com:2762")
     .with_options(DicomClientOptions {
-        tls: Some(TlsOptions::client(...)),
+        connection: ClientOptions {
+            tls: Some(TlsOptions::client(Some("ca.pem"))),
+            ..Default::default()
+        },
         ..Default::default()
     });
 ```
@@ -485,15 +549,13 @@ client.with_event_handler(Arc::new(|event| {
 ## Structured Reports
 
 ```rust
-use radicom::sr::code_item::CodeItem;
-use radicom::sr::content_item::{ContentItem, RelationshipType};
+use radicom::sr::{CodeItem, ContentItem, Relationship};
 
-let code = CodeItem::new("T-A0100", "SRT")
+let concept = CodeItem::new("T-A0100", "SRT")
     .with_meaning("Chest")
     .with_version("1");
 
-let item = ContentItem::text("Finding", "No abnormality detected")
-    .with_concept_name(code);
+let item = ContentItem::text(concept, Relationship::Contains, "No abnormality detected");
 ```
 
 ## Printing
@@ -502,13 +564,16 @@ let item = ContentItem::text("Finding", "No abnormality detected")
 
 ## Benchmarks
 
-The workspace ships three dependency-free benchmark binaries (`harness = false`, `std::time::Instant`) so they run offline without `criterion`:
+The workspace ships four dependency-free benchmark binaries (`harness = false`, `std::time::Instant`) so they run offline without `criterion`:
 
 | Binary | Measures | Command |
 |---|---|---|
 | `crates/radicom/benches/core.rs` | `parse_dataset`, `write_dataset`, `get_frame`, `render_frame`, `open_800_elements`, `from_bytes_800` | `cargo bench -p radicom --all-features` |
+| `crates/radicom/benches/workflows.rs` | charset encode/decode (UTF-8 + ISO 2022), deflate, uncompressed transcoding, validation, DICOMDIR build/save, directory scan, on-demand open, anonymize | `cargo bench -p radicom --all-features` |
 | `crates/radicom-json/benches/json.rs` | `dataset_to_json`, `json_to_dataset`, JSON round-trip | `cargo bench -p radicom-json` |
 | `crates/radicom-network/benches/throughput.rs` | loopback C-STORE throughput (`Memory` and `SpoolToTemp` sinks) | `cargo bench -p radicom-network` |
+
+The `workflows.rs` anonymize row only runs with `--all-features`.
 
 Compile-check all targets without running them:
 
@@ -516,7 +581,7 @@ Compile-check all targets without running them:
 cargo bench --workspace --no-run
 ```
 
-Example output from `cargo bench -p radicom --all-features` on a developer machine (absolute numbers are CPU- and file-dependent):
+Example output from the `radicom` core suite on a developer machine (absolute numbers are CPU- and file-dependent):
 
 | Benchmark | Result |
 |---|---:|
@@ -559,7 +624,7 @@ See [docs/02-development-guide.md](docs/02-development-guide.md) for the full te
 
 ### Coverage
 
-Current measured production-source line coverage is **90.03%** (14,554 / 16,165 lines), using `rustc -C instrument-coverage` + `llvm-cov`, excluding third-party crates, generated dictionary tables, `xtask`, integration-test sources and `#[cfg(test)]` modules. The breakdown is approximately: core 90.19%, network 91.30%, JSON 76.76%.
+Current measured production-source line coverage is **95.34%** (23,546 / 24,698 lines), using `rustc -C instrument-coverage` + `llvm-cov`, excluding third-party crates, generated dictionary tables, `xtask`, integration-test sources and `#[cfg(test)]` modules. The breakdown is approximately: core 96.10%, network 93.75%, JSON 95.44%.
 
 Run coverage locally with `llvm-tools-preview` and `cargo-llvm-cov`:
 
@@ -588,19 +653,17 @@ To move to a newer dictionary baseline, replace both XML files, run the generato
 
 This project is a Rust port inspired by [fo-dicom](https://github.com/fo-dicom/fo-dicom). The design keeps fo-dicom's semantics (tolerance behaviours included) while using Rust idioms: traits and generics instead of dependency-injection containers and inheritance, `Result`/`Option` instead of exception tiers, and zero-copy buffer views for large values.
 
-The mapping from fo-dicom to radicom — feature parity, intentional divergences and out-of-scope areas — is recorded in:
+The mapping from fo-dicom to radicom — scope, intentional divergences and out-of-scope areas — is recorded in:
 
-- [docs/02-development-guide.md](docs/02-development-guide.md) — feature-by-feature mapping with IDs, progress, outstanding work and known limits
+- [docs/02-development-guide.md](docs/02-development-guide.md) — scope, baseline, known limits, testing, interop and release process
 - [docs/01-architecture.md](docs/01-architecture.md) — architecture and the intentional divergences (§14)
 
 ## Documentation
 
 | Document | Content |
 |---|---|
-| [docs/README.md](docs/README.md) | Documentation index, project background, baseline and glossary |
 | [docs/01-architecture.md](docs/01-architecture.md) | **What the code must obey**: tag ordering, tolerance rules T1–T10, the frozen codec boundary, wire formats, divergences |
-| [docs/02-development-guide.md](docs/02-development-guide.md) | Feature list with IDs and priorities, milestone status, outstanding work, known limits, test strategy, CI and publishing |
-| [docs/03-interop.md](docs/03-interop.md) | Interop testing against real peers |
+| [docs/02-development-guide.md](docs/02-development-guide.md) | Scope and baseline, known limits, test strategy, interop testing, code generation, CI and publishing |
 
 ## License
 
@@ -619,8 +682,8 @@ Third-party data: the DICOM dictionary XML files reused from fo-dicom (and the t
 crates.io API token with `publish-new` and `publish-update` scopes); releasing is done by pushing a tag:
 
 ```pwsh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.2
+git push origin v0.1.2
 ```
 
 The version lives once in the root `Cargo.toml` (`[workspace.package] version`, mirrored by the internal

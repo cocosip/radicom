@@ -1,4 +1,4 @@
-//! Match rule DSL for query filtering (MATCH-01; docs/02-development-guide.md §2).
+//! Match rule DSL for query filtering.
 //!
 //! Ports fo-dicom `DicomMatchRules`: a [`MatchRule`] tests a dataset against a
 //! tag/value condition. Rules compose with [`MatchRuleSet`] (And/Or) and

@@ -1,10 +1,10 @@
 # Development Guide
 
-> Planning, feature IDs, progress and testing. Design invariants live in
-> [01-architecture.md](01-architecture.md). Historical day-by-day entries are **not** kept here — use
-> `git log`.
+> Testing, interop, maintenance and release. Design invariants live in
+> [01-architecture.md](01-architecture.md); usage examples are in the root [README.md](../README.md).
+> This document describes the current state only — history lives in `git log`.
 
-## 1. Scope
+## 1. Scope and Baseline
 
 **In scope (`radicom`)**: DICOM data model, file reading/writing, network communication (DIMSE),
 serialization, media files, structured reports, printing data model, anonymization, pixel data access
@@ -15,252 +15,28 @@ JPEG-LS / JPEG 2000 / HTJ2K / RLE codecs. `radicom` defines only the interfaces,
 registration mechanism and transcode flow. `radicom-codecs` mirrors `fo-dicom.Codecs` and injects its
 implementations through the registration point.
 
-**Priorities**
-
-| Level | Meaning |
+| Item | Value |
 |---|---|
-| P0 | Core requirement, part of the MVP; the library is unusable without it |
-| P1 | Important; should be done before the official release |
-| P2 | Enhancement; may be deferred |
+| Reference implementation | fo-dicom (Fellow Oak DICOM), v5.2.x stable / 6.0.0-alpha dev source tree |
+| DICOM standard edition tracked | 2025d (per the fo-dicom ChangeLog) |
+| Bundled dictionary version | 2026b (5347 public tags, 4678 private tags across 235 creators) |
+| Primary standard parts | PS3.3 (information model), PS3.5 (data structures/encoding), PS3.6 (data dictionary), PS3.7 (message exchange), PS3.8 (network communication), PS3.10 (media storage), PS3.15 (security profiles), PS3.18 (web services / JSON) |
 
 **fo-dicom components with no direct port** (the capability is covered in a Rust-native shape; only the
 .NET-specific packaging is not carried over):
 
 | fo-dicom component | radicom equivalent |
 |---|---|
-| `FO-DICOM.AspNetCore` (IHostedService wrapper) | HOST-01: config-driven hosting helper on `radicom-network` |
-| `FO-DICOM.Instrumentation` | OBS-02: `tracing`-convention metrics emission |
-| `FO-DICOM.Json` (Newtonsoft backend) | JSON-01 (serde). A second backend is redundant — divergence D11 |
-| `FO-DICOM.Dump` (WPF GUI) | INF-07: `radicom-dump` CLI + INF-04 library dump |
-| WinForms / WPF / SkiaSharp / NetStandard image backends | REND-07: one `RawImage` + optional backend — divergence D7 |
-| GDI+ print rendering extensions | PRINT-02: cross-platform FilmBox layout rendering |
-| Managed codecs in Core (RLE, JPEG Lossless) | radicom ships zero built-in codecs — divergence D10 |
-| Legacy client plumbing (`DicomClientConnection`, state shims) | replaced by the async expert layer (CLI-02) |
+| `FO-DICOM.AspNetCore` (IHostedService wrapper) | config-driven hosting helper on `radicom-network` |
+| `FO-DICOM.Instrumentation` | `tracing`-convention metrics emission |
+| `FO-DICOM.Json` (Newtonsoft backend) | serde. A second backend is redundant — divergence D11 |
+| `FO-DICOM.Dump` (WPF GUI) | `radicom-dump` CLI plus the library dump formatter |
+| WinForms / WPF / SkiaSharp / NetStandard image backends | one `RawImage` plus an optional backend — divergence D7 |
+| GDI+ print rendering extensions | cross-platform FilmBox layout rendering |
+| Managed codecs in Core (RLE, JPEG Lossless) | zero built-in codecs — divergence D10 |
+| Legacy client plumbing (`DicomClientConnection`, state shims) | replaced by the async expert layer |
 
----
-
-## 2. Feature List
-
-Every feature carries a stable ID. **IDs are never renumbered**; a superseded feature is marked
-`Dropped` with a reason rather than deleted. These IDs are referenced throughout the code and the
-architecture document.
-
-### 2.1 Core identifier system
-
-| ID | Feature | Priority |
-|---|---|---|
-| TAG-01 | Tag structure `(group, element)`; `is_private`; u32 conversion; Display/Parse formats | P0 |
-| TAG-02 | Private tag semantics: equality/ordering/hash by group + low 8 bits + creator; block normalisation | P0 |
-| TAG-03 | 5259 generated `Tag` constants plus 88 masked rows from the fo-dicom dictionary XML | P0 |
-| TAG-04 | Tag interning index (u32 → Tag) so the parser and AT elements reuse instances | P1 |
-| TAG-05 | `MaskedTag` (card + mask, `xx` wildcard) with Parse/Display/IsMatch | P1 |
-| VR-01 | The 34 VRs with encoding metadata (length-field width, padding, unit size, string flags) | P0 |
-| VR-02 | VR parsing from both strings and two-letter bytes | P0 |
-| UID-01 | UID typing (12 classifications) plus heuristic storage-category derivation | P0 |
-| UID-02 | UID registry (~1928 generated constants) with Parse/Register/Query/Enumerate | P0 |
-| UID-03 | UID generation: `2.25.<uuid>`, sequence append, consistent remapping, recursive regeneration | P0 |
-| UID-04 | Print management Meta SOP ↔ sub SOP class mapping, both directions | P2 |
-| UID-05 | Derive a DICOM UID from the host MAC address | P2 |
-| TS-01 | ~57 built-in transfer syntaxes with explicit/encapsulated/lossy/deflate/endianness attributes | P0 |
-| TS-02 | Transfer syntax Parse/Lookup/Query/Register — the extension point for `radicom-codecs` | P0 |
-| TS-03 | Virtual syntaxes (Implicit VR Big Endian, GE private big endian) | P1 |
-| DICT-01 | Dictionary entries (tag/masked/name/keyword/VR list/VM/retired); public + private, lazy loaded | P0 |
-| DICT-02 | Lookup precedence: private sub-dictionary → creator fallback → exact → masked → Unknown | P0 |
-| DICT-03 | Runtime loading of external dictionaries from XML; one-shot default replacement | P1 |
-| VM-01 | VM representation with Parse/Display round-trip | P1 |
-
-### 2.2 Dataset and elements
-
-| ID | Feature | Priority |
-|---|---|---|
-| DS-01 | Ordered dataset container (tag-sorted) with deep-copy and transfer-syntax cascade into nested items | P0 |
-| DS-02 | Three read tiers: `get_*` (Err), `try_get_*` (Option), `get_or` (default) | P0 |
-| DS-03 | Write API: insert/insert_or_update, VR resolution, multi-value parsing, remove/clear | P0 |
-| DS-04 | Private tag operations with automatic creator insertion and block-exhaustion handling | P0 |
-| DS-05 | `clone` (deep, skip validation) and `copy_to` (all / selected / masked filter) | P0 |
-| DS-06 | Enhanced multi-frame functional-group flattening | P1 |
-| DS-07 | Element-wise deep content equality as `PartialEq` | P1 |
-| DS-08 | DA + TM → timezone-aware date-time composition | P1 |
-| DS-09 | Walker trait (element / SQ enter-exit / fragment enter-exit), shared by serializers and dumps | P0 |
-| DS-10 | `enumerate_group` (group length excluded) and `enumerate_masked` | P2 |
-| ELEM-01 | Concrete element types per VR (strings, PN, numeric strings, date-time, binary, AT, Other, UN, UI) | P0 |
-| ELEM-02 | Conversion matrix to Rust types; DS comma tolerance; precision demotion | P0 |
-| ELEM-03 | Fragment sequences: offset table + fragment list, OB/OW variants | P0 |
-| ELEM-04 | Sequence elements with recursive validation | P0 |
-| ELEM-05 | Lazy evaluation: strings keep text only, encoding and padding deferred to serialization | P1 |
-| MATCH-01 | Match rule DSL (14 rules plus And/Or/Negate composition) | P2 |
-| XFORM-01 | Transform rule DSL (16 rules) with Modified Attributes Sequence recording | P2 |
-
-### 2.3 Character sets and validation
-
-| ID | Feature | Priority |
-|---|---|---|
-| ENC-01 | ~34 charset ↔ encoding mappings with spelling tolerance and ASCII fallback | P0 |
-| ENC-02 | Multi-charset decoding via ISO 2022 escape sequences; per-VR reset rules | P0 |
-| ENC-03 | Multi-charset encoding: strict probing, per-segment trial, escape injection, fallback | P1 |
-| ENC-04 | Custom charset registration and encoding → charset reverse lookup | P1 |
-| VAL-01 | Per-VR string validators (length, legal characters, format, ranges) incl. DT timezone rules | P0 |
-| VAL-02 | VM validation against dictionary Min/Max | P1 |
-| VAL-03 | Validation switches: global × per-dataset × scope guard | P0 |
-
-### 2.4 File and IO
-
-| ID | Feature | Priority |
-|---|---|---|
-| FILE-01 | `DicomFile` open from path/stream/bytes, stop predicate, context-carrying errors | P0 |
-| FILE-02 | Large-object policy: Default / ReadLargeOnDemand / SkipLargeTags / ReadAll with threshold | P1 |
-| FILE-03 | Format detection: preamble/no-preamble/no-meta/ACR-NEMA, endianness, VR explicitness | P0 |
-| FILE-04 | File meta information (group 0002) with strongly typed fields and pre-save refresh | P0 |
-| FILE-05 | Save: preamble + meta (always Explicit VR LE, group length recalculated) + dataset | P0 |
-| FILE-06 | `has_valid_header` and Clone | P1 |
-| RD-01 | Recursive-descent parser with depth cap (256) | P0 |
-| RD-02 | 8-callback parse observer trait, decoupling parsing from building | P0 |
-| RD-03 | Malformed-data tolerance (rows T1–T10, see [01-architecture.md](01-architecture.md) §7) | P0 |
-| RD-04 | Deflate transfer syntax (raw DEFLATE on write, zlib fallback on read) | P1 |
-| RD-05 | Private creator tracking during parsing; tags bind their creator immediately | P0 |
-| WR-01 | Walker-based writer; CP-1066 UN demotion; private SQ always explicit length; fragments | P0 |
-| WR-02 | Exact encoded-size calculator (reused by explicit lengths and DICOMDIR offsets) | P0 |
-| WR-03 | Group length recalculation/removal plus write options | P0 |
-| BUF-01 | `ByteBuffer` trait (`is_memory/size/data/get_byte_range/copy_to`) | P0 |
-| BUF-02 | Buffer implementations: Memory/Empty/Range/Composite/FileWindow/StreamWindow/TempSpill/Endian/padding/BulkDataUri | P0 |
-| IO-01 | File/directory references and temporary files with deferred deletion | P1 |
-| IO-02 | Byte source/target with multi-width access and large-object logic | P0 |
-| IO-03 | Endianness enum, byte swapping, `ByteConverter` | P0 |
-| MEM-01 | Large-buffer lease pool | P2 |
-
-### 2.5 Pixel data and codec interfaces
-
-| ID | Feature | Priority |
-|---|---|---|
-| PIX-01 | `PixelData` facade: attribute mapping, OB/OW/encapsulated kinds, factories | P0 |
-| PIX-02 | Frame access: zero-copy slices, three encapsulated extraction rules, GE big-endian swap, `add_frame` | P0 |
-| PIX-03 | Frame size with 1-bit row packing, YBR 422/420 odd widths and subsampling | P0 |
-| PIX-04 | Palette LUT extraction (size 0 → 65536; 16-bit entries take the high byte) | P1 |
-| PIX-05 | Overlay discovery, standalone and embedded high-bit extraction, reverse building | P1 |
-| CODEC-01 | `Codec` trait touching only the `PixelData` facade — the narrow boundary for `radicom-codecs` | P0 |
-| CODEC-02 | Codec parameter families (JPEG, JPEG 2000, HTJ2K, RLE, JPEG-LS) | P0 |
-| CODEC-03 | `CodecRegistry`; default empty; `radicom-codecs` injects its own implementation | P0 |
-| ~~CODEC-04~~ | ~~Built-in RLE codec~~ — **dropped 2026-10-27** (zero built-in codecs; divergence D10) | – |
-| CODEC-05 | JPEG SOF bit-depth probing (a shared boundary utility, not a codec) | P2 |
-| TR-01 | `Transcoder` with the decision table, lossy bookkeeping, overlay extraction, meta sync | P0 |
-| TR-02 | Single-frame cloning decode (`decode_frame`, `decode_pixel_data`) | P0 |
-| TR-03 | `clone_with_syntax` convenience API | P1 |
-
-### 2.6 Network (DIMSE)
-
-| ID | Feature | Priority |
-|---|---|---|
-| NET-01 | Async TCP/TLS abstraction: options, timeouts, initiator/acceptor, IPv4/IPv6 | P0 |
-| NET-02 | PDU codec for all 7 types with bounds checking and PDV handling | P0 |
-| NET-03 | Association model: presentation contexts, odd IDs, role selection | P0 |
-| NET-04 | Extended negotiation (SOP class and common) plus user identity | P1 |
-| NET-05 | Protocol engine: receive loop, pending-ID table, PDV reassembly | P0 |
-| NET-06 | Chunked send: on-the-fly PDV chunking and on-the-wire transcoding (a per-message circuit breaker is not implemented) | P0 |
-| NET-07 | Timeouts: association/request/release deadlines with pending cleanup (no background watchdog task) | P1 |
-| NET-08 | Connection lifecycle: release/abort close paths, typed error propagation | P0 |
-| SRV-01 | Generic `DicomServer<P>`: listening, per-connection tasks, **enforced max-clients**, lifecycle | P0 |
-| SRV-02 | Built-in C-ECHO SCP | P0 |
-| SRV-03 | C-STORE receive with an injectable spool sink; failures answered without dropping the connection | P0 |
-| SRV-04 | C-FIND with level presets and streamed matches | P0 |
-| SRV-05 | C-GET with reverse C-STORE sub-operations | P1 |
-| SRV-06 | C-MOVE with outbound store and Move Originator written | P1 |
-| SRV-07 | N-EVENT-REPORT / N-GET / N-SET / N-ACTION / N-CREATE / N-DELETE | P2 |
-| SRV-08 | C-CANCEL (fo-dicom defines it without implementing; radicom fills the gap) | P2 |
-| CLI-01 | High-level `DicomClient`: queue, association reuse, retry, cancellation, events | P0 |
-| CLI-02 | Expert layer: `Connection`, response streams, manual association management | P1 |
-| HOST-01 | Config-driven server hosting helper with health and graceful stop | P2 |
-| DIMSE-01 | Command model: 22 fields, bit-15 response flag, message IDs, ~60 status presets with masks | P0 |
-| OBS-01 | Structured logging plus a metrics collection trait | P1 |
-| OBS-02 | `tracing`-convention metric emission (no `opentelemetry` dependency — divergence D12) | P2 |
-
-### 2.7 Serialization, media, SR, printing, anonymization
-
-| ID | Feature | Priority |
-|---|---|---|
-| JSON-01 | DICOM JSON (PS3.18): tag keys, Value/InlineBinary/BulkDataURI, PN groups, numeric modes, **group length stripped**, tolerant reading | P1 |
-| JSON-02 | Bidirectional BulkDataUri buffer references | P2 |
-| XML-01 | One-way Native DICOM Model export | P2 |
-| MEDIA-01 | DICOMDIR read/write: two-pass offsets, four-level dedup chain, nearest-offset tolerance | P1 |
-| MEDIA-02 | `IconGenerator` trait plus the built-in 8-bit ≤128×128 builder | P2 |
-| MEDIA-03 | Directory scanner with progress events | P2 |
-| SR-01 | SR content tree: 15 value types, 7 relationships, traversal, open/save with explicit lengths | P1 |
-| SR-02 | CodeItem (short/long/URN dispatch), MeasuredValue, ReferencedSOP | P1 |
-| PRINT-01 | Film Session/Box, Image Box, Presentation LUT models with layout computation | P2 |
-| PRINT-02 | FilmBox layout rendering to an image | P2 |
-| ANON-01 | PS3.15 Basic Profile: 11 options × 6 actions, wildcard matching, SQ recursion, consistent UIDs | P1 |
-
-### 2.8 Rendering
-
-| ID | Feature | Priority |
-|---|---|---|
-| REND-01 | `DicomImage` entry: PI inference, window properties, frame caches, scale, overlay compositing | P2 |
-| REND-02 | Pipelines: grayscale (Modality → VOI → output table → invert), RGB, palette | P2 |
-| REND-03 | LUT family: VOI, Modality, Output, Palette, Invert, Padding, Composite | P2 |
-| REND-04 | `GrayscaleRenderOptions` factory chain plus the XA/XRF exception | P2 |
-| REND-05 | Pixel render types: bit masking, min/max, histogram, bilinear/nearest scaling | P2 |
-| REND-06 | Color conversion: YBR family → RGB, planar↔interleaved, reverse bits, color tables | P2 |
-| REND-07 | Image backend: dependency-free `RawImage` (BGRA) with PNG/BMP export | P2 |
-| REND-08 | `FrameGeometry` (image ↔ patient) and localizer projection/intersection | P2 |
-| REND-09 | MPR: volume cutting, stack resampling, write-back | P2 |
-| REND-10 | Icon image rendering `(0000,9113)` | P2 |
-| REND-11 | SpatialTransform plus shared math utilities (Point/Vector/Matrix/Rect/Interval/Histogram/BitList) | P2 |
-
-### 2.9 Infrastructure
-
-| ID | Feature | Priority |
-|---|---|---|
-| INF-01 | Error hierarchy carrying tag/VR/content context | P0 |
-| INF-02 | ImplementationClassUID / VersionName constants | P0 |
-| INF-03 | Logging facade with categorized targets and dataset dump | P1 |
-| INF-04 | Dataset → formatted string dump | P1 |
-| INF-05 | Code generation (tags, UIDs, dictionaries, anonymization CSV) | P0 |
-| INF-06 | Test data corpus and round-trip baselines | P0 |
-| INF-07 | `radicom-dump` CLI | P2 |
-
-**Totals**: 127 items (126 live + 1 dropped), 65 at P0, 32 at P1, 29 at P2.
-
----
-
-## 3. Milestones and Progress
-
-Milestones are ordered so each delivers a usable, testable increment.
-
-| Milestone | Theme | Status |
-|---|---|---|
-| M0 | Project scaffolding (workspace, 4 crates, code generation, CI, test data) | Done |
-| M1 | Identifier system (Tag/VR/UID/TS/Dictionary/VM) | Done |
-| M2 | Dataset, elements, charsets, validation | Done |
-| M3 | File and IO (buffers, parser, writer, DicomFile) | Done |
-| M4 | Pixel data, codec interfaces, transcoder — **codec boundary frozen** | Done |
-| M5 | Network core (PDU, association, engine, C-ECHO, C-STORE, TLS) | Done |
-| M6 | Network services (C-FIND/GET/MOVE, expert layer, extended negotiation) | Done except real-peer MOVE |
-| M7 | Serialization, media, SR, anonymization | Done |
-| M8 | Rendering, printing, rule DSLs, hosting, observability, benchmarks | Done (image-crate backend optional) |
-
-Outstanding work is environment- or scope-limited, not missing implementation:
-
-| Item | Category | Reason |
-|---|---|---|
-| JPEG / JPEG-LS / JPEG 2000 / HTJ2K / RLE implementations | Out of scope | Belongs to the separate `radicom-codecs` project |
-| UID-05 macOS MAC | Platform | Needs CoreWLAN/IOKit FFI; Windows and Linux are implemented and tested |
-| Reference-peer interop regression | Environment | Needs an external DCMTK/fo-dicom peer; loopback self-tests cover the same paths |
-| `image` crate backend | Optional | Not a dependency; PNG/BMP export is covered by the hand-written encoders |
-| Single-consumer trait abstractions from fo-dicom | Form | Rust side has concrete equivalents; empty trait shells are deliberately not created |
-| C-MOVE against a real peer | Environment | The peer did not map the destination AE to this host; loopback covers the function |
-| Print CUBIC / LIN optical-density models | Feature | Print rendering uses a linear density window |
-
-### 3.1 Definition of done (per feature group)
-
-A group is done when:
-
-1. every feature-list item is implemented and unit-tested;
-2. every rule/table row of its architecture section has a passing test (tolerance rows included; every
-   T1–T10 row has a test named after it);
-3. round-trip and golden tests are updated and green;
-4. the milestone status above is updated;
-5. [01-architecture.md](01-architecture.md) is corrected where the implementation deviated from it.
-
-### 3.2 Known limits (not defects)
+## 2. Known Limits
 
 Deliberate, tested ceilings. Change one only together with the tests that describe it.
 
@@ -281,25 +57,9 @@ Deliberate, tested ceilings. Change one only together with the tests that descri
 - Concrete codecs, external peers, print/media hardware and non-Windows behaviour are not established by
   local tests.
 
----
+## 3. Testing
 
-## 4. Risks
-
-| # | Risk | Impact | Mitigation |
-|---|---|---|---|
-| R1 | Tolerance rules are scattered folklore; missing one fails on real data | High | Build the corpus from fo-dicom's issue list; fuzz the reader |
-| R2 | Codec boundary churn breaks `radicom-codecs` after the freeze | High | Boundary review with stakeholders; semver discipline |
-| R3 | Multi-charset (ISO 2022) handling is intricate and corrupts CJK names | High | Standalone charset module with fo-dicom-aligned tests against real samples |
-| R4 | Network detail (send windows, max-PDU interplay, negotiation order) causes interop bugs | Medium | Loopback plus peer tests, PDU goldens |
-| R5 | DICOMDIR offset computation and record stitching are error-prone | Medium | Two-pass writer, golden files, offset tolerance tests |
-| R6 | Dictionary XML licensing/version drift | Low | Keep the MS-PL attribution; pin the standard version constant |
-| R7 | P2 scope creep delaying P0 | Medium | P2 only after M7; status table keeps deferrals visible |
-
----
-
-## 5. Testing
-
-### 5.1 Principles
+### 3.1 Principles
 
 1. **The tolerance corpus is a first-class deliverable**: every lenient behaviour (T1–T10, DICOMDIR
    nearest offset, JSON tolerance) has a named test referencing the originating issue or standard clause.
@@ -308,9 +68,9 @@ Deliberate, tested ceilings. Change one only together with the tests that descri
 3. **Interop, not just self-consistency**: network paths are tested against external peers.
 4. **No-panic guarantee**: parse and network decode paths are fuzzed; all failures are typed errors.
 5. **A test must be able to fail.** If reverting the fix leaves the test green, it is not covering the
-   defect. Verification for both directions of a bug fix is part of the definition of done.
+   defect. Verification for both directions of a bug fix is part of the work.
 
-### 5.2 Organization
+### 3.2 Organization
 
 ```
 crates/radicom/src/**/tests.rs   # unit tests beside the code
@@ -323,7 +83,7 @@ tests-data/                      # shared fixtures with a provenance README
 Naming: `<area>_<behavior>__<case>`, with the rule ID suffix for tolerance tests (e.g.
 `reader_un_vr_sq_recovery__T3`).
 
-### 5.3 Test data
+### 3.3 Test Data
 
 A 23-sample corpus (22 `.dcm` files plus a `DICOMDIR`) from fo-dicom's test data lives in `tests-data/`
 under the fo-dicom **MS-PL** license with a provenance note. Categories covered: syntax matrix
@@ -332,7 +92,10 @@ under the fo-dicom **MS-PL** license with a provenance note. Categories covered:
 GB18030, UTF-8), structures (nested SQ, fragments, private tags), media (DICOMDIR), SR, meta variants (no
 preamble / no meta / ACR-NEMA), and golden PDU byte captures.
 
-### 5.4 Round-trip and goldens
+To expand the corpus, drop fo-dicom-generated `.dcm` files into the matching `tests-data/<category>/`
+directory and register them in the `CORPUS` table in `crates/radicom/tests/corpus.rs`.
+
+### 3.4 Round-Trips and Goldens
 
 - **Byte-level round-trip**: parse → write with identical options → byte-equal.
 - **Semantic round-trip**: where byte equality is impossible (group length removal, padding), compare via
@@ -340,7 +103,7 @@ preamble / no meta / ACR-NEMA), and golden PDU byte captures.
 - **Goldens**: JSON output, DICOMDIR offsets, dump strings, PDU byte streams — generated once, reviewed,
   then enforced. Regenerate with `cargo run --package xtask -- regen-goldens`; CI fails on drift.
 
-### 5.5 Network testing
+### 3.5 Network Testing
 
 - **Loopback**: SCU↔SCP integration for echo/store/find/get/move, lifecycle, retry/linger/breaker with a
   scripted mock peer.
@@ -348,7 +111,7 @@ preamble / no meta / ACR-NEMA), and golden PDU byte captures.
   host. Gated on `RADICOM_PEER`; otherwise the tests self-skip.
 - **Fuzz**: mutated PDU streams must produce typed errors without panics or unbounded reads.
 
-### 5.6 Codec testing
+### 3.6 Codec Testing
 
 Only one configuration exists today: the empty registry plus the test-only mock codecs in
 `pixel/codec.rs` and `pixel/transcoder.rs`, which validate the facade, the transcoder decision table, the
@@ -358,7 +121,7 @@ A second configuration — end-to-end transcoding against the real `radicom-code
 optional dev-dependency once that project exists. Nothing in this workspace references it today, so this
 repository never hard-depends on it.
 
-### 5.7 Fuzzing
+### 3.7 Fuzzing
 
 Pure `std`, deterministic, no `cargo-fuzz` needed: `crates/radicom/tests/fuzz.rs` sweeps arbitrary bytes,
 byte-mutated valid files and a bogus ~4 GiB declared length through the parser;
@@ -366,14 +129,14 @@ byte-mutated valid files and a bogus ~4 GiB declared length through the parser;
 return a typed `Result` without panicking. Memory guarantees: on-demand windows never load whole values,
 and C-STORE receive is bounded by spooling.
 
-### 5.8 Benchmarks
+### 3.8 Benchmarks
 
 `criterion` is not vendored in the offline cache, so the suites are dependency-free `harness = false`
 binaries using `std::time::Instant`:
 
 | Binary | Measures | Run with |
 |---|---|---|
-| `crates/radicom/benches/core.rs` | parse_dataset, write_dataset, get_frame, render_frame, open() on-demand vs materialized | `cargo bench -p radicom --all-features` |
+| `crates/radicom/benches/core.rs` | parse_dataset, write_dataset, get_frame, render_frame, open() on-demand vs from_bytes for 800 elements | `cargo bench -p radicom --all-features` |
 | `crates/radicom/benches/workflows.rs` | charset encode/decode (UTF-8 + ISO 2022), deflate, uncompressed transcoding, validation, DICOMDIR build/save, directory scan, on-demand open, anonymize | `cargo bench -p radicom --all-features` |
 | `crates/radicom-json/benches/json.rs` | dataset_to_json, json_to_dataset, json_roundtrip | `cargo bench -p radicom-json` |
 | `crates/radicom-network/benches/throughput.rs` | loopback C-STORE MiB/s (memory and spool sinks) | `cargo bench -p radicom-network` |
@@ -382,7 +145,121 @@ binaries using `std::time::Instant`:
 `from_bytes`; the file `open()` path is measured separately because on-demand windows make it a
 different code path.
 
-### 5.9 CI stages
+### 3.9 Coverage
+
+Production-line coverage has a **95% floor**. `cargo run --package xtask -- coverage` runs
+`cargo llvm-cov` and keeps only production lines: test/bench/example targets, `xtask` and inline
+`#[cfg(test)]` modules are excluded. CI runs the same command and publishes the measured numbers.
+
+## 4. Interop Testing Against Real Peers
+
+The loopback regressions above exercise real local sockets, so a plain `cargo test` verifies radicom
+against itself. Cross-implementation acceptance needs an external peer: a fo-dicom C-STORE SCP or Q/R
+SCP, DCMTK, dcm4che, or a production PACS.
+
+### 4.1 Offline Self-Test (runs by default)
+
+The `self_interop_*` cases in `crates/radicom-network/tests/interop.rs` need no peer: they start a
+`DicomServer` on `127.0.0.1` and drive real TCP with a `DicomClient`, verifying C-ECHO and a **real file
+C-STORE over TCP → SCP → read back** with semantic equality (compared element by element after
+normalising group lengths; the transfer syntax is preserved). `cargo test --workspace --all-features`
+runs them.
+
+### 4.2 Interop Tool: the `peer_interop` Example
+
+Location: `crates/radicom-network/examples/peer_interop.rs`
+
+It supports optional C-ECHO; optional C-STORE of a file; and optional C-FIND / C-GET / C-MOVE. **Each
+phase uses its own association**, so a C-STORE-only SCP that does not support Verification does not
+break the later operations. C-ECHO is fatal only when it is the sole requested operation; any
+*requested* operation that fails exits non-zero.
+
+```pwsh
+# C-ECHO only
+cargo run -p radicom-network --example peer_interop -- `
+  --peer 127.0.0.1:11112 --calling RADICOM --called DCM4CHE
+
+# C-STORE only (skips C-ECHO; for C-STORE-only SCPs)
+cargo run -p radicom-network --example peer_interop -- `
+  --peer 127.0.0.1:11112 --calling RADICOM --called DCM4CHE --no-echo `
+  --store tests-data\explicit-le\GH487.dcm
+
+# C-FIND (STUDY)
+cargo run -p radicom-network --example peer_interop -- `
+  --peer 127.0.0.1:11112 --calling RADICOM --called DCM4CHE --no-echo `
+  --find STUDY --patient-name "Doe*"
+
+# C-GET (STUDY): instances arrive as reverse C-STOREs
+cargo run -p radicom-network --example peer_interop -- `
+  --peer 127.0.0.1:11112 --calling RADICOM --called DCM4CHE --no-echo `
+  --get STUDY --study-uid 1.2.3 --storage 1.2.840.10008.5.1.4.1.1.2
+
+# C-MOVE (STUDY): the SCP must map --dest to this host's address
+cargo run -p radicom-network --example peer_interop -- `
+  --peer 127.0.0.1:11112 --calling RADICOM --called DCM4CHE --no-echo `
+  --move STUDY --study-uid 1.2.3 --dest ARCHIVE
+```
+
+Arguments:
+
+- `--peer host:port` (default `127.0.0.1:11112`)
+- `--calling AE` / `--called AE`
+- `--no-echo` — skip C-ECHO (use when the peer does not support Verification)
+- `--store <file.dcm>` — C-STORE that file (SOP class taken from `(0008,0016)`)
+- `--find PATIENT|STUDY|SERIES|IMAGE` — C-FIND
+- `--get PATIENT|STUDY|SERIES|IMAGE` — C-GET; `--storage uid1,uid2` lists accepted storage classes
+  (defaults to CT/MR/SC). A mismatch makes the sub-operations fail, so set this to the actual instance
+  SOP classes
+- `--move PATIENT|STUDY|SERIES|IMAGE --dest AE` — C-MOVE; `--dest` is the AE the SCP must deliver to
+- FIND/GET/MOVE share the match keys: `--patient-name`, `--patient-id`, `--study-uid`, `--accession`
+
+### 4.3 Gated Interop Tests (optional in CI)
+
+Location: `crates/radicom-network/tests/interop.rs`
+
+A normal `cargo test` **skips** them (no peer, keeping the suite self-contained). They connect for real
+only when `RADICOM_PEER` is set:
+
+```pwsh
+$env:RADICOM_PEER    = "127.0.0.1:11112"
+$env:RADICOM_CALLING = "RADICOM"
+$env:RADICOM_CALLED  = "DCM4CHE"
+$env:RADICOM_STORE_FILE = "tests-data\explicit-le\GH487.dcm"   # optional C-STORE
+cargo test -p radicom-network --test interop -- --nocapture
+```
+
+### 4.4 Acceptance Criteria
+
+| Service | Peer | Acceptance |
+|---|---|---|
+| C-ECHO | Verification SCP | status 0x0000 (a C-STORE-only SCP may not support it — that is normal) |
+| C-STORE | C-STORE SCP | status 0x0000; the peer's dataset is semantically equal to the source |
+| C-FIND | Q/R SCP | correct match count and return keys (PatientName / StudyInstanceUID, ...) |
+| C-MOVE | Q/R SCP + destination AE | correct completed sub-operation count; instances land at the destination |
+| C-GET | Q/R SCP | correct completed reverse-C-STORE count; the reverse-store handler receives the instances |
+
+> C-MOVE and C-GET need a destination-AE / reverse-store endpoint. radicom can play that role itself
+> (`collect_reverse_stores` plus `DicomServer`), which the loopback suite already covers.
+
+## 5. Code Generation and Maintenance
+
+Tag, UID and private dictionary tables are generated from the pinned fo-dicom dictionary XML under
+`crates/radicom-dict/dictionaries/`; never edit generated files manually.
+
+```bash
+cargo run --package xtask -- gen-dict          # regenerate
+cargo run --package xtask -- gen-dict --check  # verify (CI gate)
+```
+
+To move to a newer dictionary baseline, replace both XML files, run the generator, and commit the XML plus
+all regenerated outputs together. `cargo run --package xtask -- regen-goldens` rebuilds the golden
+baselines and is run only after reviewing an intentional change. The repository ships no
+`.cargo/config.toml`, so nothing relies on a local alias; keep machine-specific cargo settings in your own
+untracked `.cargo/` directory.
+
+## 6. CI and Releasing
+
+### 6.1 CI stages
 
 | Stage | Trigger | Content |
 |---|---|---|
@@ -394,16 +271,10 @@ different code path.
 | fuzz | local/manual | both fuzz targets |
 | interop | local / self-hosted | DCMTK / fo-dicom matrix |
 | bench | local/manual | `cargo bench` against a baseline |
-| coverage | push to `master`/`main`, pull request, `workflow_dispatch` | `cargo run --package xtask -- coverage` (runs `cargo llvm-cov`; production lines only — test/bench/example targets and inline `#[cfg(test)]` modules are excluded) with a **95% floor**. CI runs the same long form (the repository ships no `.cargo/config.toml` alias) and publishes the measured numbers, so run it locally for current numbers. |
+| coverage | push to `master`/`main`, pull request, `workflow_dispatch` | `cargo run --package xtask -- coverage`, 95% production-line floor |
 | release | push of a `v*` tag | `release.yml`: first `verify-tag` (the tag must equal every publishable crate's version, and the publishable set must equal the list `publish` pushes); then the same gates as `ci.yml` — `fmt --check`, clippy and tests with default **and** all features, `cargo doc` with `-D warnings`, `gen-dict --check`, `cargo package --list` proving `LICENSE` + `README.md` ship in every crate — plus the MSRV (1.89) check; only then are `radicom-dict` → `radicom` → `radicom-json` → `radicom-network` published to crates.io, in that dependency order, and a GitHub release is created with generated notes. Versions already on crates.io are skipped, so a failed tag run can be re-run from the same tag. A manual (`workflow_dispatch`) run with a tag input regenerates the release notes only and never publishes. |
 
-### 5.10 Conventions
-
-- Update the milestone status and any changed architecture statement in the same commit as the code.
-- Record exit-condition verification (test summary or interop notes) with the milestone.
-- Never weaken a test to make it pass; fix the cause.
-
-### 5.11 Versioning and publishing
+### 6.2 Versioning and publishing
 
 - The version lives once, in the root `Cargo.toml` under `[workspace.package]`. Every member inherits it, and
   internal dependencies are declared once under `[workspace.dependencies]` with that same version. Cargo refuses
@@ -412,9 +283,10 @@ different code path.
 - Bumping a release edits two blocks in the root manifest — `[workspace.package] version` and the four internal
   pins under `[workspace.dependencies]` — followed by the normal checks, a commit, and a `vX.Y.Z` tag. Keep the
   tag equal to the version: `release.yml` rejects any other tag.
-- A bump also renames the peer-visible Implementation Version Name (`RADICOM 0.1.2`): file meta (`radicom`) and
-  association user information (`radicom-network`) both derive it from `CARGO_PKG_VERSION`, and a compile-time
-  check rejects any name longer than the 16-byte SH limit, so a pre-release version must be shortened first.
+- A bump also renames the peer-visible Implementation Version Name (`RADICOM <workspace version>`, currently
+  `RADICOM 0.1.2`): file meta (`radicom`) and association user information (`radicom-network`) both derive it
+  from `CARGO_PKG_VERSION`, and a compile-time check rejects any name longer than the 16-byte SH limit, so a
+  pre-release version must be shortened first.
 - Publishing needs a `CARGO_REGISTRY_TOKEN` repository secret (crates.io API token with `publish-new` and
   `publish-update` scopes). CI reads it from the environment; nothing is written to disk.
 - Dependency order is load-bearing: a crate is publishable only after everything it depends on is on crates.io,
@@ -425,6 +297,16 @@ different code path.
   non-merge commit subject between the previous tag and this one, plus a `compare` link. The first release lists
   the whole history instead. A `workflow_dispatch` run with a tag input regenerates those notes for an existing
   tag without publishing anything, which is how a release that predates the notes job is backfilled.
-- The first public release is `v0.1.0`. Before it, `cargo package` verification for `radicom`, `radicom-json`
-  and `radicom-network` cannot resolve their own unpublished dependencies locally; that is expected, and the
-  tag run publishes the crates in dependency order.
+- The first public release was `v0.1.0`; the current release line is `v0.1.2`. Local `cargo package`
+  verification for `radicom`, `radicom-json` and `radicom-network` cannot resolve their own unpublished
+  dependencies; that is expected, and the tag run publishes the crates in dependency order.
+
+## 7. Conventions
+
+- Design changes flow **back** into [01-architecture.md](01-architecture.md) in the same commit as the code;
+  these documents describe the current state, not history.
+- Source comments reference sections as `docs/<file>.md §N`. Moving or renumbering a document means updating
+  those references; `grep -r "docs/" crates xtask` finds them all.
+- Source comments also carry stable work-item labels (`NET-06`, `SRV-04`, `PIX-02`, ...) from the original
+  implementation plan. They are trace labels, not API contracts — the architecture sections are authoritative.
+- Never weaken a test to make it pass; fix the cause.

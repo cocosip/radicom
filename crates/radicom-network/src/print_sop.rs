@@ -1,5 +1,4 @@
-//! Print Meta SOP class mapping and network identifier (UID-04/05;
-//! docs/02-development-guide.md §2 UID-04/05).
+//! Print Meta SOP class mapping and network identifier.
 //!
 //! `MetaSopClasses` maps a Print Management Meta SOP class to the sub SOP
 //! classes it aggregates, in both directions (fo-dicom `MetaSopClasses`), and

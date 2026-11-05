@@ -2,7 +2,7 @@
 
 > This is the **only design reference** when changing code. It records the invariants and design
 > decisions you must not violate — it does not restate the implementation, which is the source of truth.
-> Feature IDs (`TAG-01`, `NET-06`, `T1`–`T10`, ...) are defined in [02-development-guide.md](02-development-guide.md) §2.
+> Testing, interop and release procedures live in [02-development-guide.md](02-development-guide.md).
 
 ## 0. Workspace and Dependency Direction
 
@@ -225,6 +225,10 @@ remaining element.
 - Numeric values are byte-swapped to the target syntax; chunk boundaries must respect unit alignment.
 - The file meta group always recalculates `(0002,0000) FileMetaInformationGroupLength` (Type 1),
   regardless of the dataset-level group-length option.
+- File meta identifies the implementation with the fixed class UID (`0002,0012`) and the derived
+  `RADICOM <workspace version>` name (`0002,0013`); association user information advertises the same
+  version name. The name derives from `CARGO_PKG_VERSION`, and a compile-time check enforces the
+  16-byte SH limit.
 - ACR-NEMA format is rejected on save.
 
 ---
@@ -241,6 +245,11 @@ Changing it breaks `radicom-codecs`.
   Bits Allocated (PS3.5 §8.2), native output is `OW` above 8 bits. `PixelDataVrMode::Compatible`
   preserves fo-dicom 5.x's legacy `OW` fragments for byte-identical output. Codecs only append frames;
   a codec that rebuilds the fragment sequence to change its VR is wrong.
+- Read and write VR policy are separate. The transcoder reads tolerantly by default (`Compatible`):
+  a legacy `OW` encapsulated element is accepted and preserved. `with_pixel_data_read_mode(Standard)`
+  opts into input validation; output is `Standard` (`OB`) unless a compatibility mode is selected.
+  `with_strict_dicom_vr(bool)` is a go-dicom-style alias for the **write** mode only, never a read
+  switch.
 - A `Codec` implementation must:
   - touch the dataset only through `PixelData` property setters, never other elements;
   - map every failure to `Error::Codec` and **never panic**;

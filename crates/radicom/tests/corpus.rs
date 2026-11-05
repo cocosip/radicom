@@ -3,7 +3,7 @@
 //! The files live under `tests-data/` at the repo root (see its README for
 //! provenance — a minimal set imported from fo-dicom's MS-PL test data). Each
 //! entry below is parsed, re-written with identical options, re-parsed, and the
-//! datasets compared for semantic equality (docs/02-development-guide.md §5.4).
+//! datasets compared for semantic equality (docs/02-development-guide.md §3.4).
 
 use std::path::PathBuf;
 
@@ -203,7 +203,7 @@ fn a_truncated_file_keeps_its_readable_prefix() {
 }
 
 /// A real SR document walks correctly: the content tree parses into the expected
-/// number of nodes with the expected value types (docs/02-development-guide.md §5.1, docs/01-architecture.md §12.3).
+/// number of nodes with the expected value types (docs/02-development-guide.md §3.1, docs/01-architecture.md §12.3).
 #[test]
 fn a_real_sr_document_walks_its_content_tree() {
     use radicom::sr::{ContentItem, ValueType};

@@ -1,4 +1,4 @@
-//! Dataset dump formatting (INF-04; docs/02-development-guide.md §2 INF-04, INF-07).
+//! Dataset dump formatting.
 //!
 //! Renders a `Dataset` as indented text — tag, VR, dictionary keyword and value
 //! — with truncation controls. This is the library half of the `radicom-dump`

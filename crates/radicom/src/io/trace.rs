@@ -13,7 +13,7 @@ use crate::model::tag::Tag;
 use crate::model::transfer_syntax::TransferSyntax;
 use crate::model::vr::Vr;
 
-/// A [`ParseObserver`] that logs each event at debug level (docs/02-development-guide.md §5.3).
+/// A [`ParseObserver`] that logs each event at debug level.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TraceObserver;
 

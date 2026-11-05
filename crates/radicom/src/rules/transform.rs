@@ -1,4 +1,4 @@
-//! Transform rule DSL for dataset mutation (XFORM-01; docs/02-development-guide.md §2).
+//! Transform rule DSL for dataset mutation.
 //!
 //! Ports fo-dicom `DicomTransformRules`: a [`TransformRule`] rewrites one element
 //! (set/map/copy/regex/prefix/append/trim/pad/truncate/upper/lower/generate UID/
