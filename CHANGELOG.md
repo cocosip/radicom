@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.2] - 2026-11-05
+
+### Changed
+
+- `Transcoder::with_strict_dicom_vr(bool)` now selects only the encapsulated Pixel Data **write**
+  mode, matching go-dicom's `WithStrictDICOMVR`: `true` is `Standard` (`OB`), `false` is `Compatible`
+  (legacy fo-dicom 5.x `OW`). Reading stays at `with_pixel_data_read_mode` (tolerant by default), so
+  asking for strict output no longer makes legacy `OW` inputs unreadable.
+
+### Added
+
+- `Dataset::clone_with_syntax_and_vr_mode` and `DicomFile::clone_with_syntax_and_vr_mode` expose the
+  write VR mode (go-dicom `WithPixelDataWriteMode`), so callers can emit fo-dicom 5.x-compatible `OW`
+  headers through the convenience API instead of building a `Transcoder` by hand.
+
 ## [0.1.1] - 2026-11-05
 
 ### Changed

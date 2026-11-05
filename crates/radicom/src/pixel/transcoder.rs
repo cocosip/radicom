@@ -73,16 +73,19 @@ impl Transcoder {
         self
     }
 
-    /// Sets both read and write modes: `true` is `Standard` everywhere,
-    /// `false` is `Compatible` everywhere.
+    /// Selects the encapsulated Pixel Data **write** VR mode, like go-dicom's
+    /// `WithStrictDICOMVR`: `true` is `Standard` (`OB`), `false` is
+    /// `Compatible` (legacy fo-dicom 5.x `OW` above 8 bits).
+    ///
+    /// Only output changes. Reading keeps [`Self::with_pixel_data_read_mode`]
+    /// (tolerant by default), so strict output never refuses a legacy `OW`
+    /// input.
     pub fn with_strict_dicom_vr(mut self, strict: bool) -> Self {
-        let mode = if strict {
+        self.pixel_data_write_mode = if strict {
             PixelDataVrMode::Standard
         } else {
             PixelDataVrMode::Compatible
         };
-        self.pixel_data_read_mode = mode;
-        self.pixel_data_write_mode = mode;
         self
     }
 
@@ -342,7 +345,21 @@ impl Dataset {
         syntax: Arc<TransferSyntax>,
         out_params: Option<CodecParams>,
     ) -> Result<Dataset, Error> {
-        Transcoder::new(self.transfer_syntax(), syntax, None, out_params).transcode_dataset(self)
+        self.clone_with_syntax_and_vr_mode(syntax, out_params, PixelDataVrMode::Standard)
+    }
+
+    /// Like [`Self::clone_with_syntax`], but selects the encapsulated Pixel
+    /// Data write VR mode (go-dicom `WithPixelDataWriteMode`). `Compatible`
+    /// reproduces the non-conformant `OW` fragments of fo-dicom 5.x.
+    pub fn clone_with_syntax_and_vr_mode(
+        &self,
+        syntax: Arc<TransferSyntax>,
+        out_params: Option<CodecParams>,
+        write_mode: PixelDataVrMode,
+    ) -> Result<Dataset, Error> {
+        Transcoder::new(self.transfer_syntax(), syntax, None, out_params)
+            .with_pixel_data_write_mode(write_mode)
+            .transcode_dataset(self)
     }
 }
 
@@ -353,7 +370,18 @@ impl crate::io::file::DicomFile {
         syntax: Arc<TransferSyntax>,
         out_params: Option<CodecParams>,
     ) -> Result<crate::io::file::DicomFile, Error> {
+        self.clone_with_syntax_and_vr_mode(syntax, out_params, PixelDataVrMode::Standard)
+    }
+
+    /// File variant of [`Dataset::clone_with_syntax_and_vr_mode`].
+    pub fn clone_with_syntax_and_vr_mode(
+        &self,
+        syntax: Arc<TransferSyntax>,
+        out_params: Option<CodecParams>,
+        write_mode: PixelDataVrMode,
+    ) -> Result<crate::io::file::DicomFile, Error> {
         Transcoder::new(self.dataset.transfer_syntax(), syntax, None, out_params)
+            .with_pixel_data_write_mode(write_mode)
             .transcode_file(self)
     }
 }
@@ -848,6 +876,33 @@ mod tests {
         crate::pixel::codec::reset_codec_registry();
     }
 
+    #[test]
+    fn clone_with_syntax_and_vr_mode_forwards_the_write_mode() {
+        let _guard = crate::pixel::codec::lock_registry();
+        set_codec_registry(Arc::new(MockRegistry {
+            syntaxes: vec![&syntaxes::JPEG_2000_LOSSLESS],
+        }));
+        let ds = with_pixels(16, 2, 1, &[&[1u8, 0, 2, 0]]);
+
+        // The default convenience keeps the standard OB output.
+        let standard = ds
+            .clone_with_syntax(syntaxes::JPEG_2000_LOSSLESS.clone(), None)
+            .unwrap();
+        assert_eq!(standard.item(&PIXEL_DATA).unwrap().vr(), Vr::Ob);
+
+        // The variant forwards Compatible for fo-dicom 5.x-compatible files.
+        let compatible = ds
+            .clone_with_syntax_and_vr_mode(
+                syntaxes::JPEG_2000_LOSSLESS.clone(),
+                None,
+                PixelDataVrMode::Compatible,
+            )
+            .unwrap();
+        assert_eq!(compatible.item(&PIXEL_DATA).unwrap().vr(), Vr::Ow);
+
+        crate::pixel::codec::reset_codec_registry();
+    }
+
     fn ow_encapsulated_source() -> Dataset {
         let mut ds = dataset(8, 2, 2);
         ds.set_transfer_syntax(syntaxes::JPEG_2000_LOSSLESS.clone());
@@ -882,11 +937,13 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("OB"), "{err}");
+        // with_strict_dicom_vr only changes the write mode (go-dicom parity),
+        // so it must still accept the legacy input.
         assert!(tr
             .clone()
             .with_strict_dicom_vr(true)
             .transcode_dataset(&ds)
-            .is_err());
+            .is_ok());
         crate::pixel::codec::reset_codec_registry();
     }
 
@@ -918,7 +975,7 @@ mod tests {
         );
         assert!(tr
             .clone()
-            .with_strict_dicom_vr(true)
+            .with_pixel_data_read_mode(PixelDataVrMode::Standard)
             .transcode_dataset(&explicit)
             .is_err());
 
@@ -932,7 +989,7 @@ mod tests {
         );
         assert!(tr.transcode_dataset(&implicit).is_ok());
         assert!(tr
-            .with_strict_dicom_vr(true)
+            .with_pixel_data_read_mode(PixelDataVrMode::Standard)
             .transcode_dataset(&implicit)
             .is_err());
     }
