@@ -8,7 +8,7 @@ A pure Rust implementation of the DICOM (Digital Imaging and Communications in M
 
 radicom covers the DICOM data model, file I/O, network communication (DIMSE), serialization, media files, structured reports, printing data models, anonymization, pixel data access, and the codec **interfaces** plus transcoder.
 
-The concrete image codec implementations (JPEG, JPEG-LS, JPEG 2000, HTJ2K, RLE native codecs) live in the separate **[radicom-codecs](https://github.com/cocosip/radicom-codecs)** project — mirroring the relationship between `FO-DICOM.Core` and `fo-dicom.Codecs`.
+Compressed transfer syntaxes are supported through the companion **[radicom-codecs](https://github.com/cocosip/radicom-codecs)** crate: twelve codecs (RLE Lossless, JPEG, JPEG-LS, JPEG 2000, HTJ2K) registered with one `radicom_codecs::install()` call. That split mirrors the relationship between `FO-DICOM.Core` and `fo-dicom.Codecs`.
 
 ## Workspace Layout
 
@@ -18,6 +18,9 @@ The concrete image codec implementations (JPEG, JPEG-LS, JPEG 2000, HTJ2K, RLE n
 | **`radicom-network`** | Async (tokio) DICOM networking: PDU codec, association negotiation, DIMSE C-/N-services, SCU client, SCP server, TLS |
 | **`radicom-json`** | DICOM JSON Model (PS3.18) and Native XML serialization |
 | **`radicom-dict`** | Generated tag / UID / private dictionary tables (from the pinned fo-dicom dictionary XML) |
+
+The codec implementations are a separate companion workspace, not a member of this one: see
+[Image Codecs](#image-codecs).
 
 ## Features
 
@@ -38,9 +41,23 @@ The concrete image codec implementations (JPEG, JPEG-LS, JPEG 2000, HTJ2K, RLE n
 - **DICOM Networking** — DIMSE C-ECHO/STORE/FIND/MOVE/GET and N-EVENT-REPORT/GET/SET/ACTION/CREATE/DELETE; SCU client, SCP server framework, TLS, asynchronous operations, role selection, extended negotiation, user identity
 - **Network Observability** — Vendor-neutral structured events and metrics hooks with metadata-only records
 
-### Explicitly Out of Scope
+### Image Codecs
 
-Concrete codec implementations are **not** in this repository. `radicom` ships the codec **registry, traits and transcoder** only — a frozen boundary that [`radicom-codecs`](https://github.com/cocosip/radicom-codecs) implements. Mirroring `FO-DICOM.Core` ↔ `fo-dicom.Codecs`.
+`radicom` ships the codec **contract** only — `Codec`, `CodecRegistry`, `CodecParams` and the
+`Transcoder` — as a frozen boundary (see [docs/01-architecture.md](docs/01-architecture.md) §9.1).
+The implementations live in the companion crate
+[`radicom-codecs`](https://github.com/cocosip/radicom-codecs)
+([crates.io](https://crates.io/crates/radicom-codecs)): RLE Lossless, JPEG (Process 1, Process 2/4,
+Lossless 14, Lossless 14 SV1), JPEG-LS Lossless/Near-Lossless, JPEG 2000 Lossless/Lossy and HTJ2K
+Lossless/Lossless RPCL/Lossy — twelve transfer syntaxes in total.
+
+```rust
+// Registers every codec in the process-wide registry, once at startup.
+radicom_codecs::install();
+```
+
+Without that call only uncompressed-to-uncompressed transcoding works; a compressed source or
+target fails with `CodecError::NotRegistered`.
 
 ## Support Matrix
 
@@ -61,9 +78,9 @@ Concrete codec implementations are **not** in this repository. `radicom` ships t
 | DIMSE | C-ECHO/STORE/FIND/MOVE/GET, N-EVENT-REPORT/GET/SET/ACTION/CREATE/DELETE | ✅ | `radicom-network` |
 | Network transports | tokio TCP, rustls TLS (PEM), max-PDU negotiation, role selection, user identity | ✅ (feature `tls`) | `radicom-network` |
 | Observability | Structured tracing events and metrics hooks | ✅ | `radicom-network` |
-| Image codecs | JPEG / JPEG-LS / JPEG 2000 / HTJ2K / RLE **implementations** | ⛔ out of scope | separate [`radicom-codecs`](https://github.com/cocosip/radicom-codecs) project |
+| Image codecs | RLE Lossless, JPEG, JPEG-LS, JPEG 2000 and HTJ2K **implementations** | ✅ (12 transfer syntaxes) | companion crate [`radicom-codecs`](https://github.com/cocosip/radicom-codecs) |
 
-Legend: ✅ implemented and tested in this workspace; ⛔ deliberately out of scope. The codec **interfaces** (`Codec`, `CodecRegistry`, `CodecParams`, transcoder) are implemented here; only the concrete codec implementations live in `radicom-codecs`.
+Legend: ✅ implemented and tested. The codec **interfaces** (`Codec`, `CodecRegistry`, `CodecParams`, transcoder) are implemented in this workspace; the concrete codec implementations ship in `radicom-codecs`.
 
 
 ## Installation
@@ -73,7 +90,11 @@ Legend: ✅ implemented and tested in this workspace; ⛔ deliberately out of sc
 radicom = "0.1.2"
 radicom-network = "0.1.2"   # only if you need DIMSE networking
 radicom-json = "0.1.2"      # only if you need DICOM JSON / XML
+radicom-codecs = "0.1.2"    # only if you need RLE / JPEG / JPEG-LS / JPEG 2000 / HTJ2K
 ```
+
+`radicom-codecs` is a separate crate, not a feature of `radicom`; call `radicom_codecs::install()`
+once at startup to register its codecs (see [Image Codecs](#image-codecs)).
 
 Optional features of `radicom`:
 
@@ -195,9 +216,9 @@ fn main() -> Result<(), radicom::Error> {
 ### Transcoding and Pixel Data VR
 
 `Transcoder` and the `clone_with_syntax` convenience APIs move pixel data between transfer syntaxes
-through the codec registry. This repository ships no codecs, so compressed targets need implementations
-registered from [`radicom-codecs`](https://github.com/cocosip/radicom-codecs); uncompressed-to-uncompressed
-transcoding works standalone.
+through the codec registry. Uncompressed-to-uncompressed transcoding works standalone; compressed
+sources or targets resolve their codecs after `radicom_codecs::install()` has registered the
+companion crate's twelve codecs (see [Image Codecs](#image-codecs)).
 
 ```rust
 use radicom::io::file::DicomFile;
