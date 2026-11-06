@@ -4547,7 +4547,7 @@ async fn raw_association_handshake(configure: impl FnOnce(&mut Associate)) -> cr
 
 #[tokio::test]
 async fn client_rejects_malformed_association_accepts() {
-    for malformed_kind in [0u8, 1u8, 2u8] {
+    for malformed_kind in [0u8, 1u8, 2u8, 3u8] {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let peer = tokio::spawn(async move {
@@ -4557,7 +4557,22 @@ async fn client_rejects_malformed_association_accepts() {
             };
             let mut answer = Associate::new(request.called_ae, request.calling_ae);
             answer.user_information = request.user_information;
-            if malformed_kind != 0 {
+            if malformed_kind == 3 {
+                answer.presentation_contexts = vec![
+                    PresentationContext {
+                        id: 1,
+                        abstract_syntax: String::new(),
+                        transfer_syntaxes: Vec::new(),
+                        result: 1,
+                    },
+                    PresentationContext {
+                        id: 1,
+                        abstract_syntax: String::new(),
+                        transfer_syntaxes: Vec::new(),
+                        result: 1,
+                    },
+                ];
+            } else if malformed_kind != 0 {
                 answer.presentation_contexts.push(PresentationContext {
                     id: 1,
                     abstract_syntax: String::new(),
@@ -4585,7 +4600,18 @@ async fn client_rejects_malformed_association_accepts() {
             addr,
             "SCU",
             "SCP",
-            vec![echo_context()],
+            if malformed_kind == 3 {
+                vec![
+                    echo_context(),
+                    PresentationContext::new(
+                        3,
+                        sop_class::VERIFICATION,
+                        vec!["1.2.840.10008.1.2".to_string()],
+                    ),
+                ]
+            } else {
+                vec![echo_context()]
+            },
             ClientOptions::default(),
         )
         .await;
