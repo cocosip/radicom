@@ -458,9 +458,6 @@ fn decode_associate(body: &[u8], is_rq: bool) -> Result<Associate> {
         }
         offset = end;
     }
-    if offset != body.len() {
-        return Err(NetworkError::protocol("trailing bytes in A-ASSOCIATE body"));
-    }
 
     Ok(Associate {
         protocol_version,
@@ -498,11 +495,6 @@ fn decode_presentation_context(value: &[u8], is_ac: bool) -> Result<Presentation
             _ => {}
         }
         offset = end;
-    }
-    if offset != value.len() {
-        return Err(NetworkError::protocol(
-            "trailing bytes in presentation context",
-        ));
     }
 
     Ok(PresentationContext {
@@ -651,9 +643,6 @@ fn decode_user_information(value: &[u8], is_rq: bool) -> Result<UserInformation>
             _ => {}
         }
         offset = end;
-    }
-    if offset != value.len() {
-        return Err(NetworkError::protocol("trailing bytes in User Information"));
     }
     Ok(out)
 }
@@ -2374,5 +2363,90 @@ mod tests {
             }
             other => panic!("expected a Protocol error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn strict_pdu_and_association_validation_rejects_malformed_items() {
+        let mut release = encode(&Pdu::ReleaseRq);
+        release.push(0);
+        assert!(
+            decode(&release).is_err(),
+            "bytes after a PDU are not ignored"
+        );
+
+        for title in ["", "12345678901234567", "bad\n"] {
+            assert!(validate_ae_title(title).is_err(), "invalid title {title:?}");
+        }
+        assert!(validate_ae_title("VALID_AE").is_ok());
+
+        let mut assoc = associate_frame(
+            0x01,
+            &[item(
+                item::APPLICATION_CONTEXT,
+                APPLICATION_CONTEXT.as_bytes(),
+            )],
+        );
+        assoc.push(0);
+        let length = (assoc.len() - 6) as u32;
+        assoc[2..6].copy_from_slice(&length.to_be_bytes());
+        assert!(
+            decode(&assoc).is_err(),
+            "trailing association bytes are rejected"
+        );
+
+        let mut pc = vec![1, 0, 0, 0, 0];
+        pc.extend_from_slice(&item(item::ABSTRACT_SYNTAX, APPLICATION_CONTEXT.as_bytes()));
+        let malformed_pc = associate_frame(
+            0x01,
+            &[
+                item(item::APPLICATION_CONTEXT, APPLICATION_CONTEXT.as_bytes()),
+                item(item::PRESENTATION_CONTEXT_RQ, &pc),
+            ],
+        );
+        assert!(
+            decode(&malformed_pc).is_err(),
+            "trailing PC bytes are rejected"
+        );
+
+        let max = item(item::MAX_PDU_LENGTH, &16384u32.to_be_bytes());
+        let mut user = max.clone();
+        user.push(0);
+        assert!(decode_user_information(&user, true).is_err());
+        let raw_item = |kind: u8, value: &[u8]| {
+            let mut out = vec![kind, 0];
+            out.extend_from_slice(&(value.len() as u16).to_be_bytes());
+            out.extend_from_slice(value);
+            out
+        };
+        assert!(
+            decode_user_information(&raw_item(item::MAX_PDU_LENGTH, &[0, 0, 0]), true).is_err()
+        );
+        assert!(
+            decode_user_information(&raw_item(item::ASYNC_OPERATIONS, &[0, 0, 0]), true).is_err()
+        );
+        assert!(
+            decode_user_information(&raw_item(item::ROLE_SELECTION, &[0, 1, b'x']), true).is_err()
+        );
+
+        let role = vec![0, 1, b'x', 1, 0, 9];
+        assert!(decode_user_information(&item(item::ROLE_SELECTION, &role), true).is_err());
+        assert!(
+            decode_user_information(&raw_item(item::USER_IDENTITY_RQ, &[1, 0, 0]), true).is_err()
+        );
+        let identity = [1, 0, 0, 0, 0, 0, 1];
+        assert!(decode_user_information(&item(item::USER_IDENTITY_RQ, &identity), true).is_err());
+        let response = [0, 1, b'x', 1];
+        assert!(decode_user_information(&item(item::USER_IDENTITY_AC, &response), false).is_err());
+
+        let bad_context = bytes::Bytes::from_static(&[0, 0, 0, 2, 0, 0]);
+        assert!(decode_pdata_bytes(bad_context).is_err());
+        let bad_header = bytes::Bytes::from_static(&[0, 0, 0, 2, 1, 4]);
+        assert!(decode_pdata_bytes(bad_header).is_err());
+
+        let mut ac = Associate::new("SCP", "SCU");
+        let mut accepted = PresentationContext::new(1, STORAGE_CLASS, Vec::new());
+        accepted.result = 0;
+        ac.presentation_contexts.push(accepted);
+        assert!(super::encode(&Pdu::AssociateAc(ac)).is_err());
     }
 }

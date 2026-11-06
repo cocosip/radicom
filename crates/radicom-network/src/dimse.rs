@@ -1154,6 +1154,27 @@ mod tests {
     }
 
     #[test]
+    fn malformed_command_headers_are_rejected() {
+        let mut ds = Dataset::new();
+        ds.insert_value(tag::COMMAND_FIELD, CommandField::CFindRq.code());
+        ds.insert_value(tag::MESSAGE_ID, 1u16);
+        ds.insert_value(tag::COMMAND_DATA_SET_TYPE, 2u16);
+        assert!(Command::from_dataset(&ds).is_err());
+
+        ds.insert_value(tag::COMMAND_DATA_SET_TYPE, NO_DATA_SET);
+        ds.insert_value(tag::MESSAGE_ID, 0u16);
+        assert!(Command::from_dataset(&ds).is_err());
+
+        let mut response = Dataset::new();
+        response.insert_value(tag::COMMAND_FIELD, CommandField::CFindRsp.code());
+        response.insert_value(tag::COMMAND_DATA_SET_TYPE, NO_DATA_SET);
+        assert!(Command::from_dataset(&response).is_err());
+
+        response.insert_value(tag::MESSAGE_ID_BEING_RESPONDED_TO, 0u16);
+        assert!(Command::from_dataset(&response).is_err());
+    }
+
+    #[test]
     fn error_comment_is_truncated_to_lo_length() {
         let long = "x".repeat(200);
         let truncated = truncate_lo(&long);

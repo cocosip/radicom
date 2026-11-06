@@ -2048,6 +2048,30 @@ async fn loopback_c_move_without_a_destination_is_refused() {
         Some(crate::dimse::status::MOVE_DESTINATION_UNKNOWN)
     );
 
+    // A non-empty destination still has to be a valid 1..=16 byte AE title.
+    let bad = crate::cmove::CMoveRequest::study("1.2.3.4", "12345678901234567", 2);
+    let bad_identifier =
+        crate::message::encode_dataset(&bad.identifier, &syntaxes::IMPLICIT_VR_LITTLE_ENDIAN)
+            .unwrap();
+    let bad_command = command_bytes(&bad.to_command()).unwrap();
+    for pdata in association
+        .splitter
+        .split_message(context_id, &bad_command, Some(&bad_identifier))
+        .unwrap()
+    {
+        write_pdu(&mut association.stream, &Pdu::PData(pdata))
+            .await
+            .unwrap();
+    }
+    let bad_response = association
+        .await_response(2, CommandField::CMoveRsp)
+        .await
+        .unwrap();
+    assert_eq!(
+        bad_response.status,
+        Some(crate::dimse::status::MOVE_DESTINATION_UNKNOWN)
+    );
+
     association.release().await.unwrap();
     handle.await.unwrap().unwrap();
 }
@@ -4522,6 +4546,55 @@ async fn raw_association_handshake(configure: impl FnOnce(&mut Associate)) -> cr
 }
 
 #[tokio::test]
+async fn client_rejects_malformed_association_accepts() {
+    for malformed_kind in [0u8, 1u8, 2u8] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let Some(Pdu::AssociateRq(request)) = read_pdu(&mut stream).await.unwrap() else {
+                panic!("client did not send A-ASSOCIATE-RQ");
+            };
+            let mut answer = Associate::new(request.called_ae, request.calling_ae);
+            answer.user_information = request.user_information;
+            if malformed_kind != 0 {
+                answer.presentation_contexts.push(PresentationContext {
+                    id: 1,
+                    abstract_syntax: String::new(),
+                    transfer_syntaxes: Vec::new(),
+                    result: 5,
+                });
+            }
+            if malformed_kind == 2 {
+                use tokio::io::AsyncWriteExt as _;
+                let mut frame = crate::pdu::encode(&Pdu::AssociateAc(answer)).unwrap();
+                let marker = [1, 0, 5, 0];
+                let offset = frame
+                    .windows(marker.len())
+                    .position(|window| window == marker)
+                    .expect("presentation context marker");
+                frame[offset + 2] = 0;
+                stream.write_all(&frame).await.unwrap();
+            } else {
+                write_pdu(&mut stream, &Pdu::AssociateAc(answer))
+                    .await
+                    .unwrap();
+            }
+        });
+        let result = Association::open(
+            addr,
+            "SCU",
+            "SCP",
+            vec![echo_context()],
+            ClientOptions::default(),
+        )
+        .await;
+        assert!(result.is_err(), "malformed A-ASSOCIATE-AC was accepted");
+        peer.await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn the_accept_repeats_the_request_ae_titles() {
     // NET-02: the AC carries the RQ's AE titles in the RQ's order.
     let answer = raw_association_handshake(|_| {}).await;
@@ -5918,6 +5991,14 @@ async fn a_stalled_store_response_times_out_when_the_server_sets_one() {
         started.elapsed() < Duration::from_secs(1),
         "the deadline is what ends the wait"
     );
+    let error = serving
+        .next_pdu()
+        .await
+        .expect_err("the idle dispatcher also honours the request timeout");
+    assert!(matches!(
+        error,
+        NetworkError::RequestTimedOut { message_id: 0 }
+    ));
 }
 
 // -- batch 2: L4, L6, L8, client fallback, M6 ----------------------------
@@ -6319,6 +6400,15 @@ async fn a_c_find_batch_returns_each_requests_matches() {
     )
     .await
     .unwrap();
+
+    let duplicate_ids = [
+        crate::cfind::CFindRequest::study_query(1),
+        crate::cfind::CFindRequest::study_query(1),
+    ];
+    assert!(
+        association.send_c_find_batch(&duplicate_ids).await.is_err(),
+        "a batch cannot reuse a DIMSE Message ID"
+    );
 
     let requests = [
         crate::cfind::CFindRequest::study_query(1),

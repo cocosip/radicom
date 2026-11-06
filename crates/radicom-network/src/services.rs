@@ -558,6 +558,28 @@ mod tests {
     }
 
     #[test]
+    fn malformed_c_store_response_fields_are_rejected() {
+        let mut command = Command::request(CommandField::CStoreRsp, 1);
+        command.message_id_being_responded_to = Some(1);
+        command.status = Some(status::SUCCESS);
+        command.affected_sop_class_uid = Some("1.2.3".into());
+        command.affected_sop_instance_uid = Some("1.2.3.4".into());
+        assert!(CStoreResponse::from_command(&command).is_ok());
+
+        command.message_id_being_responded_to = None;
+        assert!(CStoreResponse::from_command(&command).is_err());
+        command.message_id_being_responded_to = Some(1);
+        command.status = None;
+        assert!(CStoreResponse::from_command(&command).is_err());
+        command.status = Some(status::SUCCESS);
+        command.affected_sop_class_uid = None;
+        assert!(CStoreResponse::from_command(&command).is_err());
+        command.affected_sop_class_uid = Some("1.2.3".into());
+        command.affected_sop_instance_uid = None;
+        assert!(CStoreResponse::from_command(&command).is_err());
+    }
+
+    #[test]
     fn c_store_offers_the_source_syntax_plus_implicit() {
         let syntaxes =
             c_store_transfer_syntaxes(transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN, &[], false);

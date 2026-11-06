@@ -604,6 +604,24 @@ mod tests {
         assert!(CFindResponse::from_command(&command, None).is_err());
     }
 
+    #[test]
+    fn malformed_response_fields_are_rejected() {
+        let mut command = Command::request(CommandField::CFindRsp, 1);
+        command.message_id_being_responded_to = Some(1);
+        command.affected_sop_class_uid = Some("1.2.3".into());
+
+        command.status = Some(status::PENDING);
+        assert!(CFindResponse::from_command(&command, None).is_err());
+        command.status = Some(status::SUCCESS);
+        assert!(CFindResponse::from_command(&command, Some(Dataset::new())).is_err());
+
+        command.message_id_being_responded_to = None;
+        assert!(CFindResponse::from_command(&command, None).is_err());
+        command.message_id_being_responded_to = Some(1);
+        command.affected_sop_class_uid = None;
+        assert!(CFindResponse::from_command(&command, None).is_err());
+    }
+
     /// A provider yielding a fixed set of items then a terminal response.
     struct FixedProvider {
         items: Vec<Dataset>,
