@@ -108,7 +108,12 @@ mod uid_literals {
                     .expect("inside the workspace")
                     .to_string_lossy()
                     .replace('\\', "/");
-                if relative.contains("/generated/") || DEFINITION_SITES.contains(&&*relative) {
+                if relative.contains("/generated/")
+                    || DEFINITION_SITES.contains(&&*relative)
+                    // A `tests.rs` module file is test code by declaration
+                    // (`#[cfg(test)] mod tests;`), so it has no inline marker.
+                    || relative.ends_with("/tests.rs")
+                {
                     continue;
                 }
                 let source = std::fs::read_to_string(&path).expect("read source");
