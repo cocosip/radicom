@@ -230,15 +230,19 @@ fn select(e: &DicomElement, index: Option<usize>) -> Result<String, Error> {
                     count: 0,
                 }));
             }
+            // Only string VRs are `\`-separated; a binary VR's bytes are not text,
+            // so is_multi_value must not split them on a stray 0x5C byte.
             value
-                .split(|c| c == '\\' && e.vr.is_multi_value())
+                .split(|c| c == '\\' && e.vr.is_string() && e.vr.is_multi_value())
                 .nth(i)
                 .map(str::to_string)
                 .ok_or_else(|| {
                     Error::Data(DataError::IndexOutOfRange {
                         tag: (&e.tag).into(),
                         index: i,
-                        count: value.split(|c| c == '\\' && e.vr.is_multi_value()).count(),
+                        count: value
+                            .split(|c| c == '\\' && e.vr.is_string() && e.vr.is_multi_value())
+                            .count(),
                     })
                 })
         }
@@ -1535,6 +1539,19 @@ mod cm_regression {
         // Vec<T> from an empty string is an empty vector.
         let empty = DicomElement::new_str(Tag::new(0x7777, 0x0108), Vr::Lo, "");
         assert!(empty.get::<Vec<u16>>(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn binary_bytes_are_not_split_as_multi_value_strings() {
+        // A binary VR is not backslash-separated text: a 0x5C byte must not
+        // create a second indexed value.
+        let ob = DicomElement::new_bytes(
+            Tag::new(0x7777, 0x0200),
+            Vr::Ob,
+            Arc::new(MemoryBuffer::from(vec![b'A', b'\\', b'B'])),
+        );
+        assert_eq!(ob.get::<String>(Some(0)).unwrap(), "A\\B");
+        assert!(ob.get::<String>(Some(1)).is_err());
     }
 
     #[test]
