@@ -154,7 +154,9 @@ impl VolumeData {
             return Err(invalid("slices are mixed up from different stacks"));
         }
 
-        images.sort_by(|a, b| a.sorting_value.partial_cmp(&b.sorting_value).unwrap());
+        // `total_cmp` orders NaN deterministically instead of panicking on the
+        // `partial_cmp(...).unwrap()` that a NaN sorting value would trigger.
+        images.sort_by(|a, b| a.sorting_value.total_cmp(&b.sorting_value));
         let sort_orders: Vec<f64> = images.iter().map(|i| i.sorting_value()).collect();
         let slices_normal = images[0].geometry.direction_normal();
 

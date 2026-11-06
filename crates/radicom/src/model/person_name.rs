@@ -133,28 +133,11 @@ pub fn parse_ds(s: &str) -> Result<f64, crate::error::Error> {
     })
 }
 
-/// Formats an f64 as a DS string: at most 16 characters; longer outputs
-/// demote to 10 significant digits (fo-dicom `ToDecimalString`).
-///
-/// Small magnitudes need scientific notation: `{:.10}` would round e.g.
-/// 1e-20 to `0.0000000000` and silently lose the value.
+/// Formats an f64 as a DS string. Delegates to the single shared implementation
+/// in `crate::model::vr::format_ds`, which is finite-guarded (NaN/Inf → "0")
+/// and produces a value that fits the 16-character DS limit.
 pub fn format_ds(v: f64) -> String {
-    let full = format!("{v}");
-    if full.len() <= 16 {
-        return full;
-    }
-    if v != 0.0 && v.abs() < 1e-4 {
-        let scientific = format!("{v:.6e}");
-        if scientific.len() <= 16 {
-            return scientific;
-        }
-    }
-    let demoted = format!("{v:.10}");
-    if demoted.len() <= 16 {
-        demoted
-    } else {
-        format!("{v:.3e}")
-    }
+    crate::model::vr::format_ds(v)
 }
 
 /// Parses an IS value: i32 with fo-dicom's lenient decimal-fraction

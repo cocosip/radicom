@@ -307,6 +307,41 @@ mod tests {
         syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone()
     }
 
+    #[test]
+    fn sv_and_uv_accept_standard_and_legacy_lengths() {
+        fn long_elem(
+            group: u16,
+            element: u16,
+            vr: &[u8; 2],
+            len_field: &[u8],
+            value: &[u8],
+        ) -> Vec<u8> {
+            let mut out = Vec::new();
+            out.extend_from_slice(&group.to_le_bytes());
+            out.extend_from_slice(&element.to_le_bytes());
+            out.extend_from_slice(vr);
+            out.extend_from_slice(len_field);
+            out.extend_from_slice(value);
+            out
+        }
+        fn read_bytes(bytes: &[u8]) -> Vec<u8> {
+            let ds = parse_dataset_bytes(bytes, &le()).unwrap();
+            match ds.item(&Tag::new(0x0028, 0x3002)) {
+                Some(crate::model::item::DicomItem::Element(e)) => {
+                    e.value().as_buffer().unwrap().data().unwrap().into_owned()
+                }
+                _ => panic!("SV element missing"),
+            }
+        }
+        let value = (-3i16).to_le_bytes();
+        // standard SV: reserved(2 bytes) + u32 length
+        let standard = long_elem(0x0028, 0x3002, b"SV", &[0, 0, 2, 0, 0, 0], &value);
+        assert_eq!(read_bytes(&standard), value.to_vec());
+        // legacy SV (old fo-dicom): a bare u16 length, no reserved field
+        let legacy = long_elem(0x0028, 0x3002, b"SV", &[2, 0], &value);
+        assert_eq!(read_bytes(&legacy), value.to_vec());
+    }
+
     fn el_header(group: u16, element: u16, vr: &str, value: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&group.to_le_bytes());

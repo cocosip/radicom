@@ -196,10 +196,9 @@ pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
         }
         Vr::As => {
             let b = content.as_bytes();
-            if b.len() == 3 && b.iter().all(|c| c.is_ascii_digit())
-                || (b.len() == 4
-                    && b[..3].iter().all(|c| c.is_ascii_digit())
-                    && matches!(b[3], b'D' | b'W' | b'M' | b'Y'))
+            if b.len() == 4
+                && b[..3].iter().all(|c| c.is_ascii_digit())
+                && matches!(b[3], b'D' | b'W' | b'M' | b'Y')
             {
                 Ok(())
             } else {
@@ -262,7 +261,7 @@ pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
                 if comps.len() > 5 {
                     return Err(fail(vr, content, "more than five components"));
                 }
-                if has_control(g, false) {
+                if has_control(g, true) {
                     return Err(fail(vr, content, "control character"));
                 }
             }
@@ -419,7 +418,10 @@ mod tests {
     #[test]
     fn as_cs_rules() {
         assert!(validate_single(Vr::As, "034Y").is_ok());
-        assert!(validate_single(Vr::As, "034").is_ok());
+        assert!(
+            validate_single(Vr::As, "034").is_err(),
+            "AS needs a D/W/M/Y suffix"
+        );
         assert!(validate_single(Vr::As, "034X").is_err());
         assert!(validate_single(Vr::As, "34Y").is_err());
 
@@ -634,6 +636,13 @@ mod tests {
         );
         let long = format!("{}^x", "N".repeat(65));
         assert!(validate_single(Vr::Pn, &long).is_err(), "group over 64");
+        // PN is charset-sensitive: ISO 2022 CJK names legitimately carry ESC
+        // (0x1B), so it is allowed; other control characters are still rejected.
+        assert!(
+            validate_single(Vr::Pn, "山田^\u{1B}$B太郎").is_ok(),
+            "ESC allowed for ISO 2022 PN"
+        );
+        assert!(validate_single(Vr::Pn, "a\u{7}b").is_err(), "BEL rejected");
     }
 
     #[test]

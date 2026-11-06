@@ -507,7 +507,13 @@ impl<T: FromElement> FromElement for Option<T> {
 
 impl FromElement for SharedBuffer {
     fn from_element(e: &DicomElement, _index: Option<usize>) -> Result<Self, Error> {
-        Ok(e.encoded())
+        // Only binary VRs are byte-backed. Returning `encoded()` for a string VR
+        // would hand back raw UTF-8 bytes, bypassing the Specific Character Set
+        // and silently corrupting non-ASCII text when copied across datasets.
+        match e.value() {
+            ElementValue::Bytes(_) => Ok(e.encoded()),
+            ElementValue::Str(_) => Err(type_err(e, "a binary value")),
+        }
     }
 }
 
@@ -693,6 +699,18 @@ mod tests {
         // UI pads with NUL
         let ui_odd = el(Vr::Ui, "1.2");
         assert_eq!(&*ui_odd.encoded().data().unwrap(), b"1.2\x00");
+    }
+
+    #[test]
+    fn ds_nan_formats_to_a_legal_zero() {
+        use crate::model::dataset::Dataset;
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::PIXEL_SPACING, f64::NAN);
+        assert_eq!(
+            ds.get_element(Tag::PIXEL_SPACING).unwrap().string_value(),
+            "0",
+            "a non-finite DS must not become the illegal text \"NaN\""
+        );
     }
 
     #[test]
@@ -1517,6 +1535,21 @@ mod cm_regression {
         // Vec<T> from an empty string is an empty vector.
         let empty = DicomElement::new_str(Tag::new(0x7777, 0x0108), Vr::Lo, "");
         assert!(empty.get::<Vec<u16>>(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn shared_buffer_rejects_string_vrs() {
+        // A string VR must not be handed out as raw UTF-8 bytes through
+        // get::<SharedBuffer> — that bypasses the Specific Character Set.
+        let pn = DicomElement::new_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+        assert!(pn.get::<SharedBuffer>(None).is_err());
+        // a binary VR is still byte-backed and works
+        let us = DicomElement::new_bytes(
+            Tag::new(0x7777, 0x0109),
+            Vr::Us,
+            Arc::new(MemoryBuffer::from(vec![1u8, 0])),
+        );
+        assert!(us.get::<SharedBuffer>(None).is_ok());
     }
 
     #[test]

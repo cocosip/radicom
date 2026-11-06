@@ -263,30 +263,27 @@ macro_rules! pixel_read_methods {
                 )));
             }
             if self.bits_allocated()? == 1 {
-                // Bits are packed continuously, so a frame may start mid-byte.
-                // Repack this frame into its own byte-aligned LSB-first buffer.
+                // Each 1-bit frame is byte-aligned: a frame occupies
+                // ceil(rows*cols*samples/8) bytes and the next frame starts on
+                // the following byte boundary (fo-dicom DicomPixelData
+                // UncompressedFrameSize; docs §9.1 "one frame is ceil(...) bytes").
                 let frame_bits = (self.width() as usize)
                     * (self.height() as usize)
                     * (self.samples_per_pixel() as usize);
-                let start_bit = index as usize * frame_bits;
                 let frame_bytes = frame_bits.div_ceil(8);
-                if (start_bit + frame_bits) as u64 > buffer.size() * 8 {
+                let offset = index as usize * frame_bytes;
+                if (offset + frame_bytes) as u64 > buffer.size() {
                     return Err(pixel_err(format!(
-                        "frame {index} needs bits {start_bit}..{} but pixel data holds {} bits",
-                        start_bit + frame_bits,
-                        buffer.size() * 8
+                        "frame {index} needs bytes {offset}..{} but pixel data holds {}",
+                        offset + frame_bytes,
+                        buffer.size()
                     )));
                 }
                 let raw = buffer.data()?;
                 let raw: &[u8] = raw.as_ref();
-                let mut out = vec![0u8; frame_bytes];
-                for bit_index in 0..frame_bits {
-                    let pos = start_bit + bit_index;
-                    if (raw[pos / 8] >> (pos % 8)) & 1 == 1 {
-                        out[bit_index / 8] |= 1 << (bit_index % 8);
-                    }
-                }
-                return Ok(Arc::new(MemoryBuffer::from(out)));
+                return Ok(Arc::new(MemoryBuffer::from(
+                    raw[offset..offset + frame_bytes].to_vec(),
+                )));
             }
             let frame_size = self.uncompressed_frame_size()?;
             let offset = index as u64 * frame_size;
@@ -697,32 +694,25 @@ impl<'a> PixelData<'a> {
                     _ => Vec::new(),
                 };
                 if self.bits_allocated()? == 1 {
-                    // Single-bit frames share bytes: place this frame's bits at
-                    // bit offset `index * frame_bits`, LSB first (review #5).
+                    // Each 1-bit frame is byte-aligned: frame `index` starts at
+                    // `index * ceil(frame_bits/8)` and occupies its own bytes
+                    // (fo-dicom DicomPixelData; docs §9.1). Keep earlier frames,
+                    // drop any trailing pad, then write this frame LSB-first.
                     let frame_bits = (self.width() as usize)
                         * (self.height() as usize)
                         * (self.samples_per_pixel() as usize);
-                    let start_bit = index as usize * frame_bits;
-                    let needed = start_bit.div_ceil(8);
-                    combined.truncate(needed);
-                    if combined.len() < needed {
-                        combined.resize(needed, 0);
-                    }
+                    let frame_bytes = frame_bits.div_ceil(8);
+                    let offset = index as usize * frame_bytes;
+                    combined.truncate(offset.min(combined.len()));
+                    combined.resize(offset + frame_bytes, 0);
                     let src = data.as_ref();
                     for bit_index in 0..frame_bits {
                         let bit =
                             (src.get(bit_index / 8).copied().unwrap_or(0) >> (bit_index % 8)) & 1;
-                        let pos = start_bit + bit_index;
-                        if pos / 8 >= combined.len() {
-                            combined.push(0);
-                        }
                         if bit == 1 {
-                            combined[pos / 8] |= 1u8 << (pos % 8);
-                        } else {
-                            combined[pos / 8] &= !(1u8 << (pos % 8));
+                            combined[offset + bit_index / 8] |= 1u8 << (bit_index % 8);
                         }
                     }
-                    combined.truncate((start_bit + frame_bits).div_ceil(8));
                 } else {
                     // `index * frame_size` data bytes are stored, plus at most
                     // one trailing pad from the previous append; drop that pad
@@ -1130,21 +1120,28 @@ mod tests {
     }
 
     #[test]
-    fn single_bit_frames_pack_continuously_across_byte_boundaries() {
-        // review #5: 1-bit frames are a continuous LSB-first bit stream, so a
-        // frame can start mid-byte; they must not be located by
-        // index * ceil(frame_bits / 8).
+    fn single_bit_frames_are_byte_aligned_per_frame() {
+        // Each 1-bit frame occupies its own ceil(frame_bits/8) bytes; the next
+        // frame starts on the following byte boundary (fo-dicom DicomPixelData
+        // UncompressedFrameSize, docs §9.1 "one frame is ceil(...) bytes").
+        // Frames do NOT share a byte.
         let mut ds = mono_dataset(1, 1, 1, 2);
         {
             let mut pd = PixelData::create_new(&mut ds).unwrap();
             pd.add_frame([0x01]).unwrap();
             pd.add_frame([0x00]).unwrap();
         }
+        // two 1x1 frames => two stored bytes (one per frame), not one shared byte
+        let stored = match ds.item(&PIXEL_DATA) {
+            Some(DicomItem::Element(e)) => e.value().as_buffer().map(|b| b.size()).unwrap_or(0),
+            _ => 0,
+        };
+        assert_eq!(stored, 2, "1-bit frames must be byte-aligned per frame");
         let view = PixelDataRef::from_dataset(&ds).unwrap();
         assert_eq!(view.get_frame(0).unwrap().data().unwrap().as_ref(), &[0x01]);
         assert_eq!(view.get_frame(1).unwrap().data().unwrap().as_ref(), &[0x00]);
 
-        // 3x1: frame 0 = pixels 1,0,1; frame 1 = pixels 0,1,1, sharing byte 0.
+        // 3x1: frame_bits=3 => 1 byte per frame; two frames => 2 stored bytes
         let mut ds = mono_dataset(3, 1, 1, 2);
         {
             let mut pd = PixelData::create_new(&mut ds).unwrap();
@@ -1771,7 +1768,7 @@ mod tests {
         let pd = PixelData::from_dataset(&mut ds).unwrap();
         assert!(pd.get_frame(0).is_ok());
         let err = pd.get_frame(1).unwrap_err().to_string();
-        assert!(err.contains("needs bits"), "{err}");
+        assert!(err.contains("needs bytes"), "{err}");
     }
 
     fn encapsulated_with(fragments: &[&'static [u8]], frames: u32) -> Dataset {

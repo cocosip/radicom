@@ -110,6 +110,11 @@ pub fn parse_da(s: &str) -> Result<Range<NaiveDate>, Error> {
             } else {
                 parse_date_core(b)?
             };
+            if min > max {
+                return Err(Error::Data(DataError::Other {
+                    message: format!("DA range ends before it begins: \"{s}\""),
+                }));
+            }
             Ok(Range::new(min, max))
         }
     }
@@ -196,6 +201,11 @@ pub fn parse_tm(s: &str) -> Result<Range<NaiveTime>, Error> {
         Some((a, b)) => {
             let min = one(a)?;
             let max = if b.is_empty() { min } else { one(b)? };
+            if min > max {
+                return Err(Error::Data(DataError::Other {
+                    message: format!("TM range ends before it begins: \"{s}\""),
+                }));
+            }
             Ok(Range::new(min, max))
         }
     }
@@ -422,6 +432,16 @@ mod tests {
         assert!(parse_da("20240230").is_err(), "day 30 in February");
         assert!(parse_da("202").is_err());
         assert!(parse_da("abcd").is_err());
+    }
+
+    #[test]
+    fn reversed_da_tm_ranges_are_rejected() {
+        // A range whose end precedes its start is malformed, like parse_dt.
+        assert!(parse_da("20241231-20240101").is_err(), "reversed DA range");
+        assert!(parse_tm("120000-080000").is_err(), "reversed TM range");
+        // normal forward ranges still parse
+        assert!(parse_da("20240101-20241231").is_ok());
+        assert!(parse_tm("080000-120000").is_ok());
     }
 
     #[test]

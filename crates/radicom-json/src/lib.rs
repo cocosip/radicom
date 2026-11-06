@@ -493,7 +493,33 @@ fn binary_number(chunk: &[u8], vr: Vr) -> Option<Value> {
             return Some(Value::Number(u64::from_le_bytes(bytes).into()));
         }
         Vr::Fl if chunk.len() >= 4 => {
-            f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f64
+            let f = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            // Preserve the f32 shortest decimal form: fo-dicom writes 0.1f32 as
+            // "0.1", not the f64 expansion "0.10000000149011612". Re-parsing the
+            // Display text keeps serde_json to a Number while emitting the short
+            // form. Non-finite values stay as the DICOM JSON strings below.
+            return Some(if f.is_finite() {
+                let mut text = format!("{f}");
+                // Keep FL a JSON float even for integral values (1.0f -> "1.0"),
+                // preserving the previous float-typed output; fractional values
+                // keep f32-shortest text ("0.1", never the f64 expansion).
+                if !(text.contains('.') || text.contains('e') || text.contains('E')) {
+                    text.push_str(".0");
+                }
+                serde_json::from_str::<Value>(&text)
+                    .unwrap_or_else(|_| Value::Number(Number::from_f64(f as f64).expect("finite")))
+            } else {
+                Value::String(
+                    if f.is_nan() {
+                        "NaN"
+                    } else if f.is_sign_positive() {
+                        "Infinity"
+                    } else {
+                        "-Infinity"
+                    }
+                    .into(),
+                )
+            });
         }
         Vr::Fd if chunk.len() >= 8 => f64::from_le_bytes([
             chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
@@ -687,7 +713,12 @@ pub fn json_to_dataset(json: &str, options: &JsonOptions) -> Result<Dataset> {
     let value = parse_json(json)?;
     let mut dataset = value_to_dataset(&value)?;
     if options.validate_on_read {
-        dataset.validate()?;
+        // Honour the global/scope validation switch: a scope that disabled
+        // validation keeps reading tolerant (docs §5). `Dataset::validate` is
+        // itself on-demand and not scope-aware, so gate it here.
+        if radicom::validation::should_validate(true) {
+            dataset.validate()?;
+        }
         // like fo-dicom's autoValidate dataset, later writes validate again
         dataset.set_validation(true);
     }
@@ -708,7 +739,9 @@ pub fn json_to_datasets(json: &str, options: &JsonOptions) -> Result<Vec<Dataset
         .map(|value| {
             let mut dataset = value_to_dataset(value)?;
             if options.validate_on_read {
-                dataset.validate()?;
+                if radicom::validation::should_validate(true) {
+                    dataset.validate()?;
+                }
                 dataset.set_validation(true);
             }
             Ok(dataset)
@@ -1082,6 +1115,36 @@ fn type_name(value: &Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fl_serializes_with_the_f32_shortest_decimal() {
+        // fo-dicom writes a FL by its f32 shortest text; a f64 expansion would
+        // yield "0.10000000149011612" for 0.1f32.
+        let v = binary_number(&0.1f32.to_le_bytes(), Vr::Fl).unwrap();
+        assert_eq!(serde_json::to_string(&v).unwrap(), "0.1");
+        // FD keeps full f64 precision.
+        let v = binary_number(&(0.1f64).to_le_bytes(), Vr::Fd).unwrap();
+        assert_eq!(serde_json::to_string(&v).unwrap(), "0.1");
+    }
+
+    #[test]
+    fn validate_on_read_respects_the_validation_scope_switch() {
+        // an invalid CS value that strict reading rejects
+        let json = r#"{"00080060":{"vr":"CS","Value":["lower case"]}}"#;
+        let strict = JsonOptions {
+            validate_on_read: true,
+            ..Default::default()
+        };
+        assert!(json_to_dataset(json, &strict).is_err());
+        // a scope that disabled validation keeps validate_on_read tolerant
+        {
+            let _guard = radicom::validation::ValidationScopeGuard::validation_off();
+            assert!(
+                json_to_dataset(json, &strict).is_ok(),
+                "a disabled validation scope must keep reading tolerant"
+            );
+        }
+    }
     use radicom::model::transfer_syntax::syntaxes;
 
     fn sample() -> Dataset {

@@ -89,9 +89,10 @@ impl PresentationLutTable {
         };
         let first_mapped = i16::from_le_bytes([desc[2], desc[3]]) as i32;
         let bits = u16::from_le_bytes([desc[4], desc[5]]);
-        if !matches!(bits, 8 | 16) {
+        // PS3.3 C.11.4 allows 8 or 10–16 bits per entry (10–15 read as 16-bit words).
+        if !(bits == 8 || (10..=16).contains(&bits)) {
             return Err(data_error(format!(
-                "Presentation LUT Descriptor bit depth {bits} is not 8 or 16"
+                "Presentation LUT Descriptor bit depth {bits} is not 8 or 10-16"
             )));
         }
 
@@ -115,7 +116,7 @@ impl PresentationLutTable {
             }
             entries.extend(data[..count].iter().map(|b| *b as i32));
         } else {
-            // bits == 16 (validated above to be 8 or 16)
+            // bits >= 10 (10–16) use the 16-bit word path per PS3.3 C.11.4
             if data.len() < count * 2 {
                 return Err(data_error(format!(
                     "Presentation LUT has {count} 16-bit entries but only {} data bytes",
@@ -396,8 +397,9 @@ mod tests {
         // descriptor shorter than three US values
         assert!(film_with_lut_item(lut_item(&[1, 0, 0], &[0], Vr::Ow)).is_err());
 
-        // bits per entry other than 8/16
-        assert!(film_with_lut_item(lut_item(&[1, 0, 0, 0, 12, 0], &[0, 0], Vr::Ow)).is_err());
+        // bits per entry outside 8 and 10–16
+        assert!(film_with_lut_item(lut_item(&[1, 0, 0, 0, 9, 0], &[0, 0], Vr::Ow)).is_err());
+        assert!(film_with_lut_item(lut_item(&[1, 0, 0, 0, 17, 0], &[0, 0], Vr::Ow)).is_err());
 
         // no data element
         assert!(film_with_lut_item(lut_item(&[1, 0, 0, 0, 8, 0], &[], Vr::Ow)).is_err());
@@ -459,6 +461,25 @@ mod tests {
         assert_eq!(table.value_at(0), Some(-1));
         assert_eq!(table.map_byte(0), 0, "negative entries clamp to black");
         assert_eq!(table.map_byte(1), 0, "16 of 65535 is below one 8-bit step");
+    }
+
+    #[test]
+    fn a_twelve_bit_descriptor_parses_via_the_16_bit_path() {
+        // PS3.3 C.11.4 allows 10–15 bits per entry; they are stored as 16-bit
+        // words. A 12-bit descriptor must parse, not be rejected.
+        let table = film_with_lut_item(lut_item(
+            &[2, 0, 0, 0, 12, 0],
+            &[0x00, 0x00, 0xFF, 0xFF],
+            Vr::Ow,
+        ))
+        .unwrap()
+        .table()
+        .unwrap()
+        .clone();
+        assert_eq!(table.bits(), 12);
+        assert_eq!(table.len(), 2);
+        assert_eq!(table.map_byte(0), 0);
+        assert_eq!(table.map_byte(1), 255, "65535 clamps to the 12-bit max");
     }
 
     #[test]

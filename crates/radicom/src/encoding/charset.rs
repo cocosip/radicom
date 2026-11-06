@@ -437,8 +437,23 @@ pub fn encode_multi_charset_with(
     pn: bool,
     first_designator: Option<&'static [u8]>,
 ) -> Vec<u8> {
+    encode_multi_charset_with_strict(text, first, alternates, pn, first_designator, false)
+}
+
+/// [`encode_multi_charset_with`] plus `strict_ascii`: when set, any non-7-bit
+/// byte produced by the *first* encoding is replaced with `?`, matching .NET
+/// `Encoding.ASCII` for an explicit ISO_IR 6 / ISO 2022 IR 6 declaration. The
+/// fallback alternates are untouched, so a JIS/GBK segment still round-trips.
+pub(crate) fn encode_multi_charset_with_strict(
+    text: &str,
+    first: &'static Encoding,
+    alternates: &[&'static Encoding],
+    pn: bool,
+    first_designator: Option<&'static [u8]>,
+    strict_ascii: bool,
+) -> Vec<u8> {
     let Some(designator) = first_designator else {
-        return encode_multi_charset_plain(text, first, alternates, pn);
+        return encode_multi_charset_plain(text, first, alternates, pn, strict_ascii);
     };
     if text.is_ascii() {
         return text.as_bytes().to_vec();
@@ -516,12 +531,17 @@ fn encode_multi_charset_plain(
     first: &'static Encoding,
     alternates: &[&'static Encoding],
     pn: bool,
+    strict_ascii: bool,
 ) -> Vec<u8> {
     // Try the whole string with the first encoding; `encode` reports
     // replacement-character usage via the error flag.
     let (encoded, _, had_errors) = first.encode(text);
     if !had_errors {
-        return encoded.into_owned();
+        let mut out = encoded.into_owned();
+        if strict_ascii {
+            mask_non_ascii(&mut out);
+        }
+        return out;
     }
 
     // Per-segment fallback: split at VR-appropriate delimiters, pick the
@@ -573,12 +593,22 @@ fn encode_multi_charset_plain(
                     active = enc;
                 }
                 let (encoded, _, had_errors) = enc.encode(segment);
+                let mut encoded = encoded.into_owned();
+                // Only the first (default repertoire) encoding is forced to
+                // strict ASCII; an alternate keeps its own bytes.
+                if strict_ascii && enc == first {
+                    mask_non_ascii(&mut encoded);
+                }
                 bytes.extend_from_slice(&encoded);
                 let _ = had_errors;
             }
             None => {
                 // last resort: first encoding with replacement characters
                 let (encoded, _, _) = first.encode(segment);
+                let mut encoded = encoded.into_owned();
+                if strict_ascii {
+                    mask_non_ascii(&mut encoded);
+                }
                 bytes.extend_from_slice(&encoded);
             }
         }
@@ -589,6 +619,22 @@ fn encode_multi_charset_plain(
 fn segment_can_encode(enc: &'static Encoding, segment: &str) -> bool {
     let (_, _, had_errors) = enc.encode(segment);
     !had_errors
+}
+
+/// Replaces every non-7-bit byte with `?` (strict ASCII encode semantics).
+fn mask_non_ascii(bytes: &mut [u8]) {
+    for b in bytes.iter_mut() {
+        if *b >= 0x80 {
+            *b = b'?';
+        }
+    }
+}
+
+/// True when `term` declares the default ISO-IR 6 repertoire, whose encoding
+/// must be strict 7-bit ASCII even though `encoding_rs` maps the `ASCII` label
+/// to its windows-1252 superset. Covers the single-byte and ISO 2022 spellings.
+pub(crate) fn is_strict_ascii_term(term: &str) -> bool {
+    matches!(normalize_term(term).as_str(), "ISOIR6" | "ISO2022IR6")
 }
 
 /// The ISO 2022 escape prefix switching into `enc` (spec §4 table).
@@ -840,11 +886,20 @@ mod tests {
 
     #[test]
     fn encode_replacement_fallback() {
+        // ISO_IR 6 must be strict 7-bit ASCII on the wire: a non-ASCII scalar
+        // ('é') becomes '?' and never an 8-bit 0xE9 byte. Decode stays lenient.
         let ascii = charset_encoding("ISO_IR 6");
-        // no alternates: 'é' becomes a replacement character, never panics
-        let out = encode_multi_charset("café", ascii, &[], false);
-        let (text, _, _) = encoding_rs::WINDOWS_1252.decode(&out);
-        assert!(text.contains("caf"));
+        assert!(is_strict_ascii_term("ISO_IR 6"));
+        assert!(is_strict_ascii_term("ISO 2022 IR 6"));
+        assert!(!is_strict_ascii_term("ISO_IR 100"));
+        let out = encode_multi_charset_with_strict("café", ascii, &[], false, None, true);
+        assert!(out.iter().all(|b| *b < 0x80), "no >0x7F bytes: {out:02x?}");
+        assert_eq!(out, b"caf?");
+
+        // ISO_IR 100 (Latin-1) is unaffected and still produces 0xE9 for 'é'.
+        let latin = charset_encoding("ISO_IR 100");
+        let out = encode_multi_charset_with_strict("café", latin, &[], false, None, false);
+        assert!(out.contains(&0xE9), "Latin-1 keeps 0xE9: {out:02x?}");
     }
 
     #[test]

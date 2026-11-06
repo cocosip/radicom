@@ -228,6 +228,10 @@ pub struct PdvAssembler {
     armed: std::collections::HashSet<u8>,
     /// Dataset streams currently being written to a file, per context.
     spilling: std::collections::HashMap<u8, SpillWriter>,
+    /// Bytes currently held in spool files by in-progress spills, over all
+    /// contexts. Counted in the aggregate budget alongside `buffered`, so many
+    /// contexts spilling at once cannot exceed `max_buffered_bytes` (F).
+    spilled: usize,
     /// High-water mark of `buffered`, so a test can prove the spill bounded it.
     peak_buffered: usize,
 }
@@ -242,6 +246,7 @@ impl Default for PdvAssembler {
             spool: None,
             armed: std::collections::HashSet::new(),
             spilling: std::collections::HashMap::new(),
+            spilled: 0,
             peak_buffered: 0,
         }
     }
@@ -445,24 +450,58 @@ impl PdvAssembler {
                     "spilled DIMSE message exceeds the maximum size",
                 ));
             }
+            // Aggregate ceiling: buffered bytes plus bytes already in spool
+            // files plus this PDV. The prefix moves from memory to the file, so
+            // it stays inside the budget either way; only the incoming PDV adds.
+            if self.aggregate_len().saturating_add(pdv.data.len()) > self.max_buffered_bytes {
+                self.drop_buffer(key);
+                self.armed.remove(&context_id);
+                return Err(NetworkError::protocol(
+                    "buffered DIMSE messages exceed the maximum size",
+                ));
+            }
             let prefix = self.drop_buffer(key).unwrap_or_default();
-            let writer = self.open_spill(&config, &prefix)?;
+            let writer = match self.open_spill(&config, &prefix) {
+                Ok(writer) => writer,
+                Err(error) => {
+                    self.armed.remove(&context_id);
+                    return Err(error);
+                }
+            };
+            self.spilled += prefix.len();
             self.spilling.insert(context_id, writer);
         }
 
-        let writer = self.spilling.get_mut(&context_id).expect("spool writer");
-        if writer.written() + pdv.data.len() as u64 > config.max_message_length {
+        let written = self
+            .spilling
+            .get(&context_id)
+            .map_or(0, SpillWriter::written);
+        if written + pdv.data.len() as u64 > config.max_message_length {
             self.spilling.remove(&context_id);
+            self.spilled = self.spilled.saturating_sub(written as usize);
             self.armed.remove(&context_id);
             return Err(NetworkError::protocol(
                 "spilled DIMSE message exceeds the maximum size",
             ));
         }
+        // the aggregate ceiling counts spooled bytes too, so parallel spills
+        // across many contexts share one budget (F)
+        if self.aggregate_len().saturating_add(pdv.data.len()) > self.max_buffered_bytes {
+            self.spilling.remove(&context_id);
+            self.spilled = self.spilled.saturating_sub(written as usize);
+            self.armed.remove(&context_id);
+            return Err(NetworkError::protocol(
+                "buffered DIMSE messages exceed the maximum size",
+            ));
+        }
+        let writer = self.spilling.get_mut(&context_id).expect("spool writer");
         writer.append(&pdv.data)?;
+        self.spilled += pdv.data.len();
         if !pdv.is_last {
             return Ok(None);
         }
         let writer = self.spilling.remove(&context_id).expect("spool writer");
+        self.spilled = self.spilled.saturating_sub(writer.written() as usize);
         self.armed.remove(&context_id);
         Ok(Some(MessageUnit {
             context_id,
@@ -470,6 +509,11 @@ impl PdvAssembler {
             bytes: bytes::Bytes::new(),
             spool: Some(writer.spool),
         }))
+    }
+
+    /// Bytes currently held either in memory buffers or in spool files.
+    fn aggregate_len(&self) -> usize {
+        self.buffered.saturating_add(self.spilled)
     }
 
     /// Opens the spool file and moves an in-memory prefix into it.
@@ -650,14 +694,15 @@ impl PduSplitter {
             // the wire. Keep the slice itself even so the padding it would need
             // is already counted in the limit (review #17).
             let available = body_limit.saturating_sub(used);
-            if available <= 6 {
+            // A PDV costs six header bytes plus at least one even-padded value
+            // byte, so fewer than eight bytes left cannot hold a non-empty PDV:
+            // flush the current PDU and recompute. (A leftover of exactly seven
+            // bytes used to yield `(7 - 6) & !1 == 0`, i.e. a zero-length PDV.)
+            if available < 8 {
                 pdus.push(std::mem::take(&mut current));
                 used = 0;
                 continue;
             }
-            // `available` is either the full body or a leftover of at most one
-            // byte after a flush, so this slice is never empty: no zero-length
-            // PDV can be emitted.
             let room = ((available - 6) & !1).min(value_limit);
             let end = (offset + room).min(data.len());
             let is_last = end == data.len();
@@ -1236,6 +1281,78 @@ mod tests {
         assert_eq!(total, data.len());
     }
 
+    #[test]
+    fn a_configured_pdv_limit_never_emits_a_zero_length_pdv() {
+        // MaxDataBuffer 12 with a 25-byte body leaves exactly seven bytes after
+        // the first PDV: (25 - 6 - 12) = 7. The old `(7 - 6) & !1 == 0` emitted
+        // an empty PDV; flushing the PDU instead keeps every PDV non-empty.
+        let splitter = PduSplitter::with_limits(25, 16, None, Some(12));
+        let data = [0u8; 30];
+        let pdus = splitter.split(1, false, &data).unwrap();
+        assert!(
+            pdus.iter()
+                .all(|pdu| pdu.pdvs.iter().all(|pdv| !pdv.data.is_empty())),
+            "no zero-length PDV may be emitted: {:?}",
+            pdus.iter()
+                .map(|p| p.pdvs.iter().map(|d| d.data.len()).collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        );
+        let total: usize = pdus
+            .iter()
+            .flat_map(|pdu| pdu.pdvs.iter())
+            .map(|pdv| pdv.data.len())
+            .sum();
+        assert_eq!(total, data.len(), "every byte is carried exactly once");
+        let last_flags: Vec<bool> = pdus
+            .iter()
+            .flat_map(|pdu| pdu.pdvs.iter())
+            .map(|pdv| pdv.is_last)
+            .collect();
+        assert_eq!(
+            last_flags.iter().filter(|last| **last).count(),
+            1,
+            "only the final PDV carries the last bit"
+        );
+        assert!(*last_flags.last().unwrap());
+    }
+
+    #[test]
+    fn spilled_streams_share_the_aggregate_budget() {
+        // F: spilled bytes must count against `max_buffered_bytes`, or several
+        // contexts could spill to disk in parallel with no aggregate ceiling.
+        // `with_max_message_length(8)` also sets the aggregate ceiling to 16.
+        let dir = spill_dir("aggregate");
+        let mut assembler = PdvAssembler {
+            spool: Some(SpoolConfig {
+                memory_threshold: 0,
+                max_message_length: 1024,
+                dir: Some(dir.clone()),
+            }),
+            ..PdvAssembler::with_max_message_length(8)
+        };
+        for context in 1..=3 {
+            assembler.arm_spill(context);
+        }
+        // two contexts each spill 8 bytes: exactly at the 16-byte ceiling
+        assert!(assembler
+            .push_pdv(&dataset_pdv(1, false, 8))
+            .unwrap()
+            .is_none());
+        assert!(assembler
+            .push_pdv(&dataset_pdv(2, false, 8))
+            .unwrap()
+            .is_none());
+        // a third spill would take the aggregate to 24 bytes
+        let error = assembler
+            .push_pdv(&dataset_pdv(3, false, 8))
+            .expect_err("the aggregate spool budget is enforced");
+        assert!(
+            error.to_string().contains("buffered DIMSE messages"),
+            "unexpected error: {error}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A directory for one spill test, unique per process and tag.
     fn spill_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("radicom-spill-{tag}-{}", std::process::id()));
@@ -1328,6 +1445,9 @@ mod tests {
                 max_message_length: 8 * 1024 * 1024,
                 dir: Some(dir.clone()),
             }),
+            // keep the aggregate ceiling out of the way: this test is about the
+            // per-message in-memory cap, not the (separately tested) spool budget
+            max_buffered_bytes: 8 * 1024 * 1024,
             ..PdvAssembler::with_max_message_length(1024)
         };
         assembler.arm_spill(1);

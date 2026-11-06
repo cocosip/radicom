@@ -56,6 +56,8 @@ pub mod tags {
     pub const TRIM: Tag = Tag::TRIM;
     /// (2010,0510) Referenced Image Box Sequence (in FilmBox).
     pub const REFERENCED_IMAGE_BOX_SEQUENCE: Tag = Tag::REFERENCED_IMAGE_BOX_SEQUENCE;
+    /// (2010,0500) Referenced Film Session Sequence (in FilmBox; Type 1).
+    pub const REFERENCED_FILM_SESSION_SEQUENCE: Tag = Tag::REFERENCED_FILM_SESSION_SEQUENCE;
     /// (2020,0010) Image Position.
     pub const IMAGE_POSITION: Tag = Tag::IMAGE_BOX_POSITION;
     /// (2020,0020) Polarity.
@@ -128,8 +130,14 @@ pub struct FilmSession {
 
 impl FilmSession {
     pub fn new() -> Self {
+        let mut dataset = Dataset::new();
+        // A film session is a Basic Film Session SOP instance (PS3.3 C.13.2): a
+        // fixed SOP Class UID plus a generated SOP Instance UID, so a film box
+        // can reference it through (2010,0500) (fo-dicom `FilmSession`).
+        dataset.insert_str(tags::SOP_CLASS_UID, Vr::Ui, crate::uids::BASIC_FILM_SESSION);
+        dataset.insert_str(tags::SOP_INSTANCE_UID, Vr::Ui, Uid::generate_value());
         FilmSession {
-            dataset: Dataset::new(),
+            dataset,
             presentation_luts: Vec::new(),
         }
     }
@@ -220,6 +228,33 @@ impl FilmSession {
             .retain(|lut| lut.sop_instance_uid().as_deref() != Some(sop_instance_uid));
         self.presentation_luts.len() != before
     }
+
+    /// `(0008,0016)` SOP Class UID (Basic Film Session by default).
+    pub fn sop_class_uid(&self) -> Option<String> {
+        self.dataset.try_get_str(tags::SOP_CLASS_UID)
+    }
+
+    pub fn set_sop_class_uid(&mut self, uid: impl Into<String>) {
+        self.dataset.insert_str(tags::SOP_CLASS_UID, Vr::Ui, uid);
+    }
+
+    /// `(0008,0018)` SOP Instance UID.
+    pub fn sop_instance_uid(&self) -> Option<String> {
+        self.dataset.try_get_str(tags::SOP_INSTANCE_UID)
+    }
+
+    pub fn set_sop_instance_uid(&mut self, uid: impl Into<String>) {
+        self.dataset.insert_str(tags::SOP_INSTANCE_UID, Vr::Ui, uid);
+    }
+
+    /// Creates a film box that references this session's SOP instance
+    /// (fo-dicom `FilmSession.CreateFilmBox`), writing the Type 1
+    /// `ReferencedFilmSessionSequence (2010,0500)`.
+    pub fn create_film_box(&self) -> FilmBox {
+        let mut film_box = FilmBox::new();
+        film_box.set_referenced_film_session(self);
+        film_box
+    }
 }
 
 impl Default for FilmSession {
@@ -264,6 +299,56 @@ impl FilmBox {
     /// image boxes are reattached with [`Self::add_image_box`].
     pub fn into_dataset(self) -> Dataset {
         self.dataset
+    }
+
+    /// Writes the Type 1 `ReferencedFilmSessionSequence (2010,0500)` pointing
+    /// back at `session` (fo-dicom `FilmBox` constructor). This sequence is
+    /// mandatory in a Basic Film Box SOP instance (PS3.3 C.13.3).
+    pub fn set_referenced_film_session(&mut self, session: &FilmSession) {
+        self.set_sequence_reference(
+            tags::REFERENCED_FILM_SESSION_SEQUENCE,
+            session.sop_class_uid(),
+            session.sop_instance_uid(),
+        );
+    }
+
+    /// The `(2010,0500)` referenced film session SOP Class/Instance UIDs.
+    pub fn referenced_film_session(&self) -> Option<(Option<String>, Option<String>)> {
+        let item = self
+            .dataset
+            .try_get_sequence(tags::REFERENCED_FILM_SESSION_SEQUENCE)?
+            .items()
+            .first()?;
+        Some((
+            item.try_get_str(tags::REFERENCED_SOP_CLASS_UID),
+            item.try_get_str(tags::REFERENCED_SOP_INSTANCE_UID),
+        ))
+    }
+
+    /// Replaces the single-item reference sequence `tag` with an item carrying
+    /// `(0008,1150)/(0008,1155)` set from `class`/`instance`.
+    fn set_sequence_reference(
+        &mut self,
+        tag: Tag,
+        class: Option<String>,
+        instance: Option<String>,
+    ) {
+        let mut item = Dataset::new();
+        if let Some(class) = class {
+            item.insert_str(tags::REFERENCED_SOP_CLASS_UID, Vr::Ui, class);
+        }
+        if let Some(instance) = instance {
+            item.insert_str(tags::REFERENCED_SOP_INSTANCE_UID, Vr::Ui, instance);
+        }
+        match self.dataset.sequence_mut(tag.clone()) {
+            Some(sequence) => {
+                sequence.items_mut().clear();
+                sequence.push(item);
+            }
+            None => {
+                self.dataset.insert_sequence(tag).push(item);
+            }
+        }
     }
 
     /// Sets the display format string and validates it parses (§12.4).
@@ -1111,6 +1196,34 @@ mod tests {
         assert_eq!(film.film_orientation(), FilmOrientation::Portrait);
         assert!(FilmOrientation::parse("landscape ").is_ok());
         assert!(FilmOrientation::parse("").is_err());
+    }
+
+    #[test]
+    fn a_film_box_references_its_film_session() {
+        let session = FilmSession::new();
+        let instance = session.sop_instance_uid();
+        assert_eq!(
+            session.sop_class_uid().as_deref(),
+            Some(crate::uids::BASIC_FILM_SESSION)
+        );
+        assert!(
+            instance.is_some(),
+            "a film session gets a generated SOP Instance UID"
+        );
+
+        let mut film_box = FilmBox::new();
+        film_box.set_referenced_film_session(&session);
+        let (class, inst) = film_box
+            .referenced_film_session()
+            .expect("(2010,0500) ReferencedFilmSessionSequence must be present");
+        assert_eq!(class.as_deref(), Some(crate::uids::BASIC_FILM_SESSION));
+        assert_eq!(inst, instance);
+
+        // the convenience constructor writes the same reference
+        assert!(session
+            .create_film_box()
+            .referenced_film_session()
+            .is_some());
     }
 
     #[test]

@@ -396,6 +396,16 @@ impl DicomFile {
             None => dataset_syntax(format, dataset_bytes, dataset_bytes.len() as u64)?,
         };
 
+        // A deflated transfer syntax stores the dataset as raw DEFLATE. Inflate
+        // it before parsing; otherwise the compressed bytes would be misread as
+        // Explicit VR elements (RD-04, matching the streaming open path).
+        let inflated;
+        let dataset_bytes: &[u8] = if syntax.is_deflate() {
+            inflated = crate::io::reader::inflate(dataset_bytes)?;
+            &inflated
+        } else {
+            dataset_bytes
+        };
         let mut source = ByteSourceReader::new(Cursor::new(dataset_bytes), syntax.endian());
         let mut builder = DatasetBuilder::with_transfer_syntax(syntax.clone());
         let outcome =
@@ -2458,6 +2468,27 @@ mod coverage_tests {
         let mut cursor = std::io::Cursor::new(bytes);
         let file = DicomFile::from_reader(&mut cursor, &ReadOptions::default()).unwrap();
         assert_eq!(file.format, FileFormat::AcrNema1);
+    }
+
+    #[test]
+    fn open_partial_inflates_a_deflated_dataset() {
+        // A deflated file must be inflated before parsing in open_partial, just
+        // as the streaming open path does; otherwise it yields compressed
+        // garbage. The real fixture under tests-data is a raw-DEFLATE sample.
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests-data/deflated/GH227.dcm");
+        let full = DicomFile::open(&path).expect("open deflated file");
+        let partial =
+            DicomFile::open_partial(&path, &|_| false).expect("open_partial deflated file");
+        let expected = full
+            .dataset
+            .try_get_str(Tag::SOP_INSTANCE_UID)
+            .expect("full parse has a SOP Instance UID");
+        assert_eq!(
+            partial.dataset.try_get_str(Tag::SOP_INSTANCE_UID),
+            Some(expected),
+            "the decompressed dataset exposes a known element"
+        );
     }
 
     #[test]

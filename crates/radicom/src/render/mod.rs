@@ -162,7 +162,8 @@ impl LutTable {
         let out = if width == 1.0 {
             // A one-wide output range (two consecutive entries) is a threshold,
             // not the general formula: (width - 1) would divide by zero (PR-C-04).
-            if (v as f64) < center {
+            // fo-dicom `VOILinearLUT` uses `WindowCenterMin05 = center - 0.5`.
+            if (v as f64) < center - 0.5 {
                 0.0
             } else {
                 255.0
@@ -3291,14 +3292,17 @@ mod tests {
     #[test]
     fn voi_lut_output_width_of_one_does_not_divide_by_zero() {
         // PR-C-04: two entries differing by 1 give an output range of width 1;
-        // the re-window used `(width - 1.0)` and divided by zero. It must act as
-        // a threshold instead: the low entry maps black, the high entry white.
+        // the re-window used `(width - 1.0)` and divided by zero.
+        // fo-dicom VOILinearLUT tests `value < WindowCenterMin05` where
+        // `WindowCenterMin05 = center - 0.5`. With entries [10, 11] the center is
+        // 10.5 and the threshold 10.0, so both entries land above it (white); the
+        // important property is that this is a clean threshold, never a NaN panic.
         let mut ds = gray_image(1, 1, 8, &[0], None, None);
         put_voi_lut(&mut ds, 0, &[10, 11]);
         let item = &ds.try_get_sequence(Tag::VOILUT_SEQUENCE).unwrap().items()[0];
         let table = super::LutTable::from_item(item).unwrap();
-        assert_eq!(table.map_byte(0.0), 0, "entry 10 → black");
-        assert_eq!(table.map_byte(1.0), 255, "entry 11 → white");
+        assert_eq!(table.map_byte(0.0), 255, "10 is not < 10.0 → white");
+        assert_eq!(table.map_byte(1.0), 255, "11 is not < 10.0 → white");
     }
 
     #[test]

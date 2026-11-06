@@ -17,7 +17,7 @@ use crate::model::dataset::Dataset;
 use crate::model::tag::Tag;
 use crate::model::transfer_syntax::syntaxes;
 use crate::model::vr::Vr;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub mod icon;
@@ -273,6 +273,21 @@ pub struct DicomDirectory {
     file: DicomFile,
     records: Vec<DirectoryRecord>,
     roots: Vec<usize>,
+    /// parent record index → child record indices, in sibling (ascending index)
+    /// order. Kept in sync at every internal `records` insertion so `children`
+    /// is O(children) instead of a full-table scan (which made rebuild O(n²)).
+    children_by_parent: HashMap<usize, Vec<usize>>,
+}
+
+/// Builds the parent → children adjacency from the records' `parent` links.
+fn build_children_map(records: &[DirectoryRecord]) -> HashMap<usize, Vec<usize>> {
+    let mut map: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (index, record) in records.iter().enumerate() {
+        if let Some(parent) = record.parent {
+            map.entry(parent).or_default().push(index);
+        }
+    }
+    map
 }
 
 impl DicomDirectory {
@@ -314,6 +329,7 @@ impl DicomDirectory {
             file,
             records: Vec::new(),
             roots: Vec::new(),
+            children_by_parent: HashMap::new(),
         })
     }
 
@@ -329,10 +345,12 @@ impl DicomDirectory {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         let file = DicomFile::from_bytes(bytes, &ReadOptions::default())?;
         let (records, roots) = stitch(bytes, &file.dataset);
+        let children_by_parent = build_children_map(&records);
         Ok(DicomDirectory {
             file,
             records,
             roots,
+            children_by_parent,
         })
     }
 
@@ -355,9 +373,10 @@ impl DicomDirectory {
 
     /// Direct children of `index`, in sibling order (§12.2).
     pub fn children(&self, index: usize) -> Vec<usize> {
-        (0..self.records.len())
-            .filter(|i| self.records[*i].parent == Some(index))
-            .collect()
+        self.children_by_parent
+            .get(&index)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Every record in depth-first order with its depth (§12.2).
@@ -367,8 +386,11 @@ impl DicomDirectory {
     pub fn walk(&self) -> Vec<(usize, usize)> {
         let mut out = Vec::new();
         let mut visited = vec![false; self.records.len()];
+        // Build from the current parent links so a hand-edited/corrupt tree is
+        // walked correctly even if the cached adjacency is stale.
+        let children = build_children_map(&self.records);
         for root in &self.roots {
-            self.walk_from(*root, 0, &mut out, &mut visited);
+            self.walk_from(*root, 0, &mut out, &mut visited, &children);
         }
         out
     }
@@ -379,14 +401,15 @@ impl DicomDirectory {
         depth: usize,
         out: &mut Vec<(usize, usize)>,
         visited: &mut [bool],
+        children: &HashMap<usize, Vec<usize>>,
     ) {
         if index >= self.records.len() || visited[index] {
             return;
         }
         visited[index] = true;
         out.push((index, depth));
-        for child in self.children(index) {
-            self.walk_from(child, depth + 1, out, visited);
+        for &child in children.get(&index).map(Vec::as_slice).unwrap_or(&[]) {
+            self.walk_from(child, depth + 1, out, visited, children);
         }
     }
 
@@ -418,8 +441,9 @@ impl DicomDirectory {
         }
         // 0 = unvisited, 1 = on the current path, 2 = finished
         let mut state = vec![0u8; count];
+        let children = build_children_map(&self.records);
         for &root in &self.roots {
-            self.validate_visit(root, &mut state)?;
+            self.validate_visit(root, &mut state, &children)?;
         }
         if state.contains(&0) {
             return Err(record_error("a record is not reachable from any root"));
@@ -427,15 +451,20 @@ impl DicomDirectory {
         Ok(())
     }
 
-    fn validate_visit(&self, index: usize, state: &mut [u8]) -> Result<(), Error> {
+    fn validate_visit(
+        &self,
+        index: usize,
+        state: &mut [u8],
+        children: &HashMap<usize, Vec<usize>>,
+    ) -> Result<(), Error> {
         match state[index] {
             1 => return Err(record_error("DICOMDIR record tree contains a cycle")),
             2 => return Ok(()),
             _ => {}
         }
         state[index] = 1;
-        for child in self.children(index) {
-            self.validate_visit(child, state)?;
+        for &child in children.get(&index).map(Vec::as_slice).unwrap_or(&[]) {
+            self.validate_visit(child, state, children)?;
         }
         state[index] = 2;
         Ok(())
@@ -603,6 +632,10 @@ impl DicomDirectory {
             dataset: record,
             parent: Some(series),
         });
+        self.children_by_parent
+            .entry(series)
+            .or_default()
+            .push(instance);
         Ok(DicomDirectoryEntry {
             patient,
             study,
@@ -656,6 +689,10 @@ impl DicomDirectory {
             dataset: record.dataset,
             parent: Some(parent),
         });
+        self.children_by_parent
+            .entry(parent)
+            .or_default()
+            .push(index);
         index
     }
 
@@ -678,6 +715,9 @@ impl DicomDirectory {
     /// resulting layout, then patches the offset values in place. One record
     /// clone instead of two full sequences (review §3.5).
     fn rebuild(&mut self) -> Result<(), Error> {
+        // Refresh the adjacency so `children`/`next_sibling` below are O(1)/
+        // O(children); rebuilding this once removes the previous O(n²) scans.
+        self.children_by_parent = build_children_map(&self.records);
         let links: Vec<(Option<usize>, Option<usize>)> = (0..self.records.len())
             .map(|index| {
                 (
@@ -1260,6 +1300,46 @@ mod tests {
         assert_eq!(dir.children(1), vec![2]);
         assert_eq!(dir.children(2), vec![3]);
         assert!(dir.children(3).is_empty());
+    }
+
+    #[test]
+    fn children_index_stays_correct_with_many_records() {
+        // Regression for the O(n²) full-table scan in `children`: build a few
+        // hundred records and verify the adjacency (order included) is right.
+        let mut dir = DicomDirectory::new("MANY");
+        let n = 200usize;
+        for i in 0..n {
+            let series = format!("1.2.3.4.{i}");
+            let instance_uid = format!("1.2.3.4.5.{i}");
+            dir.add_file(
+                &instance("P1", "1.2.3", &series, CT, &instance_uid),
+                format!("IMG{i:04}"),
+            )
+            .unwrap();
+        }
+        // 1 patient + 1 study + n series + n images
+        assert_eq!(dir.records().len(), 2 + 2 * n);
+        let patient = 0usize;
+        assert_eq!(
+            dir.children(patient),
+            vec![1],
+            "one study under the patient"
+        );
+        let study = dir.children(patient)[0];
+        let series = dir.children(study);
+        assert_eq!(series.len(), n, "every series is a child of the study");
+        assert!(
+            series.windows(2).all(|w| w[0] < w[1]),
+            "sibling order is ascending record index"
+        );
+        for &s in &series {
+            assert_eq!(dir.children(s).len(), 1, "one image per series");
+        }
+        assert_eq!(
+            dir.walk().len(),
+            dir.records().len(),
+            "walk reaches every record exactly once"
+        );
     }
 
     #[test]

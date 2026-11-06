@@ -494,7 +494,15 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
             Ok(v as u32)
         } else {
             if explicit {
-                self.source.read_u16().map_err(|e| io_err_need(e, at, 2))?; // reserved
+                // A standard SV/UV carries reserved(2) + u32 like other 32-bit
+                // VRs, but prior fo-dicom versions wrote a bare 2-byte length.
+                // Read the first u16: a non-zero value for SV/UV is that legacy
+                // length; otherwise it was the reserved field of the standard
+                // 32-bit form (fo-dicom DicomReader.ParseLength, #177).
+                let first = self.source.read_u16().map_err(|e| io_err_need(e, at, 2))?;
+                if matches!(vr, Vr::Sv | Vr::Uv) && first != 0 {
+                    return Ok(first as u32);
+                }
             }
             self.source.read_u32().map_err(|e| io_err_need(e, at, 4))
         }

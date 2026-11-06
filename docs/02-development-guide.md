@@ -48,8 +48,10 @@ Deliberate, tested ceilings. Change one only together with the tests that descri
 - A received C-STORE spills its PDVs to a temporary file (64 GiB bound) before parsing, but the parse
   still materialises the dataset once (the core exposes only byte-slice `parse_dataset_bytes`), and the
   SCU reverse-store (C-GET) path still buffers. Send-side streaming does not imply a file-backed parse.
-- The read-side PDU cap is 256 KiB and applies to A-ASSOCIATE too. PS3.8's Max-PDU-Length formally
-  governs only P-DATA-TF; the cap is a deliberate allocation-safety deviation.
+- A-ASSOCIATE (and the other non-P-DATA PDUs) are capped at 256 KiB — a deliberate allocation-safety
+  deviation, because PS3.8's Max-PDU-Length formally governs only P-DATA-TF. A P-DATA PDU is bounded by
+  the locally advertised Maximum-length-received (default 16384, itself capped at 256 KiB), so a peer
+  that exceeds the advertised value is a protocol error.
 - An external private sequence written with a *defined* length under Implicit VR still needs a private
   dictionary to recover its structure (its bytes are preserved).
 - CP-246 (`explicit_vr = false`) is applied to the Big-Endian UN-undefined-length-SQ case only; applying

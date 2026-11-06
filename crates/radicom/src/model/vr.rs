@@ -144,9 +144,22 @@ impl Vr {
         )
     }
 
-    /// Values may repeat, `\`-separated (string VRs except LT/ST/UR/UT).
+    /// Values may repeat for this VR. Matches fo-dicom `DicomVR.IsMultiValue`:
+    /// false only for LT/ST/UR/UT/SQ (and the internal item markers); every
+    /// other VR — string and binary alike — is multi-valued.
     pub const fn is_multi_value(self) -> bool {
-        self.is_string() && !matches!(self, Vr::Lt | Vr::St | Vr::Ur | Vr::Ut)
+        !matches!(
+            self,
+            Vr::Lt
+                | Vr::St
+                | Vr::Ur
+                | Vr::Ut
+                | Vr::Sq
+                | Vr::Item
+                | Vr::ItemDelim
+                | Vr::SeqDelim
+                | Vr::Implicit
+        )
     }
 
     /// Value padding byte (spec §2 "pad").
@@ -435,8 +448,12 @@ mod tests {
         for vr in single {
             assert!(!vr.is_multi_value(), "{}", vr);
         }
-        // non-string VRs are never multi-value
-        assert!(!Vr::Ob.is_multi_value() && !Vr::Sq.is_multi_value());
+        // binary VRs are multi-valued too (fo-dicom DicomVR.IsMultiValue); only
+        // SQ (and the internal item markers) is not
+        for vr in [Vr::Ob, Vr::Ow, Vr::Us, Vr::Ss, Vr::At, Vr::Sv, Vr::Uv] {
+            assert!(vr.is_multi_value(), "{vr}");
+        }
+        assert!(!Vr::Sq.is_multi_value());
     }
 
     #[test]

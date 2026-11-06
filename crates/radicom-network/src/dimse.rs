@@ -596,7 +596,7 @@ impl Status {
 pub fn status_description(code: u16) -> &'static str {
     match code {
         0x0000 => "Success",
-        0x0001 | 0x0002 => "Warning",
+        0x0001 => "Warning",
         0x0107 => "Attribute list error",
         0x0116 => "Attribute Value Out of Range",
         0x0106 => "Invalid attribute value",
@@ -757,7 +757,11 @@ pub fn classify(code: u16) -> StatusState {
 fn exact_state(code: u16) -> Option<StatusState> {
     Some(match code {
         0x0000 => StatusState::Success,
-        0x0001 | 0x0002 | 0x0107 | 0x0108 | 0x0116 => StatusState::Warning,
+        // 0x0001 (Warning), 0x0107 (Attribute List Error) and 0x0116 (Attribute
+        // Value Out of Range) are the only PS3.7 Annex C warning codes. 0x0002
+        // and 0x0108 are not defined there (fo-dicom's Lookup falls back to
+        // ProcessingFailure), so an unknown code is a failure, not a warning.
+        0x0001 | 0x0107 | 0x0116 => StatusState::Warning,
         // 0xFF00/0xFF01 are the only pending statuses; DIMSE-N codes such as
         // 0x0106 (Invalid attribute value) are failures, not pending
         0xFF00 | 0xFF01 => StatusState::Pending,
@@ -1154,6 +1158,24 @@ mod tests {
         assert_eq!(
             classify(status::ATTRIBUTE_VALUE_OUT_OF_RANGE),
             StatusState::Warning
+        );
+        // PS3.7 Annex C: 0x0107 is the Attribute List Error warning
+        assert_eq!(classify(status::ATTRIBUTE_LIST_ERROR), StatusState::Warning);
+        // 0x0108 and 0x0002 are not PS3.7 warning codes (fo-dicom -> Failure)
+        assert_eq!(
+            classify(0x0108),
+            StatusState::Failure,
+            "0x0108 is not a defined warning code"
+        );
+        assert_eq!(
+            classify(0x0002),
+            StatusState::Failure,
+            "0x0002 is not a defined warning code"
+        );
+        assert_eq!(
+            status_description(0x0108),
+            "Unknown status",
+            "an undefined code has no description"
         );
         assert_eq!(
             classify(0x0100),

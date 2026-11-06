@@ -100,15 +100,38 @@ pub async fn read_pdu<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<Pdu
 /// future after it consumed part of a frame loses those bytes and the next call
 /// resynchronises in the middle of a PDU. This keeps the received bytes in the
 /// struct instead: dropping the future only loses an *attempt*, never data.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PduReader {
     buf: bytes::BytesMut,
+    /// The largest PDU variable field this side will accept: the configured
+    /// (clamped) `max_pdu_length` we advertised as Maximum-length-received.
+    max_pdu: u32,
+}
+
+impl Default for PduReader {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PduReader {
     pub fn new() -> Self {
         PduReader {
             buf: bytes::BytesMut::new(),
+            max_pdu: MAX_PDU_SIZE,
+        }
+    }
+
+    /// A framer that rejects frames above the locally configured receive limit.
+    ///
+    /// `max_pdu` is the value the association advertises as
+    /// Maximum-length-received (already clamped by
+    /// [`crate::pdu::clamp_max_pdu_length`]), so the receiver accepts exactly
+    /// what it promised and rejects anything larger as a protocol error.
+    pub fn with_max_pdu(max_pdu: u32) -> Self {
+        PduReader {
+            buf: bytes::BytesMut::new(),
+            max_pdu,
         }
     }
 
@@ -141,9 +164,9 @@ impl PduReader {
             return Ok(None);
         }
         let length = u32::from_be_bytes([self.buf[2], self.buf[3], self.buf[4], self.buf[5]]);
-        if length > MAX_PDU_SIZE {
+        if length > self.max_pdu {
             return Err(NetworkError::protocol(
-                "PDU exceeds the 262144-byte receive limit",
+                "PDU exceeds the configured receive limit",
             ));
         }
         let total = HEADER_LEN + length as usize;
@@ -535,6 +558,24 @@ mod tests {
         match read_pdu(&mut server).await {
             Err(NetworkError::Protocol(message)) => {
                 assert!(message.contains("262144"), "got {message}")
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_configured_receive_limit_rejects_a_larger_pdu() {
+        // E: the receive limit is the locally configured max_pdu_length, not the
+        // 262144 constant. A framer configured for 64 bytes must reject a frame
+        // whose variable field is 65 bytes, before allocating the body.
+        let (mut client, mut server) = duplex(64);
+        client
+            .write_all(&[0x04, 0x00, 0x00, 0x00, 0x00, 65])
+            .await
+            .unwrap();
+        match PduReader::with_max_pdu(64).read_pdu(&mut server).await {
+            Err(NetworkError::Protocol(message)) => {
+                assert!(message.contains("receive limit"), "got {message}")
             }
             other => panic!("expected Protocol error, got {other:?}"),
         }

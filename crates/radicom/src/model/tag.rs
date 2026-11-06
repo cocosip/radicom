@@ -162,10 +162,13 @@ impl Tag {
             // odd case with a typed error instead of tripping `Tag::private`'s
             // debug assertion.
             Some(_) if group & 1 == 0 => Err(bad_tag(s)),
+            // Intern through the dictionary's creator cache so equal creator
+            // strings share one `Arc<PrivateCreator>` (docs §1.3), instead of a
+            // fresh allocation per parse.
             Some(c) => Ok(Tag::private(
                 group,
                 element,
-                Arc::new(PrivateCreator::new(c)),
+                crate::model::dictionary::dictionary().intern_creator(c),
             )),
         }
     }
@@ -464,6 +467,20 @@ mod extra_tests {
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
+
+    #[test]
+    fn parsing_the_same_private_creator_is_interned() {
+        // Two parses of the same creator string must share one Arc (§1.3),
+        // instead of allocating a fresh PrivateCreator each time.
+        let a = Tag::parse("(0029,1010:ACME)").unwrap();
+        let b = Tag::parse("(0029,1010:ACME)").unwrap();
+        let ca = a.private_creator_arc().unwrap();
+        let cb = b.private_creator_arc().unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&ca, &cb),
+            "private creator Arc must be interned through the dictionary cache"
+        );
+    }
 
     #[test]
     fn a_missing_comma_after_splitting_the_creator_is_rejected() {

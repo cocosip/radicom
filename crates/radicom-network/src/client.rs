@@ -802,13 +802,26 @@ impl DicomClient {
     }
 }
 
-/// True when the open association accepted every abstract syntax in `wanted`.
+/// True when the open association accepted every context in `wanted` with the
+/// transfer syntax we intend to use.
+///
+/// An association that accepted the abstract syntax under a *different* transfer
+/// syntax does not cover the request: sending in the preferred syntax would then
+/// silently fall back to the accepted one (and transcode or fail). The caller
+/// closes the association and re-negotiates with the syntax it actually needs.
 fn covers(association: &Association, wanted: &[PresentationContext]) -> bool {
     wanted.iter().all(|context| {
-        association
-            .contexts()
-            .find_abstract(&context.abstract_syntax)
-            .is_some()
+        match context.transfer_syntaxes.first() {
+            Some(preferred) => association
+                .contexts()
+                .find_exact(&context.abstract_syntax, preferred)
+                .is_some(),
+            // A proposal without a syntax can only be checked by abstract syntax.
+            None => association
+                .contexts()
+                .find_abstract(&context.abstract_syntax)
+                .is_some(),
+        }
     })
 }
 
@@ -1822,6 +1835,64 @@ mod tests {
             "an ID this client never sent"
         );
         peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_implicit_le_association_does_not_cover_a_jpeg_context() {
+        // D: reusing an association that only accepted Implicit VR LE for a
+        // JPEG instance would silently transcode (or fail). `covers` must look
+        // at the transfer syntax, not just the abstract syntax.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            crate::test_wire::accept_association(&mut stream).await;
+            // hold the association until the test drops it
+            let _ = crate::transport::read_pdu(&mut stream).await;
+        });
+        const CT: &str = "1.2.840.10008.5.1.4.1.1.2";
+        const IMPLICIT: &str = "1.2.840.10008.1.2";
+        const JPEG: &str = "1.2.840.10008.1.2.4.50";
+        let association = Association::open(
+            addr,
+            "SCU",
+            "SCP",
+            vec![PresentationContext::new(1, CT, vec![IMPLICIT.to_string()])],
+            crate::server::ClientOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            covers(
+                &association,
+                &[PresentationContext::new(1, CT, vec![IMPLICIT.to_string()])]
+            ),
+            "the accepted Implicit VR LE context is covered"
+        );
+        assert!(
+            !covers(
+                &association,
+                &[PresentationContext::new(1, CT, vec![JPEG.to_string()])]
+            ),
+            "a JPEG context is not covered by an Implicit-VR-only association"
+        );
+        // even with the implicit fallback in the proposal, the preferred JPEG
+        // syntax must be accepted exactly
+        assert!(
+            !covers(
+                &association,
+                &[PresentationContext::new(
+                    1,
+                    CT,
+                    crate::services::c_store_transfer_syntaxes(JPEG, &[], false)
+                )]
+            ),
+            "the preferred JPEG syntax is not accepted"
+        );
+
+        drop(association);
+        let _ = peer.await;
     }
 
     async fn echo_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {

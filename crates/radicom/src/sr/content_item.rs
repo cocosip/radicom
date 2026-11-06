@@ -1435,7 +1435,10 @@ mod tests {
         let large = MeasuredValue::new(1e300, units.clone())
             .numeric_value_text()
             .unwrap();
-        assert!(large.len() <= 16 && large.contains('e'), "got {large}");
+        assert!(
+            large.len() <= 16 && (large.contains('e') || large.contains('E')),
+            "got {large}"
+        );
 
         // a non-finite value has no DS form at all
         assert!(MeasuredValue::new(f64::NAN, units)

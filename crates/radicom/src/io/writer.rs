@@ -4,7 +4,8 @@
 //! an explicit-length sequence can never disagree with its own byte count.
 
 use crate::encoding::charset::{
-    charset_encoding, encode_multi_charset_with, iso2022_designator_for_term,
+    charset_encoding, encode_multi_charset_with_strict, is_strict_ascii_term,
+    iso2022_designator_for_term,
 };
 use crate::error::{DataError, Error};
 use crate::io::byte_source::ByteTargetWriter;
@@ -50,6 +51,9 @@ struct Charsets {
     /// ISO 2022 designation the declared first term requires (PS3.5
     /// §6.1.2.5.3); `None` for the default repertoire and UTF-8.
     first_designator: Option<&'static [u8]>,
+    /// True when the first term is ISO_IR 6 / ISO 2022 IR 6, whose wire form is
+    /// strict 7-bit ASCII even though encoding_rs maps `ASCII` to windows-1252.
+    strict_ascii: bool,
 }
 
 impl Charsets {
@@ -60,6 +64,7 @@ impl Charsets {
                 first: c.first,
                 alternates: c.alternates.clone(),
                 first_designator: c.first_designator,
+                strict_ascii: c.strict_ascii,
             })
         };
         let Some(DicomItem::Element(element)) = ds.item(&Tag::SPECIFIC_CHARACTER_SET) else {
@@ -73,6 +78,7 @@ impl Charsets {
                     first,
                     alternates: rest.to_vec(),
                     first_designator: None,
+                    strict_ascii: false,
                 });
             }
             return inherit();
@@ -86,6 +92,7 @@ impl Charsets {
             first: charset_encoding(first),
             alternates: terms.map(charset_encoding).collect(),
             first_designator: iso2022_designator_for_term(first),
+            strict_ascii: is_strict_ascii_term(first),
         })
     }
 }
@@ -577,12 +584,13 @@ fn encode_value(e: &DicomElement, charset: Option<&Charsets>) -> Result<Option<V
     match e.value() {
         ElementValue::Str(text) => {
             let mut bytes = match charset {
-                Some(c) if e.vr().is_character_encoded() => encode_multi_charset_with(
+                Some(c) if e.vr().is_character_encoded() => encode_multi_charset_with_strict(
                     text,
                     c.first,
                     &c.alternates,
                     e.vr() == Vr::Pn,
                     c.first_designator,
+                    c.strict_ascii,
                 ),
                 _ => text.as_bytes().to_vec(),
             };
