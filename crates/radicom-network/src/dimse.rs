@@ -378,7 +378,6 @@ impl Command {
         let field =
             CommandField::from_code(code).ok_or(NetworkError::protocol("unknown command field"))?;
 
-        let data_set_type: u16 = ds.get_or(tag::COMMAND_DATA_SET_TYPE, NO_DATA_SET);
         let attribute_identifier_list = if ds.contains(&tag::ATTRIBUTE_IDENTIFIER_LIST) {
             let element = ds
                 .get_element(tag::ATTRIBUTE_IDENTIFIER_LIST)
@@ -411,6 +410,33 @@ impl Command {
         } else {
             None
         };
+        let data_set_type: u16 = ds
+            .get(tag::COMMAND_DATA_SET_TYPE)
+            .map_err(|_| NetworkError::protocol("command set has no Command Data Set Type"))?;
+        if data_set_type != NO_DATA_SET && data_set_type != 0x0001 {
+            return Err(NetworkError::protocol(
+                "command set has an invalid Command Data Set Type",
+            ));
+        }
+        let message_id = ds.get(tag::MESSAGE_ID).unwrap_or(0);
+        if field.writes_message_id() && message_id == 0 {
+            return Err(NetworkError::protocol(
+                "request Message ID must be present and nonzero",
+            ));
+        }
+        let message_id_being_responded_to = ds.get(tag::MESSAGE_ID_BEING_RESPONDED_TO).ok();
+        if (!field.is_request() || field == CommandField::CCancelRq)
+            && message_id_being_responded_to.is_none()
+        {
+            return Err(NetworkError::protocol(
+                "response Message ID Being Responded To is missing",
+            ));
+        }
+        if message_id_being_responded_to == Some(0) {
+            return Err(NetworkError::protocol(
+                "Message ID Being Responded To must be nonzero",
+            ));
+        }
 
         Ok(Command {
             field,
@@ -420,8 +446,8 @@ impl Command {
             requested_sop_class_uid: ds
                 .try_get_str(tag::REQUESTED_SOP_CLASS_UID)
                 .map(|s| s.trim().to_string()),
-            message_id: ds.get_or(tag::MESSAGE_ID, 0u16),
-            message_id_being_responded_to: ds.get(tag::MESSAGE_ID_BEING_RESPONDED_TO).ok(),
+            message_id,
+            message_id_being_responded_to,
             status: ds.get(tag::STATUS).ok(),
             error_comment: ds
                 .try_get_str(tag::ERROR_COMMENT)
@@ -919,6 +945,8 @@ mod tests {
         // an absent (0000,0700) reads as MEDIUM
         let mut ds = Dataset::new();
         ds.insert_value(tag::COMMAND_FIELD, CommandField::CFindRq.code());
+        ds.insert_value(tag::MESSAGE_ID, 1u16);
+        ds.insert_value(tag::COMMAND_DATA_SET_TYPE, NO_DATA_SET);
         assert_eq!(
             Command::from_dataset(&ds).unwrap().priority,
             Priority::Medium

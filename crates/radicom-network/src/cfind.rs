@@ -315,10 +315,30 @@ impl CFindResponse {
         if command.field != CommandField::CFindRsp {
             return Err(NetworkError::protocol("not a C-FIND response"));
         }
+        let status = command.status.unwrap_or(status::PROCESSING_FAILURE);
+        let pending = matches!(status, status::PENDING | status::PENDING_WARNING);
+        if pending != identifier.is_some() {
+            return Err(NetworkError::protocol(
+                "C-FIND Pending responses require an Identifier and terminal responses forbid one",
+            ));
+        }
+        let message_id_being_responded_to = command
+            .message_id_being_responded_to
+            .filter(|id| *id != 0)
+            .ok_or(NetworkError::protocol(
+                "C-FIND response has no valid Message ID Being Responded To",
+            ))?;
+        let affected_sop_class_uid = command
+            .affected_sop_class_uid
+            .clone()
+            .filter(|uid| !uid.is_empty())
+            .ok_or(NetworkError::protocol(
+                "C-FIND response has no Affected SOP Class UID",
+            ))?;
         Ok(CFindResponse {
-            message_id_being_responded_to: command.message_id_being_responded_to.unwrap_or(0),
-            affected_sop_class_uid: command.affected_sop_class_uid.clone().unwrap_or_default(),
-            status: command.status.unwrap_or(status::PROCESSING_FAILURE),
+            message_id_being_responded_to,
+            affected_sop_class_uid,
+            status,
             identifier,
             remaining: command.remaining_suboperations.unwrap_or(0),
             completed: command.completed_suboperations.unwrap_or(0),

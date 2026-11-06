@@ -402,6 +402,21 @@ fn raw_value_array(
     let bytes = raw.data()?;
     let bytes: &[u8] = bytes.as_ref();
     let unit = vr.unit_size().max(1);
+    if matches!(
+        vr,
+        Vr::At | Vr::Us | Vr::Ss | Vr::Ul | Vr::Sl | Vr::Fl | Vr::Fd | Vr::Sv | Vr::Uv
+    ) && !bytes.len().is_multiple_of(unit)
+    {
+        return Err(JsonError::Malformed {
+            tag: _tag.to_string(),
+            reason: format!(
+                "{} value length {} is not a multiple of {}",
+                vr,
+                bytes.len(),
+                unit
+            ),
+        });
+    }
     Ok(match vr {
         Vr::At => bytes
             .as_chunks::<4>()

@@ -381,6 +381,7 @@ where
     // cancel-safe framer (review #13).
     let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Result<Outgoing>>(64);
     let mut jobs: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+    let mut active_request_ids = std::collections::HashSet::new();
     // a C-CANCEL for a request running on a task is forwarded through here
     let cancels: CancelMap = CancelMap::default();
     let max_jobs = if incoming_window == 0 {
@@ -402,6 +403,9 @@ where
                             &outgoing.syntax,
                         )
                         .await?;
+                    if let Some(id) = outgoing.command.message_id_being_responded_to {
+                        active_request_ids.remove(&id);
+                    }
                 }
             }
             joined = jobs.join_next(), if !jobs.is_empty() => {
@@ -430,7 +434,21 @@ where
                                     "command on an unaccepted presentation context",
                                 ));
                             }
-                            let command = command_from_bytes(&unit.bytes)?;
+                            let command = match command_from_bytes(&unit.bytes) {
+                                Ok(command) => command,
+                                Err(_error) => {
+                                    // A malformed command is a service-user
+                                    // violation; tell the peer before closing.
+                                    let abort = Abort {
+                                        source: AbortSource::User,
+                                        reason: 0,
+                                    };
+                                    serving.send_pdu(&Pdu::Abort(abort)).await?;
+                                    return Err(NetworkError::PeerViolation(
+                                        "peer sent a malformed command",
+                                    ));
+                                }
+                            };
                             serving
                                 .accepted
                                 .validate_request(unit.context_id, &command, true)?;
@@ -476,6 +494,11 @@ where
                                 handle_command(&mut serving, unit.context_id, command).await?;
                                 serving.resume_deferred();
                             } else if DispatchJob::is_concurrent(&command) {
+                                if !active_request_ids.insert(command.message_id) {
+                                    return Err(NetworkError::protocol(
+                                        "duplicate outstanding DIMSE Message ID",
+                                    ));
+                                }
                                 // C: keep concurrent providers within the
                                 // negotiated window. When it is full, wait for a
                                 // running job to finish (writing its response)
@@ -494,6 +517,9 @@ where
                                                         &outgoing.syntax,
                                                     )
                                                     .await?;
+                                                if let Some(id) = outgoing.command.message_id_being_responded_to {
+                                                    active_request_ids.remove(&id);
+                                                }
                                             }
                                         }
                                         joined = jobs.join_next() => {
@@ -931,6 +957,29 @@ where
             .await;
     };
 
+    if !is_valid_ae_title(&destination_ae) {
+        let request = crate::cmove::CMoveRequest {
+            message_id: command.message_id,
+            sop_class_uid: command.affected_sop_class_uid.clone().unwrap_or_default(),
+            priority: command.priority,
+            destination_ae,
+            identifier,
+        };
+        let response = crate::cmove::CMoveResponse::failure(
+            &request,
+            crate::dimse::status::MOVE_DESTINATION_UNKNOWN,
+            "C-MOVE Move Destination is not a valid AE title",
+        );
+        return serving
+            .send_with_dataset(
+                context_id,
+                &response.to_command(),
+                response.identifier().as_ref(),
+                syntax,
+            )
+            .await;
+    }
+
     let request = crate::cmove::CMoveRequest {
         message_id: command.message_id,
         sop_class_uid: command.affected_sop_class_uid.clone().unwrap_or_default(),
@@ -1050,6 +1099,11 @@ where
             .await?;
     }
     Ok(())
+}
+
+fn is_valid_ae_title(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty() && bytes.len() <= 16 && bytes.iter().all(|byte| (0x20..=0x7e).contains(byte))
 }
 
 /// The C-FIND path: decode the Identifier and stream the matches back (§11.4).
@@ -1320,7 +1374,12 @@ where
     }
 
     pub(crate) async fn next_pdu(&mut self) -> Result<Option<Pdu>> {
-        self.pdu_reader.read_pdu(self.stream).await
+        match self.options.request_timeout {
+            Some(limit) => tokio::time::timeout(limit, self.pdu_reader.read_pdu(self.stream))
+                .await
+                .map_err(|_| NetworkError::RequestTimedOut { message_id: 0 })?,
+            None => self.pdu_reader.read_pdu(self.stream).await,
+        }
     }
 
     /// Reads the next PDU, bounded by `ServerOptions::request_timeout` (M8).

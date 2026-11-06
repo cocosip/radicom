@@ -100,6 +100,7 @@ pub enum ImageDisplayFormat {
 }
 
 impl ImageDisplayFormat {
+    const MAX_CELLS: u64 = 1_000_000;
     /// Parses a DICOM `ImageDisplayFormat` string (§12.4).
     pub fn parse(text: &str) -> Result<ImageDisplayFormat, Error> {
         let text = text.trim();
@@ -114,6 +115,9 @@ impl ImageDisplayFormat {
                     .ok_or_else(|| format_error(text, "STANDARD needs C,R"))?;
                 let columns = parse_count(columns, text)?;
                 let rows = parse_count(rows, text)?;
+                if u64::from(columns) * u64::from(rows) > Self::MAX_CELLS {
+                    return Err(format_error(text, "layout has too many cells"));
+                }
                 Ok(ImageDisplayFormat::Standard { columns, rows })
             }
             "ROW" => Ok(ImageDisplayFormat::Row(parse_counts(rest, text)?)),
@@ -134,9 +138,9 @@ impl ImageDisplayFormat {
     /// The total number of image cells this format defines.
     pub fn cell_count(&self) -> u32 {
         match self {
-            ImageDisplayFormat::Standard { columns, rows } => columns * rows,
-            ImageDisplayFormat::Row(counts) => counts.iter().sum(),
-            ImageDisplayFormat::Col(counts) => counts.iter().sum(),
+            ImageDisplayFormat::Standard { columns, rows } => columns.saturating_mul(*rows),
+            ImageDisplayFormat::Row(counts) => counts.iter().copied().sum(),
+            ImageDisplayFormat::Col(counts) => counts.iter().copied().sum(),
             ImageDisplayFormat::Slide | ImageDisplayFormat::SuperSlide => 1,
             ImageDisplayFormat::Custom(_) => 0,
         }
@@ -253,6 +257,9 @@ fn parse_counts(rest: &str, whole: &str) -> Result<Vec<u32>, Error> {
     let counts = counts?;
     if counts.is_empty() {
         return Err(format_error(whole, "no counts given"));
+    }
+    if counts.iter().map(|&count| u64::from(count)).sum::<u64>() > ImageDisplayFormat::MAX_CELLS {
+        return Err(format_error(whole, "layout has too many cells"));
     }
     Ok(counts)
 }

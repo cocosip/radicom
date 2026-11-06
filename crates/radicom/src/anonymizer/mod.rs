@@ -191,7 +191,9 @@ impl Anonymizer {
                         self.replace_uid(dataset, &tag, replaced)
                     }
                     Action::Clean | Action::Uid => {
-                        if vr.is_string() {
+                        if matches!(vr, Vr::Da | Vr::Dt | Vr::Tm | Vr::Ds | Vr::Is) {
+                            self.blank(dataset, &tag, vr, true)?;
+                        } else if vr.is_string() {
                             dataset.insert_str(tag.clone(), vr, "ANONYMOUS");
                         } else {
                             self.blank(dataset, &tag, vr, true)?;

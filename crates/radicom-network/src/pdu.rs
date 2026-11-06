@@ -351,6 +351,9 @@ pub fn decode_bytes(frame: Bytes) -> Result<Pdu> {
     if frame.len() < end {
         return Err(NetworkError::protocol("PDU body is truncated"));
     }
+    if frame.len() != end {
+        return Err(NetworkError::protocol("bytes remain after the PDU body"));
+    }
     let body = frame.slice(6..end);
 
     Ok(match pdu_type {
@@ -387,6 +390,19 @@ fn decode_ae(bytes: &[u8]) -> String {
         .to_string()
 }
 
+pub(crate) fn validate_ae_title(value: &str) -> Result<()> {
+    let bytes = value.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > 16
+        || bytes.iter().any(|byte| !(0x20..=0x7e).contains(byte))
+    {
+        return Err(NetworkError::protocol(
+            "AE title must contain 1..=16 printable ASCII bytes",
+        ));
+    }
+    Ok(())
+}
+
 /// Pads or truncates an AE title to at most 16 **bytes** (PS3.8 §9.3.2).
 ///
 /// The cut lands on a UTF-8 boundary so the value stays valid text instead of
@@ -421,7 +437,7 @@ fn decode_associate(body: &[u8], is_rq: bool) -> Result<Associate> {
     let mut presentation_contexts = Vec::new();
     let mut user_information = UserInformation::default();
 
-    while offset + 4 <= body.len() {
+    while offset < body.len() {
         let (item_type, start, end) = item_header(body, offset)?;
         let value = &body[start..end];
         match item_type {
@@ -441,6 +457,9 @@ fn decode_associate(body: &[u8], is_rq: bool) -> Result<Associate> {
             _ => {}
         }
         offset = end;
+    }
+    if offset != body.len() {
+        return Err(NetworkError::protocol("trailing bytes in A-ASSOCIATE body"));
     }
 
     Ok(Associate {
@@ -470,7 +489,7 @@ fn decode_presentation_context(value: &[u8], is_ac: bool) -> Result<Presentation
     let mut transfer_syntaxes = Vec::new();
 
     let mut offset = 4usize;
-    while offset + 4 <= value.len() {
+    while offset < value.len() {
         let (item_type, start, end) = item_header(value, offset)?;
         let uid = decode_string(&value[start..end]);
         match item_type {
@@ -479,6 +498,11 @@ fn decode_presentation_context(value: &[u8], is_ac: bool) -> Result<Presentation
             _ => {}
         }
         offset = end;
+    }
+    if offset != value.len() {
+        return Err(NetworkError::protocol(
+            "trailing bytes in presentation context",
+        ));
     }
 
     Ok(PresentationContext {
@@ -496,14 +520,17 @@ fn decode_presentation_context(value: &[u8], is_ac: bool) -> Result<Presentation
 fn decode_user_information(value: &[u8], is_rq: bool) -> Result<UserInformation> {
     let mut out = UserInformation::default();
     let mut offset = 0usize;
-    while offset + 4 <= value.len() {
+    while offset < value.len() {
         let (item_type, start, end) = item_header(value, offset)?;
         let raw = &value[start..end];
         match item_type {
             item::MAX_PDU_LENGTH => {
-                if raw.len() >= 4 {
-                    out.max_pdu_length = u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]);
+                if raw.len() != 4 {
+                    return Err(NetworkError::protocol(
+                        "Maximum Length Received item must be four bytes",
+                    ));
                 }
+                out.max_pdu_length = u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]);
             }
             item::IMPLEMENTATION_CLASS_UID => {
                 out.implementation_class_uid = Some(decode_string(raw));
@@ -512,16 +539,21 @@ fn decode_user_information(value: &[u8], is_rq: bool) -> Result<UserInformation>
                 out.implementation_version_name = Some(decode_string(raw));
             }
             item::ASYNC_OPERATIONS => {
-                if raw.len() >= 4 {
-                    out.async_operations = Some(AsyncOperations {
-                        invoked: u16::from_be_bytes([raw[0], raw[1]]),
-                        performed: u16::from_be_bytes([raw[2], raw[3]]),
-                    });
+                if raw.len() != 4 {
+                    return Err(NetworkError::protocol(
+                        "Asynchronous Operations item must be four bytes",
+                    ));
                 }
+                out.async_operations = Some(AsyncOperations {
+                    invoked: u16::from_be_bytes([raw[0], raw[1]]),
+                    performed: u16::from_be_bytes([raw[2], raw[3]]),
+                });
             }
             item::ROLE_SELECTION => {
                 // [uid_len u16][uid][scu][scp] — PS3.8 §D.3.3.4
-                if raw.len() >= 4 {
+                if raw.len() < 4 {
+                    return Err(NetworkError::protocol("role selection is truncated"));
+                } else {
                     let uid_len = u16::from_be_bytes([raw[0], raw[1]]) as usize;
                     let uid = raw.get(2..2 + uid_len).ok_or(NetworkError::protocol(
                         "role selection UID runs past the item",
@@ -537,6 +569,11 @@ fn decode_user_information(value: &[u8], is_rq: bool) -> Result<UserInformation>
                         scu_role: scu != 0,
                         scp_role: scp != 0,
                     });
+                    if raw.len() != 4 + uid_len
+                        && !(raw.len() == 5 + uid_len && raw.last() == Some(&0))
+                    {
+                        return Err(NetworkError::protocol("role selection has trailing bytes"));
+                    }
                 }
             }
             item::SOP_CLASS_EXTENDED_NEGOTIATION => {
@@ -556,7 +593,9 @@ fn decode_user_information(value: &[u8], is_rq: bool) -> Result<UserInformation>
             item::USER_IDENTITY_RQ => {
                 // type(1) positive(1) primary_len(2) primary
                 // secondary_len(2) secondary — PS3.8 §D.3.3.7
-                if raw.len() >= 4 {
+                if raw.len() < 4 {
+                    return Err(NetworkError::protocol("user identity request is truncated"));
+                } else {
                     // Trust boundary: the type is one of 1..=5 (§D.3.3.7).
                     if !(1..=5).contains(&raw[0]) {
                         return Err(NetworkError::protocol("user identity type must be 1..=5"));
@@ -582,6 +621,14 @@ fn decode_user_information(value: &[u8], is_rq: bool) -> Result<UserInformation>
                         secondary,
                         positive_response_requested: raw[1] != 0,
                     });
+                    if secondary_at + 2 + secondary_len != raw.len()
+                        && !(secondary_at + 3 + secondary_len == raw.len()
+                            && raw.last() == Some(&0))
+                    {
+                        return Err(NetworkError::protocol(
+                            "user identity request has trailing bytes",
+                        ));
+                    }
                 }
             }
             item::USER_IDENTITY_AC => {
@@ -591,12 +638,22 @@ fn decode_user_information(value: &[u8], is_rq: bool) -> Result<UserInformation>
                 let response = raw.get(2..2 + server_len).ok_or(NetworkError::protocol(
                     "user identity server response runs past the item",
                 ))?;
+                if raw.len() != 2 + server_len
+                    && !(raw.len() == 3 + server_len && raw.last() == Some(&0))
+                {
+                    return Err(NetworkError::protocol(
+                        "user identity response has trailing bytes",
+                    ));
+                }
                 out.user_identity_response = Some(response.to_vec());
             }
             // unknown sub-items are skipped by length
             _ => {}
         }
         offset = end;
+    }
+    if offset != value.len() {
+        return Err(NetworkError::protocol("trailing bytes in User Information"));
     }
     Ok(out)
 }
@@ -684,6 +741,11 @@ fn decode_pdata_bytes(body: Bytes) -> Result<PData> {
         }
         let context_id = body[start];
         let header = body[start + 1];
+        if context_id == 0 || header & 0xFC != 0 {
+            return Err(NetworkError::protocol(
+                "PDV has an invalid presentation context or control header",
+            ));
+        }
         // The PDV value is even-padded on the wire and the pad byte is
         // indistinguishable from real data at this layer, so it is kept.
         // The DIMSE assembler delimits real content by the command group
@@ -829,7 +891,12 @@ fn encode_associate(a: &Associate, is_rq: bool) -> Result<Vec<u8>> {
             for syntax in &pc.transfer_syntaxes {
                 push_item(&mut body, item::TRANSFER_SYNTAX, syntax.as_bytes())?;
             }
-        } else if let Some(syntax) = pc.transfer_syntaxes.first() {
+        } else if pc.result == 0 {
+            let Some(syntax) = pc.transfer_syntaxes.first() else {
+                return Err(NetworkError::protocol(
+                    "accepted presentation context has no transfer syntax",
+                ));
+            };
             // an A-ASSOCIATE-AC carries exactly one accepted transfer syntax and
             // never repeats the abstract syntax (§9.3.3)
             push_item(&mut body, item::TRANSFER_SYNTAX, syntax.as_bytes())?;

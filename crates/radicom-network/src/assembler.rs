@@ -52,8 +52,11 @@ impl Default for SpoolConfig {
 }
 
 impl SpoolConfig {
-    /// Largest spooled dataset a default assembler accepts (64 GiB).
-    pub const DEFAULT_MAX_SPILLED_LENGTH: u64 = 64 * 1024 * 1024 * 1024;
+    /// Largest spooled dataset a default assembler accepts (4 GiB).
+    ///
+    /// Deployments receiving whole-slide images can raise this explicitly;
+    /// the default must not let one peer consume an unbounded amount of disk.
+    pub const DEFAULT_MAX_SPILLED_LENGTH: u64 = 4 * 1024 * 1024 * 1024;
 }
 
 /// A received message body: in memory, or streamed to a file (H3).

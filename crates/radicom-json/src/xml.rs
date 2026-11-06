@@ -23,7 +23,7 @@ use radicom::model::element::DicomElement;
 use radicom::model::item::{DicomItem, DicomSequence};
 use radicom::model::tag::Tag;
 use radicom::model::vr::Vr;
-use radicom::Error;
+use radicom::{DataError, Error};
 use std::fmt::Write as _;
 /// Renders a dataset as an XML string (XML-01). A deferred value that cannot be
 /// read is an error, not an empty value.
@@ -147,6 +147,20 @@ fn raw_units_text(raw: &radicom::model::buffer::SharedBuffer, vr: Vr) -> Result<
     let bytes = raw.data()?;
     let bytes: &[u8] = bytes.as_ref();
     let unit = vr.unit_size().max(1);
+    if matches!(
+        vr,
+        Vr::At | Vr::Us | Vr::Ss | Vr::Ul | Vr::Sl | Vr::Fl | Vr::Fd | Vr::Sv | Vr::Uv
+    ) && !bytes.len().is_multiple_of(unit)
+    {
+        return Err(Error::Data(DataError::Other {
+            message: format!(
+                "{} value length {} is not a multiple of {}",
+                vr,
+                bytes.len(),
+                unit
+            ),
+        }));
+    }
     let mut parts = Vec::new();
     for chunk in bytes.chunks(unit) {
         if chunk.len() < unit {
@@ -756,8 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn a_short_byte_backed_value_keeps_whole_units_only() {
-        // 3 bytes of US: the trailing partial unit is dropped, never indexed
+    fn a_short_byte_backed_value_is_rejected() {
         let mut ds = Dataset::new();
         ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
             Tag::ROWS,
@@ -766,12 +779,7 @@ mod tests {
                 0x01, 0x00, 0x02,
             ])),
         )));
-        let xml = dataset_to_xml(&ds).unwrap();
-        assert!(xml.contains("<Value number=\"1\">1</Value>"), "{xml}");
-        assert!(
-            !xml.contains("513"),
-            "the partial unit is not decoded: {xml}"
-        );
+        assert!(dataset_to_xml(&ds).is_err());
     }
 
     #[test]

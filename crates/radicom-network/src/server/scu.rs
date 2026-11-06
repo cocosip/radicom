@@ -149,6 +149,8 @@ impl Association {
     ) -> Result<Self> {
         let mut options = options;
         options.max_pdu_length = crate::pdu::clamp_max_pdu_length(options.max_pdu_length);
+        crate::pdu::validate_ae_title(calling_ae)?;
+        crate::pdu::validate_ae_title(called_ae)?;
         // validate before touching the network: a bad identity must not
         // depend on whether the peer happens to be reachable (§11.2)
         if let Some(identity) = &options.user_identity {
@@ -217,6 +219,12 @@ impl Association {
                 // the AC echoes the roles it granted; they apply to whichever
                 // context carries that abstract syntax (review #16)
                 let granted_roles = accept.user_information.role_selections;
+                if accept.presentation_contexts.len() != requested_contexts.len() {
+                    return Err(NetworkError::protocol(
+                        "association accept must answer every proposed presentation context",
+                    ));
+                }
+                let mut accepted_ids = std::collections::HashSet::new();
                 let negotiated = accept
                     .presentation_contexts
                     .iter()
@@ -236,6 +244,21 @@ impl Association {
                                     "association accept names a context that was not proposed",
                                 )
                             })?;
+                        if !accepted_ids.insert(pc.id) {
+                            return Err(NetworkError::protocol(
+                                "association accept repeats a presentation context ID",
+                            ));
+                        }
+                        if pc.result == 0 && pc.transfer_syntaxes.len() != 1 {
+                            return Err(NetworkError::protocol(
+                                "accepted presentation context must carry exactly one transfer syntax",
+                            ));
+                        }
+                        if pc.result != 0 && !pc.transfer_syntaxes.is_empty() {
+                            return Err(NetworkError::protocol(
+                                "rejected presentation context must not carry a transfer syntax",
+                            ));
+                        }
                         let transfer_syntax =
                             pc.transfer_syntaxes.first().cloned().unwrap_or_default();
                         if pc.result == 0 && !rq.transfer_syntaxes.contains(&transfer_syntax) {
@@ -696,9 +719,17 @@ impl Association {
         originator_ae: Option<&str>,
         originator_message_id: Option<u16>,
     ) -> Result<CStoreResponse> {
-        let (message_id, context_id, target, command) =
+        let (message_id, context_id, target, command_bytes) =
             self.plan_c_store(file, originator_ae, originator_message_id)?;
         let dataset = &file.dataset;
+        let expected_sop_class_uid = dataset
+            .try_get_str(radicom::model::tag::Tag::SOP_CLASS_UID)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let expected_sop_instance_uid = dataset
+            .try_get_str(radicom::model::tag::Tag::SOP_INSTANCE_UID)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
 
         // Stream the dataset when no transcode is needed (NET-13): the writer
         // frames PDUs through a bounded channel, so a multi-GB instance never
@@ -715,11 +746,20 @@ impl Association {
                 Ok(transcoded) => {
                     let payload =
                         bytes::Bytes::from(crate::message::encode_dataset(&transcoded, &target)?);
-                    let pdus =
-                        self.splitter
-                            .split_message_bytes(context_id, command, Some(payload))?;
+                    let pdus = self.splitter.split_message_bytes(
+                        context_id,
+                        command_bytes,
+                        Some(payload),
+                    )?;
                     write_pdata_batch(&mut self.stream, pdus).await?;
-                    return self.finish_c_store(message_id).await;
+                    return self
+                        .finish_c_store(
+                            message_id,
+                            context_id,
+                            &expected_sop_class_uid,
+                            &expected_sop_instance_uid,
+                        )
+                        .await;
                 }
                 Err(_) if self.ignore_unsupported_syntax_change => source.clone(),
                 Err(error) => {
@@ -735,7 +775,7 @@ impl Association {
         crate::message::write_message_streamed(
             &mut self.stream,
             context_id,
-            command,
+            command_bytes,
             dataset.clone(),
             send_syntax,
             max_pdu,
@@ -744,25 +784,43 @@ impl Association {
             self.splitter.max_data_pdv(),
         )
         .await?;
-        self.finish_c_store(message_id).await
+        self.finish_c_store(
+            message_id,
+            context_id,
+            &expected_sop_class_uid,
+            &expected_sop_instance_uid,
+        )
+        .await
     }
 
     /// Waits for the response of the C-STORE sent as `message_id` (§11.4).
-    async fn finish_c_store(&mut self, message_id: u16) -> Result<CStoreResponse> {
+    async fn finish_c_store(
+        &mut self,
+        message_id: u16,
+        context_id: u8,
+        expected_sop_class_uid: &str,
+        expected_sop_instance_uid: &str,
+    ) -> Result<CStoreResponse> {
         self.pending.insert(message_id);
         let response = self
-            .await_response(message_id, CommandField::CStoreRsp)
+            .await_response_with_context(message_id, CommandField::CStoreRsp, true)
             .await;
         self.pending.remove(message_id);
-        response.map(|command| {
-            CStoreResponse::from_command(&command).unwrap_or_else(|_| CStoreResponse {
-                message_id_being_responded_to: message_id,
-                status: crate::dimse::status::PROCESSING_FAILURE,
-                affected_sop_class_uid: String::new(),
-                affected_sop_instance_uid: String::new(),
-                error_comment: Some("malformed C-STORE response".into()),
-            })
-        })
+        let (response_context, command) = response?;
+        if response_context != context_id {
+            return Err(NetworkError::protocol(
+                "C-STORE response used the wrong presentation context",
+            ));
+        }
+        let response = CStoreResponse::from_command(&command)?;
+        if response.affected_sop_class_uid.trim() != expected_sop_class_uid
+            || response.affected_sop_instance_uid.trim() != expected_sop_instance_uid
+        {
+            return Err(NetworkError::protocol(
+                "C-STORE response did not echo the requested SOP UIDs",
+            ));
+        }
+        Ok(response)
     }
 
     /// Validates a C-STORE and builds its command, context and target syntax.
@@ -907,6 +965,32 @@ impl Association {
                                     "duplicate or unexpected C-STORE batch response ID",
                                 )
                             })?;
+                            let request = files[index];
+                            let expected_class = request
+                                .dataset
+                                .try_get_str(radicom::model::tag::Tag::SOP_CLASS_UID)
+                                .map(|s| s.trim().to_string())
+                                .unwrap_or_default();
+                            let expected_context = self
+                                .contexts
+                                .pick(&expected_class, request.dataset.transfer_syntax().uid())?;
+                            if unit.context_id != expected_context.id {
+                                return Err(NetworkError::protocol(
+                                    "C-STORE batch response used the wrong presentation context",
+                                ));
+                            }
+                            let expected_instance = request
+                                .dataset
+                                .try_get_str(radicom::model::tag::Tag::SOP_INSTANCE_UID)
+                                .map(|s| s.trim().to_string())
+                                .unwrap_or_default();
+                            if response.affected_sop_class_uid.trim() != expected_class
+                                || response.affected_sop_instance_uid.trim() != expected_instance
+                            {
+                                return Err(NetworkError::protocol(
+                                    "C-STORE batch response did not echo the requested SOP UIDs",
+                                ));
+                            }
                             self.pending.remove(id);
                             responses[index] = Some(response);
                         }
@@ -952,22 +1036,19 @@ impl Association {
         &mut self,
         requests: &[crate::cfind::CFindRequest],
     ) -> Result<Vec<Vec<crate::cfind::CFindResponse>>> {
+        let mut ids = std::collections::HashSet::new();
         let mut prepared = Vec::with_capacity(requests.len());
         for request in requests {
+            if request.message_id == 0 || !ids.insert(request.message_id) {
+                return Err(NetworkError::protocol(
+                    "C-FIND batch message IDs must be unique and nonzero",
+                ));
+            }
             let context = self.contexts.pick(&request.sop_class_uid, "")?;
             self.contexts
                 .validate_request(context.id, &request.to_command(), true)?;
             let syntax = transfer_syntax_of(&context.transfer_syntax)?;
-            let payload = bytes::Bytes::from(crate::message::encode_dataset(
-                &request.identifier,
-                &syntax,
-            )?);
-            let pdus = self.splitter.split_message_bytes(
-                context.id,
-                bytes::Bytes::from(command_bytes(&request.to_command())?),
-                Some(payload),
-            )?;
-            prepared.push((syntax, request.message_id, pdus));
+            prepared.push((syntax, request.message_id, context.id));
         }
 
         let window = self.window();
@@ -979,8 +1060,17 @@ impl Association {
         let result = async {
             while next < prepared.len() || !inflight.is_empty() {
                 while next < prepared.len() && inflight.len() < window {
-                    let (_, message_id, pdus) = &prepared[next];
-                    write_pdata_batch(&mut self.stream, pdus.clone()).await?;
+                    let (syntax, message_id, context_id) = &prepared[next];
+                    let payload = bytes::Bytes::from(crate::message::encode_dataset(
+                        &requests[next].identifier,
+                        syntax,
+                    )?);
+                    let pdus = self.splitter.split_message_bytes(
+                        *context_id,
+                        bytes::Bytes::from(command_bytes(&requests[next].to_command())?),
+                        Some(payload),
+                    )?;
+                    write_pdata_batch(&mut self.stream, pdus).await?;
                     inflight.insert(*message_id, next);
                     self.pending.insert(*message_id);
                     next += 1;
@@ -1031,7 +1121,11 @@ impl Association {
                                         syntax,
                                         self.fallback_encoding,
                                     )?;
-                                    debug_assert_eq!(context_id, unit.context_id);
+                                    if context_id != unit.context_id {
+                                        return Err(NetworkError::protocol(
+                                            "C-FIND batch Identifier used the wrong presentation context",
+                                        ));
+                                    }
                                     self.record_find_response(
                                         index,
                                         command,
@@ -1138,7 +1232,7 @@ impl Association {
         write_pdata_batch(&mut self.stream, pdus).await?;
 
         // the Identifier of a Pending response follows its command
-        let mut awaiting_command: Option<Command> = None;
+        let mut awaiting_command: Option<(u8, Command)> = None;
         loop {
             let Some(pdu) = self.read_request_pdu(message_id).await? else {
                 return Err(NetworkError::ClosedPrematurely { source: None });
@@ -1159,6 +1253,11 @@ impl Association {
                                 {
                                     continue;
                                 }
+                                if unit.context_id != context_id {
+                                    return Err(NetworkError::protocol(
+                                        "C-FIND response used the wrong presentation context",
+                                    ));
+                                }
                                 if command.no_dataset {
                                     let response =
                                         crate::cfind::CFindResponse::from_command(&command, None)?;
@@ -1169,13 +1268,21 @@ impl Association {
                                     }
                                 } else {
                                     // the match dataset follows
-                                    awaiting_command = Some(command);
+                                    awaiting_command = Some((unit.context_id, command));
                                 }
                             }
                             Stream::Data => {
-                                let Some(command) = awaiting_command.take() else {
+                                let Some((command_context, command)) = awaiting_command.take()
+                                else {
                                     continue;
                                 };
+                                if unit.context_id != command_context
+                                    || unit.context_id != context_id
+                                {
+                                    return Err(NetworkError::protocol(
+                                        "C-FIND Identifier used the wrong presentation context",
+                                    ));
+                                }
                                 let identifier = crate::message::decode_dataset_with_fallback(
                                     &unit.bytes,
                                     &syntax,
@@ -1577,6 +1684,18 @@ impl Association {
         message_id: u16,
         expected: CommandField,
     ) -> Result<Command> {
+        Ok(self
+            .await_response_with_context(message_id, expected, false)
+            .await?
+            .1)
+    }
+
+    async fn await_response_with_context(
+        &mut self,
+        message_id: u16,
+        expected: CommandField,
+        reject_dataset: bool,
+    ) -> Result<(u8, Command)> {
         loop {
             let Some(pdu) = self.read_request_pdu(message_id).await? else {
                 return Err(NetworkError::ClosedPrematurely { source: None });
@@ -1590,13 +1709,18 @@ impl Association {
                             continue;
                         }
                         if unit.stream != Stream::Command {
-                            continue;
+                            if !reject_dataset {
+                                continue;
+                            }
+                            return Err(NetworkError::protocol(
+                                "response carried an unexpected dataset",
+                            ));
                         }
                         let command = command_from_bytes(&unit.bytes)?;
                         if command.field == expected
                             && command.message_id_being_responded_to == Some(message_id)
                         {
-                            return Ok(command);
+                            return Ok((unit.context_id, command));
                         }
                     }
                 }

@@ -279,10 +279,10 @@ macro_rules! pixel_read_methods {
                         buffer.size()
                     )));
                 }
-                let raw = buffer.data()?;
-                let raw: &[u8] = raw.as_ref();
-                return Ok(Arc::new(MemoryBuffer::from(
-                    raw[offset..offset + frame_bytes].to_vec(),
+                return Ok(Arc::new(RangeBuffer::new(
+                    buffer,
+                    offset as u64,
+                    frame_bytes as u64,
                 )));
             }
             let frame_size = self.uncompressed_frame_size()?;
