@@ -667,11 +667,22 @@ ZfpRQ7oSMvyXNqCGkIuXOez3UtiQ5pUwnznzQF4hBfzAlhysk9/VTzgwbQxMCjDOEd6m
         };
         assert!(options.client_config().is_ok());
     }
+    /// A fresh temp directory for one set of files. Tests that generate
+    /// certificates run in parallel, so a directory shared by tag would let one
+    /// test read a certificate next to another test's key.
+    fn unique_dir(tag: &str) -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("radicom-tls-{}-{tag}-{seq}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     /// Writes a self-signed certificate for `name` and key, returning their paths.
     fn self_signed_for(tag: &str, name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         let cert = rcgen::generate_simple_self_signed(vec![name.to_string()]).unwrap();
-        let dir = std::env::temp_dir().join(format!("radicom-tls-{}-{tag}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = unique_dir(tag);
         let cert_path = dir.join("cert.pem");
         let key_path = dir.join("key.pem");
         std::fs::write(&cert_path, cert.cert.pem()).unwrap();
@@ -1323,8 +1334,7 @@ ZfpRQ7oSMvyXNqCGkIuXOez3UtiQ5pUwnznzQF4hBfzAlhysk9/VTzgwbQxMCjDOEd6m
         let leaf = leaf_params
             .signed_by(&leaf_key, &ca, &ca_key)
             .expect("leaf certificate");
-        let dir = std::env::temp_dir().join(format!("radicom-tls-ca-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = unique_dir("ca");
         let ca_path = dir.join("ca.pem");
         let leaf_path = dir.join("leaf.pem");
         let key_path = dir.join("leaf-key.pem");
