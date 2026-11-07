@@ -312,7 +312,15 @@ impl PdvAssembler {
 
     /// An assembler that can spill armed dataset streams to a file (H3).
     pub fn with_spool(spool: SpoolConfig) -> Self {
+        // The aggregate ceiling must never be smaller than a single spooled
+        // dataset, or `store_spool.max_message_length` above the default
+        // `DEFAULT_MAX_BUFFERED_BYTES` would be silently unreachable. Scale the
+        // aggregate budget from the spool cap so the configured limit is real.
+        let max_buffered_bytes = usize::try_from(spool.max_message_length)
+            .unwrap_or(usize::MAX)
+            .saturating_add(Self::DEFAULT_MAX_MESSAGE_LENGTH);
         PdvAssembler {
+            max_buffered_bytes,
             spool: Some(spool),
             ..Self::default()
         }
@@ -363,6 +371,9 @@ impl PdvAssembler {
         }
         let key = (pdv.context_id, stream);
         if pdv.data.len() > self.max_message_length {
+            // Drop any partial message for this key so the assembler does not
+            // stay non-idle after a protocol error.
+            self.drop_buffer(key);
             return Err(NetworkError::protocol(
                 "DIMSE message exceeds the maximum size",
             ));
@@ -387,7 +398,7 @@ impl PdvAssembler {
         // aggregate ceiling: one message per presentation context is legal, but
         // holding the limit in every context at once is not something a peer
         // needs (NET-05 follow-up)
-        if self.buffered + pdv.data.len() > self.max_buffered_bytes {
+        if self.aggregate_len().saturating_add(pdv.data.len()) > self.max_buffered_bytes {
             self.drop_buffer(key);
             return Err(NetworkError::protocol(
                 "buffered DIMSE messages exceed the maximum size",
@@ -421,7 +432,7 @@ impl PdvAssembler {
         let config = self
             .spool
             .clone()
-            .expect("an armed stream requires a spool config");
+            .ok_or_else(|| NetworkError::protocol("an armed stream requires a spool config"))?;
         let context_id = pdv.context_id;
         let key = (context_id, Stream::Data);
 
@@ -429,6 +440,13 @@ impl PdvAssembler {
             let buffered = self.buffers.get(&key).map_or(0, bytes::BytesMut::len);
             let total = buffered + pdv.data.len();
             if total <= config.memory_threshold {
+                if self.aggregate_len().saturating_add(pdv.data.len()) > self.max_buffered_bytes {
+                    self.drop_buffer(key);
+                    self.armed.remove(&context_id);
+                    return Err(NetworkError::protocol(
+                        "buffered DIMSE messages exceed the maximum size",
+                    ));
+                }
                 let buffer = self.buffers.entry(key).or_default();
                 buffer.extend_from_slice(&pdv.data);
                 self.buffered += pdv.data.len();
@@ -497,13 +515,27 @@ impl PdvAssembler {
                 "buffered DIMSE messages exceed the maximum size",
             ));
         }
-        let writer = self.spilling.get_mut(&context_id).expect("spool writer");
-        writer.append(&pdv.data)?;
+        // Append through a short borrow so a write failure rolls back the spool
+        // state instead of leaving counters/file inconsistent (§13).
+        let append_error = match self.spilling.get_mut(&context_id) {
+            Some(writer) => writer.append(&pdv.data).err(),
+            None => Some(NetworkError::protocol("spool writer missing")),
+        };
+        if let Some(error) = append_error {
+            if let Some(writer) = self.spilling.remove(&context_id) {
+                self.spilled = self.spilled.saturating_sub(writer.written() as usize);
+            }
+            self.armed.remove(&context_id);
+            return Err(error);
+        }
         self.spilled += pdv.data.len();
         if !pdv.is_last {
             return Ok(None);
         }
-        let writer = self.spilling.remove(&context_id).expect("spool writer");
+        let writer = self
+            .spilling
+            .remove(&context_id)
+            .ok_or_else(|| NetworkError::protocol("spool writer missing"))?;
         self.spilled = self.spilled.saturating_sub(writer.written() as usize);
         self.armed.remove(&context_id);
         Ok(Some(MessageUnit {

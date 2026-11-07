@@ -6017,14 +6017,11 @@ async fn a_stalled_store_response_times_out_when_the_server_sets_one() {
         started.elapsed() < Duration::from_secs(1),
         "the deadline is what ends the wait"
     );
-    let error = serving
-        .next_pdu()
-        .await
-        .expect_err("the idle dispatcher also honours the request timeout");
-    assert!(matches!(
-        error,
-        NetworkError::RequestTimedOut { message_id: 0 }
-    ));
+    // The idle dispatcher must NOT be bounded by `request_timeout`, or a quiet
+    // but healthy peer would be aborted. A short external wait must still be
+    // pending (a timeout, not an error) rather than `RequestTimedOut`.
+    let idle = tokio::time::timeout(Duration::from_millis(30), serving.next_pdu()).await;
+    assert!(idle.is_err(), "the idle dispatcher waits unbounded");
 }
 
 // -- batch 2: L4, L6, L8, client fallback, M6 ----------------------------

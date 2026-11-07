@@ -292,6 +292,11 @@ fn build_children_map(records: &[DirectoryRecord]) -> HashMap<usize, Vec<usize>>
 
 impl DicomDirectory {
     /// Creates an empty directory with `file_set_id` (§12.2 step 3).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `file_set_id` is empty. Use [`Self::try_new`] to handle an
+    /// invalid or user/file-derived identifier without panicking.
     pub fn new(file_set_id: impl Into<String>) -> Self {
         Self::try_new(file_set_id).expect("DICOMDIR FileSetID must not be empty")
     }

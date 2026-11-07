@@ -777,6 +777,16 @@ fn read_meta_block(
                         "meta group is truncated",
                     ));
                 }
+                // A bogus element length makes `scan_meta` ask for more on every
+                // pass; cap the growth so a crafted file cannot force the whole
+                // file into memory (a real meta group is tiny).
+                const MAX_META_BYTES: usize = 4 * 1024 * 1024;
+                if take >= MAX_META_BYTES {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "meta group exceeds the maximum size",
+                    ));
+                }
                 want = (take.saturating_mul(2)).min(avail);
             }
         }

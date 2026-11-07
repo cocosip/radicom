@@ -21,13 +21,15 @@ impl DicomServerRegistry {
     pub fn is_available(address: SocketAddr) -> bool {
         !registered()
             .lock()
-            .expect("server registry lock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .contains(&address)
     }
 
     /// Reserves `address` until the returned guard is dropped.
     pub fn register(address: SocketAddr) -> Result<DicomServerRegistration> {
-        let mut addresses = registered().lock().expect("server registry lock poisoned");
+        let mut addresses = registered()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !addresses.insert(address) {
             return Err(NetworkError::protocol(
                 "server address is already registered",

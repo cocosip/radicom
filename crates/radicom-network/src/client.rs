@@ -107,7 +107,10 @@ impl Default for CancellationHandle {
 impl CancellationHandle {
     /// Signals the matching live request. Inactive IDs return false.
     pub fn cancel(&self, message_id: u16) -> bool {
-        let active = self.active.lock().unwrap();
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if *active != Some(message_id) {
             return false;
         }
@@ -116,7 +119,10 @@ impl CancellationHandle {
     }
 
     fn register(&self, message_id: u16) -> ActiveRequest {
-        let mut active = self.active.lock().unwrap();
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.signal.send_replace(None);
         *active = Some(message_id);
         ActiveRequest(self.clone())
@@ -134,7 +140,11 @@ impl CancellationHandle {
 struct ActiveRequest(CancellationHandle);
 impl Drop for ActiveRequest {
     fn drop(&mut self) {
-        *self.0.active.lock().unwrap() = None;
+        *self
+            .0
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 }
 
@@ -223,7 +233,9 @@ impl DicomClient {
     /// Collects reverse C-STORE instances into `sink`.
     pub fn collect_reverse_stores(mut self, sink: Arc<std::sync::Mutex<Vec<DicomFile>>>) -> Self {
         self.reverse_store = Some(Arc::new(move |request: &CStoreRequest| {
-            sink.lock().unwrap().push(request.file.clone());
+            sink.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request.file.clone());
             Ok(crate::services::CStoreResponse::success(request))
         }));
         self
@@ -1113,12 +1125,20 @@ mod tests {
         let seen: Arc<std::sync::Mutex<Vec<ClientEvent>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = seen.clone();
-        let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
-            .with_event_handler(Arc::new(move |event| sink.lock().unwrap().push(event)));
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string()).with_event_handler(
+            Arc::new(move |event| {
+                sink.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(event)
+            }),
+        );
         client.send_c_echo(sop_class::VERIFICATION).await.unwrap();
         client.release().await;
 
-        let events = seen.lock().unwrap().clone();
+        let events = seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         assert_eq!(
             events,
             vec![
@@ -1246,7 +1266,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            received.lock().unwrap().len(),
+            received
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len(),
             1,
             "the instance arrived through the reverse handler"
         );
@@ -1383,8 +1406,13 @@ mod tests {
         let seen: Arc<std::sync::Mutex<Vec<ClientEvent>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = seen.clone();
-        let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
-            .with_event_handler(Arc::new(move |event| sink.lock().unwrap().push(event)));
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string()).with_event_handler(
+            Arc::new(move |event| {
+                sink.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(event)
+            }),
+        );
         // C-MOVE is not served by the Verification provider
         let request = CMoveRequest::study("1.2.3", "DEST", 1);
         match client.send_c_move(&request).await {
@@ -1392,7 +1420,9 @@ mod tests {
             other => panic!("expected a rejection, got {other:?}"),
         }
         assert!(matches!(
-            seen.lock().unwrap().first(),
+            seen.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .first(),
             Some(ClientEvent::AssociationRejected { .. })
         ));
         handle.await.unwrap().unwrap();
@@ -1439,14 +1469,22 @@ mod tests {
         let seen: Arc<std::sync::Mutex<Vec<ClientEvent>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = seen.clone();
-        let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
-            .with_event_handler(Arc::new(move |event| sink.lock().unwrap().push(event)));
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string()).with_event_handler(
+            Arc::new(move |event| {
+                sink.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(event)
+            }),
+        );
 
         client.send_c_echo(sop_class::VERIFICATION).await.unwrap();
         let response = client.send_c_store(&instance()).await.unwrap();
         assert_eq!(response.status, crate::dimse::status::SUCCESS);
 
-        let events = seen.lock().unwrap().clone();
+        let events = seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         let accepted = events
             .iter()
             .filter(|event| matches!(event, ClientEvent::AssociationAccepted { .. }))
@@ -1686,7 +1724,11 @@ mod tests {
         let sink = seen.clone();
         let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
             .with_options(impatient_options(2))
-            .with_event_handler(Arc::new(move |event| sink.lock().unwrap().push(event)));
+            .with_event_handler(Arc::new(move |event| {
+                sink.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(event)
+            }));
 
         let error = client
             .send_c_echo(sop_class::VERIFICATION)
@@ -1696,7 +1738,7 @@ mod tests {
             error,
             NetworkError::AssociationRequestTimedOut { .. }
         ));
-        let events = seen.lock().unwrap();
+        let events = seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(events.contains(&ClientEvent::AssociationRequestTimedOut { attempts: 1 }));
         assert!(events.contains(&ClientEvent::AssociationRequestTimedOut { attempts: 2 }));
     }
@@ -1718,7 +1760,11 @@ mod tests {
         };
         let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
             .with_options(options)
-            .with_event_handler(Arc::new(move |event| sink.lock().unwrap().push(event)));
+            .with_event_handler(Arc::new(move |event| {
+                sink.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(event)
+            }));
 
         let error = client
             .send_c_echo(sop_class::VERIFICATION)
@@ -1926,7 +1972,9 @@ mod tests {
         let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
             .with_reverse_store_handler(handler)
             .with_event_handler(Arc::new(move |event| {
-                sink.lock().unwrap().push(event);
+                sink.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(event);
             }));
 
         client
@@ -1937,9 +1985,12 @@ mod tests {
             .shutdown(DicomClientCancellationMode::ImmediatelyAbortAssociation)
             .await;
         assert_eq!(supplied.load(std::sync::atomic::Ordering::SeqCst), 0);
-        assert!(events.lock().unwrap().contains(&ClientEvent::StateChanged {
-            state: ConnectionState::Closed
-        }));
+        assert!(events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&ClientEvent::StateChanged {
+                state: ConnectionState::Closed
+            }));
         server.abort();
     }
 
@@ -2000,7 +2051,9 @@ mod tests {
         let sink = events.clone();
         let mut client = DicomClient::new("SCU", "SCP", addr.to_string()).with_event_handler(
             Arc::new(move |event| {
-                sink.lock().unwrap().push(event);
+                sink.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(event);
             }),
         );
         let error = client
@@ -2011,9 +2064,12 @@ mod tests {
             error,
             NetworkError::ClosedPrematurely { .. } | NetworkError::Io(_)
         ));
-        assert!(events.lock().unwrap().contains(&ClientEvent::StateChanged {
-            state: ConnectionState::Closed
-        }));
+        assert!(events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&ClientEvent::StateChanged {
+                state: ConnectionState::Closed
+            }));
         assert!(
             client.association.is_none(),
             "the dead association is dropped"
@@ -2144,10 +2200,13 @@ mod tests {
         let recorded = seen.clone();
         let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
             .with_n_event_report_handler(Arc::new(move |request| {
-                recorded.lock().unwrap().push((
-                    request.event_type_id.unwrap_or(0),
-                    request.sop_class_uid.clone().unwrap_or_default(),
-                ));
+                recorded
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push((
+                        request.event_type_id.unwrap_or(0),
+                        request.sop_class_uid.clone().unwrap_or_default(),
+                    ));
                 Ok(crate::nservice::NServiceResponse::success(request, None))
             }));
         // SCP so the peer may report the event here, SCU so this side may still
@@ -2164,7 +2223,9 @@ mod tests {
             .unwrap();
         assert_eq!(first.status, crate::dimse::status::SUCCESS);
         assert!(
-            seen.lock().unwrap().is_empty(),
+            seen.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty(),
             "an idle client reads the report with its next request"
         );
 
@@ -2174,7 +2235,7 @@ mod tests {
             .unwrap();
         assert_eq!(second.status, crate::dimse::status::SUCCESS);
         assert_eq!(
-            *seen.lock().unwrap(),
+            *seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
             vec![(1u16, PRINTER_SOP_CLASS.to_string())],
             "the client answered exactly one pushed report"
         );
@@ -2312,7 +2373,10 @@ mod tests {
                     .dataset
                     .get_str(radicom::model::tag::Tag::PATIENT_NAME)
                     .unwrap_or_default();
-                self.seen.lock().unwrap().push(name);
+                self.seen
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(name);
                 Ok(CStoreResponse::success(request))
             }
         }
@@ -2335,7 +2399,11 @@ mod tests {
         assert_eq!(response.status, crate::dimse::status::SUCCESS);
         client.release().await;
         handle.await.unwrap().unwrap();
-        let name = seen.lock().unwrap().pop().expect("the instance arrived");
+        let name = seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop()
+            .expect("the instance arrived");
         name
     }
 

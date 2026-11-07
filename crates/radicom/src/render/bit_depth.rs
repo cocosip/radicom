@@ -30,7 +30,11 @@ impl BitDepth {
             return 0;
         }
         if self.signed {
-            -(1i64 << (self.stored.min(63) - 1))
+            if self.stored >= 64 {
+                i64::MIN
+            } else {
+                -(1i64 << (self.stored - 1))
+            }
         } else {
             0
         }
@@ -41,11 +45,16 @@ impl BitDepth {
         if self.stored == 0 {
             return 0;
         }
-        let bits = self.stored.min(63) as u32;
         if self.signed {
-            (1i64 << (bits - 1)) - 1
+            if self.stored >= 64 {
+                i64::MAX
+            } else {
+                (1i64 << (self.stored - 1)) - 1
+            }
+        } else if self.stored >= 63 {
+            i64::MAX
         } else {
-            (1i64 << bits) - 1
+            (1i64 << self.stored) - 1
         }
     }
 

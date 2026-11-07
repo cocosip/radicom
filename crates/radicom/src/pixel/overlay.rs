@@ -252,7 +252,11 @@ impl OverlayData {
 
         let raw = pixel.data()?;
         let unit = (bits / 8) as usize;
-        let frame_size = image_columns * image_rows * unit;
+        // Embedded overlays index the image frame; for multi-sample (colour)
+        // data each pixel spans `samples_per_pixel` samples, so both the frame
+        // stride and the pixel offset must include it (§9.1).
+        let samples = ds.get_or(Tag::new(0x0028, 0x0002), 1u16).max(1) as usize;
+        let frame_size = image_columns * image_rows * unit * samples;
         let start = frame as usize * frame_size;
         if raw.len() < start + frame_size {
             return Err(Error::Imaging(ImagingError(format!(
@@ -268,7 +272,7 @@ impl OverlayData {
                 if ix < 0 || iy < 0 || ix >= image_columns as isize || iy >= image_rows as isize {
                     continue; // outside the image: no overlay bit
                 }
-                let idx = (iy as usize * image_columns + ix as usize) * unit;
+                let idx = (iy as usize * image_columns + ix as usize) * unit * samples;
                 let value = if unit == 1 {
                     frame_bytes[idx] as u16
                 } else {

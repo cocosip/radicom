@@ -132,11 +132,15 @@ impl<P: ServiceProvider + 'static> DicomServer<P> {
                         tokio::time::timeout(options.tls_handshake_timeout, tls.accept(stream))
                             .await
                     {
-                        let _ = serve_connection(stream, provider, options).await;
+                        if let Err(error) = serve_connection(stream, provider, options).await {
+                            tracing::debug!(target: "radicom::network", %error, "connection ended with an error");
+                        }
                     }
                     return;
                 }
-                let _ = serve_connection(stream, provider, options).await;
+                if let Err(error) = serve_connection(stream, provider, options).await {
+                    tracing::debug!(target: "radicom::network", %error, "connection ended with an error");
+                }
             });
         }
     }
@@ -422,7 +426,7 @@ where
         };
         match pdu {
             Pdu::PData(pdata) => {
-                let units = serving.assembler.push_pdata(&pdata)?;
+                let units = serving.push_pdata_offloaded(&pdata).await?;
                 serving.pending_units.extend(units);
                 while let Some(unit) = serving.pending_units.pop_front() {
                     match unit.stream {
@@ -776,7 +780,7 @@ where
                 let Some(pdu) = pdu? else { return Ok(()) };
                 match pdu {
                     Pdu::PData(pdata) => {
-                        let units = serving.assembler.push_pdata(&pdata)?;
+                        let units = serving.push_pdata_offloaded(&pdata).await?;
                         serving.pending_units.extend(units);
                     }
                     Pdu::Abort(abort) => {
@@ -1040,7 +1044,7 @@ where
                 let Some(pdu) = pdu? else { return Ok(()) };
                 match pdu {
                     Pdu::PData(pdata) => {
-                        let units = serving.assembler.push_pdata(&pdata)?;
+                        let units = serving.push_pdata_offloaded(&pdata).await?;
                         serving.pending_units.extend(units);
                     }
                     Pdu::Abort(abort) => {
@@ -1176,7 +1180,7 @@ where
                 let Some(pdu) = pdu? else { return Ok(()) };
                 match pdu {
                     Pdu::PData(pdata) => {
-                        let units = serving.assembler.push_pdata(&pdata)?;
+                        let units = serving.push_pdata_offloaded(&pdata).await?;
                         serving.pending_units.extend(units);
                     }
                     Pdu::Abort(abort) => {
@@ -1373,13 +1377,44 @@ where
         self.deferred_requests = 0;
     }
 
-    pub(crate) async fn next_pdu(&mut self) -> Result<Option<Pdu>> {
-        match self.options.request_timeout {
-            Some(limit) => tokio::time::timeout(limit, self.pdu_reader.read_pdu(self.stream))
-                .await
-                .map_err(|_| NetworkError::RequestTimedOut { message_id: 0 })?,
-            None => self.pdu_reader.read_pdu(self.stream).await,
+    /// Feeds a P-DATA-TF to the assembler, moving any spooling work onto the
+    /// blocking pool so a dataset streaming to disk never blocks a runtime
+    /// worker (§6, §11.1). Messages that stay in memory are assembled inline.
+    pub(crate) async fn push_pdata_offloaded(
+        &mut self,
+        pdata: &crate::pdu::PData,
+    ) -> Result<Vec<crate::assembler::MessageUnit>> {
+        let spills = pdata
+            .pdvs
+            .iter()
+            .any(|pdv| !pdv.is_command && self.assembler.is_spilling(pdv.context_id));
+        if !spills {
+            return self.assembler.push_pdata(pdata);
         }
+        let mut assembler = std::mem::take(&mut self.assembler);
+        let owned = pdata.clone();
+        match tokio::task::spawn_blocking(move || {
+            let result = assembler.push_pdata(&owned);
+            (assembler, result)
+        })
+        .await
+        {
+            Ok((assembler, result)) => {
+                self.assembler = assembler;
+                result
+            }
+            Err(join) => {
+                tracing::error!(target: "radicom::network", %join, "assembler blocking task failed");
+                Err(NetworkError::protocol("assembler blocking task failed"))
+            }
+        }
+    }
+
+    pub(crate) async fn next_pdu(&mut self) -> Result<Option<Pdu>> {
+        // The idle dispatcher waits unbounded: `request_timeout` governs only
+        // responses to requests this SCP issues (see `next_pdu_with_deadline`).
+        // Bounding the idle read by it would abort quiet-but-healthy peers.
+        self.pdu_reader.read_pdu(self.stream).await
     }
 
     /// Reads the next PDU, bounded by `ServerOptions::request_timeout` (M8).
@@ -1499,7 +1534,7 @@ where
             };
             match pdu {
                 Pdu::PData(pdata) => {
-                    let units = self.assembler.push_pdata(&pdata)?;
+                    let units = self.push_pdata_offloaded(&pdata).await?;
                     self.pending_units.extend(units);
                 }
                 Pdu::Abort(abort) => {
@@ -1588,7 +1623,7 @@ where
             };
             match pdu {
                 Pdu::PData(pdata) => {
-                    let units = self.assembler.push_pdata(&pdata)?;
+                    let units = self.push_pdata_offloaded(&pdata).await?;
                     self.pending_units.extend(units);
                 }
                 Pdu::Abort(abort) => {

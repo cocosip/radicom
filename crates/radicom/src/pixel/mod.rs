@@ -263,7 +263,16 @@ macro_rules! pixel_read_methods {
                 )));
             }
             if self.bits_allocated()? == 1 {
-                // Each 1-bit frame is byte-aligned: a frame occupies
+                // A zero dimension is a broken dataset, never a zero-byte frame:
+                // the 1-bit fast path bypasses `uncompressed_frame_size`'s guard
+                // and would otherwise return an empty `Ok` frame (§9.1).
+                if self.width() == 0 || self.height() == 0 {
+                    return Err(pixel_err(format!(
+                        "image has zero dimensions ({}x{})",
+                        self.width(),
+                        self.height()
+                    )));
+                }
                 // ceil(rows*cols*samples/8) bytes and the next frame starts on
                 // the following byte boundary (fo-dicom DicomPixelData
                 // UncompressedFrameSize; docs §9.1 "one frame is ceil(...) bytes").
