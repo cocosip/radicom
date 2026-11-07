@@ -26,10 +26,12 @@ pub enum Stream {
 /// stream; this carries its limits.
 #[derive(Debug, Clone)]
 pub struct SpoolConfig {
-    /// Bytes kept in memory before the dataset moves to a file.
+    /// Bytes kept in memory before the dataset moves to a file (fo-dicom
+    /// `DicomServiceOptions.MaxCStoreMemoryStreamSize`).
     ///
-    /// `0` spills from the first PDV, which is fo-dicom's behaviour and the
-    /// default; a larger value keeps small instances entirely in memory.
+    /// The default (1 MiB) buffers a small instance in memory and only opens the
+    /// temp file once it grows past this; `0` spills from the first PDV (always a
+    /// temp file). Applies to the C-STORE / reverse C-STORE receive path.
     pub memory_threshold: usize,
     /// Hard bound on one spooled dataset. A larger message is refused.
     ///
@@ -44,7 +46,7 @@ pub struct SpoolConfig {
 impl Default for SpoolConfig {
     fn default() -> Self {
         SpoolConfig {
-            memory_threshold: 0,
+            memory_threshold: 1024 * 1024,
             max_message_length: Self::DEFAULT_MAX_SPILLED_LENGTH,
             dir: None,
         }
