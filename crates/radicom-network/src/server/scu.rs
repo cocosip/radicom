@@ -139,6 +139,39 @@ impl std::fmt::Debug for Association {
 }
 
 impl Association {
+    /// Feeds a P-DATA-TF to the assembler, moving any spooling work onto the
+    /// blocking pool so a reverse C-STORE instance never blocks a runtime worker
+    /// (§6, §11.1). Messages that stay in memory are assembled inline.
+    async fn push_pdata_offloaded(
+        &mut self,
+        pdata: &crate::pdu::PData,
+    ) -> Result<Vec<crate::assembler::MessageUnit>> {
+        let spills = pdata
+            .pdvs
+            .iter()
+            .any(|pdv| !pdv.is_command && self.assembler.is_spilling(pdv.context_id));
+        if !spills {
+            return self.assembler.push_pdata(pdata);
+        }
+        let mut assembler = std::mem::take(&mut self.assembler);
+        let owned = pdata.clone();
+        match tokio::task::spawn_blocking(move || {
+            let result = assembler.push_pdata(&owned);
+            (assembler, result)
+        })
+        .await
+        {
+            Ok((assembler, result)) => {
+                self.assembler = assembler;
+                result
+            }
+            Err(join) => {
+                tracing::error!(target: "radicom::network", %join, "assembler blocking task failed");
+                Err(NetworkError::protocol("assembler blocking task failed"))
+            }
+        }
+    }
+
     /// Opens a connection and negotiates an association (§11.4).
     pub async fn open(
         addr: impl tokio::net::ToSocketAddrs,
@@ -337,7 +370,10 @@ impl Association {
                 options.max_command_buffer.map(|limit| limit as usize),
                 options.max_data_buffer.map(|limit| limit as usize),
             ),
-            assembler: PdvAssembler::new(),
+            assembler: match options.reverse_spool.clone() {
+                Some(spool) => PdvAssembler::with_spool(spool),
+                None => PdvAssembler::new(),
+            },
             pending: crate::engine::PendingTable::new(),
             request_cancellation: None,
             release_timeout: options.release_timeout,
@@ -430,7 +466,7 @@ impl Association {
                 };
                 match pdu {
                     Pdu::PData(pdata) => {
-                        for unit in self.assembler.push_pdata(&pdata)? {
+                        for unit in self.push_pdata_offloaded(&pdata).await? {
                             // H2: answer an incoming N-EVENT-REPORT-RQ instead of
                             // dropping it, before the response filtering below
                             if self.intercept_event_report(&unit).await? {
@@ -946,7 +982,7 @@ impl Association {
                 };
                 match pdu {
                     Pdu::PData(pdata) => {
-                        for unit in self.assembler.push_pdata(&pdata)? {
+                        for unit in self.push_pdata_offloaded(&pdata).await? {
                             // H2: answer an incoming N-EVENT-REPORT-RQ instead of
                             // mistaking it for a C-STORE response
                             if self.intercept_event_report(&unit).await? {
@@ -1081,7 +1117,7 @@ impl Association {
                 };
                 match pdu {
                     Pdu::PData(pdata) => {
-                        for unit in self.assembler.push_pdata(&pdata)? {
+                        for unit in self.push_pdata_offloaded(&pdata).await? {
                             if self.intercept_event_report(&unit).await? {
                                 continue;
                             }
@@ -1239,7 +1275,7 @@ impl Association {
             };
             match pdu {
                 Pdu::PData(pdata) => {
-                    for unit in self.assembler.push_pdata(&pdata)? {
+                    for unit in self.push_pdata_offloaded(&pdata).await? {
                         // H2: answer an incoming N-EVENT-REPORT-RQ instead of
                         // dropping it, before the response filtering below
                         if self.intercept_event_report(&unit).await? {
@@ -1365,7 +1401,7 @@ impl Association {
             };
             match pdu {
                 Pdu::PData(pdata) => {
-                    for unit in self.assembler.push_pdata(&pdata)? {
+                    for unit in self.push_pdata_offloaded(&pdata).await? {
                         // H2: answer an incoming N-EVENT-REPORT-RQ instead of
                         // dropping it, before the response filtering below
                         if self.intercept_event_report(&unit).await? {
@@ -1479,7 +1515,7 @@ impl Association {
             };
             match pdu {
                 Pdu::PData(pdata) => {
-                    for unit in self.assembler.push_pdata(&pdata)? {
+                    for unit in self.push_pdata_offloaded(&pdata).await? {
                         // H2: answer an incoming N-EVENT-REPORT-RQ instead of
                         // dropping it, before the response filtering below
                         if self.intercept_event_report(&unit).await? {
@@ -1517,6 +1553,10 @@ impl Association {
                                                     "overlapping reverse C-STORE requests",
                                                 ));
                                             }
+                                            // Spool the instance so a large reverse
+                                            // C-STORE does not sit in memory or block
+                                            // the runtime worker.
+                                            self.assembler.arm_spill(unit.context_id);
                                             awaiting_store = Some((unit.context_id, command));
                                         }
                                     }
@@ -1591,11 +1631,23 @@ impl Association {
                                     })?;
                                 let store_syntax =
                                     transfer_syntax_of(&store_context.transfer_syntax)?;
-                                let dataset = crate::message::decode_dataset_with_fallback(
-                                    &unit.bytes,
-                                    &store_syntax,
-                                    self.fallback_encoding,
-                                )?;
+                                let body = unit.body();
+                                let decode_syntax = store_syntax.clone();
+                                let fallback = self.fallback_encoding;
+                                let dataset = tokio::task::spawn_blocking(move || {
+                                    let bytes = body.read_all()?;
+                                    crate::message::decode_dataset_with_fallback(
+                                        &bytes,
+                                        &decode_syntax,
+                                        fallback,
+                                    )
+                                })
+                                .await
+                                .map_err(|join| {
+                                    NetworkError::Io(std::io::Error::other(format!(
+                                        "reverse C-STORE decode task failed: {join}"
+                                    )))
+                                })??;
                                 let mut file = radicom::io::file::DicomFile::from_dataset(dataset);
                                 file.dataset.set_transfer_syntax(store_syntax.clone());
                                 let request = crate::store::c_store_request_from_message(
@@ -1702,7 +1754,7 @@ impl Association {
             };
             match pdu {
                 Pdu::PData(pdata) => {
-                    for unit in self.assembler.push_pdata(&pdata)? {
+                    for unit in self.push_pdata_offloaded(&pdata).await? {
                         // H2: answer an incoming N-EVENT-REPORT-RQ instead of
                         // dropping it, before the response filtering below
                         if self.intercept_event_report(&unit).await? {
@@ -1822,7 +1874,7 @@ impl Association {
             };
             match pdu {
                 Pdu::PData(pdata) => {
-                    for unit in self.assembler.push_pdata(&pdata)? {
+                    for unit in self.push_pdata_offloaded(&pdata).await? {
                         // H2: answer an incoming N-EVENT-REPORT-RQ instead of
                         // dropping it, before the response filtering below
                         if self.intercept_event_report(&unit).await? {

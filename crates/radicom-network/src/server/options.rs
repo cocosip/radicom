@@ -224,6 +224,12 @@ pub struct ClientOptions {
     /// side sends are never re-decoded: the writer uses the dataset's own
     /// fallback list.
     pub fallback_encoding: Option<&'static str>,
+    /// Temporary-file spool for incoming reverse C-STORE instances (C-GET).
+    ///
+    /// The received instance is staged to `dir` (OS temp when `None`) and parsed
+    /// off the async worker, mirroring the SCP's C-STORE receive path. `None`
+    /// disables spilling and buffers the instance in memory, as before.
+    pub reverse_spool: Option<crate::assembler::SpoolConfig>,
     /// SOP Class Common Extended Negotiation to offer (L4, PS3.7 §D.3.3.6).
     ///
     /// The item names a service class and its related general SOP classes, so
@@ -264,6 +270,7 @@ impl Default for ClientOptions {
             extended_negotiations: Vec::new(),
             ignore_unsupported_syntax_change: false,
             fallback_encoding: None,
+            reverse_spool: Some(crate::assembler::SpoolConfig::default()),
             common_extended: None,
             role_selections: Vec::new(),
             #[cfg(feature = "tls")]
