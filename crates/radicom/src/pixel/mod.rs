@@ -1716,6 +1716,25 @@ mod tests {
     }
 
     #[test]
+    fn single_bit_zero_dimensions_error_instead_of_an_empty_frame() {
+        // The 1-bit fast path bypasses `uncompressed_frame_size`; a zero
+        // dimension there must still be an error, never an empty `Ok` frame.
+        let mut ds = mono_dataset(0, 0, 1, 1);
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                PIXEL_DATA,
+                Vr::Ob,
+                Arc::new(MemoryBuffer::from(vec![0u8; 8])),
+            ),
+        ));
+        let view = PixelDataRef::from_dataset(&ds).unwrap();
+        assert!(
+            view.get_frame(0).is_err(),
+            "1-bit zero dimensions must not yield an empty frame"
+        );
+    }
+
+    #[test]
     fn a_parsed_file_reports_real_dimensions_and_a_full_frame() {
         // Regression for the byte-path geometry bug: a parsed file stores
         // Rows/Columns as US bytes, which used to read back as 0.

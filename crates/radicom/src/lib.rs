@@ -44,6 +44,21 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! Editing and saving a file:
+//!
+//! ```no_run
+//! use radicom::io::file::DicomFile;
+//! use radicom::{Tag, Vr};
+//!
+//! fn main() -> Result<(), radicom::Error> {
+//!     let mut file = DicomFile::open("in.dcm")?;
+//!     file.dataset
+//!         .insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+//!     file.save("out.dcm")?;
+//!     Ok(())
+//! }
+//! ```
 
 pub mod dump;
 pub mod encoding;

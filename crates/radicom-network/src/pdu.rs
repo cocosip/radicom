@@ -1335,6 +1335,24 @@ mod tests {
     }
 
     #[test]
+    fn presentation_context_items_must_match_the_pdu_kind() {
+        let mut assoc = Associate::new("STORE-SCP", "MY-SCU");
+        assoc.presentation_contexts.push(PresentationContext::new(
+            1,
+            "1.2.840.10008.1.1",
+            vec!["1.2.840.10008.1.2".to_string()],
+        ));
+        // A body encoded as AC carries a presentation-context-AC item; decoding
+        // it as an RQ must be rejected (PS3.8 §9.3.3).
+        let ac_body = encode_associate(&assoc, false).unwrap();
+        assert!(decode_associate(&ac_body, true).is_err());
+        // A body encoded as RQ carries a presentation-context-RQ item; decoding
+        // it as an AC must be rejected.
+        let rq_body = encode_associate(&assoc, true).unwrap();
+        assert!(decode_associate(&rq_body, false).is_err());
+    }
+
+    #[test]
     fn associate_rq_round_trips() {
         let mut assoc = Associate::new("STORE-SCP", "MY-SCU");
         assoc.presentation_contexts.push(PresentationContext::new(

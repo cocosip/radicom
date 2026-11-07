@@ -133,4 +133,24 @@ mod tests {
         assert_eq!(BitDepth::new(12, 12, 11, false).next_power_of_two(), 16);
         assert_eq!(BitDepth::new(16, 16, 15, false).next_power_of_two(), 16);
     }
+
+    #[test]
+    fn extreme_depths_saturate_and_malformed_depth_passes_through() {
+        // 64-bit signed saturates instead of overflowing the shift.
+        let signed64 = BitDepth::new(64, 64, 63, true);
+        assert_eq!(
+            (signed64.min_value(), signed64.max_value()),
+            (i64::MIN, i64::MAX)
+        );
+        // 63 significant unsigned bits is the widest non-overflowing shift.
+        assert_eq!(BitDepth::new(64, 63, 62, false).max_value(), i64::MAX);
+        // stored 0 → (0, 0) on both ends.
+        let unspecified = BitDepth::new(16, 0, 0, false);
+        assert_eq!((unspecified.min_value(), unspecified.max_value()), (0, 0));
+        // malformed depth metadata (stored 0, stored > allocated, high_bit ≥
+        // allocated) passes through unchanged.
+        assert_eq!(BitDepth::new(8, 0, 0, false).normalize(0xAB), 0xAB);
+        assert_eq!(BitDepth::new(8, 9, 0, false).normalize(0xAB), 0xAB);
+        assert_eq!(BitDepth::new(8, 4, 8, false).normalize(0xAB), 0xAB);
+    }
 }

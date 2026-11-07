@@ -343,6 +343,48 @@ async fn self_interop_c_get_receives_instances_over_tcp() {
     handle.await.unwrap().unwrap();
 }
 
+#[tokio::test]
+async fn self_interop_c_get_uses_registered_storage_classes() {
+    // U1: declare the receivable storage classes once; `send_c_get_registered`
+    // proposes them (with the SCP role) during the association negotiation.
+    let provider = Arc::new(GetInstanceProvider {
+        instances: vec![instance("1.2.3.4.6.1")],
+    });
+    let server = DicomServer::bind("127.0.0.1:0", provider, ServerOptions::default())
+        .await
+        .expect("bind");
+    let addr = server.local_addr();
+    let handle = tokio::spawn(async move { server.accept_one().await });
+
+    let received: Arc<Mutex<Vec<DicomFile>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
+        .collect_reverse_stores(received.clone())
+        .with_reverse_store_classes(vec!["1.2.840.10008.5.1.4.1.1.7".to_string()]);
+    let responses = client
+        .send_c_get_registered(&CGetRequest::study("1.2.3.4", 2))
+        .await
+        .expect("C-GET via registered classes");
+
+    assert_eq!(received.lock().unwrap().len(), 1, "the instance arrived");
+    assert_eq!(responses.last().unwrap().status, 0x0000, "C-GET completes");
+    client.release().await;
+    handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn c_get_registered_requires_declared_storage_classes() {
+    let mut client = DicomClient::new("SCU", "SCP", "127.0.0.1:1").with_reverse_store_handler(
+        Arc::new(|request: &CStoreRequest| Ok(CStoreResponse::success(request))),
+    );
+    match client
+        .send_c_get_registered(&CGetRequest::study("1.2.3", 1))
+        .await
+    {
+        Ok(_) => panic!("expected an error without declared classes"),
+        Err(error) => assert!(error.to_string().contains("storage SOP classes"), "{error}"),
+    }
+}
+
 /// An SCP that performs C-MOVE by pushing every instance to a destination.
 struct MoveToDestinationProvider {
     destination: std::net::SocketAddr,

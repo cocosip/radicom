@@ -1504,6 +1504,15 @@ mod cm_regression {
         );
         assert!(bad.string_parts().is_empty());
 
+        // A non-UTF-8 byte-backed multi-value string cannot be split as text, so
+        // `count` falls back to counting raw `\` separators.
+        let non_utf8_multi = DicomElement::new_bytes(
+            Tag::new(0x7777, 0x0104),
+            Vr::Lo,
+            Arc::new(MemoryBuffer::from(vec![0xFFu8, b'\\', 0xFE, b'\\', 0xFD])),
+        );
+        assert_eq!(non_utf8_multi.count(), 3);
+
         // FromLeBytes::from_le reads a native-width little-endian unit.
         assert_eq!(<u16 as FromLeBytes>::from_le(&[0x34, 0x12]), 0x1234u16);
         assert_eq!(<u32 as FromLeBytes>::from_le(&[1, 0, 0, 0]), 1u32);

@@ -1206,4 +1206,54 @@ mod tests {
         assert_eq!(average.count(), 2);
         assert_eq!(average.next(10), 7, "the oldest sample drops out");
     }
+
+    #[test]
+    fn remaining_geometry_helpers_cover_their_branches() {
+        // Point3::moved along a unit axis and to_vector.
+        assert_eq!(
+            Point3::new(0.0, 0.0, 0.0).moved(&Vector3::AXIS_Z, 2.0),
+            Point3::new(0.0, 0.0, 2.0)
+        );
+        assert_eq!(
+            Point3::new(1.0, 2.0, 3.0).to_vector(),
+            Vector3::new(1.0, 2.0, 3.0)
+        );
+        // Vector3::distance.
+        assert_eq!(Vector3::ZERO.distance(&Vector3::new(0.0, 3.0, 4.0)), 5.0);
+        // Rotating about the zero axis is a no-op.
+        assert_eq!(Vector3::AXIS_X.rotate(&Vector3::ZERO, 1.0), Vector3::AXIS_X);
+        // nearest_axis hits the x- and z-dominant branches.
+        assert_eq!(
+            Vector3::new(-2.0, 0.1, 0.1).nearest_axis(),
+            Vector3::new(-1.0, 0.0, 0.0)
+        );
+        assert_eq!(
+            Vector3::new(0.1, 0.1, -2.0).nearest_axis(),
+            Vector3::new(0.0, 0.0, -1.0)
+        );
+        // Segment3::normal_vector and Slice3::plane.
+        let segment = Segment3::new(Point3::new(0.0, 0.0, 0.0), Point3::new(3.0, 0.0, 0.0));
+        assert_eq!(segment.normal_vector(), Vector3::AXIS_X);
+        let slice = Slice3::new(
+            Point3::new(0.0, 0.0, 0.0),
+            Vector3::AXIS_X,
+            Vector3::AXIS_Y,
+            2,
+            2,
+            1.0,
+        );
+        assert_eq!(slice.plane().normal, Vector3::AXIS_Z);
+        // Orientation3 coronal/sagittal and Plane3::from_points.
+        assert_eq!(Orientation3::coronal().normal, Vector3::new(0.0, -1.0, 0.0));
+        assert_eq!(Orientation3::sagittal().normal, Vector3::AXIS_X);
+        let plane = Plane3::from_points(
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        );
+        assert_eq!(plane.normal, Vector3::AXIS_Z);
+        // Rect::new clamps negative sizes to zero.
+        let rect = Rect::new(0.0, 0.0, -3.0, -4.0);
+        assert_eq!((rect.width, rect.height), (0.0, 0.0));
+    }
 }

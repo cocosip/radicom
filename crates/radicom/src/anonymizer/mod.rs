@@ -559,6 +559,16 @@ mod tests {
     }
 
     #[test]
+    fn a_clone_starts_with_its_own_empty_uid_map() {
+        let original = Anonymizer::basic();
+        let clone = original.clone();
+        assert!(
+            clone.replaced_uids().is_empty(),
+            "a cloned anonymizer must not inherit the original's UID map (§12.5)"
+        );
+    }
+
+    #[test]
     fn a_date_tag_marked_z_is_emptied_and_one_marked_x_is_removed() {
         // cross-checked against fo-dicom's DicomAnonymizerTest:
         // StudyDate (0008,0020)=Z → empty; SeriesDate (0008,0021)=X/D → removed

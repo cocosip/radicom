@@ -1318,6 +1318,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn c_get_through_registered_storage_classes() {
+        struct RegisteredGetProvider;
+        #[async_trait::async_trait]
+        impl ServiceProvider for RegisteredGetProvider {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![
+                    crate::association::sop_class::STUDY_ROOT_QR_GET.to_string(),
+                    "1.2.840.10008.5.1.4.1.1.7".to_string(),
+                ]
+            }
+            fn on_c_get<'a>(
+                &'a self,
+                request: &'a crate::cget::CGetRequest,
+            ) -> futures::stream::BoxStream<'a, Result<crate::cget::CGetEvent>> {
+                let _ = request;
+                let mut dataset = radicom::model::dataset::Dataset::new();
+                dataset.insert_str(
+                    radicom::model::tag::Tag::SOP_CLASS_UID,
+                    radicom::model::vr::Vr::Ui,
+                    "1.2.840.10008.5.1.4.1.1.7",
+                );
+                dataset.insert_str(
+                    radicom::model::tag::Tag::SOP_INSTANCE_UID,
+                    radicom::model::vr::Vr::Ui,
+                    "1.2.3.4.5",
+                );
+                dataset.set_transfer_syntax(
+                    radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+                );
+                Box::pin(futures::stream::once(async move {
+                    Ok(crate::cget::CGetEvent::instance(DicomFile::from_dataset(
+                        dataset,
+                    )))
+                }))
+            }
+        }
+
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(RegisteredGetProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let received: Arc<std::sync::Mutex<Vec<DicomFile>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
+            .collect_reverse_stores(received.clone())
+            .with_reverse_store_classes(vec!["1.2.840.10008.5.1.4.1.1.7".to_string()]);
+        let responses = client
+            .send_c_get_registered(&CGetRequest::study("1.2.3", 1))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            received
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len(),
+            1,
+            "the instance arrived through the registered storage classes"
+        );
+        assert_eq!(
+            responses.last().unwrap().status,
+            crate::dimse::status::SUCCESS,
+            "one instance completed"
+        );
+        client.release().await;
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn c_get_registered_without_declared_classes_is_a_clear_error() {
+        let mut client = DicomClient::new("SCU", "SCP", "127.0.0.1:1").with_reverse_store_handler(
+            Arc::new(|request: &crate::services::CStoreRequest| {
+                Ok(crate::services::CStoreResponse::success(request))
+            }),
+        );
+        match client
+            .send_c_get_registered(&CGetRequest::study("1.2.3", 1))
+            .await
+        {
+            Ok(_) => panic!("expected an error without declared classes"),
+            Err(error) => assert!(error.to_string().contains("storage SOP classes"), "{error}"),
+        }
+    }
+
+    #[tokio::test]
     async fn c_find_through_the_high_level_client() {
         struct FindProvider;
         #[async_trait::async_trait]

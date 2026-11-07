@@ -18,6 +18,25 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! C-STORE then C-FIND:
+//!
+//! ```no_run
+//! use radicom::io::file::DicomFile;
+//! use radicom_network::cfind::CFindRequest;
+//! use radicom_network::client::DicomClient;
+//!
+//! async fn store_and_find() -> Result<(), Box<dyn std::error::Error>> {
+//!     let mut client = DicomClient::new("MY-SCU", "ANY-SCP", "127.0.0.1:11112");
+//!     let file = DicomFile::open("example.dcm")?;
+//!     client.send_c_store(&file).await?;
+//!     for response in client.send_c_find(&CFindRequest::study_query(1)).await? {
+//!         println!("status {:?}", response.status);
+//!     }
+//!     client.release().await;
+//!     Ok(())
+//! }
+//! ```
 
 pub mod assembler;
 pub mod association;
