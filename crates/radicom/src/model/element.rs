@@ -127,7 +127,17 @@ impl DicomElement {
                     if b.size() == 0 {
                         0
                     } else if self.vr.is_multi_value() {
-                        self.string_parts().len().max(1)
+                        // UTF-8 text splits on `\`; a byte-backed value in
+                        // another charset does not decode, so count separators on
+                        // the raw bytes instead of under-reporting the count.
+                        let parts = self.string_parts();
+                        if !parts.is_empty() {
+                            parts.len()
+                        } else {
+                            b.as_slice()
+                                .map(|raw| raw.iter().filter(|&&x| x == b'\\').count() + 1)
+                                .unwrap_or(1)
+                        }
                     } else {
                         1
                     }

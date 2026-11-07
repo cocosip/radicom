@@ -116,11 +116,12 @@ impl Vr {
         )
     }
 
-    /// Affected by Specific Character Set (spec §2 "charset-sensitive").
+    /// Affected by Specific Character Set (PS3.5 §6.2). `UR` is UTF-8 by
+    /// definition and deliberately excluded.
     pub const fn is_character_encoded(self) -> bool {
         matches!(
             self,
-            Vr::Lo | Vr::Lt | Vr::Pn | Vr::Sh | Vr::St | Vr::Uc | Vr::Ur | Vr::Ut
+            Vr::Lo | Vr::Lt | Vr::Pn | Vr::Sh | Vr::St | Vr::Uc | Vr::Ut
         )
     }
 
@@ -406,7 +407,7 @@ mod tests {
             (Vr::Ui, "UI", true, false, true, 0x00, 64, 1, 1),
             (Vr::Ul, "UL", false, false, true, 0x00, 4, 4, 4),
             (Vr::Un, "UN", false, false, false, 0x00, 0, 1, 1),
-            (Vr::Ur, "UR", true, true, false, b' ', 0, 1, 1),
+            (Vr::Ur, "UR", true, false, false, b' ', 0, 1, 1),
             (Vr::Us, "US", false, false, true, 0x00, 2, 2, 2),
             (Vr::Ut, "UT", true, true, false, b' ', 0, 1, 1),
             (Vr::Uv, "UV", false, false, false, 0x00, 8, 8, 8),

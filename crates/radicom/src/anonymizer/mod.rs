@@ -33,7 +33,7 @@ const SOP_INSTANCE_UID: Tag = Tag::SOP_INSTANCE_UID;
 const MEDIA_STORAGE_SOP_INSTANCE_UID: Tag = Tag::MEDIA_STORAGE_SOP_INSTANCE_UID;
 
 /// Anonymizer that applies a profile under one option set (§12.5).
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Anonymizer {
     profile: SecurityProfile,
     /// The composed PS3.15 option set; the Basic Profile is the baseline and any
@@ -41,9 +41,24 @@ pub struct Anonymizer {
     options: AnonOptions,
     patient_name: Option<String>,
     patient_id: Option<String>,
-    /// Original → replacement UID, shared by clones and kept across calls
-    /// (fo-dicom `ReplacedUIDs`); a `Mutex` so the methods can stay `&self`.
+    /// Original → replacement UID, kept across calls (fo-dicom `ReplacedUIDs`);
+    /// a `Mutex` so the methods can stay `&self`. Deliberately **not** shared
+    /// across clones: each anonymizer instance keeps its own map.
     replaced: Arc<Mutex<HashMap<String, String>>>,
+}
+
+impl Clone for Anonymizer {
+    /// A clone is an independent instance with a fresh, empty UID map, matching
+    /// the documented "two instances never share it" guarantee (§12.5).
+    fn clone(&self) -> Self {
+        Anonymizer {
+            profile: self.profile.clone(),
+            options: self.options,
+            patient_name: self.patient_name.clone(),
+            patient_id: self.patient_id.clone(),
+            replaced: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
 }
 
 impl Anonymizer {

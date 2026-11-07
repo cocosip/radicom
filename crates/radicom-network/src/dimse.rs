@@ -437,6 +437,11 @@ impl Command {
                 "Message ID Being Responded To must be nonzero",
             ));
         }
+        // PS3.7 Table E.1-1: every response carries (0000,0900) Status (Type 1).
+        if !field.is_request() {
+            ds.get::<u16>(tag::STATUS)
+                .map_err(|_| NetworkError::protocol("response Command Set has no Status"))?;
+        }
 
         Ok(Command {
             field,

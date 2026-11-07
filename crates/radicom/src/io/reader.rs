@@ -612,7 +612,6 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
             Err(Error::Reader(ReaderError::Eof { .. })) => return Ok(Step::End(LevelEnd::Eof)),
             Err(e) => return Err(e),
         };
-        let value_start = self.position()?;
         // The length field is laid out per the VR that was *written*: T9
         // rewrites UN to UL only after this, since UN uses the long form.
         let length = match self.parse_length(raw_vr, explicit, tag_pos) {
@@ -620,6 +619,10 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
             Err(Error::Reader(ReaderError::Eof { .. })) => return Ok(Step::End(LevelEnd::Eof)),
             Err(e) => return Err(e),
         };
+        // The value begins *after* the length field, not after the VR. Using the
+        // pre-length position as a sequence's `level_start` was off by the
+        // header width.
+        let value_start = self.position()?;
         let mut vr = self.fix_group_length_vr(element, raw_vr);
         // fo-dicom `DicomReader.ParseValue`: an UN element is re-resolved
         // through the dictionary now that the length has been read, so a
@@ -788,7 +791,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         vr: Vr,
         start: u64,
     ) -> Result<(), Error> {
-        let mut offset_table: Option<Vec<u32>> = None;
+        let mut offset_table_seen = false;
         loop {
             if self.source.require(4).is_err() {
                 break; // T6: missing final delimiter at EOF
@@ -807,7 +810,8 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                             position: pos,
                         }));
                     }
-                    let first = offset_table.is_none();
+                    let first = !offset_table_seen;
+                    offset_table_seen = true;
                     if self.options.large_policy == LargeValuePolicy::Skip
                         && length as u64 >= self.options.large_object_size
                     {
@@ -841,8 +845,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                     };
                     if first {
                         let table = decode_offset_table(&buffer, self.big_endian)?;
-                        observer.on_begin_fragment(&self.ctx(start), tag, vr, table.clone())?;
-                        offset_table = Some(table);
+                        observer.on_begin_fragment(&self.ctx(start), tag, vr, table)?;
                     } else {
                         // PS3.5 A.4: a fragment value is even-length. A stray odd
                         // length is padded to even for consumers (fo-dicom
@@ -879,7 +882,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         }
         // an empty encapsulated value still announces begin/end so the
         // element exists in the built dataset
-        if offset_table.is_none() {
+        if !offset_table_seen {
             observer.on_begin_fragment(&self.ctx(start), tag, vr, Vec::new())?;
         }
         observer.on_end_fragment(&self.here()?)?;

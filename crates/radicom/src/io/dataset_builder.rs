@@ -140,7 +140,11 @@ impl ParseObserver for DatasetBuilder {
             return Ok(());
         }
 
-        let element = if vr.is_string() {
+        let element = if vr == Vr::Ur {
+            // UR is UTF-8 regardless of (0008,0005) (PS3.5 §6.2).
+            let text = String::from_utf8_lossy(&buffer.data()?).into_owned();
+            DicomElement::new_str(tag.clone(), vr, trim_value_padding(vr, text))
+        } else if vr.is_string() {
             let text = self.decode_str(&buffer.data()?, vr == Vr::Pn);
             DicomElement::new_str(tag.clone(), vr, trim_value_padding(vr, text))
         } else {

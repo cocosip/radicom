@@ -445,9 +445,19 @@ fn decode_associate(body: &[u8], is_rq: bool) -> Result<Associate> {
                 application_context = decode_string(value);
             }
             item::PRESENTATION_CONTEXT_RQ => {
+                if !is_rq {
+                    return Err(NetworkError::protocol(
+                        "presentation-context RQ item inside an A-ASSOCIATE-AC",
+                    ));
+                }
                 presentation_contexts.push(decode_presentation_context(value, false)?);
             }
             item::PRESENTATION_CONTEXT_AC => {
+                if is_rq {
+                    return Err(NetworkError::protocol(
+                        "presentation-context AC item inside an A-ASSOCIATE-RQ",
+                    ));
+                }
                 presentation_contexts.push(decode_presentation_context(value, true)?);
             }
             item::USER_INFORMATION => {
@@ -655,13 +665,16 @@ fn decode_extended_negotiation(raw: &[u8]) -> Result<ExtendedNegotiation> {
     let uid = raw.get(2..2 + uid_len).ok_or(NetworkError::protocol(
         "extended negotiation UID runs past the item",
     ))?;
+    let mut requested = raw[2 + uid_len..].to_vec();
+    // The flat Service Class Application Information array is even-padded by the
+    // item framing; strip a lone trailing pad so an AC does not echo a phantom
+    // field the peer never sent.
+    if requested.len() % 2 == 1 && requested.last() == Some(&0) {
+        requested.pop();
+    }
     Ok(ExtendedNegotiation {
         sop_class: String::from_utf8_lossy(uid).to_string(),
-        // The rest is the flat Service Class Application Information array. An
-        // odd-length array is even-padded by the item framing and that pad byte
-        // is indistinguishable from a real field here, so it reads back as one
-        // trailing 0 field — 0 means "not supported", so no grant is invented.
-        requested: raw[2 + uid_len..].to_vec(),
+        requested,
         accepted: Vec::new(),
     })
 }

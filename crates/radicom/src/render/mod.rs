@@ -512,10 +512,14 @@ impl GrayscaleRenderOptions {
                 "SmallestImagePixelValue is not less than LargestImagePixelValue",
             ));
         }
-        let slope = first_number(dataset, Tag::RESCALE_SLOPE).unwrap_or(1.0);
-        let intercept = first_number(dataset, Tag::RESCALE_INTERCEPT).unwrap_or(0.0);
-        let low = smallest * slope + intercept;
-        let high = largest * slope + intercept;
+        let (low, high) = match parse_modality_lut(dataset) {
+            Some(lut) => (lut.map(smallest), lut.map(largest)),
+            None => {
+                let slope = first_number(dataset, Tag::RESCALE_SLOPE).unwrap_or(1.0);
+                let intercept = first_number(dataset, Tag::RESCALE_INTERCEPT).unwrap_or(0.0);
+                (smallest * slope + intercept, largest * slope + intercept)
+            }
+        };
         let mut base = GrayscaleRenderOptions::from_window_level(
             (low + high) / 2.0,
             (high - low).abs().max(1.0),
@@ -799,12 +803,20 @@ fn window_from_pixel_value_range(dataset: &Dataset) -> Option<(f64, f64)> {
     if smallest >= largest {
         return None;
     }
-    // The tags are stored values: convert to the physical units `map()` works in,
-    // exactly like FromBitRange does (PR-C-05).
-    let slope = first_number(dataset, Tag::RESCALE_SLOPE).unwrap_or(1.0);
-    let intercept = first_number(dataset, Tag::RESCALE_INTERCEPT).unwrap_or(0.0);
-    let low = smallest * slope + intercept;
-    let high = largest * slope + intercept;
+    // The tags are stored values: convert to the physical units `map()` works in.
+    // A Modality LUT replaces the rescale and defines its own output domain, so
+    // route the bounds through it exactly like `from_min_max`/`from_bit_range`.
+    let (low, high) = match parse_modality_lut(dataset) {
+        Some(lut) => (lut.map(smallest), lut.map(largest)),
+        None => {
+            let slope = first_number(dataset, Tag::RESCALE_SLOPE).unwrap_or(1.0);
+            let intercept = first_number(dataset, Tag::RESCALE_INTERCEPT).unwrap_or(0.0);
+            (smallest * slope + intercept, largest * slope + intercept)
+        }
+    };
+    if low >= high {
+        return None;
+    }
     let center = (low + high) / 2.0;
     let width = (high - low).abs().max(1.0);
     Some((center, width))
@@ -1056,6 +1068,12 @@ impl RawImage {
     /// CRC32 the PNG format requires. PNG is grayscale because the render
     /// output is 8-bit luminance.
     pub fn to_png(&self) -> Vec<u8> {
+        // A colour image cannot be represented as grayscale without discarding
+        // the R/G channels; emit true-colour RGB rather than silently keeping
+        // only the blue channel.
+        if !self.pixels_are_gray() {
+            return self.to_png_rgb();
+        }
         // build an 8-bit grayscale scanline buffer (1 channel)
         let mut raw = Vec::with_capacity((self.width * self.height + self.height) as usize);
         for y in 0..self.height {
