@@ -159,6 +159,9 @@ pub struct DicomClient {
     pub options: DicomClientOptions,
     /// Reverse C-STORE handler, required for C-GET (§11.4).
     reverse_store: Option<crate::server::ReverseStoreHandler>,
+    /// Storage SOP classes the reverse C-STORE handler can receive; proposed
+    /// automatically by [`Self::send_c_get_registered`].
+    reverse_store_classes: Vec<String>,
     /// Answers an SCP-initiated N-EVENT-REPORT-RQ on this client (H2).
     n_event: Option<crate::server::NEventReportHandler>,
     events: Option<Arc<dyn Fn(ClientEvent) + Send + Sync>>,
@@ -184,6 +187,7 @@ impl DicomClient {
             called_ae: called_ae.into(),
             options: DicomClientOptions::default(),
             reverse_store: None,
+            reverse_store_classes: Vec::new(),
             n_event: None,
             events: None,
             sent_on_association: 0,
@@ -205,11 +209,26 @@ impl DicomClient {
     }
 
     /// Registers the reverse C-STORE handler; without one C-GET fails fast.
+    ///
+    /// Pair it with [`Self::with_reverse_store_classes`] so
+    /// [`Self::send_c_get_registered`] can propose the storage presentation
+    /// contexts automatically.
     pub fn with_reverse_store_handler(
         mut self,
         handler: crate::server::ReverseStoreHandler,
     ) -> Self {
         self.reverse_store = Some(handler);
+        self
+    }
+
+    /// Declares the storage SOP classes the reverse C-STORE handler can receive.
+    ///
+    /// This is a client capability, not a per-request argument: register it once
+    /// and [`Self::send_c_get_registered`] proposes a presentation context (with
+    /// the SCP role) for each (§11.4). The explicit
+    /// [`Self::send_c_get`] still takes the classes directly.
+    pub fn with_reverse_store_classes(mut self, classes: impl IntoIterator<Item = String>) -> Self {
+        self.reverse_store_classes = classes.into_iter().collect();
         self
     }
 
@@ -694,6 +713,22 @@ impl DicomClient {
             self.last_request = Some((request.message_id, context_id));
         }
         Ok(responses)
+    }
+
+    /// Runs a C-GET using the storage SOP classes declared with
+    /// [`Self::with_reverse_store_classes`], so the caller does not repeat them
+    /// on every request. Errors when none were declared.
+    pub async fn send_c_get_registered(
+        &mut self,
+        request: &CGetRequest,
+    ) -> Result<Vec<CGetResponse>> {
+        let classes = self.reverse_store_classes.clone();
+        if classes.is_empty() {
+            return Err(NetworkError::protocol(
+                "C-GET needs storage SOP classes: call with_reverse_store_classes first",
+            ));
+        }
+        self.send_c_get(request, &classes).await
     }
 
     /// Sends one N-service request and returns its response (H2, §11.4).

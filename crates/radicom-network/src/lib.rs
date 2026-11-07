@@ -3,6 +3,21 @@
 //! PDU codec, association negotiation, the per-connection protocol engine,
 //! SCU/SCP services and the two-layer client. Implementation follows
 //! milestones M5–M6 per docs/01-architecture.md §11.
+//!
+//! # Quick start
+//!
+//! A C-ECHO round trip (compile-checked; `no_run` because it needs a live peer):
+//!
+//! ```no_run
+//! use radicom_network::client::DicomClient;
+//!
+//! async fn echo() -> radicom_network::Result<()> {
+//!     let mut client = DicomClient::new("MY-SCU", "ANY-SCP", "127.0.0.1:11112");
+//!     client.send_c_echo(radicom::uids::VERIFICATION).await?;
+//!     client.release().await;
+//!     Ok(())
+//! }
+//! ```
 
 pub mod assembler;
 pub mod association;

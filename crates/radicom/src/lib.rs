@@ -11,6 +11,39 @@
 //!
 //! Image codec implementations live in the separate `radicom-codecs` project;
 //! this crate only defines the [`pixel::codec`] interfaces and registry.
+//!
+//! # Quick start
+//!
+//! Reading a file (compile-checked; `no_run` because it needs a real file):
+//!
+//! ```no_run
+//! use radicom::io::file::DicomFile;
+//! use radicom::Tag;
+//!
+//! fn main() -> Result<(), radicom::Error> {
+//!     let file = DicomFile::open("example.dcm")?;
+//!     let ds = &file.dataset;
+//!     if let Some(name) = ds.try_get_str(Tag::PATIENT_NAME) {
+//!         println!("Patient Name: {name}");
+//!     }
+//!     Ok(())
+//! }
+//! ```
+//!
+//! Accessing pixel data:
+//!
+//! ```no_run
+//! use radicom::io::file::DicomFile;
+//! use radicom::pixel::PixelData;
+//!
+//! fn main() -> Result<(), radicom::Error> {
+//!     let mut file = DicomFile::open("image.dcm")?;
+//!     let pixels = PixelData::from_dataset(&mut file.dataset)?;
+//!     let frame = pixels.get_frame(0)?;
+//!     println!("{}x{} bytes={}", pixels.width(), pixels.height(), frame.size());
+//!     Ok(())
+//! }
+//! ```
 
 pub mod dump;
 pub mod encoding;
