@@ -310,10 +310,12 @@ impl PdvAssembler {
         }
     }
 
-    /// Largest non-storage (unarmed) message held in memory by a server
-    /// assembler. Query/move/get identifiers and N-service datasets are small;
-    /// capping them here bounds a peer's per-message memory without affecting
-    /// the spooled C-STORE path.
+    /// In-memory ceiling for a non-storage (unarmed) message in a server
+    /// assembler. Query/move/get identifiers and N-service datasets are usually
+    /// small, so this bounds a peer's per-message RAM; a larger one spills to
+    /// the configured spool file instead of being refused (N3), bounded by
+    /// [`SpoolConfig::max_message_length`]. Without a spool config it is a hard
+    /// refusal.
     pub const DEFAULT_MAX_NON_STORAGE_MESSAGE: usize = 16 * 1024 * 1024;
 
     /// An assembler that can spill armed dataset streams to a file (H3).
@@ -355,6 +357,38 @@ impl PdvAssembler {
         self.armed.contains(&context_id) || self.spilling.contains_key(&context_id)
     }
 
+    /// Whether feeding `pdata` would move a dataset stream onto the blocking
+    /// pool because it streams to disk: an armed/in-progress context, or a data
+    /// stream the in-memory ceiling would push into a spill (N3).
+    ///
+    /// The server calls this before `push_pdata` so a spooling write never runs
+    /// on a runtime worker (§6, §11.1). It accounts for all data PDVs of one
+    /// context in the same P-DATA-TF, since their sum can cross the ceiling even
+    /// when each PDV alone would not.
+    pub fn would_spill_pdata(&self, pdata: &crate::pdu::PData) -> bool {
+        if self.spool.is_none() {
+            return false;
+        }
+        let mut per_context: std::collections::HashMap<u8, usize> =
+            std::collections::HashMap::new();
+        for pdv in &pdata.pdvs {
+            if pdv.is_command {
+                continue;
+            }
+            if self.is_spilling(pdv.context_id) {
+                return true;
+            }
+            *per_context.entry(pdv.context_id).or_default() += pdv.data.len();
+        }
+        per_context.into_iter().any(|(context_id, add)| {
+            let buffered = self
+                .buffers
+                .get(&(context_id, Stream::Data))
+                .map_or(0, bytes::BytesMut::len);
+            buffered.saturating_add(add) > self.max_message_length
+        })
+    }
+
     /// The largest value of `buffered` seen so far (test/diagnostic use).
     pub fn peak_buffered(&self) -> usize {
         self.peak_buffered
@@ -383,7 +417,19 @@ impl PdvAssembler {
             return self.push_spilled_pdv(pdv);
         }
         let key = (pdv.context_id, stream);
-        if pdv.data.len() > self.max_message_length {
+        // A data stream that outgrows the in-memory ceiling is streamed to the
+        // spool file instead of being refused (N3): a legitimate large C-FIND /
+        // C-MOVE / C-GET identifier or N-service dataset must not cost a whole
+        // message in RAM. Commands stay bounded here — they are parsed from
+        // memory — and without a spool config the old refusal stands.
+        let buffered = self.buffers.get(&key).map_or(0, bytes::BytesMut::len);
+        if pdv.data.len() > self.max_message_length
+            || buffered.saturating_add(pdv.data.len()) > self.max_message_length
+        {
+            if stream == Stream::Data && self.spool.is_some() {
+                self.armed.insert(pdv.context_id);
+                return self.push_spilled_pdv(pdv);
+            }
             // Drop any partial message for this key so the assembler does not
             // stay non-idle after a protocol error.
             self.drop_buffer(key);
@@ -399,14 +445,6 @@ impl PdvAssembler {
                 bytes: pdv.data.clone(),
                 spool: None,
             }));
-        }
-        let buffered = self.buffers.get(&key).map_or(0, bytes::BytesMut::len);
-        if buffered + pdv.data.len() > self.max_message_length {
-            // drop the partial message: continuing would only buffer more
-            self.drop_buffer(key);
-            return Err(NetworkError::protocol(
-                "DIMSE message exceeds the maximum size",
-            ));
         }
         // aggregate ceiling: one message per presentation context is legal, but
         // holding the limit in every context at once is not something a peer
@@ -1455,6 +1493,70 @@ mod tests {
         drop(unit);
         drop(assembler);
         assert!(!path.exists(), "the temp file dies with the message");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_unarmed_stream_above_the_ceiling_spills_instead_of_failing() {
+        // N3: a non-C-STORE dataset past the in-memory ceiling streams to the
+        // spool file (bounded by the spool cap) instead of being refused.
+        let dir = spill_dir("nonstorage");
+        let mut assembler = PdvAssembler::with_spool_and_limits(
+            SpoolConfig {
+                memory_threshold: 0,
+                max_message_length: 64 * 1024 * 1024,
+                dir: Some(dir.clone()),
+            },
+            8,
+        );
+        // Neither PDV alone exceeds the 8-byte ceiling; together they do.
+        assert!(assembler
+            .push_pdv(&dataset_pdv(1, false, 6))
+            .unwrap()
+            .is_none());
+        let unit = assembler
+            .push_pdv(&dataset_pdv(1, true, 6))
+            .unwrap()
+            .expect("the last PDV completes the spilled message");
+        assert!(
+            unit.bytes.is_empty(),
+            "a spilled stream keeps no memory copy"
+        );
+        let spool = unit.spool.clone().expect("the large dataset spilled");
+        assert_eq!(spool.len(), 12);
+        assert_eq!(unit.body().read_all().unwrap().len(), 12);
+        assert!(
+            assembler.peak_buffered() <= 8,
+            "RAM stayed under the in-memory ceiling"
+        );
+        drop(spool);
+        drop(unit);
+        drop(assembler);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn would_spill_pdata_predicts_the_crossing_pdata() {
+        let dir = spill_dir("predict");
+        let assembler = PdvAssembler::with_spool_and_limits(
+            SpoolConfig {
+                memory_threshold: 0,
+                max_message_length: 1024,
+                dir: Some(dir.clone()),
+            },
+            8,
+        );
+        let small = crate::pdu::PData {
+            pdvs: vec![dataset_pdv(1, false, 4)],
+        };
+        assert!(!assembler.would_spill_pdata(&small));
+        let crossing = crate::pdu::PData {
+            pdvs: vec![dataset_pdv(1, false, 12)],
+        };
+        assert!(
+            assembler.would_spill_pdata(&crossing),
+            "a data PDV past the ceiling is predicted so it is offloaded"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

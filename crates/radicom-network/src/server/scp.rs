@@ -1391,11 +1391,7 @@ where
         &mut self,
         pdata: &crate::pdu::PData,
     ) -> Result<Vec<crate::assembler::MessageUnit>> {
-        let spills = pdata
-            .pdvs
-            .iter()
-            .any(|pdv| !pdv.is_command && self.assembler.is_spilling(pdv.context_id));
-        if !spills {
+        if !self.assembler.would_spill_pdata(pdata) {
             return self.assembler.push_pdata(pdata);
         }
         let mut assembler = std::mem::take(&mut self.assembler);

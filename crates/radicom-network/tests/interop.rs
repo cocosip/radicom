@@ -221,6 +221,31 @@ fn instance(uid: &str) -> DicomFile {
     DicomFile::from_dataset(dataset)
 }
 
+/// A valid uncompressed 8-bit instance of `rows * columns` bytes, used to drive
+/// the receive spool with an instance far larger than one P-DATA PDU (N4).
+fn large_instance(uid: &str, rows: u16, columns: u16) -> DicomFile {
+    let mut dataset = Dataset::new();
+    dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+    dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, uid);
+    dataset.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe^John");
+    dataset.insert_value(Tag::ROWS, rows);
+    dataset.insert_value(Tag::COLUMNS, columns);
+    dataset.insert_value(Tag::BITS_ALLOCATED, 8u16);
+    dataset.insert_value(Tag::BITS_STORED, 8u16);
+    dataset.insert_value(Tag::HIGH_BIT, 7u16);
+    dataset.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16);
+    dataset.insert_value(Tag::PIXEL_REPRESENTATION, 0u16);
+    dataset.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
+    {
+        let mut pixel = radicom::pixel::PixelData::create_new(&mut dataset).unwrap();
+        pixel
+            .add_frame(vec![0x5Au8; rows as usize * columns as usize])
+            .unwrap();
+    }
+    dataset.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+    DicomFile::from_dataset(dataset)
+}
+
 /// An SCP that answers a C-FIND with one Pending item per match, then Success.
 struct FindProvider {
     matches: Vec<String>,
@@ -383,6 +408,47 @@ async fn c_get_registered_requires_declared_storage_classes() {
         Ok(_) => panic!("expected an error without declared classes"),
         Err(error) => assert!(error.to_string().contains("storage SOP classes"), "{error}"),
     }
+}
+
+/// A C-GET of a 4 MiB instance exercises the reverse-store receive spool end to
+/// end: the instance is split over many PDVs, staged to a temp file on the
+/// client, then decoded and captured intact (N4).
+#[tokio::test]
+async fn self_interop_c_get_large_instance_round_trips_through_the_spool() {
+    let rows = 2048u16;
+    let columns = 2048u16;
+    let provider = Arc::new(GetInstanceProvider {
+        instances: vec![large_instance("1.2.3.4.7.1", rows, columns)],
+    });
+    let server = DicomServer::bind("127.0.0.1:0", provider, ServerOptions::default())
+        .await
+        .expect("bind");
+    let addr = server.local_addr();
+    let handle = tokio::spawn(async move { server.accept_one().await });
+
+    let received: Arc<Mutex<Vec<DicomFile>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut client =
+        DicomClient::new("SCU", "SCP", addr.to_string()).collect_reverse_stores(received.clone());
+    let storage = vec!["1.2.840.10008.5.1.4.1.1.7".to_string()];
+    let responses = client
+        .send_c_get(&CGetRequest::study("1.2.3.4", 1), &storage)
+        .await
+        .expect("C-GET large instance");
+
+    assert_eq!(responses.last().unwrap().status, 0x0000, "C-GET completes");
+    let frame_size = {
+        let files = received.lock().unwrap();
+        assert_eq!(files.len(), 1, "the large instance arrived once");
+        let view = radicom::pixel::PixelDataRef::from_dataset(&files[0].dataset).unwrap();
+        view.get_frame(0).expect("one frame").size()
+    };
+    assert_eq!(
+        frame_size,
+        u64::from(rows) * u64::from(columns),
+        "the whole 4 MiB frame survived the spooled round trip"
+    );
+    client.release().await;
+    handle.await.unwrap().unwrap();
 }
 
 /// An SCP that performs C-MOVE by pushing every instance to a destination.
