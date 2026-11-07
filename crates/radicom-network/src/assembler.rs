@@ -310,16 +310,29 @@ impl PdvAssembler {
         }
     }
 
+    /// Largest non-storage (unarmed) message held in memory by a server
+    /// assembler. Query/move/get identifiers and N-service datasets are small;
+    /// capping them here bounds a peer's per-message memory without affecting
+    /// the spooled C-STORE path.
+    pub const DEFAULT_MAX_NON_STORAGE_MESSAGE: usize = 16 * 1024 * 1024;
+
     /// An assembler that can spill armed dataset streams to a file (H3).
     pub fn with_spool(spool: SpoolConfig) -> Self {
+        Self::with_spool_and_limits(spool, Self::DEFAULT_MAX_MESSAGE_LENGTH)
+    }
+
+    /// Like [`Self::with_spool`] but with an explicit in-memory ceiling for
+    /// non-spilled messages; the aggregate budget scales with the spool cap.
+    pub fn with_spool_and_limits(spool: SpoolConfig, max_message_length: usize) -> Self {
         // The aggregate ceiling must never be smaller than a single spooled
         // dataset, or `store_spool.max_message_length` above the default
         // `DEFAULT_MAX_BUFFERED_BYTES` would be silently unreachable. Scale the
         // aggregate budget from the spool cap so the configured limit is real.
         let max_buffered_bytes = usize::try_from(spool.max_message_length)
             .unwrap_or(usize::MAX)
-            .saturating_add(Self::DEFAULT_MAX_MESSAGE_LENGTH);
+            .saturating_add(max_message_length);
         PdvAssembler {
+            max_message_length,
             max_buffered_bytes,
             spool: Some(spool),
             ..Self::default()

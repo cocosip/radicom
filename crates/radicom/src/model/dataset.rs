@@ -785,6 +785,11 @@ impl Dataset {
     /// ≤ 0x00FF with a creator) resolve to their concrete block tags; when
     /// resolution fails with `create = true` the creator block is claimed.
     fn resolve_private_write(&mut self, tag: &Tag, create: bool) -> Option<Tag> {
+        // A concrete private tag (element > 0x00FF) is assumed to be addressed
+        // inside its creator block already: the caller owns the `(gggg,00bb)`
+        // PrivateCreator element. Dictionary-style tags (element <= 0x00FF) get a
+        // creator block allocated here. This keeps a concrete insert from
+        // silently changing the dataset's element count.
         self.get_private_tag_ref(tag, create)
     }
 }

@@ -140,7 +140,7 @@ impl Default for ServerOptions {
     fn default() -> Self {
         ServerOptions {
             called_ae_title: None,
-            max_clients: 0,
+            max_clients: 64,
             max_pdu_length: 16384,
             max_pdvs_per_pdu: 16,
             max_command_buffer: None,

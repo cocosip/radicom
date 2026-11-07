@@ -360,7 +360,12 @@ where
         splitter: &splitter,
         provider: &provider,
         options: &options,
-        assembler: PdvAssembler::with_spool(options.store_spool.clone()),
+        // Bound non-storage (query/move/get/N) datasets in memory; C-STORE
+        // datasets are armed and streamed to a spool instead.
+        assembler: PdvAssembler::with_spool_and_limits(
+            options.store_spool.clone(),
+            PdvAssembler::DEFAULT_MAX_NON_STORAGE_MESSAGE,
+        ),
         pending_units: VecDeque::new(),
         deferred_units: VecDeque::new(),
         deferred_requests: 0,
@@ -1111,6 +1116,7 @@ fn is_valid_ae_title(value: &str) -> bool {
 }
 
 /// The C-FIND path: decode the Identifier and stream the matches back (§11.4).
+#[cfg(test)]
 pub async fn handle_c_find<P: ServiceProvider, S>(
     serving: &mut Serving<'_, P, S>,
     context_id: u8,
@@ -1237,6 +1243,7 @@ where
 }
 
 /// The C-STORE path: spool the instance and hand it to the provider (§11.4).
+#[cfg(test)]
 pub async fn handle_c_store<P: ServiceProvider, S>(
     serving: &mut Serving<'_, P, S>,
     context_id: u8,
@@ -2404,12 +2411,13 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     match command.field {
-        // the C-STORE sink owns the temp file a spilled body arrived in (H3)
-        CommandField::CStoreRq => handle_c_store(serving, context_id, command, body, syntax).await,
-        CommandField::CFindRq => {
-            let dataset_bytes = body.read_all()?;
-            handle_c_find(serving, context_id, command, &dataset_bytes, syntax).await
-        }
+        // C-STORE and C-FIND are always dispatched to a task
+        // (`DispatchJob::is_concurrent`); a dataset arriving here for them is a
+        // dispatch bug. Keeping the single `execute_c_store`/`execute_c_find`
+        // implementation avoids two divergent copies of the validation logic.
+        CommandField::CStoreRq | CommandField::CFindRq => Err(NetworkError::protocol(
+            "C-STORE/C-FIND reached the inline dataset dispatcher",
+        )),
         CommandField::CMoveRq => {
             let dataset_bytes = body.read_all()?;
             handle_c_move(serving, context_id, command, &dataset_bytes, syntax).await
