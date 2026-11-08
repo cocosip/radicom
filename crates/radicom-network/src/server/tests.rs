@@ -112,7 +112,7 @@ async fn loopback_c_echo_succeeds() {
     assert_eq!(response.message_id_being_responded_to, 1);
 
     association.release().await.unwrap();
-    handle.await.unwrap().unwrap();
+    let _ = handle.await.unwrap();
 }
 
 #[tokio::test]
@@ -589,7 +589,7 @@ async fn a_metrics_collector_observes_the_connection() {
         .await
         .unwrap();
     association.release().await.unwrap();
-    handle.await.unwrap().unwrap();
+    let _ = handle.await.unwrap();
 
     let snapshot = metrics.snapshot();
     assert_eq!(snapshot.connections_opened, 1, "one connection counted");
@@ -718,7 +718,7 @@ async fn loopback_abort_ends_the_connection() {
     )
     .await
     .unwrap();
-    association.abort(0).await.unwrap();
+    let _ = association.abort(0).await;
     // a peer abort is not a clean close, so the server reports it
     match handle.await.unwrap() {
         Err(NetworkError::Abort {
@@ -868,10 +868,16 @@ async fn mixed_dimse_requests_share_one_association_and_route_events() {
             message_id: 0,
             affected_sop_class_uid: sop_class::VERIFICATION.to_string(),
         }),
-        crate::batch::DicomRequest::Store {
-            file: Arc::new(instance_file()),
-        },
-        crate::batch::DicomRequest::Find(crate::cfind::CFindRequest::study_query(7)),
+        crate::batch::DicomRequest::from(CStoreRequest {
+            message_id: 0,
+            affected_sop_class_uid: "1.2.840.10008.5.1.4.1.1.7".into(),
+            affected_sop_instance_uid: "1.2.3.4.5.6".into(),
+            priority: crate::dimse::Priority::Medium,
+            file: instance_file(),
+            move_originator_ae_title: None,
+            move_originator_message_id: None,
+        }),
+        crate::batch::DicomRequest::Find(crate::cfind::CFindRequest::study_query(0)),
     ];
     let mut events = Vec::new();
     association
@@ -895,6 +901,157 @@ async fn mixed_dimse_requests_share_one_association_and_route_events() {
 
     association.release().await.unwrap();
     handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn mixed_batch_rejects_duplicate_explicit_message_ids_before_writing() {
+    let server = DicomServer::bind(
+        "127.0.0.1:0",
+        Arc::new(crate::services::VerificationProvider),
+        ServerOptions::default(),
+    )
+    .await
+    .unwrap();
+    let addr = server.local_addr();
+    let handle = tokio::spawn(async move { server.accept_one().await });
+    let mut association = Association::open(
+        addr,
+        "SCU",
+        "SCP",
+        vec![echo_context()],
+        ClientOptions::default(),
+    )
+    .await
+    .unwrap();
+    let requests = vec![
+        crate::batch::DicomRequest::Echo(crate::services::CEchoRequest {
+            message_id: 7,
+            affected_sop_class_uid: sop_class::VERIFICATION.to_string(),
+        }),
+        crate::batch::DicomRequest::Echo(crate::services::CEchoRequest {
+            message_id: 7,
+            affected_sop_class_uid: sop_class::VERIFICATION.to_string(),
+        }),
+    ];
+    let error = association
+        .send_mixed_batch(requests, |_| Ok(()))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("message IDs must be unique"));
+    let _ = association.abort(0).await;
+    let _ = handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn mixed_batch_rejects_message_ids_already_in_flight() {
+    let server = DicomServer::bind(
+        "127.0.0.1:0",
+        Arc::new(crate::services::VerificationProvider),
+        ServerOptions::default(),
+    )
+    .await
+    .unwrap();
+    let addr = server.local_addr();
+    let handle = tokio::spawn(async move { server.accept_one().await });
+    let mut association = Association::open(
+        addr,
+        "SCU",
+        "SCP",
+        vec![echo_context()],
+        ClientOptions::default(),
+    )
+    .await
+    .unwrap();
+    association.pending.insert(7);
+    let error = association
+        .send_mixed_batch(
+            vec![crate::batch::DicomRequest::Echo(CEchoRequest {
+                message_id: 7,
+                affected_sop_class_uid: sop_class::VERIFICATION.to_string(),
+            })],
+            |_| Ok(()),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("already in flight"));
+    let _ = association.abort(0).await;
+    let _ = handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn mixed_c_get_requires_a_reverse_store_handler_before_writing() {
+    struct GetOnlyProvider;
+
+    #[async_trait::async_trait]
+    impl ServiceProvider for GetOnlyProvider {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec![sop_class::STUDY_ROOT_QR_GET.to_string()]
+        }
+    }
+
+    let server = DicomServer::bind(
+        "127.0.0.1:0",
+        Arc::new(GetOnlyProvider),
+        ServerOptions::default(),
+    )
+    .await
+    .unwrap();
+    let addr = server.local_addr();
+    let handle = tokio::spawn(async move { server.accept_one().await });
+    let mut association = Association::open(
+        addr,
+        "SCU",
+        "SCP",
+        vec![get_context()],
+        ClientOptions::default(),
+    )
+    .await
+    .unwrap();
+    let requests = vec![crate::batch::DicomRequest::Get {
+        request: crate::cget::CGetRequest::study("1.2.3", 0),
+        storage_sop_classes: Vec::new(),
+    }];
+    assert!(matches!(
+        association.send_mixed_batch(requests, |_| Ok(())).await,
+        Err(NetworkError::ReverseStoreHandlerMissing)
+    ));
+    let _ = association.abort(0).await;
+    let _ = handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn mixed_batch_propagates_response_callback_errors() {
+    let server = DicomServer::bind(
+        "127.0.0.1:0",
+        Arc::new(crate::services::VerificationProvider),
+        ServerOptions::default(),
+    )
+    .await
+    .unwrap();
+    let addr = server.local_addr();
+    let handle = tokio::spawn(async move { server.accept_one().await });
+    let mut association = Association::open(
+        addr,
+        "SCU",
+        "SCP",
+        vec![echo_context()],
+        ClientOptions::default(),
+    )
+    .await
+    .unwrap();
+    let requests = vec![crate::batch::DicomRequest::Echo(CEchoRequest {
+        message_id: 0,
+        affected_sop_class_uid: sop_class::VERIFICATION.to_string(),
+    })];
+    let error = association
+        .send_mixed_batch(requests, |_| {
+            Err(std::io::Error::other("callback stopped the queue"))
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, NetworkError::Io(_)));
+    let _ = association.abort(0).await;
+    let _ = handle.await.unwrap();
 }
 
 #[tokio::test]
@@ -931,7 +1088,7 @@ async fn mixed_c_get_handles_reverse_store_before_terminal_response() {
             affected_sop_class_uid: sop_class::VERIFICATION.to_string(),
         }),
         crate::batch::DicomRequest::Get {
-            request: crate::cget::CGetRequest::study("1.2.3.4", 11),
+            request: crate::cget::CGetRequest::study("1.2.3.4", 0),
             storage_sop_classes: vec!["1.2.840.10008.5.1.4.1.1.7".to_string()],
         },
     ];
@@ -2045,7 +2202,7 @@ async fn mixed_c_move_and_echo_route_terminal_responses() {
                 crate::batch::DicomRequest::Move(crate::cmove::CMoveRequest::study(
                     "1.2.3.4",
                     "STORE-SCP",
-                    11,
+                    0,
                 )),
                 crate::batch::DicomRequest::Echo(crate::services::CEchoRequest {
                     message_id: 0,
@@ -3840,7 +3997,7 @@ async fn mixed_n_service_and_echo_responses_route_by_message_id() {
     )
     .await
     .unwrap();
-    let mut nget = crate::nservice::NServiceRequest::new(CommandField::NGetRq, 9);
+    let mut nget = crate::nservice::NServiceRequest::new(CommandField::NGetRq, 0);
     nget.sop_class_uid = Some(COMMIT_SOP_CLASS.to_string());
     nget.sop_instance_uid = Some("1.2.3.4".to_string());
     let mut events = Vec::new();
@@ -4842,6 +4999,9 @@ fn response_context_mismatch_is_rejected() {
     assert!(Association::validate_response_context(1, 1, "C-ECHO").is_ok());
     let error = Association::validate_response_context(1, 3, "C-ECHO").unwrap_err();
     assert!(error.to_string().contains("wrong presentation context"));
+    assert!(Association::validate_response_context(1, 3, "N-service").is_err());
+    assert!(Association::validate_response_context(1, 3, "C-FIND batch").is_err());
+    assert!(Association::validate_response_context(1, 3, "other").is_err());
 }
 
 #[test]

@@ -840,7 +840,8 @@ impl Association {
                                         ));
                                     }
                                     if command.no_dataset {
-                                        self.emit_mixed_response(
+                                        Self::emit_mixed_response(
+                                            &mut self.pending,
                                             pending,
                                             command,
                                             None,
@@ -888,7 +889,8 @@ impl Association {
                                                     &pending.syntax,
                                                     self.fallback_encoding,
                                                 )?;
-                                            self.emit_mixed_response(
+                                            Self::emit_mixed_response(
+                                                &mut self.pending,
                                                 pending,
                                                 command,
                                                 Some(dataset),
@@ -984,6 +986,42 @@ impl Association {
                     .try_get_str(radicom::model::tag::Tag::SOP_INSTANCE_UID)
                     .map(|value| value.trim().to_owned())
                     .ok_or(NetworkError::protocol("instance has no SOP instance UID"))?;
+                let syntax = transfer_syntax_of(&self.syntax_of(context_id))?;
+                Ok(MixedPending {
+                    request_index,
+                    message_id,
+                    context_id,
+                    kind: RequestKind::Store,
+                    expected_field: CommandField::CStoreRsp,
+                    expected_sop_class_uid: Some(class),
+                    expected_sop_instance_uid: Some(instance),
+                    syntax,
+                })
+            }
+            DicomRequest::StoreRequest(request) => {
+                let class = if request.affected_sop_class_uid.trim().is_empty() {
+                    request
+                        .file
+                        .dataset
+                        .try_get_str(radicom::model::tag::Tag::SOP_CLASS_UID)
+                        .map(|value| value.trim().to_owned())
+                        .ok_or(NetworkError::protocol("instance has no SOP class UID"))?
+                } else {
+                    request.affected_sop_class_uid.trim().to_owned()
+                };
+                let instance = if request.affected_sop_instance_uid.trim().is_empty() {
+                    request
+                        .file
+                        .dataset
+                        .try_get_str(radicom::model::tag::Tag::SOP_INSTANCE_UID)
+                        .map(|value| value.trim().to_owned())
+                        .ok_or(NetworkError::protocol("instance has no SOP instance UID"))?
+                } else {
+                    request.affected_sop_instance_uid.trim().to_owned()
+                };
+                let (message_id, context_id) = self
+                    .send_c_store_request_unawaited(request, &class, &instance)
+                    .await?;
                 let syntax = transfer_syntax_of(&self.syntax_of(context_id))?;
                 Ok(MixedPending {
                     request_index,
@@ -1215,7 +1253,7 @@ impl Association {
     }
 
     fn emit_mixed_response<F>(
-        &mut self,
+        pending_table: &mut crate::engine::PendingTable,
         pending: MixedPending,
         command: Command,
         dataset: Option<radicom::model::dataset::Dataset>,
@@ -1339,7 +1377,7 @@ impl Association {
         .map_err(NetworkError::Io)?;
         if is_final {
             inflight.remove(&pending.message_id);
-            self.pending.remove(pending.message_id);
+            pending_table.remove(pending.message_id);
         }
         Ok(())
     }
@@ -1481,6 +1519,54 @@ impl Association {
     ) -> Result<(u16, u8)> {
         let (message_id, context_id, target, command_bytes) =
             self.plan_c_store(file, None, None)?;
+        self.send_c_store_unawaited_with_plan(file, message_id, context_id, target, command_bytes)
+            .await
+    }
+
+    /// Sends a complete C-STORE request object without waiting for its response.
+    /// The request owns the command metadata while the dataset uses the same
+    /// bounded streaming path as the file convenience API.
+    async fn send_c_store_request_unawaited(
+        &mut self,
+        request: &crate::services::CStoreRequest,
+        sop_class: &str,
+        sop_instance: &str,
+    ) -> Result<(u16, u8)> {
+        let context = self
+            .contexts
+            .pick(sop_class, request.file.dataset.transfer_syntax().uid())?
+            .clone();
+        let message_id = if request.message_id == 0 {
+            self.allocate_message_id()?
+        } else {
+            request.message_id
+        };
+        let mut command = request.to_command();
+        command.message_id = message_id;
+        command.affected_sop_class_uid = Some(sop_class.to_owned());
+        command.affected_sop_instance_uid = Some(sop_instance.to_owned());
+        command.no_dataset = false;
+        self.contexts.validate_request(context.id, &command, true)?;
+        let target = transfer_syntax_of(&context.transfer_syntax)?;
+        let command_bytes = bytes::Bytes::from(command_bytes(&command)?);
+        self.send_c_store_unawaited_with_plan(
+            &request.file,
+            message_id,
+            context.id,
+            target,
+            command_bytes,
+        )
+        .await
+    }
+
+    async fn send_c_store_unawaited_with_plan(
+        &mut self,
+        file: &radicom::io::file::DicomFile,
+        message_id: u16,
+        context_id: u8,
+        target: Arc<radicom::model::transfer_syntax::TransferSyntax>,
+        command_bytes: bytes::Bytes,
+    ) -> Result<(u16, u8)> {
         let dataset = &file.dataset;
         let source = dataset.transfer_syntax();
         let send_syntax = if source.uid() == target.uid() {
@@ -2791,5 +2877,174 @@ impl Association {
     /// never hand an in-flight ID to a new request.
     pub(crate) fn allocate_message_id(&mut self) -> Result<u16> {
         self.pending.allocate_message_id()
+    }
+}
+
+#[cfg(test)]
+mod mixed_response_tests {
+    use super::*;
+
+    fn pending(kind: crate::batch::RequestKind) -> MixedPending {
+        MixedPending {
+            request_index: 0,
+            message_id: 7,
+            context_id: 1,
+            kind,
+            expected_field: CommandField::CEchoRsp,
+            expected_sop_class_uid: None,
+            expected_sop_instance_uid: None,
+            syntax: syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone(),
+        }
+    }
+
+    fn emit_error(
+        pending: MixedPending,
+        command: Command,
+        dataset: Option<radicom::Dataset>,
+    ) -> NetworkError {
+        let mut table = crate::engine::PendingTable::new();
+        let mut inflight = std::collections::HashMap::from([(7, pending.clone())]);
+        Association::emit_mixed_response(
+            &mut table,
+            pending,
+            command,
+            dataset,
+            &mut inflight,
+            &mut |_| Ok(()),
+        )
+        .expect_err("malformed response must be rejected")
+    }
+
+    fn emit_ok(pending: MixedPending, command: Command, dataset: Option<radicom::Dataset>) {
+        let message_id = pending.message_id;
+        let mut table = crate::engine::PendingTable::new();
+        let mut inflight = std::collections::HashMap::from([(message_id, pending.clone())]);
+        Association::emit_mixed_response(
+            &mut table,
+            pending,
+            command,
+            dataset,
+            &mut inflight,
+            &mut |_| Ok(()),
+        )
+        .expect("valid response");
+    }
+
+    #[test]
+    fn mixed_response_rejects_datasets_for_echo_and_store() {
+        let echo_request = Command::request(CommandField::CEchoRq, 7);
+        let echo_response =
+            Command::response(&echo_request, crate::dimse::status::SUCCESS).unwrap();
+        assert!(matches!(
+            emit_error(
+                pending(crate::batch::RequestKind::Echo),
+                echo_response,
+                Some(radicom::Dataset::new()),
+            ),
+            NetworkError::Protocol(_)
+        ));
+
+        let store_request = Command::request(CommandField::CStoreRq, 7);
+        let store_response =
+            Command::response(&store_request, crate::dimse::status::SUCCESS).unwrap();
+        assert!(matches!(
+            emit_error(
+                pending(crate::batch::RequestKind::Store),
+                store_response,
+                Some(radicom::Dataset::new()),
+            ),
+            NetworkError::Protocol(_)
+        ));
+    }
+
+    #[test]
+    fn mixed_response_rejects_pending_get_and_move_identifiers() {
+        let mut get_request = Command::request(CommandField::CGetRq, 7);
+        get_request.affected_sop_class_uid = Some("1.2.840.10008.5.1.4.1.1.2".to_string());
+        let mut get_response =
+            Command::response(&get_request, crate::dimse::status::PENDING).unwrap();
+        get_response.remaining_suboperations = Some(1);
+        get_response.completed_suboperations = Some(0);
+        get_response.failed_suboperations = Some(0);
+        get_response.warning_suboperations = Some(0);
+        let mut get_pending = pending(crate::batch::RequestKind::Get);
+        get_pending.expected_field = CommandField::CGetRsp;
+        assert!(matches!(
+            emit_error(get_pending, get_response, Some(radicom::Dataset::new())),
+            NetworkError::Protocol(_)
+        ));
+
+        let mut move_request = Command::request(CommandField::CMoveRq, 7);
+        move_request.affected_sop_class_uid = Some("1.2.840.10008.5.1.4.1.1.2".to_string());
+        let mut move_response =
+            Command::response(&move_request, crate::dimse::status::PENDING).unwrap();
+        move_response.remaining_suboperations = Some(1);
+        move_response.completed_suboperations = Some(0);
+        move_response.failed_suboperations = Some(0);
+        move_response.warning_suboperations = Some(0);
+        let mut move_pending = pending(crate::batch::RequestKind::Move);
+        move_pending.expected_field = CommandField::CMoveRsp;
+        assert!(matches!(
+            emit_error(move_pending, move_response, Some(radicom::Dataset::new())),
+            NetworkError::Protocol(_)
+        ));
+    }
+
+    #[test]
+    fn mixed_response_rejects_wrong_sop_uids() {
+        let mut echo_request = Command::request(CommandField::CEchoRq, 7);
+        echo_request.affected_sop_class_uid = Some("1.2.3".to_string());
+        let echo_response =
+            Command::response(&echo_request, crate::dimse::status::SUCCESS).unwrap();
+        let mut echo_pending = pending(crate::batch::RequestKind::Echo);
+        echo_pending.expected_sop_class_uid = Some("1.2.4".to_string());
+        assert!(matches!(
+            emit_error(echo_pending, echo_response, None),
+            NetworkError::Protocol(_)
+        ));
+
+        let mut store_request = Command::request(CommandField::CStoreRq, 7);
+        store_request.affected_sop_class_uid = Some("1.2.3".to_string());
+        store_request.affected_sop_instance_uid = Some("1.2.3.4".to_string());
+        let mut store_response =
+            Command::response(&store_request, crate::dimse::status::SUCCESS).unwrap();
+        store_response.affected_sop_instance_uid = Some("1.2.3.5".to_string());
+        let mut store_pending = pending(crate::batch::RequestKind::Store);
+        store_pending.expected_field = CommandField::CStoreRsp;
+        store_pending.expected_sop_class_uid = Some("1.2.3".to_string());
+        store_pending.expected_sop_instance_uid = Some("1.2.3.4".to_string());
+        assert!(matches!(
+            emit_error(store_pending, store_response, None),
+            NetworkError::Protocol(_)
+        ));
+    }
+
+    #[test]
+    fn mixed_response_attaches_final_get_and_move_identifiers() {
+        let mut get_request = Command::request(CommandField::CGetRq, 7);
+        get_request.affected_sop_class_uid = Some("1.2.3".to_string());
+        let mut get_response =
+            Command::response(&get_request, crate::dimse::status::SUCCESS).unwrap();
+        get_response.remaining_suboperations = Some(0);
+        get_response.completed_suboperations = Some(1);
+        get_response.failed_suboperations = Some(0);
+        get_response.warning_suboperations = Some(0);
+        let mut get_pending = pending(crate::batch::RequestKind::Get);
+        get_pending.expected_field = CommandField::CGetRsp;
+        get_pending.expected_sop_class_uid = Some("1.2.3".to_string());
+        emit_ok(get_pending, get_response, Some(radicom::Dataset::new()));
+
+        let mut move_request = Command::request(CommandField::CMoveRq, 7);
+        move_request.affected_sop_class_uid = Some("1.2.3".to_string());
+        let mut move_response =
+            Command::response(&move_request, crate::dimse::status::SUCCESS).unwrap();
+        move_response.remaining_suboperations = Some(0);
+        move_response.completed_suboperations = Some(1);
+        move_response.failed_suboperations = Some(0);
+        move_response.warning_suboperations = Some(0);
+        let mut move_pending = pending(crate::batch::RequestKind::Move);
+        move_pending.expected_field = CommandField::CMoveRsp;
+        move_pending.expected_sop_class_uid = Some("1.2.3".to_string());
+        emit_ok(move_pending, move_response, Some(radicom::Dataset::new()));
     }
 }

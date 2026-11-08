@@ -37,6 +37,27 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! Mixed DIMSE requests use concrete request objects in one collection and one Association:
+//!
+//! ```no_run
+//! use radicom::uids;
+//! use radicom_network::{CEchoRequest, CFindRequest, DicomClient, DicomRequest};
+//!
+//! async fn mixed_requests() -> radicom_network::Result<()> {
+//!     let requests = vec![
+//!         DicomRequest::from(CEchoRequest {
+//!             message_id: 0,
+//!             affected_sop_class_uid: uids::VERIFICATION.to_string(),
+//!         }),
+//!         DicomRequest::from(CFindRequest::study_query(0)),
+//!     ];
+//!     let mut client = DicomClient::new("MY-SCU", "ANY-SCP", "127.0.0.1:11112");
+//!     client.send_requests(requests, |_event| Ok(())).await?;
+//!     client.release().await;
+//!     Ok(())
+//! }
+//! ```
 
 pub mod assembler;
 pub mod association;
@@ -70,7 +91,9 @@ pub use association::{
     AcceptedContexts, ContextSetBuilder, ContextState, NegotiatedContext, NegotiationPolicy,
     ProposedContext, SyntaxPriority,
 };
-pub use batch::{DicomRequest, DicomResponse, DicomResponseEvent, RequestKind};
+pub use batch::{
+    DicomRequest, DicomRequestQueue, DicomResponse, DicomResponseEvent, RequestHandle, RequestKind,
+};
 pub use cfind::{CFindRequest, CFindResponse, QueryRetrieveLevel, QueryRoot, RetrieveService};
 pub use cget::{CGetEvent, CGetRequest, CGetResponse};
 pub use client::{
@@ -107,7 +130,7 @@ pub use print_sop::{
     network_identifier_from_mac, parse_mac, try_get_network_identifier, MetaSopClasses,
 };
 pub use registry::{DicomServerRegistration, DicomServerRegistry};
-pub use services::{CEchoRequest, CEchoResponse};
+pub use services::{CEchoRequest, CEchoResponse, CStoreRequest, CStoreResponse};
 
 /// Test-only helpers for asserting wire bytes (not part of the public API).
 #[cfg(test)]

@@ -447,19 +447,32 @@ impl DicomClient {
         tokio::time::sleep(self.options.quota_cooldown).await;
     }
 
-    /// Sends heterogeneous DIMSE requests on one association.
+    /// Sends concrete DIMSE request objects as one heterogeneous batch on one
+    /// association, following the fo-dicom request collection model.
     ///
     /// Presentation contexts and reverse C-STORE role selections are derived
     /// from the complete request list before the association is opened. Each
     /// response is forwarded as soon as the association scheduler receives it.
-    pub async fn send_batch<F>(
-        &mut self,
-        requests: Vec<crate::batch::DicomRequest>,
-        on_response: F,
-    ) -> Result<()>
+    pub async fn send_requests<I, R, F>(&mut self, requests: I, on_response: F) -> Result<()>
     where
+        I: IntoIterator<Item = R>,
+        R: Into<crate::batch::DicomRequest>,
         F: FnMut(crate::batch::DicomResponseEvent) -> std::io::Result<()>,
     {
+        let requests = requests
+            .into_iter()
+            .map(Into::into)
+            .map(|request| match request {
+                crate::batch::DicomRequest::Get {
+                    request,
+                    storage_sop_classes,
+                } if storage_sop_classes.is_empty() => crate::batch::DicomRequest::Get {
+                    request,
+                    storage_sop_classes: self.reverse_store_classes.clone(),
+                },
+                request => request,
+            })
+            .collect::<Vec<_>>();
         if requests.is_empty() {
             return Ok(());
         }
@@ -469,6 +482,19 @@ impl DicomClient {
             && self.reverse_store.is_none()
         {
             return Err(NetworkError::ReverseStoreHandlerMissing);
+        }
+        if requests.iter().any(|request| {
+            matches!(
+                request,
+                crate::batch::DicomRequest::Get {
+                    storage_sop_classes,
+                    ..
+                } if storage_sop_classes.is_empty()
+            )
+        }) {
+            return Err(NetworkError::protocol(
+                "C-GET needs storage SOP classes: call with_reverse_store_classes first",
+            ));
         }
         let (contexts, roles) = mixed_contexts(&requests)?;
         let request_count = requests.len();
@@ -481,6 +507,35 @@ impl DicomClient {
             self.sent_on_association += request_count;
         }
         result
+    }
+
+    /// Sends a queued set of heterogeneous DIMSE requests on one association.
+    ///
+    /// This builder-based entry point is kept for callers that prefer an
+    /// explicit queue; [`Self::send_requests`] is the primary collection API.
+    pub async fn send_queue<F>(
+        &mut self,
+        queue: crate::batch::DicomRequestQueue,
+        on_response: F,
+    ) -> Result<()>
+    where
+        F: FnMut(crate::batch::DicomResponseEvent) -> std::io::Result<()>,
+    {
+        self.send_requests(queue.into_requests(), on_response).await
+    }
+
+    /// Sends heterogeneous DIMSE requests on one association.
+    ///
+    /// This compatibility entry point delegates to [`Self::send_requests`].
+    pub async fn send_batch<F>(
+        &mut self,
+        requests: Vec<crate::batch::DicomRequest>,
+        on_response: F,
+    ) -> Result<()>
+    where
+        F: FnMut(crate::batch::DicomResponseEvent) -> std::io::Result<()>,
+    {
+        self.send_requests(requests, on_response).await
     }
 
     /// Sends a C-ECHO (§11.4).
@@ -778,6 +833,11 @@ impl DicomClient {
         &mut self,
         request: &crate::nservice::NServiceRequest,
     ) -> Result<crate::nservice::NServiceResponse> {
+        if !crate::nservice::is_n_request(request.field) {
+            return Err(NetworkError::protocol(
+                "N-service request has a non-N command field",
+            ));
+        }
         let sop_class = request
             .sop_class_uid
             .clone()
@@ -931,6 +991,24 @@ fn mixed_contexts(
                     crate::services::c_store_transfer_syntaxes(&syntax, &[], false),
                 );
             }
+            crate::batch::DicomRequest::StoreRequest(request) => {
+                let sop_class = if request.affected_sop_class_uid.trim().is_empty() {
+                    request
+                        .file
+                        .dataset
+                        .try_get_str(radicom::model::tag::Tag::SOP_CLASS_UID)
+                        .map(|value| value.trim().to_owned())
+                        .ok_or(NetworkError::protocol("instance has no SOP class UID"))?
+                } else {
+                    request.affected_sop_class_uid.trim().to_owned()
+                };
+                let syntax = request.file.dataset.transfer_syntax().uid().to_owned();
+                add_role(&sop_class, true, false);
+                add_syntaxes(
+                    &sop_class,
+                    crate::services::c_store_transfer_syntaxes(&syntax, &[], false),
+                );
+            }
             crate::batch::DicomRequest::Find(request) => {
                 add_role(&request.sop_class_uid, true, false);
                 add_syntaxes(
@@ -975,6 +1053,11 @@ fn mixed_contexts(
                 );
             }
             crate::batch::DicomRequest::NService(request) => {
+                if !crate::nservice::is_n_request(request.field) {
+                    return Err(NetworkError::protocol(
+                        "N-service request has a non-N command field",
+                    ));
+                }
                 let sop_class = request.sop_class_uid.as_deref().ok_or_else(|| {
                     NetworkError::protocol("N-service request has no SOP class UID")
                 })?;
@@ -985,7 +1068,13 @@ fn mixed_contexts(
                     .unwrap_or_else(|| {
                         crate::association::transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN.to_owned()
                     });
-                add_role(sop_class, true, false);
+                let (scu_role, scp_role) =
+                    if request.field == crate::dimse::CommandField::NEventReportRq {
+                        (false, true)
+                    } else {
+                        (true, false)
+                    };
+                add_role(sop_class, scu_role, scp_role);
                 add_syntaxes(sop_class, vec![syntax]);
             }
         }
@@ -1236,6 +1325,317 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_send_requests_does_not_open_an_association() {
+        let mut client = DicomClient::new("SCU", "SCP", "127.0.0.1:1");
+        let mut responses = 0;
+        client
+            .send_requests(std::iter::empty::<crate::batch::DicomRequest>(), |_| {
+                responses += 1;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(responses, 0);
+    }
+
+    async fn mixed_peer_error(mode: u8) -> NetworkError {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let offered = crate::test_wire::accept_association(&mut stream).await;
+            let Some(crate::pdu::Pdu::PData(pdata)) =
+                crate::transport::read_pdu(&mut stream).await.unwrap()
+            else {
+                panic!("expected the queued request")
+            };
+            let request_pdv = pdata.pdvs.first().unwrap();
+            if mode == 6 {
+                return;
+            }
+            if mode == 8 {
+                crate::transport::write_pdu(
+                    &mut stream,
+                    &crate::pdu::Pdu::Abort(crate::pdu::Abort {
+                        source: crate::error::AbortSource::User,
+                        reason: 1,
+                    }),
+                )
+                .await
+                .unwrap();
+                return;
+            }
+            if mode == 9 {
+                crate::transport::write_pdu(&mut stream, &crate::pdu::Pdu::AssociateAc(offered))
+                    .await
+                    .unwrap();
+                return;
+            }
+            if mode == 4 {
+                crate::transport::write_pdu(&mut stream, &crate::pdu::Pdu::ReleaseRq)
+                    .await
+                    .unwrap();
+                return;
+            }
+            let request = crate::server::command_from_bytes(&request_pdv.data).unwrap();
+            let mut response =
+                crate::dimse::Command::response(&request, crate::dimse::status::SUCCESS).unwrap();
+            if mode == 5 {
+                response.no_dataset = false;
+            }
+            let context_id = match mode {
+                0 => {
+                    response.field = crate::dimse::CommandField::CFindRsp;
+                    request_pdv.context_id
+                }
+                1 => {
+                    response.message_id_being_responded_to = None;
+                    request_pdv.context_id
+                }
+                2 => 3,
+                7 => {
+                    response.message_id_being_responded_to = Some(999);
+                    request_pdv.context_id
+                }
+                3 => {
+                    crate::transport::write_pdu(
+                        &mut stream,
+                        &crate::pdu::Pdu::PData(crate::pdu::PData {
+                            pdvs: vec![crate::pdu::Pdv {
+                                context_id: request_pdv.context_id,
+                                is_command: false,
+                                is_last: true,
+                                data: bytes::Bytes::from_static(&[0]),
+                            }],
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                    return;
+                }
+                5 => request_pdv.context_id,
+                _ => unreachable!(),
+            };
+            crate::transport::write_pdu(
+                &mut stream,
+                &crate::pdu::Pdu::PData(crate::pdu::PData {
+                    pdvs: vec![crate::pdu::Pdv {
+                        context_id,
+                        is_command: true,
+                        is_last: true,
+                        data: bytes::Bytes::from(crate::server::command_bytes(&response).unwrap()),
+                    }],
+                }),
+            )
+            .await
+            .unwrap();
+            if mode == 5 {
+                let dataset = crate::message::encode_dataset(
+                    &radicom::Dataset::new(),
+                    &radicom::model::transfer_syntax::syntaxes::IMPLICIT_VR_LITTLE_ENDIAN,
+                )
+                .unwrap();
+                crate::transport::write_pdu(
+                    &mut stream,
+                    &crate::pdu::Pdu::PData(crate::pdu::PData {
+                        pdvs: vec![crate::pdu::Pdv {
+                            context_id,
+                            is_command: false,
+                            is_last: true,
+                            data: bytes::Bytes::from(dataset),
+                        }],
+                    }),
+                )
+                .await
+                .unwrap();
+            }
+        });
+
+        let mut queue = crate::batch::DicomRequestQueue::new();
+        queue.push(CEchoRequest {
+            message_id: 0,
+            affected_sop_class_uid: sop_class::VERIFICATION.to_string(),
+        });
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string());
+        let error = client.send_queue(queue, |_| Ok(())).await.unwrap_err();
+        peer.await.unwrap();
+        error
+    }
+
+    #[tokio::test]
+    async fn mixed_queue_rejects_malformed_peer_responses() {
+        for mode in 0..=9 {
+            let error = mixed_peer_error(mode).await;
+            assert!(!matches!(error, NetworkError::RequestTimedOut { .. }));
+        }
+    }
+
+    #[tokio::test]
+    async fn send_requests_mixes_echo_and_n_service_requests() {
+        struct MixedProvider;
+
+        #[async_trait::async_trait]
+        impl ServiceProvider for MixedProvider {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![
+                    sop_class::VERIFICATION.to_string(),
+                    sop_class::STORAGE_COMMITMENT_PUSH.to_string(),
+                ]
+            }
+
+            async fn on_c_echo(&self, request: &CEchoRequest) -> Result<CEchoResponse> {
+                Ok(CEchoResponse::success(request))
+            }
+
+            async fn on_n_get(
+                &self,
+                request: &crate::nservice::NServiceRequest,
+            ) -> Result<crate::nservice::NServiceResponse> {
+                Ok(crate::nservice::NServiceResponse::success(request, None))
+            }
+        }
+
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(MixedProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let serving = tokio::spawn(async move { server.accept_one().await });
+
+        let mut nget = crate::nservice::NServiceRequest::new(crate::dimse::CommandField::NGetRq, 9);
+        nget.sop_class_uid = Some(sop_class::STORAGE_COMMITMENT_PUSH.to_string());
+        nget.sop_instance_uid = Some("1.2.3.4".to_string());
+        let requests = vec![
+            crate::batch::DicomRequest::from(CEchoRequest {
+                message_id: 0,
+                affected_sop_class_uid: sop_class::VERIFICATION.to_string(),
+            }),
+            crate::batch::DicomRequest::from(nget),
+        ];
+        let mut events = Vec::new();
+
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string());
+        client
+            .send_requests(requests, |event| {
+                events.push((event.request_handle(), event.response));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        client.release().await;
+
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().any(|(handle, response)| {
+            handle.index() == 0 && matches!(response, crate::batch::DicomResponse::CEcho(_))
+        }));
+        assert!(events.iter().any(|(handle, response)| {
+            handle.index() == 1 && matches!(response, crate::batch::DicomResponse::NService(_))
+        }));
+        serving.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn mixed_contexts_union_all_request_kinds_and_roles() {
+        let mut dataset = radicom::Dataset::new();
+        dataset.insert_str(
+            radicom::model::tag::Tag::SOP_CLASS_UID,
+            radicom::model::vr::Vr::Ui,
+            "1.2.840.10008.5.1.4.1.1.7",
+        );
+        dataset.insert_str(
+            radicom::model::tag::Tag::SOP_INSTANCE_UID,
+            radicom::model::vr::Vr::Ui,
+            "1.2.3.4",
+        );
+        let file = DicomFile::from_dataset(dataset);
+        let store_request = CStoreRequest {
+            message_id: 17,
+            affected_sop_class_uid: "1.2.840.10008.5.1.4.1.1.7".into(),
+            affected_sop_instance_uid: "1.2.3.4".into(),
+            priority: crate::dimse::Priority::Medium,
+            file: file.clone(),
+            move_originator_ae_title: Some("MOVE-SCP".into()),
+            move_originator_message_id: Some(9),
+        };
+        let mut nget = crate::nservice::NServiceRequest::new(crate::dimse::CommandField::NGetRq, 0);
+        nget.sop_class_uid = Some(sop_class::STORAGE_COMMITMENT_PUSH.to_string());
+        nget.sop_instance_uid = Some("1.2.3.4".to_string());
+        let requests = vec![
+            crate::batch::DicomRequest::Echo(CEchoRequest {
+                message_id: 0,
+                affected_sop_class_uid: sop_class::VERIFICATION.to_string(),
+            }),
+            crate::batch::DicomRequest::from(store_request),
+            crate::batch::DicomRequest::Find(CFindRequest::study_query(0)),
+            crate::batch::DicomRequest::Get {
+                request: CGetRequest::study("1.2.3", 0),
+                storage_sop_classes: vec!["1.2.840.10008.5.1.4.1.1.7".to_string()],
+            },
+            crate::batch::DicomRequest::Move(CMoveRequest::study("1.2.3", "DEST", 0)),
+            crate::batch::DicomRequest::NService(nget),
+        ];
+
+        let (contexts, roles) = mixed_contexts(&requests).unwrap();
+        assert!(contexts
+            .iter()
+            .any(|context| context.abstract_syntax == sop_class::VERIFICATION));
+        assert!(contexts
+            .iter()
+            .any(|context| { context.abstract_syntax == "1.2.840.10008.5.1.4.1.1.7" }));
+        assert!(contexts
+            .iter()
+            .any(|context| context.abstract_syntax == sop_class::STUDY_ROOT_QR_FIND));
+        assert!(contexts
+            .iter()
+            .any(|context| context.abstract_syntax == sop_class::STUDY_ROOT_QR_GET));
+        assert!(contexts
+            .iter()
+            .any(|context| context.abstract_syntax == sop_class::STUDY_ROOT_QR_MOVE));
+        assert!(contexts
+            .iter()
+            .any(|context| context.abstract_syntax == sop_class::STORAGE_COMMITMENT_PUSH));
+        assert!(roles
+            .iter()
+            .any(|role| { role.sop_class == "1.2.840.10008.5.1.4.1.1.7" && role.scp_role }));
+    }
+
+    #[test]
+    fn mixed_contexts_rejects_missing_sop_class_information() {
+        let missing_store = crate::batch::DicomRequest::Store {
+            file: Arc::new(DicomFile::from_dataset(radicom::Dataset::new())),
+        };
+        assert!(mixed_contexts(&[missing_store]).is_err());
+
+        let missing_n_service = crate::batch::DicomRequest::NService(
+            crate::nservice::NServiceRequest::new(crate::dimse::CommandField::NGetRq, 1),
+        );
+        assert!(mixed_contexts(&[missing_n_service]).is_err());
+    }
+
+    #[test]
+    fn mixed_contexts_uses_scp_role_for_n_event_report() {
+        let mut event =
+            crate::nservice::NServiceRequest::new(crate::dimse::CommandField::NEventReportRq, 1);
+        event.sop_class_uid = Some("1.2.840.10008.5.1.1.16".to_string());
+        let (_, roles) = mixed_contexts(&[crate::batch::DicomRequest::from(event)]).unwrap();
+        assert!(roles.iter().any(|role| {
+            role.sop_class == "1.2.840.10008.5.1.1.16" && !role.scu_role && role.scp_role
+        }));
+    }
+
+    #[test]
+    fn mixed_contexts_rejects_non_n_service_command_fields() {
+        let mut invalid =
+            crate::nservice::NServiceRequest::new(crate::dimse::CommandField::CEchoRq, 1);
+        invalid.sop_class_uid = Some(sop_class::VERIFICATION.to_string());
+        let error = mixed_contexts(&[crate::batch::DicomRequest::from(invalid)]).unwrap_err();
+        assert!(error.to_string().contains("non-N command field"));
+    }
+
+    #[tokio::test]
     async fn c_get_without_a_handler_fails_before_connecting() {
         let mut client = DicomClient::new("SCU", "SCP", "127.0.0.1:1");
         let request = CGetRequest::study("1.2.3", 1);
@@ -1243,6 +1643,117 @@ mod tests {
             Err(NetworkError::ReverseStoreHandlerMissing) => {}
             other => panic!("expected ReverseStoreHandlerMissing, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn queued_c_get_without_a_handler_fails_before_connecting() {
+        let mut client = DicomClient::new("SCU", "SCP", "127.0.0.1:1");
+        let mut queue = crate::batch::DicomRequestQueue::new();
+        queue.push(crate::batch::DicomRequest::Get {
+            request: CGetRequest::study("1.2.3", 1),
+            storage_sop_classes: Vec::new(),
+        });
+        assert!(matches!(
+            client.send_queue(queue, |_| Ok(())).await,
+            Err(NetworkError::ReverseStoreHandlerMissing)
+        ));
+    }
+
+    #[tokio::test]
+    async fn queued_c_get_with_handler_but_without_storage_classes_fails_before_connecting() {
+        let mut client = DicomClient::new("SCU", "SCP", "127.0.0.1:1").with_reverse_store_handler(
+            Arc::new(|request| Ok(crate::services::CStoreResponse::success(request))),
+        );
+        let error = client
+            .send_requests(
+                [crate::batch::DicomRequest::from(CGetRequest::study(
+                    "1.2.3", 0,
+                ))],
+                |_| Ok(()),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("storage SOP classes"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn send_n_service_rejects_non_n_command_fields_before_connecting() {
+        let mut request =
+            crate::nservice::NServiceRequest::new(crate::dimse::CommandField::CEchoRq, 1);
+        request.sop_class_uid = Some(sop_class::VERIFICATION.to_string());
+        let mut client = DicomClient::new("SCU", "SCP", "127.0.0.1:1");
+        let error = client.send_n_service(&request).await.unwrap_err();
+        assert!(error.to_string().contains("non-N command field"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn queued_c_get_uses_registered_reverse_store_classes() {
+        struct RegisteredQueueGetProvider;
+
+        #[async_trait::async_trait]
+        impl ServiceProvider for RegisteredQueueGetProvider {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![
+                    sop_class::STUDY_ROOT_QR_GET.to_string(),
+                    "1.2.840.10008.5.1.4.1.1.7".to_string(),
+                ]
+            }
+
+            fn on_c_get<'a>(
+                &'a self,
+                _request: &'a CGetRequest,
+            ) -> futures::stream::BoxStream<'a, Result<crate::cget::CGetEvent>> {
+                let mut dataset = radicom::Dataset::new();
+                dataset.insert_str(
+                    radicom::model::tag::Tag::SOP_CLASS_UID,
+                    radicom::model::vr::Vr::Ui,
+                    "1.2.840.10008.5.1.4.1.1.7",
+                );
+                dataset.insert_str(
+                    radicom::model::tag::Tag::SOP_INSTANCE_UID,
+                    radicom::model::vr::Vr::Ui,
+                    "1.2.3.4.5",
+                );
+                Box::pin(futures::stream::once(async move {
+                    Ok(crate::cget::CGetEvent::instance(DicomFile::from_dataset(
+                        dataset,
+                    )))
+                }))
+            }
+        }
+
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(RegisteredQueueGetProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let serving = tokio::spawn(async move { server.accept_one().await });
+        let received = Arc::new(std::sync::Mutex::new(Vec::<DicomFile>::new()));
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
+            .collect_reverse_stores(received.clone())
+            .with_reverse_store_classes(vec!["1.2.840.10008.5.1.4.1.1.7".to_string()]);
+        let mut queue = crate::batch::DicomRequestQueue::new();
+        queue.push(CGetRequest::study("1.2.3", 0));
+
+        client.send_queue(queue, |_| Ok(())).await.unwrap();
+        assert_eq!(received.lock().unwrap().len(), 1);
+        // Reuse the negotiated association so role coverage is checked on a
+        // second mixed-request admission as fo-dicom does for a request list.
+        client
+            .send_requests(
+                [crate::batch::DicomRequest::from(CGetRequest::study(
+                    "1.2.4", 0,
+                ))],
+                |_| Ok(()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(received.lock().unwrap().len(), 2);
+        client.release().await;
+        serving.await.unwrap().unwrap();
     }
 
     #[tokio::test]
@@ -2267,6 +2778,10 @@ mod tests {
                 &[PresentationContext::new(1, CT, vec![IMPLICIT.to_string()])]
             ),
             "the accepted Implicit VR LE context is covered"
+        );
+        assert!(
+            covers(&association, &[PresentationContext::new(1, CT, Vec::new())]),
+            "a proposal without a preferred syntax falls back to the abstract syntax"
         );
         assert!(
             !covers(
