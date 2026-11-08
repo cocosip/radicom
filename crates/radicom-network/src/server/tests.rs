@@ -877,6 +877,18 @@ async fn mixed_dimse_requests_share_one_association_and_route_events() {
             move_originator_ae_title: None,
             move_originator_message_id: None,
         }),
+        crate::batch::DicomRequest::Store {
+            file: Arc::new(instance_file()),
+        },
+        crate::batch::DicomRequest::from(CStoreRequest {
+            message_id: 0,
+            affected_sop_class_uid: String::new(),
+            affected_sop_instance_uid: String::new(),
+            priority: crate::dimse::Priority::Medium,
+            file: instance_file(),
+            move_originator_ae_title: None,
+            move_originator_message_id: None,
+        }),
         crate::batch::DicomRequest::Find(crate::cfind::CFindRequest::study_query(0)),
     ];
     let mut events = Vec::new();
@@ -888,16 +900,27 @@ async fn mixed_dimse_requests_share_one_association_and_route_events() {
         .await
         .unwrap();
 
-    assert_eq!(events.len(), 4, "echo, store, and two find responses");
+    assert_eq!(
+        events.len(),
+        6,
+        "echo, three stores, and two find responses"
+    );
     assert_eq!(events[0].request_index, 0);
     assert!(events[0].is_final);
     assert_eq!(events[1].request_index, 1);
     assert!(events[1].is_final);
     assert_eq!(events[2].request_index, 2);
-    assert!(!events[2].is_final);
-    assert_eq!(events[3].request_index, 2);
+    assert!(events[2].is_final);
+    assert_eq!(events[3].request_index, 3);
     assert!(events[3].is_final);
-    assert_eq!(provider.instance_uids(), vec!["1.2.3.4.5.6"]);
+    assert_eq!(events[4].request_index, 4);
+    assert!(!events[4].is_final);
+    assert_eq!(events[5].request_index, 4);
+    assert!(events[5].is_final);
+    assert_eq!(
+        provider.instance_uids(),
+        vec!["1.2.3.4.5.6", "1.2.3.4.5.6", "1.2.3.4.5.6"]
+    );
 
     association.release().await.unwrap();
     handle.await.unwrap().unwrap();

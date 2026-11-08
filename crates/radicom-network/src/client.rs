@@ -1560,6 +1560,8 @@ mod tests {
             move_originator_ae_title: Some("MOVE-SCP".into()),
             move_originator_message_id: Some(9),
         };
+        let mut inferred_store_request = store_request.clone();
+        inferred_store_request.affected_sop_class_uid.clear();
         let mut nget = crate::nservice::NServiceRequest::new(crate::dimse::CommandField::NGetRq, 0);
         nget.sop_class_uid = Some(sop_class::STORAGE_COMMITMENT_PUSH.to_string());
         nget.sop_instance_uid = Some("1.2.3.4".to_string());
@@ -1568,7 +1570,9 @@ mod tests {
                 message_id: 0,
                 affected_sop_class_uid: sop_class::VERIFICATION.to_string(),
             }),
+            crate::batch::DicomRequest::store(Arc::new(file.clone())),
             crate::batch::DicomRequest::from(store_request),
+            crate::batch::DicomRequest::from(inferred_store_request),
             crate::batch::DicomRequest::Find(CFindRequest::study_query(0)),
             crate::batch::DicomRequest::Get {
                 request: CGetRequest::study("1.2.3", 0),
