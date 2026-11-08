@@ -107,21 +107,21 @@ impl StoreSink {
         };
         match self {
             StoreSink::Memory => {
-                let dataset = decode_spooled_file(spool.path(), syntax, fallback)?;
+                let file = file_from_spooled_file(spool, syntax, fallback)?;
                 spool.keep();
                 Ok(ReceivedInstance {
-                    file: DicomFile::from_dataset(dataset),
+                    file,
                     path: None,
-                    temp: Some(TempSpool(spool.path().to_path_buf())),
+                    temp: None,
                 })
             }
             StoreSink::SpoolToTemp => {
-                let dataset = decode_spooled_file(spool.path(), syntax, fallback)?;
+                let file = file_from_spooled_file(spool, syntax, fallback)?;
                 spool.keep();
                 Ok(ReceivedInstance {
-                    file: DicomFile::from_dataset(dataset),
+                    file,
                     path: None,
-                    temp: Some(TempSpool(spool.path().to_path_buf())),
+                    temp: None,
                 })
             }
             StoreSink::SpoolToDir(dir) => {
@@ -132,7 +132,12 @@ impl StoreSink {
                 std::io::copy(&mut source, &mut file).map_err(NetworkError::Io)?;
                 file.flush().map_err(NetworkError::Io)?;
                 drop(file);
-                let dataset = match decode_spooled_file(&path, syntax, fallback) {
+                let dataset = match decode_spooled_file(
+                    &path,
+                    syntax,
+                    fallback,
+                    spool.max_message_length(),
+                ) {
                     Ok(dataset) => dataset,
                     Err(error) => {
                         let _ = std::fs::remove_file(&path);
@@ -215,13 +220,28 @@ fn decode_spooled_file(
     path: &Path,
     syntax: &Arc<TransferSyntax>,
     fallback: Option<&str>,
+    max_materialized_length: u64,
 ) -> Result<Dataset> {
     if syntax.is_deflate() {
         // Deflated transfer syntax needs an inflated byte stream before the
-        // existing dataset parser can run; keep this exceptional path aligned
-        // with the normal decoder until the core exposes a streaming inflater.
-        let bytes = std::fs::read(path).map_err(NetworkError::Io)?;
-        return decode(&bytes, syntax, fallback);
+        // existing dataset parser can run. Stream the compressed file instead
+        // of first materialising a second compressed copy in memory.
+        let mut file = std::fs::File::open(path).map_err(NetworkError::Io)?;
+        let bytes =
+            radicom::io::reader::inflate_stream_limited(&mut file, 0, max_materialized_length)
+                .map_err(|error| {
+                    NetworkError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        error.to_string(),
+                    ))
+                })?;
+        let mut dataset = decode(
+            &bytes,
+            &radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN,
+            fallback,
+        )?;
+        dataset.set_transfer_syntax(syntax.clone());
+        return Ok(dataset);
     }
     let file = std::fs::File::open(path).map_err(NetworkError::Io)?;
     let shared = Arc::new(file.try_clone().map_err(NetworkError::Io)?);
@@ -246,6 +266,20 @@ fn decode_spooled_file(
         ))
     })?;
     Ok(builder.into_dataset())
+}
+
+fn file_from_spooled_file(
+    spool: &crate::assembler::SpoolFile,
+    syntax: &Arc<TransferSyntax>,
+    fallback: Option<&str>,
+) -> Result<DicomFile> {
+    let dataset = decode_spooled_file(spool.path(), syntax, fallback, spool.max_message_length())?;
+    let owner = radicom::model::buffer::TempFileSpill::from_temp_file(
+        spool.path().to_path_buf(),
+        spool.len(),
+    )
+    .map_err(NetworkError::Io)?;
+    Ok(DicomFile::from_dataset_with_spool(dataset, Arc::new(owner)))
 }
 
 /// Writes the dataset through the already-open handle, then parses it.
@@ -434,6 +468,47 @@ mod tests {
             !spooled.exists(),
             "the temp spool file must not outlive the instance"
         );
+    }
+
+    #[test]
+    fn a_spooled_file_survives_until_the_c_store_request_is_dropped() {
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let mut dataset = Dataset::new();
+        dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5");
+        dataset.insert_value(Tag::PIXEL_DATA, vec![0u8; 128 * 1024]);
+        let bytes = crate::message::encode_dataset(&dataset, &syntax).unwrap();
+        let dir = std::env::temp_dir().join(format!("radicom-store-owner-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut assembler =
+            crate::assembler::PdvAssembler::with_spool(crate::assembler::SpoolConfig {
+                memory_threshold: 0,
+                dir: Some(dir.clone()),
+                ..crate::assembler::SpoolConfig::default()
+            });
+        assembler.arm_spill(1);
+        let unit = assembler
+            .push_pdv(&crate::pdu::Pdv {
+                context_id: 1,
+                is_command: false,
+                is_last: true,
+                data: bytes::Bytes::from(bytes),
+            })
+            .unwrap()
+            .expect("the dataset completes");
+        let body = unit.body();
+        let path = body.spool().unwrap().path().to_path_buf();
+        let instance = StoreSink::SpoolToTemp
+            .materialize_body(&body, &syntax)
+            .unwrap();
+        let request = c_store_request_from_message(&c_store_command(), instance).unwrap();
+        assert!(path.exists(), "the request still owns its spool file");
+        drop(request);
+        assert!(
+            !path.exists(),
+            "the spool is removed after the request drops"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -702,7 +777,7 @@ mod tests {
     fn materialize_body_handles_a_spilled_body_for_every_sink() {
         let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
 
-        // Memory parses the spool file and lets it die with the body.
+        // Memory parses the spool file and keeps it alive for lazy value windows.
         let (body, dir) = spilled_body(&syntax, "mem");
         let instance = StoreSink::Memory.materialize_body(&body, &syntax).unwrap();
         assert_eq!(
@@ -719,7 +794,7 @@ mod tests {
             .materialize_body(&body, &syntax)
             .unwrap();
         assert!(instance.path.is_none());
-        let temp = instance.temp.as_ref().expect("a temp spool").0.clone();
+        let temp = body.spool().unwrap().path().to_path_buf();
         assert!(temp.exists(), "the instance adopted the received file");
         drop(instance);
         assert!(!temp.exists(), "the adopted file dies with the instance");
@@ -774,6 +849,40 @@ mod tests {
             .unwrap();
         assert!(!buffer.is_memory(), "large values stay file-backed");
         drop(instance);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_deflated_spool_has_an_inflated_size_limit() {
+        let syntax = syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let mut dataset = Dataset::new();
+        dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5");
+        dataset.insert_value(Tag::PIXEL_DATA, vec![0u8; 4096]);
+        let bytes = crate::message::encode_dataset(&dataset, &syntax).unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("radicom-store-deflate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut assembler =
+            crate::assembler::PdvAssembler::with_spool(crate::assembler::SpoolConfig {
+                memory_threshold: 0,
+                max_message_length: 1024,
+                dir: Some(dir.clone()),
+            });
+        assembler.arm_spill(1);
+        let unit = assembler
+            .push_pdv(&crate::pdu::Pdv {
+                context_id: 1,
+                is_command: false,
+                is_last: true,
+                data: bytes::Bytes::from(bytes),
+            })
+            .unwrap()
+            .expect("the dataset completes");
+        let error = StoreSink::SpoolToTemp
+            .materialize_body(&unit.body(), &syntax)
+            .expect_err("inflated output must obey the spool limit");
+        assert!(error.to_string().contains("maximum inflated size"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

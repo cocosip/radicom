@@ -1159,6 +1159,11 @@ impl Association {
                                         "C-FIND batch",
                                     )?;
                                     if command.no_dataset {
+                                        if awaiting.is_some() {
+                                            return Err(NetworkError::protocol(
+                                                "C-FIND batch response arrived before its pending Identifier",
+                                            ));
+                                        }
                                         self.record_find_response(
                                             index,
                                             command,
@@ -1168,12 +1173,17 @@ impl Association {
                                         )?;
                                         continue;
                                     }
-                                    awaiting = Some((command, index));
+                                    Self::put_pending_dataset(
+                                        &mut awaiting,
+                                        (command, index),
+                                        "C-FIND batch response carried overlapping datasets",
+                                    )?;
                                 }
                                 Stream::Data => {
-                                    let Some((command, index)) = awaiting.take() else {
-                                        continue;
-                                    };
+                                    let (command, index) = Self::take_pending_dataset(
+                                        &mut awaiting,
+                                        "C-FIND batch Identifier without its response",
+                                    )?;
                                     Self::validate_response_context(
                                         prepared[index].2,
                                         unit.context_id,
@@ -1318,6 +1328,11 @@ impl Association {
                                     ));
                                 }
                                 if command.no_dataset {
+                                    if awaiting_command.is_some() {
+                                        return Err(NetworkError::protocol(
+                                            "C-FIND response arrived before its pending Identifier",
+                                        ));
+                                    }
                                     let response =
                                         crate::cfind::CFindResponse::from_command(&command, None)?;
                                     let terminal = !response.is_pending();
@@ -1327,14 +1342,18 @@ impl Association {
                                     }
                                 } else {
                                     // the match dataset follows
-                                    awaiting_command = Some((unit.context_id, command));
+                                    Self::put_pending_dataset(
+                                        &mut awaiting_command,
+                                        (unit.context_id, command),
+                                        "C-FIND response carried overlapping datasets",
+                                    )?;
                                 }
                             }
                             Stream::Data => {
-                                let Some((command_context, command)) = awaiting_command.take()
-                                else {
-                                    continue;
-                                };
+                                let (command_context, command) = Self::take_pending_dataset(
+                                    &mut awaiting_command,
+                                    "C-FIND Identifier without its response",
+                                )?;
                                 if unit.context_id != command_context
                                     || unit.context_id != context_id
                                 {
@@ -1663,12 +1682,16 @@ impl Association {
                                 let store_syntax =
                                     transfer_syntax_of(&store_context.transfer_syntax)?;
                                 let body = unit.body();
-                                let decode_syntax = store_syntax.clone();
                                 let fallback = self.fallback_encoding;
+                                let sink = if body.spool().is_some() {
+                                    crate::store::StoreSink::SpoolToTemp
+                                } else {
+                                    crate::store::StoreSink::Memory
+                                };
+                                let decode_syntax = store_syntax.clone();
                                 let dataset = tokio::task::spawn_blocking(move || {
-                                    let bytes = body.read_all()?;
-                                    crate::message::decode_dataset_with_fallback(
-                                        &bytes,
+                                    sink.materialize_body_with_fallback(
+                                        &body,
                                         &decode_syntax,
                                         fallback,
                                     )
@@ -1679,7 +1702,7 @@ impl Association {
                                         "reverse C-STORE decode task failed: {join}"
                                     )))
                                 })??;
-                                let mut file = radicom::io::file::DicomFile::from_dataset(dataset);
+                                let mut file = dataset.file;
                                 file.dataset.set_transfer_syntax(store_syntax.clone());
                                 let request = crate::store::c_store_request_from_message(
                                     &store,
@@ -1869,6 +1892,27 @@ impl Association {
         Ok(())
     }
 
+    pub(crate) fn take_pending_dataset<T>(
+        pending: &mut Option<T>,
+        message: &'static str,
+    ) -> Result<T> {
+        pending
+            .take()
+            .ok_or_else(|| NetworkError::protocol(message))
+    }
+
+    pub(crate) fn put_pending_dataset<T>(
+        pending: &mut Option<T>,
+        value: T,
+        message: &'static str,
+    ) -> Result<()> {
+        if pending.is_some() {
+            return Err(NetworkError::protocol(message));
+        }
+        *pending = Some(value);
+        Ok(())
+    }
+
     /// Releases the association gracefully (§11.1).
     /// Sends a C-CANCEL-RQ (0x0FFF) for an in-flight request (§11.4, SRV-08).
     ///
@@ -1971,25 +2015,36 @@ impl Association {
                                         "N-service",
                                     )?;
                                     if command.no_dataset {
+                                        if pending_command.is_some() {
+                                            return Err(NetworkError::protocol(
+                                                "N-service response arrived before its pending dataset",
+                                            ));
+                                        }
                                         return Ok((command, None));
                                     }
-                                    pending_command = Some(command);
+                                    Self::put_pending_dataset(
+                                        &mut pending_command,
+                                        command,
+                                        "N-service response carried overlapping datasets",
+                                    )?;
                                 }
                             }
                             Stream::Data => {
-                                if let Some(command) = pending_command.take() {
-                                    Self::validate_response_context(
-                                        expected_context_id,
-                                        unit.context_id,
-                                        "N-service",
-                                    )?;
-                                    let dataset = crate::message::decode_dataset_with_fallback(
-                                        &unit.bytes,
-                                        syntax,
-                                        self.fallback_encoding,
-                                    )?;
-                                    return Ok((command, Some(dataset)));
-                                }
+                                let command = Self::take_pending_dataset(
+                                    &mut pending_command,
+                                    "N-service dataset without its response",
+                                )?;
+                                Self::validate_response_context(
+                                    expected_context_id,
+                                    unit.context_id,
+                                    "N-service",
+                                )?;
+                                let dataset = crate::message::decode_dataset_with_fallback(
+                                    &unit.bytes,
+                                    syntax,
+                                    self.fallback_encoding,
+                                )?;
+                                return Ok((command, Some(dataset)));
                             }
                         }
                     }

@@ -1191,6 +1191,84 @@ pub fn inflate_stream<R: Read + Seek>(source: &mut R, start: u64) -> Result<Vec<
     ))))
 }
 
+/// Streaming deflate decoder with a hard cap on the inflated output.
+pub fn inflate_stream_limited<R: Read + Seek>(
+    source: &mut R,
+    start: u64,
+    max_output: u64,
+) -> Result<Vec<u8>, Error> {
+    source
+        .seek(std::io::SeekFrom::Start(start))
+        .map_err(|e| Error::Reader(ReaderError::Other(format!("deflate seek: {e}"))))?;
+    let mut hdr = [0u8; 2];
+    let zlib_first = source.read_exact(&mut hdr).is_ok() && looks_like_zlib(&hdr);
+    source
+        .seek(std::io::SeekFrom::Start(start))
+        .map_err(|e| Error::Reader(ReaderError::Other(format!("deflate seek: {e}"))))?;
+
+    fn read_limited<R: Read>(
+        decoder: &mut R,
+        out: &mut Vec<u8>,
+        max_output: u64,
+    ) -> std::io::Result<()> {
+        let mut chunk = [0u8; 16 * 1024];
+        loop {
+            let read = decoder.read(&mut chunk)?;
+            if read == 0 {
+                return Ok(());
+            }
+            if (out.len() as u64).saturating_add(read as u64) > max_output {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::FileTooLarge,
+                    "deflated dataset exceeds the maximum inflated size",
+                ));
+            }
+            out.extend_from_slice(&chunk[..read]);
+        }
+    }
+
+    let mut out = Vec::new();
+    if zlib_first {
+        let mut decoder = flate2::read::ZlibDecoder::new(&mut *source);
+        match read_limited(&mut decoder, &mut out, max_output) {
+            Ok(()) => return Ok(out),
+            Err(error) if error.kind() == std::io::ErrorKind::FileTooLarge => {
+                return Err(Error::Reader(ReaderError::Other(error.to_string())))
+            }
+            Err(_) => {}
+        }
+        out.clear();
+        source
+            .seek(std::io::SeekFrom::Start(start))
+            .map_err(|e| Error::Reader(ReaderError::Other(format!("deflate seek: {e}"))))?;
+    }
+    let mut raw_decoder = flate2::read::DeflateDecoder::new(&mut *source);
+    let raw_error = match read_limited(&mut raw_decoder, &mut out, max_output) {
+        Ok(()) => return Ok(out),
+        Err(error) if error.kind() == std::io::ErrorKind::FileTooLarge => {
+            return Err(Error::Reader(ReaderError::Other(error.to_string())))
+        }
+        Err(error) => error,
+    };
+    if !zlib_first {
+        out.clear();
+        source
+            .seek(std::io::SeekFrom::Start(start))
+            .map_err(|e| Error::Reader(ReaderError::Other(format!("deflate seek: {e}"))))?;
+        let mut zlib_decoder = flate2::read::ZlibDecoder::new(&mut *source);
+        match read_limited(&mut zlib_decoder, &mut out, max_output) {
+            Ok(()) => return Ok(out),
+            Err(error) if error.kind() == std::io::ErrorKind::FileTooLarge => {
+                return Err(Error::Reader(ReaderError::Other(error.to_string())))
+            }
+            Err(_) => {}
+        }
+    }
+    Err(Error::Reader(ReaderError::Other(format!(
+        "deflate: {raw_error}"
+    ))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1241,6 +1319,17 @@ mod tests {
                 );
             }
             other => panic!("expected ReaderError::Other(deflate), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inflate_stream_limited_rejects_an_oversized_output() {
+        let body = raw_deflate(&vec![b'x'; 4096]);
+        match inflate_stream_limited(&mut Cursor::new(body), 0, 1024) {
+            Err(Error::Reader(ReaderError::Other(message))) => {
+                assert!(message.contains("maximum"), "got {message}");
+            }
+            other => panic!("expected the output limit error, got {other:?}"),
         }
     }
 

@@ -122,14 +122,16 @@ impl From<bytes::Bytes> for MessageBody {
 pub struct SpoolFile {
     path: std::path::PathBuf,
     len: AtomicU64,
+    max_message_length: u64,
     keep: AtomicBool,
 }
 
 impl SpoolFile {
-    fn new(path: std::path::PathBuf) -> Self {
+    fn new(path: std::path::PathBuf, max_message_length: u64) -> Self {
         SpoolFile {
             path,
             len: AtomicU64::new(0),
+            max_message_length,
             keep: AtomicBool::new(false),
         }
     }
@@ -142,6 +144,11 @@ impl SpoolFile {
     /// Bytes written so far (the dataset length once it is complete).
     pub fn len(&self) -> u64 {
         self.len.load(Ordering::Relaxed)
+    }
+
+    /// Maximum size allowed after decoding a deflated dataset.
+    pub fn max_message_length(&self) -> u64 {
+        self.max_message_length
     }
 
     pub fn is_empty(&self) -> bool {
@@ -610,7 +617,7 @@ impl PdvAssembler {
         let (path, file) =
             create_unique_file(&dir, "radicom-recv", "dcm").map_err(NetworkError::Io)?;
         let mut writer = SpillWriter {
-            spool: Arc::new(SpoolFile::new(path)),
+            spool: Arc::new(SpoolFile::new(path, config.max_message_length)),
             file: Arc::new(file),
         };
         if !prefix.is_empty() {
@@ -1717,9 +1724,9 @@ mod tests {
 
         // A brand-new SpoolFile has no bytes yet and compares by path.
         let dir = spill_dir("spoolfile");
-        let first = SpoolFile::new(dir.join("a.dcm"));
-        let same = SpoolFile::new(dir.join("a.dcm"));
-        let other = SpoolFile::new(dir.join("b.dcm"));
+        let first = SpoolFile::new(dir.join("a.dcm"), SpoolConfig::DEFAULT_MAX_SPILLED_LENGTH);
+        let same = SpoolFile::new(dir.join("a.dcm"), SpoolConfig::DEFAULT_MAX_SPILLED_LENGTH);
+        let other = SpoolFile::new(dir.join("b.dcm"), SpoolConfig::DEFAULT_MAX_SPILLED_LENGTH);
         assert!(first.is_empty());
         assert_eq!(first.len(), 0);
         assert_eq!(first, same, "two handles to one path are equal");

@@ -150,6 +150,17 @@ impl DicomFile {
         }
     }
 
+    /// Builds a dataset-backed file that owns the temporary spill containing
+    /// its lazy value windows.
+    pub fn from_dataset_with_spool(
+        dataset: Dataset,
+        spooled: std::sync::Arc<crate::model::buffer::TempFileSpill>,
+    ) -> Self {
+        let mut file = Self::from_dataset(dataset);
+        file.spooled = Some(spooled);
+        file
+    }
+
     /// Opens and parses a file from disk (FILE-01, default read options).
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         Self::open_with_options(path, &ReadOptions::default())

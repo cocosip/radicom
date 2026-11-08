@@ -439,6 +439,17 @@ async fn self_interop_c_get_large_instance_round_trips_through_the_spool() {
     let frame_size = {
         let files = received.lock().unwrap();
         assert_eq!(files.len(), 1, "the large instance arrived once");
+        let buffer = files[0]
+            .dataset
+            .get_element(Tag::PIXEL_DATA)
+            .unwrap()
+            .value()
+            .as_buffer()
+            .unwrap();
+        assert!(
+            !buffer.is_memory(),
+            "reverse C-STORE keeps large values file-backed"
+        );
         let view = radicom::pixel::PixelDataRef::from_dataset(&files[0].dataset).unwrap();
         view.get_frame(0).expect("one frame").size()
     };

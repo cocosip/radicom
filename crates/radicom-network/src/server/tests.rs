@@ -4578,6 +4578,18 @@ fn response_sop_class_mismatch_is_rejected() {
     assert!(Association::validate_response_sop_class("1.2.3", "1.2.4").is_err());
 }
 
+#[test]
+fn dataset_pairing_rejects_orphan_and_duplicate_messages() {
+    let mut pending = None;
+    assert!(Association::take_pending_dataset(&mut pending, "orphan").is_err());
+    Association::put_pending_dataset(&mut pending, 1u8, "duplicate").unwrap();
+    assert!(Association::put_pending_dataset(&mut pending, 2u8, "duplicate").is_err());
+    assert_eq!(
+        Association::take_pending_dataset(&mut pending, "orphan").unwrap(),
+        1
+    );
+}
+
 // -- association validation and AC layout --------------------------------
 
 /// Sends an A-ASSOCIATE-RQ shaped by `configure` and returns whatever the
