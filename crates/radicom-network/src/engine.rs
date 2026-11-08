@@ -47,6 +47,11 @@ impl PendingTable {
         self.entries.insert(message_id);
     }
 
+    /// Returns whether a Message ID is already in flight.
+    pub fn contains(&self, message_id: u16) -> bool {
+        self.entries.contains(&message_id)
+    }
+
     /// Releases a message ID once its request completed; `false` when it was
     /// not in flight.
     pub fn remove(&mut self, message_id: u16) -> bool {
@@ -99,7 +104,9 @@ mod tests {
     fn a_finished_request_frees_its_id() {
         let mut table = PendingTable::new();
         table.insert(2);
+        assert!(table.contains(2));
         assert!(table.remove(2), "the ID was in flight");
+        assert!(!table.contains(2));
         assert!(!table.remove(2), "and only once");
         // the allocator already moved past 2, so the freed ID is not reused
         // by the next call — it simply stops blocking an eventual wrap

@@ -40,6 +40,7 @@
 
 pub mod assembler;
 pub mod association;
+pub mod batch;
 pub mod cfind;
 pub mod cget;
 pub mod client;
@@ -69,6 +70,7 @@ pub use association::{
     AcceptedContexts, ContextSetBuilder, ContextState, NegotiatedContext, NegotiationPolicy,
     ProposedContext, SyntaxPriority,
 };
+pub use batch::{DicomRequest, DicomResponse, DicomResponseEvent, RequestKind};
 pub use cfind::{CFindRequest, CFindResponse, QueryRetrieveLevel, QueryRoot, RetrieveService};
 pub use cget::{CGetEvent, CGetRequest, CGetResponse};
 pub use client::{
@@ -105,6 +107,7 @@ pub use print_sop::{
     network_identifier_from_mac, parse_mac, try_get_network_identifier, MetaSopClasses,
 };
 pub use registry::{DicomServerRegistration, DicomServerRegistry};
+pub use services::{CEchoRequest, CEchoResponse};
 
 /// Test-only helpers for asserting wire bytes (not part of the public API).
 #[cfg(test)]

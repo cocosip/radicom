@@ -42,9 +42,10 @@ Deliberate, tested ceilings. Change one only together with the tests that descri
 
 - The stateless compressed renderer decodes the full dataset once per render; there is no decoded-frame
   cache.
-- Client batching covers C-ECHO, C-STORE and C-FIND (at most `min(invoked, 64)` outstanding); C-GET,
-  C-MOVE and N-ACTION stay sequential. The SCP dispatches C-ECHO/C-STORE/C-FIND/N-services (except
-  N-ACTION) to tasks but serialises each response through one writer, bounded by the AC window.
+- `DicomClient::send_batch` covers heterogeneous C-ECHO, C-STORE, C-FIND, C-GET, C-MOVE and
+  N-service requests. It admits at most `min(invoked, 64)` requests at a time and routes pending and
+  terminal responses by Message ID; the peer may still execute them serially. The older typed batch
+  methods remain convenience wrappers.
 - A received C-STORE spills its PDVs to a temporary file (64 GiB bound) before parsing, but the parse
   still materialises the dataset once (the core exposes only byte-slice `parse_dataset_bytes`), and the
   SCU reverse-store (C-GET) path still buffers. Send-side streaming does not imply a file-backed parse.

@@ -129,6 +129,23 @@ pub type NEventReportHandler = Arc<
         + Sync,
 >;
 
+#[derive(Clone)]
+struct MixedPending {
+    request_index: usize,
+    message_id: u16,
+    context_id: u8,
+    kind: crate::batch::RequestKind,
+    expected_field: CommandField,
+    expected_sop_class_uid: Option<String>,
+    expected_sop_instance_uid: Option<String>,
+    syntax: Arc<radicom::model::transfer_syntax::TransferSyntax>,
+}
+
+enum MixedDataset {
+    Response { message_id: u16, command: Command },
+    ReverseStore { command: Command },
+}
+
 impl std::fmt::Debug for Association {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Association")
@@ -717,6 +734,616 @@ impl Association {
         }));
     }
 
+    /// Sends heterogeneous DIMSE requests on one association.
+    ///
+    /// Requests are admitted up to the negotiated asynchronous-operation
+    /// window. Responses may arrive in any order and are routed by Message ID;
+    /// Pending responses remain associated with their original request until a
+    /// terminal status is received.
+    pub async fn send_mixed_batch<F>(
+        &mut self,
+        requests: Vec<crate::batch::DicomRequest>,
+        mut on_response: F,
+    ) -> Result<()>
+    where
+        F: FnMut(crate::batch::DicomResponseEvent) -> std::io::Result<()>,
+    {
+        if requests.is_empty() {
+            return Ok(());
+        }
+        if requests
+            .iter()
+            .any(|request| matches!(request, crate::batch::DicomRequest::Get { .. }))
+            && self.reverse_store.is_none()
+        {
+            return Err(NetworkError::ReverseStoreHandlerMissing);
+        }
+
+        let mut explicit_ids = std::collections::HashSet::new();
+        for request in &requests {
+            let id = request.message_id().unwrap_or(0);
+            if id != 0 && !explicit_ids.insert(id) {
+                return Err(NetworkError::protocol(
+                    "mixed batch message IDs must be unique",
+                ));
+            }
+            if id != 0 && self.pending.contains(id) {
+                return Err(NetworkError::protocol(
+                    "mixed batch message ID is already in flight",
+                ));
+            }
+        }
+
+        // Reserve caller-supplied IDs before allocating automatic IDs.
+        for id in &explicit_ids {
+            self.pending.insert(*id);
+        }
+        let reserved_ids: Vec<u16> = explicit_ids.into_iter().collect();
+        let mut inflight: std::collections::HashMap<u16, MixedPending> =
+            std::collections::HashMap::new();
+        let mut datasets: std::collections::HashMap<u8, std::collections::VecDeque<MixedDataset>> =
+            std::collections::HashMap::new();
+        let mut next = 0usize;
+        let window = self.window().max(1);
+
+        let result = async {
+            while next < requests.len() || !inflight.is_empty() {
+                while next < requests.len() && inflight.len() < window {
+                    let pending = self.send_mixed_request(next, &requests[next]).await?;
+                    self.pending.insert(pending.message_id);
+                    inflight.insert(pending.message_id, pending);
+                    next += 1;
+                }
+
+                let message_id = *inflight
+                    .keys()
+                    .next()
+                    .expect("a mixed request is in flight");
+                let Some(pdu) = self.read_request_pdu(message_id).await? else {
+                    return Err(NetworkError::ClosedPrematurely { source: None });
+                };
+                match pdu {
+                    Pdu::PData(pdata) => {
+                        for unit in self.push_pdata_offloaded(&pdata).await? {
+                            if self.intercept_event_report(&unit).await? {
+                                continue;
+                            }
+                            match unit.stream {
+                                Stream::Command => {
+                                    let command = command_from_bytes(&unit.bytes)?;
+                                    if command.field == CommandField::CStoreRq {
+                                        self.queue_mixed_reverse_store(
+                                            unit.context_id,
+                                            command,
+                                            &mut datasets,
+                                        )?;
+                                        continue;
+                                    }
+                                    let id = command
+                                        .message_id_being_responded_to
+                                        .ok_or(NetworkError::protocol(
+                                            "mixed response has no Message ID Being Responded To",
+                                        ))?;
+                                    let pending = inflight.get(&id).cloned().ok_or_else(|| {
+                                        NetworkError::protocol(
+                                            "duplicate or unexpected mixed response ID",
+                                        )
+                                    })?;
+                                    Self::validate_response_context(
+                                        pending.context_id,
+                                        unit.context_id,
+                                        "mixed batch",
+                                    )?;
+                                    if command.field != pending.expected_field {
+                                        return Err(NetworkError::protocol(
+                                            "mixed response field does not match its request",
+                                        ));
+                                    }
+                                    if command.no_dataset {
+                                        self.emit_mixed_response(
+                                            pending,
+                                            command,
+                                            None,
+                                            &mut inflight,
+                                            &mut on_response,
+                                        )?;
+                                    } else {
+                                        datasets
+                                            .entry(unit.context_id)
+                                            .or_default()
+                                            .push_back(MixedDataset::Response {
+                                                message_id: id,
+                                                command,
+                                            });
+                                    }
+                                }
+                                Stream::Data => {
+                                    let queued = datasets
+                                        .get_mut(&unit.context_id)
+                                        .and_then(std::collections::VecDeque::pop_front)
+                                        .ok_or(NetworkError::protocol(
+                                            "mixed Dataset arrived without a command",
+                                        ))?;
+                                    match queued {
+                                        MixedDataset::Response {
+                                            message_id,
+                                            command,
+                                        } => {
+                                            let pending = inflight
+                                                .get(&message_id)
+                                                .cloned()
+                                                .ok_or_else(|| {
+                                                    NetworkError::protocol(
+                                                        "mixed Dataset belongs to an unknown response",
+                                                    )
+                                                })?;
+                                            Self::validate_response_context(
+                                                pending.context_id,
+                                                unit.context_id,
+                                                "mixed batch",
+                                            )?;
+                                            let dataset =
+                                                crate::message::decode_dataset_with_fallback(
+                                                    &unit.bytes,
+                                                    &pending.syntax,
+                                                    self.fallback_encoding,
+                                                )?;
+                                            self.emit_mixed_response(
+                                                pending,
+                                                command,
+                                                Some(dataset),
+                                                &mut inflight,
+                                                &mut on_response,
+                                            )?;
+                                        }
+                                        MixedDataset::ReverseStore { command } => {
+                                            self.handle_mixed_reverse_store(
+                                                unit.context_id,
+                                                command,
+                                                unit.body(),
+                                            )
+                                            .await?;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Pdu::Abort(abort) => {
+                        return Err(NetworkError::Abort {
+                            source_code: abort.source.code(),
+                            reason: abort.reason,
+                        });
+                    }
+                    Pdu::ReleaseRq => {
+                        write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
+                        return Err(NetworkError::ClosedPrematurely { source: None });
+                    }
+                    _ => {
+                        return Err(NetworkError::protocol(
+                            "unexpected PDU during a mixed DIMSE batch",
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        }
+        .await;
+
+        for id in inflight.keys().copied().chain(reserved_ids.iter().copied()) {
+            self.pending.remove(id);
+        }
+        result
+    }
+
+    async fn send_mixed_request(
+        &mut self,
+        request_index: usize,
+        request: &crate::batch::DicomRequest,
+    ) -> Result<MixedPending> {
+        use crate::batch::{DicomRequest, RequestKind};
+        match request {
+            DicomRequest::Echo(request) => {
+                let context = self
+                    .contexts
+                    .pick(&request.affected_sop_class_uid, "")?
+                    .clone();
+                let mut request = request.clone();
+                if request.message_id == 0 {
+                    request.message_id = self.allocate_message_id()?;
+                }
+                self.contexts
+                    .validate_request(context.id, &request.to_command(), true)?;
+                self.write_mixed_message(
+                    context.id,
+                    &request.to_command(),
+                    None,
+                    &context.transfer_syntax,
+                )
+                .await?;
+                Ok(MixedPending {
+                    request_index,
+                    message_id: request.message_id,
+                    context_id: context.id,
+                    kind: RequestKind::Echo,
+                    expected_field: CommandField::CEchoRsp,
+                    expected_sop_class_uid: Some(request.affected_sop_class_uid),
+                    expected_sop_instance_uid: None,
+                    syntax: transfer_syntax_of(&context.transfer_syntax)?,
+                })
+            }
+            DicomRequest::Store { file } => {
+                let (message_id, context_id) = self.send_c_store_unawaited(file).await?;
+                let class = file
+                    .dataset
+                    .try_get_str(radicom::model::tag::Tag::SOP_CLASS_UID)
+                    .map(|value| value.trim().to_owned())
+                    .ok_or(NetworkError::protocol("instance has no SOP class UID"))?;
+                let instance = file
+                    .dataset
+                    .try_get_str(radicom::model::tag::Tag::SOP_INSTANCE_UID)
+                    .map(|value| value.trim().to_owned())
+                    .ok_or(NetworkError::protocol("instance has no SOP instance UID"))?;
+                let syntax = transfer_syntax_of(&self.syntax_of(context_id))?;
+                Ok(MixedPending {
+                    request_index,
+                    message_id,
+                    context_id,
+                    kind: RequestKind::Store,
+                    expected_field: CommandField::CStoreRsp,
+                    expected_sop_class_uid: Some(class),
+                    expected_sop_instance_uid: Some(instance),
+                    syntax,
+                })
+            }
+            DicomRequest::Find(request) => {
+                let context = self.contexts.pick(&request.sop_class_uid, "")?.clone();
+                let mut request = request.clone();
+                if request.message_id == 0 {
+                    request.message_id = self.allocate_message_id()?;
+                }
+                self.contexts
+                    .validate_request(context.id, &request.to_command(), true)?;
+                self.write_mixed_message(
+                    context.id,
+                    &request.to_command(),
+                    Some(&request.identifier),
+                    &context.transfer_syntax,
+                )
+                .await?;
+                Ok(MixedPending {
+                    request_index,
+                    message_id: request.message_id,
+                    context_id: context.id,
+                    kind: RequestKind::Find,
+                    expected_field: CommandField::CFindRsp,
+                    expected_sop_class_uid: Some(request.sop_class_uid),
+                    expected_sop_instance_uid: None,
+                    syntax: transfer_syntax_of(&context.transfer_syntax)?,
+                })
+            }
+            DicomRequest::Get { request, .. } => {
+                let context = self.contexts.pick(&request.sop_class_uid, "")?.clone();
+                let mut request = request.clone();
+                if request.message_id == 0 {
+                    request.message_id = self.allocate_message_id()?;
+                }
+                self.contexts
+                    .validate_request(context.id, &request.to_command(), true)?;
+                self.write_mixed_message(
+                    context.id,
+                    &request.to_command(),
+                    Some(&request.identifier),
+                    &context.transfer_syntax,
+                )
+                .await?;
+                Ok(MixedPending {
+                    request_index,
+                    message_id: request.message_id,
+                    context_id: context.id,
+                    kind: RequestKind::Get,
+                    expected_field: CommandField::CGetRsp,
+                    expected_sop_class_uid: Some(request.sop_class_uid),
+                    expected_sop_instance_uid: None,
+                    syntax: transfer_syntax_of(&context.transfer_syntax)?,
+                })
+            }
+            DicomRequest::Move(request) => {
+                let context = self.contexts.pick(&request.sop_class_uid, "")?.clone();
+                let mut request = request.clone();
+                if request.message_id == 0 {
+                    request.message_id = self.allocate_message_id()?;
+                }
+                self.contexts
+                    .validate_request(context.id, &request.to_command(), true)?;
+                self.write_mixed_message(
+                    context.id,
+                    &request.to_command(),
+                    Some(&request.identifier),
+                    &context.transfer_syntax,
+                )
+                .await?;
+                Ok(MixedPending {
+                    request_index,
+                    message_id: request.message_id,
+                    context_id: context.id,
+                    kind: RequestKind::Move,
+                    expected_field: CommandField::CMoveRsp,
+                    expected_sop_class_uid: Some(request.sop_class_uid),
+                    expected_sop_instance_uid: None,
+                    syntax: transfer_syntax_of(&context.transfer_syntax)?,
+                })
+            }
+            DicomRequest::NService(request) => {
+                let sop_class = request
+                    .sop_class_uid
+                    .as_deref()
+                    .ok_or(NetworkError::protocol(
+                        "N-service request has no SOP class UID",
+                    ))?;
+                let preferred = request
+                    .dataset
+                    .as_ref()
+                    .map(|dataset| dataset.transfer_syntax().uid().to_owned())
+                    .unwrap_or_else(|| {
+                        crate::association::transfer_syntax::EXPLICIT_VR_LITTLE_ENDIAN.to_owned()
+                    });
+                let context = self.contexts.pick(sop_class, &preferred)?.clone();
+                let mut request = request.clone();
+                if request.message_id == 0 {
+                    request.message_id = self.allocate_message_id()?;
+                }
+                let expected_field =
+                    crate::dimse::response_field(request.field).ok_or_else(|| {
+                        NetworkError::protocol("N-service request has no response field")
+                    })?;
+                self.contexts
+                    .validate_request(context.id, &request.to_command(), true)?;
+                self.write_mixed_message(
+                    context.id,
+                    &request.to_command(),
+                    request.dataset.as_ref(),
+                    &context.transfer_syntax,
+                )
+                .await?;
+                Ok(MixedPending {
+                    request_index,
+                    message_id: request.message_id,
+                    context_id: context.id,
+                    kind: RequestKind::NService,
+                    expected_field,
+                    expected_sop_class_uid: request.sop_class_uid,
+                    expected_sop_instance_uid: request.sop_instance_uid,
+                    syntax: transfer_syntax_of(&context.transfer_syntax)?,
+                })
+            }
+        }
+    }
+
+    async fn write_mixed_message(
+        &mut self,
+        context_id: u8,
+        command: &Command,
+        dataset: Option<&radicom::model::dataset::Dataset>,
+        transfer_syntax: &str,
+    ) -> Result<()> {
+        let syntax = transfer_syntax_of(transfer_syntax)?;
+        let command = bytes::Bytes::from(command_bytes(command)?);
+        let dataset = dataset
+            .map(|dataset| crate::message::encode_dataset(dataset, &syntax))
+            .transpose()?
+            .map(bytes::Bytes::from);
+        let pdus = self
+            .splitter
+            .split_message_bytes(context_id, command, dataset)?;
+        write_pdata_batch(&mut self.stream, pdus).await
+    }
+
+    fn queue_mixed_reverse_store(
+        &mut self,
+        context_id: u8,
+        command: Command,
+        datasets: &mut std::collections::HashMap<u8, std::collections::VecDeque<MixedDataset>>,
+    ) -> Result<()> {
+        self.contexts
+            .validate_request(context_id, &command, false)?;
+        if command.no_dataset {
+            return Err(NetworkError::protocol(
+                "reverse C-STORE request has no Dataset",
+            ));
+        }
+        self.assembler.arm_spill(context_id);
+        datasets
+            .entry(context_id)
+            .or_default()
+            .push_back(MixedDataset::ReverseStore { command });
+        Ok(())
+    }
+
+    async fn handle_mixed_reverse_store(
+        &mut self,
+        context_id: u8,
+        command: Command,
+        body: crate::assembler::MessageBody,
+    ) -> Result<()> {
+        let Some(handler) = self.reverse_store.clone() else {
+            return Err(NetworkError::ReverseStoreHandlerMissing);
+        };
+        let context = self
+            .contexts
+            .by_id(context_id)
+            .ok_or_else(|| NetworkError::protocol("reverse C-STORE on an unaccepted context"))?;
+        let syntax = transfer_syntax_of(&context.transfer_syntax)?;
+        let fallback = self.fallback_encoding;
+        let sink = if body.spool().is_some() {
+            crate::store::StoreSink::SpoolToTemp
+        } else {
+            crate::store::StoreSink::Memory
+        };
+        let decode_syntax = syntax.clone();
+        let dataset = tokio::task::spawn_blocking(move || {
+            sink.materialize_body_with_fallback(&body, &decode_syntax, fallback)
+        })
+        .await
+        .map_err(|join| {
+            NetworkError::Io(std::io::Error::other(format!(
+                "reverse C-STORE decode task failed: {join}"
+            )))
+        })??;
+        let mut file = dataset.file;
+        file.dataset.set_transfer_syntax(syntax);
+        let request = crate::store::c_store_request_from_message(
+            &command,
+            crate::store::ReceivedInstance::from_file(file),
+        )?;
+        let response = match crate::store::dataset_mismatch(&request) {
+            Some(comment) => crate::services::CStoreResponse::failure(
+                &request,
+                crate::store::DATASET_MISMATCH,
+                comment,
+            ),
+            None => match handler(&request) {
+                Ok(response) => response,
+                Err(error) => crate::store::failure_response(&request, &error),
+            },
+        };
+        let bytes = bytes::Bytes::from(command_bytes(&response.to_command())?);
+        for pdata in self.splitter.split_bytes(context_id, true, bytes)? {
+            write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
+        }
+        Ok(())
+    }
+
+    fn emit_mixed_response<F>(
+        &mut self,
+        pending: MixedPending,
+        command: Command,
+        dataset: Option<radicom::model::dataset::Dataset>,
+        inflight: &mut std::collections::HashMap<u16, MixedPending>,
+        on_response: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(crate::batch::DicomResponseEvent) -> std::io::Result<()>,
+    {
+        let (response, is_final, sop_class, sop_instance) = match pending.kind {
+            crate::batch::RequestKind::Echo => {
+                if dataset.is_some() {
+                    return Err(NetworkError::protocol("C-ECHO response carries a Dataset"));
+                }
+                let response = crate::services::CEchoResponse::from_command(&command)?;
+                let sop_class = response.affected_sop_class_uid.clone();
+                (
+                    crate::batch::DicomResponse::CEcho(response),
+                    true,
+                    Some(sop_class),
+                    None,
+                )
+            }
+            crate::batch::RequestKind::Store => {
+                if dataset.is_some() {
+                    return Err(NetworkError::protocol("C-STORE response carries a Dataset"));
+                }
+                let response = crate::services::CStoreResponse::from_command(&command)?;
+                let sop_class = response.affected_sop_class_uid.clone();
+                let sop_instance = response.affected_sop_instance_uid.clone();
+                (
+                    crate::batch::DicomResponse::CStore(response),
+                    true,
+                    Some(sop_class),
+                    Some(sop_instance),
+                )
+            }
+            crate::batch::RequestKind::Find => {
+                let response = crate::cfind::CFindResponse::from_command(&command, dataset)?;
+                let is_final = !response.is_pending();
+                let sop_class = response.affected_sop_class_uid.clone();
+                (
+                    crate::batch::DicomResponse::CFind(response),
+                    is_final,
+                    Some(sop_class),
+                    None,
+                )
+            }
+            crate::batch::RequestKind::Get => {
+                let mut response = crate::cget::CGetResponse::from_command(&command)?;
+                let is_final = !response.is_pending();
+                if let Some(identifier) = dataset {
+                    if !is_final {
+                        return Err(NetworkError::protocol(
+                            "Pending C-GET response has an Identifier",
+                        ));
+                    }
+                    response.set_identifier(&identifier);
+                }
+                let sop_class = response.affected_sop_class_uid.clone();
+                (
+                    crate::batch::DicomResponse::CGet(response),
+                    is_final,
+                    Some(sop_class),
+                    None,
+                )
+            }
+            crate::batch::RequestKind::Move => {
+                let mut response = crate::cmove::CMoveResponse::from_command(&command)?;
+                let is_final = !response.is_pending();
+                if let Some(identifier) = dataset {
+                    if !is_final {
+                        return Err(NetworkError::protocol(
+                            "Pending C-MOVE response has an Identifier",
+                        ));
+                    }
+                    response.set_identifier(&identifier);
+                }
+                let sop_class = response.affected_sop_class_uid.clone();
+                (
+                    crate::batch::DicomResponse::CMove(response),
+                    is_final,
+                    Some(sop_class),
+                    None,
+                )
+            }
+            crate::batch::RequestKind::NService => {
+                let response = crate::nservice::NServiceResponse::from_command(&command, dataset);
+                (
+                    crate::batch::DicomResponse::NService(response),
+                    true,
+                    command.affected_sop_class_uid.clone(),
+                    command.affected_sop_instance_uid.clone(),
+                )
+            }
+        };
+        if pending
+            .expected_sop_class_uid
+            .as_deref()
+            .is_some_and(|expected| sop_class.as_deref() != Some(expected))
+        {
+            return Err(NetworkError::protocol(
+                "mixed response used the wrong SOP Class UID",
+            ));
+        }
+        if pending
+            .expected_sop_instance_uid
+            .as_deref()
+            .is_some_and(|expected| sop_instance.as_deref() != Some(expected))
+        {
+            return Err(NetworkError::protocol(
+                "mixed C-STORE response did not echo the requested SOP Instance UID",
+            ));
+        }
+        on_response(crate::batch::DicomResponseEvent {
+            request_index: pending.request_index,
+            message_id: pending.message_id,
+            response,
+            is_final,
+        })
+        .map_err(NetworkError::Io)?;
+        if is_final {
+            inflight.remove(&pending.message_id);
+            self.pending.remove(pending.message_id);
+        }
+        Ok(())
+    }
+
     /// The negotiated presentation contexts.
     pub fn contexts(&self) -> &AcceptedContexts {
         &self.contexts
@@ -846,6 +1473,56 @@ impl Association {
         .await
     }
 
+    /// Sends a C-STORE message without waiting for its response. The mixed
+    /// request scheduler uses this to keep several DIMSE operations in flight.
+    async fn send_c_store_unawaited(
+        &mut self,
+        file: &radicom::io::file::DicomFile,
+    ) -> Result<(u16, u8)> {
+        let (message_id, context_id, target, command_bytes) =
+            self.plan_c_store(file, None, None)?;
+        let dataset = &file.dataset;
+        let source = dataset.transfer_syntax();
+        let send_syntax = if source.uid() == target.uid() {
+            target.clone()
+        } else {
+            let transcoder = transcoder_for(&mut self.transcoder_cache, &source, &target);
+            match transcoder.transcode_dataset(dataset) {
+                Ok(transcoded) => {
+                    let payload =
+                        bytes::Bytes::from(crate::message::encode_dataset(&transcoded, &target)?);
+                    let pdus = self.splitter.split_message_bytes(
+                        context_id,
+                        command_bytes,
+                        Some(payload),
+                    )?;
+                    write_pdata_batch(&mut self.stream, pdus).await?;
+                    return Ok((message_id, context_id));
+                }
+                Err(_) if self.ignore_unsupported_syntax_change => source.clone(),
+                Err(error) => {
+                    return Err(NetworkError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        error.to_string(),
+                    )))
+                }
+            }
+        };
+        crate::message::write_message_streamed(
+            &mut self.stream,
+            context_id,
+            command_bytes,
+            dataset.clone(),
+            send_syntax,
+            self.splitter.max_pdu(),
+            self.splitter.max_pdvs_per_pdu(),
+            self.splitter.max_command_pdv(),
+            self.splitter.max_data_pdv(),
+        )
+        .await?;
+        Ok((message_id, context_id))
+    }
+
     /// Waits for the response of the C-STORE sent as `message_id` (§11.4).
     async fn finish_c_store(
         &mut self,
@@ -916,6 +1593,7 @@ impl Association {
         request.move_originator_ae_title = originator_ae.map(|ae| ae.to_string());
         request.move_originator_message_id = originator_message_id;
         request.no_dataset = false;
+        self.contexts.validate_request(context_id, &request, true)?;
 
         Ok((
             message_id,

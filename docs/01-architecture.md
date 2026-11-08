@@ -352,6 +352,10 @@ client/server. One tokio task per association. Locks must not be held across `.a
   in only to what it serves. The trait is an `async_trait`.
 - The client negotiates presentation contexts on the first request and **must renegotiate when switching
   SOP class**.
+- `DicomClient::send_batch` accepts owned `DicomRequest` values for mixed C-ECHO, C-STORE, C-FIND,
+  C-GET, C-MOVE and N-service traffic. It negotiates the union of contexts and role selections once,
+  limits in-flight requests by the asynchronous-operations window, and routes callback events by
+  Message ID; the existing typed send methods remain convenience APIs.
 - Reverse C-STORE (C-GET / C-MOVE) requires role selection; register a handler with
   `with_reverse_store_handler` or `collect_reverse_stores`.
 - Sub-operation counters must be populated from the actual results. Returning a defaulted summary makes a

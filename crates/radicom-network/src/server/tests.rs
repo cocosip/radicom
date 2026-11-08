@@ -6,7 +6,7 @@ use super::scu::*;
 use super::wire::*;
 use super::*;
 use crate::association::sop_class;
-use crate::services::{CStoreRequest, VerificationProvider};
+use crate::services::{CEchoRequest, CEchoResponse, CStoreRequest, VerificationProvider};
 use radicom::model::dataset::Dataset;
 use radicom::model::tag::Tag;
 use radicom::model::vr::Vr;
@@ -771,6 +771,7 @@ impl ServiceProvider for RecordingProvider {
         vec![
             sop_class::VERIFICATION.to_string(),
             "1.2.840.10008.5.1.4.1.1.7".to_string(),
+            sop_class::STUDY_ROOT_QR_FIND.to_string(),
         ]
     }
 
@@ -798,6 +799,20 @@ impl ServiceProvider for RecordingProvider {
         ));
         Ok(CStoreResponse::success(request))
     }
+
+    fn on_c_find<'a>(
+        &'a self,
+        request: &'a crate::cfind::CFindRequest,
+    ) -> futures::stream::BoxStream<'a, Result<crate::cfind::CFindResponse>> {
+        use futures::StreamExt;
+        let mut item = Dataset::new();
+        item.insert_str(Tag::STUDY_INSTANCE_UID, Vr::Ui, "1.2.3.4");
+        futures::stream::iter([
+            Ok(crate::cfind::CFindResponse::pending(request, item)),
+            Ok(crate::cfind::CFindResponse::success(request, 1)),
+        ])
+        .boxed()
+    }
 }
 
 fn store_context() -> PresentationContext {
@@ -819,6 +834,124 @@ fn instance_file() -> radicom::io::file::DicomFile {
     dataset.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID-1");
     dataset.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
     radicom::io::file::DicomFile::from_dataset(dataset)
+}
+
+#[tokio::test]
+async fn mixed_dimse_requests_share_one_association_and_route_events() {
+    let provider = Arc::new(RecordingProvider::new());
+    let server = DicomServer::bind(
+        "127.0.0.1:0",
+        provider.clone(),
+        ServerOptions {
+            store_sink: crate::store::StoreSink::Memory,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let addr = server.local_addr();
+    let handle = tokio::spawn(async move { server.accept_one().await });
+
+    let mut find = find_context();
+    find.id = 5;
+    let mut association = Association::open(
+        addr,
+        "SCU",
+        "SCP",
+        vec![echo_context(), store_context(), find],
+        ClientOptions::default(),
+    )
+    .await
+    .unwrap();
+    let requests = vec![
+        crate::batch::DicomRequest::Echo(crate::services::CEchoRequest {
+            message_id: 0,
+            affected_sop_class_uid: sop_class::VERIFICATION.to_string(),
+        }),
+        crate::batch::DicomRequest::Store {
+            file: Arc::new(instance_file()),
+        },
+        crate::batch::DicomRequest::Find(crate::cfind::CFindRequest::study_query(7)),
+    ];
+    let mut events = Vec::new();
+    association
+        .send_mixed_batch(requests, |event| {
+            events.push(event);
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(events.len(), 4, "echo, store, and two find responses");
+    assert_eq!(events[0].request_index, 0);
+    assert!(events[0].is_final);
+    assert_eq!(events[1].request_index, 1);
+    assert!(events[1].is_final);
+    assert_eq!(events[2].request_index, 2);
+    assert!(!events[2].is_final);
+    assert_eq!(events[3].request_index, 2);
+    assert!(events[3].is_final);
+    assert_eq!(provider.instance_uids(), vec!["1.2.3.4.5.6"]);
+
+    association.release().await.unwrap();
+    handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn mixed_c_get_handles_reverse_store_before_terminal_response() {
+    let provider = Arc::new(GetProvider {
+        instances: vec![instance_file()],
+    });
+    let server = DicomServer::bind("127.0.0.1:0", provider, ServerOptions::default())
+        .await
+        .unwrap();
+    let addr = server.local_addr();
+    let handle = tokio::spawn(async move { server.accept_one().await });
+    let mut echo = echo_context();
+    echo.id = 3;
+    let contexts = vec![
+        get_context(),
+        echo,
+        PresentationContext::new(
+            5,
+            "1.2.840.10008.5.1.4.1.1.7",
+            vec!["1.2.840.10008.1.2".to_string()],
+        ),
+    ];
+    let mut association =
+        Association::open(addr, "GET-SCU", "GET-SCP", contexts, get_client_options())
+            .await
+            .unwrap();
+    let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+    association.collect_reverse_stores(received.clone());
+
+    let requests = vec![
+        crate::batch::DicomRequest::Echo(crate::services::CEchoRequest {
+            message_id: 0,
+            affected_sop_class_uid: sop_class::VERIFICATION.to_string(),
+        }),
+        crate::batch::DicomRequest::Get {
+            request: crate::cget::CGetRequest::study("1.2.3.4", 11),
+            storage_sop_classes: vec!["1.2.840.10008.5.1.4.1.1.7".to_string()],
+        },
+    ];
+    let mut events = Vec::new();
+    association
+        .send_mixed_batch(requests, |event| {
+            events.push(event);
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(received.lock().unwrap().len(), 1);
+    assert_eq!(events.len(), 3, "echo plus C-GET pending and terminal");
+    assert_eq!(events[0].request_index, 0);
+    assert_eq!(events[1].request_index, 1);
+    assert!(!events[1].is_final);
+    assert!(events[2].is_final);
+    association.release().await.unwrap();
+    handle.await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -1813,7 +1946,14 @@ struct MoveProvider {
 #[async_trait::async_trait]
 impl ServiceProvider for MoveProvider {
     fn supported_sop_classes(&self) -> Vec<String> {
-        vec![sop_class::STUDY_ROOT_QR_MOVE.to_string()]
+        vec![
+            sop_class::STUDY_ROOT_QR_MOVE.to_string(),
+            sop_class::VERIFICATION.to_string(),
+        ]
+    }
+
+    async fn on_c_echo(&self, request: &CEchoRequest) -> Result<CEchoResponse> {
+        Ok(CEchoResponse::success(request))
     }
 
     fn on_c_move<'a>(
@@ -1856,6 +1996,77 @@ impl ServiceProvider for MoveProvider {
             }
         }))
     }
+}
+
+#[tokio::test]
+async fn mixed_c_move_and_echo_route_terminal_responses() {
+    let stored = Arc::new(RecordingProvider::new());
+    let destination = DicomServer::bind(
+        "127.0.0.1:0",
+        stored.clone(),
+        ServerOptions {
+            store_sink: crate::store::StoreSink::Memory,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let destination_addr = destination.local_addr();
+    tokio::spawn(async move {
+        let _ = destination.run().await;
+    });
+
+    let provider = Arc::new(MoveProvider {
+        destination: destination_addr,
+        instances: vec![instance_file()],
+        originator: std::sync::Mutex::new(None),
+    });
+    let server = DicomServer::bind("127.0.0.1:0", provider, ServerOptions::default())
+        .await
+        .unwrap();
+    let addr = server.local_addr();
+    let handle = tokio::spawn(async move { server.accept_one().await });
+    let mut echo = echo_context();
+    echo.id = 3;
+    let mut association = Association::open(
+        addr,
+        "MIXED-SCU",
+        "MIXED-SCP",
+        vec![move_context(), echo],
+        ClientOptions::default(),
+    )
+    .await
+    .unwrap();
+
+    let mut events = Vec::new();
+    association
+        .send_mixed_batch(
+            vec![
+                crate::batch::DicomRequest::Move(crate::cmove::CMoveRequest::study(
+                    "1.2.3.4",
+                    "STORE-SCP",
+                    11,
+                )),
+                crate::batch::DicomRequest::Echo(crate::services::CEchoRequest {
+                    message_id: 0,
+                    affected_sop_class_uid: sop_class::VERIFICATION.to_string(),
+                }),
+            ],
+            |event| {
+                events.push(event);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].request_index, 0);
+    assert_eq!(events[1].request_index, 1);
+    assert!(events.iter().all(|event| event.is_final));
+    assert_eq!(stored.instance_uids(), vec!["1.2.3.4.5.6"]);
+    association.release().await.unwrap();
+    handle.await.unwrap().unwrap();
 }
 
 fn move_context() -> PresentationContext {
@@ -2087,9 +2298,14 @@ impl ServiceProvider for GetProvider {
         // the retrieve model plus the storage class the sub-operations
         // travel on (§11.4)
         vec![
+            sop_class::VERIFICATION.to_string(),
             sop_class::STUDY_ROOT_QR_GET.to_string(),
             "1.2.840.10008.5.1.4.1.1.7".to_string(),
         ]
+    }
+
+    async fn on_c_echo(&self, request: &CEchoRequest) -> Result<CEchoResponse> {
+        Ok(CEchoResponse::success(request))
     }
 
     fn on_c_get<'a>(
@@ -3508,7 +3724,13 @@ fn n_service_answer(
 #[async_trait::async_trait]
 impl ServiceProvider for NServiceEcho {
     fn supported_sop_classes(&self) -> Vec<String> {
-        vec![COMMIT_SOP_CLASS.to_string()]
+        vec![
+            COMMIT_SOP_CLASS.to_string(),
+            sop_class::VERIFICATION.to_string(),
+        ]
+    }
+    async fn on_c_echo(&self, request: &CEchoRequest) -> Result<CEchoResponse> {
+        Ok(CEchoResponse::success(request))
     }
     async fn on_n_event_report(
         &self,
@@ -3592,6 +3814,56 @@ async fn assert_n_service_round_trip(request_field: CommandField, response_field
     );
 
     // the association survives a failed operation
+    association.release().await.unwrap();
+    handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn mixed_n_service_and_echo_responses_route_by_message_id() {
+    let server = DicomServer::bind(
+        "127.0.0.1:0",
+        Arc::new(NServiceEcho),
+        ServerOptions::default(),
+    )
+    .await
+    .unwrap();
+    let addr = server.local_addr();
+    let handle = tokio::spawn(async move { server.accept_one().await });
+    let mut echo = echo_context();
+    echo.id = 3;
+    let mut association = Association::open(
+        addr,
+        "SCU",
+        "SCP",
+        vec![commit_context(), echo],
+        ClientOptions::default(),
+    )
+    .await
+    .unwrap();
+    let mut nget = crate::nservice::NServiceRequest::new(CommandField::NGetRq, 9);
+    nget.sop_class_uid = Some(COMMIT_SOP_CLASS.to_string());
+    nget.sop_instance_uid = Some("1.2.3.4".to_string());
+    let mut events = Vec::new();
+    association
+        .send_mixed_batch(
+            vec![
+                crate::batch::DicomRequest::NService(nget),
+                crate::batch::DicomRequest::Echo(crate::services::CEchoRequest {
+                    message_id: 0,
+                    affected_sop_class_uid: sop_class::VERIFICATION.to_string(),
+                }),
+            ],
+            |event| {
+                events.push(event);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].request_index, 0);
+    assert_eq!(events[1].request_index, 1);
+    assert!(events.iter().all(|event| event.is_final));
     association.release().await.unwrap();
     handle.await.unwrap().unwrap();
 }
