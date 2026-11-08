@@ -2195,7 +2195,7 @@ pub async fn execute_n_service<P: ServiceProvider>(
         // C-STORE and the N-services are not cancellable (§11.4)
         cancel: _,
     } = job;
-    let dataset = if body.is_empty() {
+    let dataset = if command.no_dataset {
         None
     } else {
         let dataset_bytes = body.read_all()?;

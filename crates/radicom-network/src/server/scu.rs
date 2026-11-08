@@ -230,6 +230,8 @@ impl Association {
         // the AC does not repeat the abstract syntax; keep the RQ around so we
         // can recover it by presentation-context id (§9.3.3)
         let requested_contexts = request.presentation_contexts.clone();
+        let requested_called_ae = request.called_ae.clone();
+        let requested_calling_ae = request.calling_ae.clone();
         write_pdu(&mut stream, &Pdu::AssociateRq(request)).await?;
 
         let response = tokio::time::timeout(options.association_timeout, read_pdu(&mut stream))
@@ -243,6 +245,23 @@ impl Association {
         let async_operations;
         let (accepted, peer_max_pdu) = match response {
             Some(Pdu::AssociateAc(accept)) => {
+                if accept.application_context != APPLICATION_CONTEXT {
+                    return Err(NetworkError::protocol(
+                        "association accept used an unsupported application context",
+                    ));
+                }
+                if accept.protocol_version != 1 {
+                    return Err(NetworkError::protocol(
+                        "association accept used an unsupported protocol version",
+                    ));
+                }
+                if accept.called_ae != requested_called_ae
+                    || accept.calling_ae != requested_calling_ae
+                {
+                    return Err(NetworkError::protocol(
+                        "association accept did not echo the requested AE titles",
+                    ));
+                }
                 async_operations = accept.user_information.async_operations.unwrap_or_default();
                 options.async_operations.validate_answer(async_operations)?;
                 // the AC echoes the roles it granted; they apply to whichever
@@ -296,13 +315,15 @@ impl Association {
                             ));
                         }
                         // an A-ASSOCIATE-AC omits the abstract syntax (it is
-                        // implied by the presentation-context id), so recover it
-                        // from the request we just sent
-                        let abstract_syntax = if pc.abstract_syntax.is_empty() {
-                            rq.abstract_syntax.clone()
-                        } else {
-                            pc.abstract_syntax.clone()
-                        };
+                        // implied by the presentation-context id), so reject
+                        // peers that put one on the wire and recover it from
+                        // the request we just sent.
+                        if !pc.abstract_syntax.is_empty() {
+                            return Err(NetworkError::protocol(
+                                "association accept must not carry an abstract syntax",
+                            ));
+                        }
+                        let abstract_syntax = rq.abstract_syntax.clone();
                         let roles = granted_roles
                             .iter()
                             .filter(|role| role.sop_class == abstract_syntax)
@@ -718,7 +739,7 @@ impl Association {
 
         self.pending.insert(command.message_id);
         let response = self
-            .await_response(message_id, CommandField::CEchoRsp)
+            .await_response_for_context(message_id, CommandField::CEchoRsp, context_id)
             .await;
         self.pending.remove(message_id);
         CEchoResponse::from_command(&response?)
@@ -835,7 +856,7 @@ impl Association {
     ) -> Result<CStoreResponse> {
         self.pending.insert(message_id);
         let response = self
-            .await_response_with_context(message_id, CommandField::CStoreRsp, true)
+            .await_response_with_context(message_id, CommandField::CStoreRsp, true, None)
             .await;
         self.pending.remove(message_id);
         let (response_context, command) = response?;
@@ -1087,7 +1108,7 @@ impl Association {
         let mut inflight: std::collections::HashMap<u16, usize> = std::collections::HashMap::new();
         let mut responses: Vec<Vec<crate::cfind::CFindResponse>> =
             requests.iter().map(|_| Vec::new()).collect();
-        let mut awaiting: Option<(Command, usize, u8)> = None;
+        let mut awaiting: Option<(Command, usize)> = None;
         let mut next = 0usize;
         let result = async {
             while next < prepared.len() || !inflight.is_empty() {
@@ -1131,6 +1152,12 @@ impl Association {
                                             "duplicate or unexpected C-FIND batch response ID",
                                         )
                                     })?;
+                                    let expected_context_id = prepared[index].2;
+                                    Self::validate_response_context(
+                                        expected_context_id,
+                                        unit.context_id,
+                                        "C-FIND batch",
+                                    )?;
                                     if command.no_dataset {
                                         self.record_find_response(
                                             index,
@@ -1141,23 +1168,23 @@ impl Association {
                                         )?;
                                         continue;
                                     }
-                                    awaiting = Some((command, index, unit.context_id));
+                                    awaiting = Some((command, index));
                                 }
                                 Stream::Data => {
-                                    let Some((command, index, context_id)) = awaiting.take() else {
+                                    let Some((command, index)) = awaiting.take() else {
                                         continue;
                                     };
+                                    Self::validate_response_context(
+                                        prepared[index].2,
+                                        unit.context_id,
+                                        "C-FIND batch",
+                                    )?;
                                     let (syntax, _, _) = &prepared[index];
                                     let identifier = crate::message::decode_dataset_with_fallback(
                                         &unit.bytes,
                                         syntax,
                                         self.fallback_encoding,
                                     )?;
-                                    if context_id != unit.context_id {
-                                        return Err(NetworkError::protocol(
-                                            "C-FIND batch Identifier used the wrong presentation context",
-                                        ));
-                                    }
                                     self.record_find_response(
                                         index,
                                         command,
@@ -1427,6 +1454,10 @@ impl Association {
                             continue;
                         }
                         let response = crate::cmove::CMoveResponse::from_command(&command)?;
+                        Self::validate_response_sop_class(
+                            &request.sop_class_uid,
+                            &response.affected_sop_class_uid,
+                        )?;
                         let terminal = !response.is_pending();
                         if !command.no_dataset {
                             if !terminal {
@@ -1563,6 +1594,10 @@ impl Association {
                                         }
                                         let response =
                                             crate::cget::CGetResponse::from_command(&command)?;
+                                        Self::validate_response_sop_class(
+                                            &request.sop_class_uid,
+                                            &response.affected_sop_class_uid,
+                                        )?;
                                         if unit.context_id != context_id {
                                             return Err(NetworkError::protocol(
                                                 "C-GET response on the wrong context",
@@ -1727,13 +1762,26 @@ impl Association {
     }
 
     /// Reads PDUs until the response for `message_id` arrives (§11.2).
+    #[allow(dead_code)]
     pub(crate) async fn await_response(
         &mut self,
         message_id: u16,
         expected: CommandField,
     ) -> Result<Command> {
         Ok(self
-            .await_response_with_context(message_id, expected, false)
+            .await_response_with_context(message_id, expected, false, None)
+            .await?
+            .1)
+    }
+
+    async fn await_response_for_context(
+        &mut self,
+        message_id: u16,
+        expected: CommandField,
+        expected_context_id: u8,
+    ) -> Result<Command> {
+        Ok(self
+            .await_response_with_context(message_id, expected, false, Some(expected_context_id))
             .await?
             .1)
     }
@@ -1743,6 +1791,7 @@ impl Association {
         message_id: u16,
         expected: CommandField,
         reject_dataset: bool,
+        expected_context_id: Option<u8>,
     ) -> Result<(u8, Command)> {
         loop {
             let Some(pdu) = self.read_request_pdu(message_id).await? else {
@@ -1768,6 +1817,13 @@ impl Association {
                         if command.field == expected
                             && command.message_id_being_responded_to == Some(message_id)
                         {
+                            if let Some(expected_context_id) = expected_context_id {
+                                Self::validate_response_context(
+                                    expected_context_id,
+                                    unit.context_id,
+                                    "C-ECHO",
+                                )?;
+                            }
                             return Ok((unit.context_id, command));
                         }
                     }
@@ -1785,6 +1841,32 @@ impl Association {
                 _ => {}
             }
         }
+    }
+
+    pub(crate) fn validate_response_context(
+        expected: u8,
+        actual: u8,
+        operation: &str,
+    ) -> Result<()> {
+        if expected != actual {
+            let message = match operation {
+                "C-ECHO" => "C-ECHO response used the wrong presentation context",
+                "N-service" => "N-service response used the wrong presentation context",
+                "C-FIND batch" => "C-FIND batch response used the wrong presentation context",
+                _ => "response used the wrong presentation context",
+            };
+            return Err(NetworkError::protocol(message));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_response_sop_class(expected: &str, actual: &str) -> Result<()> {
+        if expected != actual {
+            return Err(NetworkError::protocol(
+                "response used the wrong SOP Class UID",
+            ));
+        }
+        Ok(())
     }
 
     /// Releases the association gracefully (§11.1).
@@ -1848,7 +1930,7 @@ impl Association {
         let expected = crate::dimse::response_field(request.field)
             .ok_or_else(|| NetworkError::protocol("N-service request has no response field"))?;
         let (response_command, response_dataset) = self
-            .await_n_response(request.message_id, expected, &target)
+            .await_n_response(request.message_id, expected, &target, context_id)
             .await?;
         Ok(crate::nservice::NServiceResponse::from_command(
             &response_command,
@@ -1862,6 +1944,7 @@ impl Association {
         message_id: u16,
         expected: CommandField,
         syntax: &Arc<radicom::model::transfer_syntax::TransferSyntax>,
+        expected_context_id: u8,
     ) -> Result<(Command, Option<Dataset>)> {
         let mut pending_command: Option<Command> = None;
         loop {
@@ -1882,6 +1965,11 @@ impl Association {
                                 if command.field == expected
                                     && command.message_id_being_responded_to == Some(message_id)
                                 {
+                                    Self::validate_response_context(
+                                        expected_context_id,
+                                        unit.context_id,
+                                        "N-service",
+                                    )?;
                                     if command.no_dataset {
                                         return Ok((command, None));
                                     }
@@ -1890,6 +1978,11 @@ impl Association {
                             }
                             Stream::Data => {
                                 if let Some(command) = pending_command.take() {
+                                    Self::validate_response_context(
+                                        expected_context_id,
+                                        unit.context_id,
+                                        "N-service",
+                                    )?;
                                     let dataset = crate::message::decode_dataset_with_fallback(
                                         &unit.bytes,
                                         syntax,

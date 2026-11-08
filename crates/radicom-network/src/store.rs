@@ -8,19 +8,22 @@
 //! under the configured directory.
 //!
 //! **Ceiling:** the *receive* phase is bounded by the PDU size
-//! ([`crate::assembler::SpoolConfig`]) instead of the instance size. Parsing a
-//! dataset still materializes it once in memory, because
-//! `parse_dataset_bytes` is byte-slice based; a file-backed dataset parse in the
-//! core crate would remove that last copy.
+//! ([`crate::assembler::SpoolConfig`]) instead of the instance size. Spool sinks
+//! parse through the core reader's file windows, matching fo-dicom's temporary
+//! receive stream without reading the entire instance back into memory.
 
 use crate::assembler::MessageBody;
 use crate::dimse::{status, Command, CommandField};
 use crate::error::{NetworkError, Result};
 use crate::services::{CStoreRequest, CStoreResponse};
+use radicom::io::byte_source::ByteSourceReader;
+use radicom::io::dataset_builder::DatasetBuilder;
 use radicom::io::file::DicomFile;
+use radicom::io::reader::{DicomReader, LargeValuePolicy};
 use radicom::io::temp::create_unique_file;
+use radicom::model::dataset::Dataset;
 use radicom::model::transfer_syntax::TransferSyntax;
-use std::io::Write;
+use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -102,20 +105,18 @@ impl StoreSink {
             let bytes = body.in_memory().expect("a non-spilled body is in memory");
             return self.materialize_with_fallback(bytes, syntax, fallback);
         };
-        // one materialization for the parse (`parse_dataset_bytes` is
-        // slice-based); the receive itself never buffered the instance
-        let bytes = spool.read_all()?;
         match self {
             StoreSink::Memory => {
-                let dataset = decode(&bytes, syntax, fallback)?;
-                // dropping the last `SpoolFile` reference deletes the temp file
-                Ok(ReceivedInstance::from_file(DicomFile::from_dataset(
-                    dataset,
-                )))
+                let dataset = decode_spooled_file(spool.path(), syntax, fallback)?;
+                spool.keep();
+                Ok(ReceivedInstance {
+                    file: DicomFile::from_dataset(dataset),
+                    path: None,
+                    temp: Some(TempSpool(spool.path().to_path_buf())),
+                })
             }
             StoreSink::SpoolToTemp => {
-                let dataset = decode(&bytes, syntax, fallback)?;
-                // adopt the received file instead of writing a second copy
+                let dataset = decode_spooled_file(spool.path(), syntax, fallback)?;
                 spool.keep();
                 Ok(ReceivedInstance {
                     file: DicomFile::from_dataset(dataset),
@@ -124,12 +125,20 @@ impl StoreSink {
                 })
             }
             StoreSink::SpoolToDir(dir) => {
-                let dataset = decode(&bytes, syntax, fallback)?;
                 std::fs::create_dir_all(dir).map_err(NetworkError::Io)?;
                 let (path, mut file) =
                     create_unique_file(dir, "radicom-store", "dcm").map_err(NetworkError::Io)?;
-                // the bytes were just parsed, so only the kept copy is written
-                file.write_all(&bytes).map_err(NetworkError::Io)?;
+                let mut source = std::fs::File::open(spool.path()).map_err(NetworkError::Io)?;
+                std::io::copy(&mut source, &mut file).map_err(NetworkError::Io)?;
+                file.flush().map_err(NetworkError::Io)?;
+                drop(file);
+                let dataset = match decode_spooled_file(&path, syntax, fallback) {
+                    Ok(dataset) => dataset,
+                    Err(error) => {
+                        let _ = std::fs::remove_file(&path);
+                        return Err(error);
+                    }
+                };
                 Ok(ReceivedInstance {
                     file: DicomFile::from_dataset(dataset),
                     path: Some(path),
@@ -199,6 +208,44 @@ impl StoreSink {
             }
         }
     }
+}
+
+/// Parses a bare dataset directly from a spool file using lazy value windows.
+fn decode_spooled_file(
+    path: &Path,
+    syntax: &Arc<TransferSyntax>,
+    fallback: Option<&str>,
+) -> Result<Dataset> {
+    if syntax.is_deflate() {
+        // Deflated transfer syntax needs an inflated byte stream before the
+        // existing dataset parser can run; keep this exceptional path aligned
+        // with the normal decoder until the core exposes a streaming inflater.
+        let bytes = std::fs::read(path).map_err(NetworkError::Io)?;
+        return decode(&bytes, syntax, fallback);
+    }
+    let file = std::fs::File::open(path).map_err(NetworkError::Io)?;
+    let shared = Arc::new(file.try_clone().map_err(NetworkError::Io)?);
+    let mut source =
+        ByteSourceReader::new(BufReader::new(file), syntax.endian()).with_shared_file(shared);
+    let fallback = fallback
+        .filter(|term| radicom::encoding::charset::is_known_charset(term))
+        .map(radicom::encoding::charset::charset_encoding);
+    let fallbacks = fallback.into_iter().collect();
+    let mut builder = DatasetBuilder::with_transfer_syntax_and_fallback(syntax.clone(), fallbacks);
+    DicomReader {
+        large_object_size: 64 * 1024,
+        large_policy: LargeValuePolicy::OnDemand,
+        partial_on_eof: false,
+        ..DicomReader::default()
+    }
+    .read(&mut source, syntax, &mut builder, None)
+    .map_err(|error| {
+        NetworkError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            error.to_string(),
+        ))
+    })?;
+    Ok(builder.into_dataset())
 }
 
 /// Writes the dataset through the already-open handle, then parses it.
@@ -687,6 +734,46 @@ mod tests {
         let kept = instance.path.expect("directory sink reports its path");
         assert!(kept.exists(), "the spooled copy is kept");
         std::fs::remove_dir_all(&out).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_spooled_large_value_stays_file_backed() {
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let mut dataset = Dataset::new();
+        dataset.insert_value(Tag::PIXEL_DATA, vec![0u8; 128 * 1024]);
+        let bytes = crate::message::encode_dataset(&dataset, &syntax).unwrap();
+        let dir = std::env::temp_dir().join(format!("radicom-store-window-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut assembler =
+            crate::assembler::PdvAssembler::with_spool(crate::assembler::SpoolConfig {
+                memory_threshold: 0,
+                dir: Some(dir.clone()),
+                ..crate::assembler::SpoolConfig::default()
+            });
+        assembler.arm_spill(1);
+        let unit = assembler
+            .push_pdv(&crate::pdu::Pdv {
+                context_id: 1,
+                is_command: false,
+                is_last: true,
+                data: bytes::Bytes::from(bytes),
+            })
+            .unwrap()
+            .expect("the dataset completes");
+        let instance = StoreSink::SpoolToTemp
+            .materialize_body(&unit.body(), &syntax)
+            .unwrap();
+        let buffer = instance
+            .file
+            .dataset
+            .get_element(Tag::PIXEL_DATA)
+            .unwrap()
+            .value()
+            .as_buffer()
+            .unwrap();
+        assert!(!buffer.is_memory(), "large values stay file-backed");
+        drop(instance);
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -371,6 +371,14 @@ mod tests {
             request.affected_sop_class_uid = Some(sop_class::STUDY_ROOT_QR_FIND.into());
             let mut response = Command::response(&request, status::SUCCESS).expect("a response");
             assert_eq!(response.field, response_field);
+            if matches!(
+                response_field,
+                CommandField::CGetRsp | CommandField::CMoveRsp
+            ) {
+                response.completed_suboperations = Some(0);
+                response.failed_suboperations = Some(0);
+                response.warning_suboperations = Some(0);
+            }
 
             let parsed = match response_field {
                 CommandField::CGetRsp => {
@@ -392,24 +400,21 @@ mod tests {
             );
 
             response.status = None;
-            let missing = match response_field {
-                CommandField::CGetRsp => {
-                    crate::cget::CGetResponse::from_command(&response)
-                        .unwrap()
-                        .status
-                }
-                CommandField::CMoveRsp => {
-                    crate::cmove::CMoveResponse::from_command(&response)
-                        .unwrap()
-                        .status
-                }
-                _ => CFindResponse::from_command(&response, None).unwrap().status,
-            };
-            assert_eq!(
-                missing,
-                status::PROCESSING_FAILURE,
-                "{response_field:?} without Status must not read as success"
-            );
+            match response_field {
+                CommandField::CGetRsp => assert!(
+                    crate::cget::CGetResponse::from_command(&response).is_err(),
+                    "C-GET without Status is malformed"
+                ),
+                CommandField::CMoveRsp => assert!(
+                    crate::cmove::CMoveResponse::from_command(&response).is_err(),
+                    "C-MOVE without Status is malformed"
+                ),
+                _ => assert_eq!(
+                    CFindResponse::from_command(&response, None).unwrap().status,
+                    status::PROCESSING_FAILURE,
+                    "C-FIND without Status must not read as success"
+                ),
+            }
         }
     }
 

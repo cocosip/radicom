@@ -311,15 +311,52 @@ impl CMoveResponse {
         if command.field != CommandField::CMoveRsp {
             return Err(NetworkError::protocol("not a C-MOVE response"));
         }
+        let message_id_being_responded_to = command
+            .message_id_being_responded_to
+            .filter(|id| *id != 0)
+            .ok_or(NetworkError::protocol(
+                "C-MOVE response has no valid Message ID Being Responded To",
+            ))?;
+        let affected_sop_class_uid = command
+            .affected_sop_class_uid
+            .clone()
+            .filter(|uid| !uid.is_empty())
+            .ok_or(NetworkError::protocol(
+                "C-MOVE response has no Affected SOP Class UID",
+            ))?;
+        let status = command
+            .status
+            .ok_or(NetworkError::protocol("C-MOVE response has no Status"))?;
+        let remaining = command.remaining_suboperations;
+        if matches!(
+            crate::dimse::classify(status),
+            crate::dimse::StatusState::Pending
+        ) && remaining.is_none()
+        {
+            return Err(NetworkError::protocol(
+                "pending C-MOVE response has no Number of Remaining Sub-operations",
+            ));
+        }
+        let completed = command
+            .completed_suboperations
+            .ok_or(NetworkError::protocol(
+                "C-MOVE response has no Number of Completed Sub-operations",
+            ))?;
+        let failed = command.failed_suboperations.ok_or(NetworkError::protocol(
+            "C-MOVE response has no Number of Failed Sub-operations",
+        ))?;
+        let warning = command.warning_suboperations.ok_or(NetworkError::protocol(
+            "C-MOVE response has no Number of Warning Sub-operations",
+        ))?;
         Ok(CMoveResponse {
-            message_id_being_responded_to: command.message_id_being_responded_to.unwrap_or(0),
-            affected_sop_class_uid: command.affected_sop_class_uid.clone().unwrap_or_default(),
-            status: command.status.unwrap_or(status::PROCESSING_FAILURE),
-            remaining: command.remaining_suboperations.unwrap_or(0),
+            message_id_being_responded_to,
+            affected_sop_class_uid,
+            status,
+            remaining: remaining.unwrap_or(0),
             summary: SubOperationSummary {
-                completed: command.completed_suboperations.unwrap_or(0),
-                failed: command.failed_suboperations.unwrap_or(0),
-                warning: command.warning_suboperations.unwrap_or(0),
+                completed,
+                failed,
+                warning,
             },
             error_comment: command.error_comment.clone(),
             failed_sop_instance_uids: Vec::new(),
@@ -633,6 +670,23 @@ mod tests {
     #[test]
     fn wrong_command_field_is_rejected() {
         let command = Command::request(CommandField::CFindRsp, 1);
+        assert!(CMoveResponse::from_command(&command).is_err());
+    }
+
+    #[test]
+    fn malformed_response_fields_are_rejected() {
+        let request = CMoveRequest::study("1.2.3", "ARCHIVE", 7);
+        let pending = CMoveResponse::pending(&request, 2, SubOperationSummary::default());
+        let mut command = pending.to_command();
+        command.message_id_being_responded_to = None;
+        assert!(CMoveResponse::from_command(&command).is_err());
+
+        let mut command = pending.to_command();
+        command.affected_sop_class_uid = None;
+        assert!(CMoveResponse::from_command(&command).is_err());
+
+        let mut command = pending.to_command();
+        command.remaining_suboperations = None;
         assert!(CMoveResponse::from_command(&command).is_err());
     }
 

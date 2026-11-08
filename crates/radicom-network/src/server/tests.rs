@@ -3617,6 +3617,56 @@ async fn n_create_round_trips_through_the_server() {
 }
 
 #[tokio::test]
+async fn n_service_preserves_a_present_empty_dataset() {
+    struct EmptyDatasetProvider(Arc<std::sync::Mutex<Option<bool>>>);
+
+    #[async_trait::async_trait]
+    impl ServiceProvider for EmptyDatasetProvider {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec![COMMIT_SOP_CLASS.to_string()]
+        }
+
+        async fn on_n_set(
+            &self,
+            request: &crate::nservice::NServiceRequest,
+        ) -> Result<crate::nservice::NServiceResponse> {
+            *self.0.lock().unwrap() = Some(request.dataset.as_ref().is_some_and(Dataset::is_empty));
+            Ok(crate::nservice::NServiceResponse::success(request, None))
+        }
+    }
+
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let server = DicomServer::bind(
+        "127.0.0.1:0",
+        Arc::new(EmptyDatasetProvider(seen.clone())),
+        ServerOptions::default(),
+    )
+    .await
+    .unwrap();
+    let addr = server.local_addr();
+    let handle = tokio::spawn(async move { server.accept_one().await });
+    let mut association = Association::open(
+        addr,
+        "SCU",
+        "SCP",
+        vec![commit_context()],
+        ClientOptions::default(),
+    )
+    .await
+    .unwrap();
+
+    let mut request = crate::nservice::NServiceRequest::new(CommandField::NSetRq, 1);
+    request.sop_class_uid = Some(COMMIT_SOP_CLASS.to_string());
+    request.sop_instance_uid = Some("1.2.3.4".to_string());
+    request.dataset = Some(Dataset::new());
+    association.send_n_service(&request).await.unwrap();
+    assert_eq!(*seen.lock().unwrap(), Some(true));
+
+    association.release().await.unwrap();
+    handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn concurrent_stores_complete_through_the_blocking_spool() {
     // §11.2/the default sink spools through spawn_blocking, so several
     // concurrent C-STOREs must still all succeed and leave the client with
@@ -4515,6 +4565,19 @@ fn transcoder_for_reuses_the_same_instance_per_syntax_pair() {
     assert_eq!(cache.len(), 2);
 }
 
+#[test]
+fn response_context_mismatch_is_rejected() {
+    assert!(Association::validate_response_context(1, 1, "C-ECHO").is_ok());
+    let error = Association::validate_response_context(1, 3, "C-ECHO").unwrap_err();
+    assert!(error.to_string().contains("wrong presentation context"));
+}
+
+#[test]
+fn response_sop_class_mismatch_is_rejected() {
+    assert!(Association::validate_response_sop_class("1.2.3", "1.2.3").is_ok());
+    assert!(Association::validate_response_sop_class("1.2.3", "1.2.4").is_err());
+}
+
 // -- association validation and AC layout --------------------------------
 
 /// Sends an A-ASSOCIATE-RQ shaped by `configure` and returns whatever the
@@ -4547,7 +4610,7 @@ async fn raw_association_handshake(configure: impl FnOnce(&mut Associate)) -> cr
 
 #[tokio::test]
 async fn client_rejects_malformed_association_accepts() {
-    for malformed_kind in [0u8, 1u8, 2u8, 3u8] {
+    for malformed_kind in [0u8, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8] {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let peer = tokio::spawn(async move {
@@ -4557,6 +4620,25 @@ async fn client_rejects_malformed_association_accepts() {
             };
             let mut answer = Associate::new(request.called_ae, request.calling_ae);
             answer.user_information = request.user_information;
+            if malformed_kind >= 4 {
+                answer.presentation_contexts = vec![PresentationContext {
+                    id: 1,
+                    abstract_syntax: if malformed_kind == 7 {
+                        sop_class::PATIENT_ROOT_QR_FIND.to_string()
+                    } else {
+                        String::new()
+                    },
+                    transfer_syntaxes: vec![syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.uid().into()],
+                    result: 0,
+                }];
+            }
+            if malformed_kind == 4 {
+                answer.application_context = "9.9.9".into();
+            } else if malformed_kind == 5 {
+                answer.protocol_version = 2;
+            } else if malformed_kind == 6 {
+                answer.called_ae = "OTHER-CALLED".into();
+            }
             if malformed_kind == 3 {
                 answer.presentation_contexts = vec![
                     PresentationContext {
@@ -4572,7 +4654,7 @@ async fn client_rejects_malformed_association_accepts() {
                         result: 1,
                     },
                 ];
-            } else if malformed_kind != 0 {
+            } else if malformed_kind == 1 || malformed_kind == 2 {
                 answer.presentation_contexts.push(PresentationContext {
                     id: 1,
                     abstract_syntax: String::new(),
@@ -4589,6 +4671,30 @@ async fn client_rejects_malformed_association_accepts() {
                     .position(|window| window == marker)
                     .expect("presentation context marker");
                 frame[offset + 2] = 0;
+                stream.write_all(&frame).await.unwrap();
+            } else if malformed_kind == 7 {
+                use tokio::io::AsyncWriteExt as _;
+                let mut frame = crate::pdu::encode(&Pdu::AssociateAc(answer)).unwrap();
+                let uid = sop_class::PATIENT_ROOT_QR_FIND.as_bytes();
+                let mut item = vec![0x30, 0, (uid.len() >> 8) as u8, uid.len() as u8];
+                item.extend_from_slice(uid);
+                if item.len() % 2 != 0 {
+                    item.push(0);
+                    item[2] = (item.len() - 4) as u8;
+                }
+                let pc = frame
+                    .windows(4)
+                    .position(|window| window[0] == 0x21 && window[1] == 0)
+                    .expect("presentation context AC item");
+                let body = pc + 4;
+                let old_len = u16::from_be_bytes([frame[pc + 2], frame[pc + 3]]);
+                let item_len = item.len() as u16;
+                let new_len = old_len + item_len;
+                frame[pc + 2..pc + 4].copy_from_slice(&new_len.to_be_bytes());
+                frame.splice(body + 4..body + 4, item);
+                let pdu_len =
+                    u32::from_be_bytes([frame[2], frame[3], frame[4], frame[5]]) + item_len as u32;
+                frame[2..6].copy_from_slice(&pdu_len.to_be_bytes());
                 stream.write_all(&frame).await.unwrap();
             } else {
                 write_pdu(&mut stream, &Pdu::AssociateAc(answer))
