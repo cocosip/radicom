@@ -1,5 +1,7 @@
 //! Network server/association tests, moved out of the former monolith.
 
+#![cfg(test)]
+
 use super::options::*;
 use super::scp::*;
 use super::scu::*;
@@ -3930,6 +3932,46 @@ fn commit_context() -> PresentationContext {
 }
 
 #[tokio::test]
+async fn association_n_service_rejects_c_commands_without_sending_them() {
+    let server = DicomServer::bind(
+        "127.0.0.1:0",
+        Arc::new(VerificationProvider),
+        ServerOptions::default(),
+    )
+    .await
+    .unwrap();
+    let addr = server.local_addr();
+    let serving = tokio::spawn(async move { server.accept_one().await });
+    let mut association = Association::open(
+        addr,
+        "SCU",
+        "SCP",
+        vec![echo_context()],
+        ClientOptions::default(),
+    )
+    .await
+    .unwrap();
+    let mut request = crate::nservice::NServiceRequest::new(CommandField::CEchoRq, 0);
+    request.sop_class_uid = Some(sop_class::VERIFICATION.into());
+    let result = association.send_n_service(&request).await;
+    assert!(
+        matches!(result, Err(NetworkError::Protocol(message)) if message.contains("non-N command field")),
+        "a C-ECHO must not be sent through the N-service API: {result:?}"
+    );
+    assert_eq!(association.next_message_id().unwrap(), 1);
+    assert_eq!(
+        association
+            .send_c_echo(sop_class::VERIFICATION)
+            .await
+            .unwrap()
+            .status,
+        crate::dimse::status::SUCCESS
+    );
+    association.release().await.unwrap();
+    serving.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn n_action_round_trips_with_a_dataset() {
     let server = DicomServer::bind(
         "127.0.0.1:0",
@@ -6540,6 +6582,435 @@ fn identifier_bytes() -> Vec<u8> {
         &syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone(),
     )
     .unwrap()
+}
+
+/// Exercise an SCU against a wire peer, including outstanding-ID cleanup on errors.
+async fn scripted_scu_response(
+    operation: &str,
+    script: impl FnOnce(Command) -> Vec<Pdu> + Send + 'static,
+) -> Result<()> {
+    let mut context = match operation {
+        "echo" | "echo-single" => echo_context(),
+        "store" | "store-single" => store_context(),
+        "find" | "find-batch" => find_context(),
+        "move" => move_context(),
+        "get" => get_context(),
+        "n-get" => commit_context(),
+        _ => unreachable!(),
+    };
+    context.id = 1;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let peer = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let Some(Pdu::AssociateRq(rq)) = read_pdu(&mut stream).await.unwrap() else {
+            panic!("expected association request");
+        };
+        let mut answer = rq.clone();
+        for context in &mut answer.presentation_contexts {
+            context.abstract_syntax.clear();
+            context.transfer_syntaxes.truncate(1);
+            context.result = 0;
+        }
+        write_pdu(&mut stream, &Pdu::AssociateAc(answer))
+            .await
+            .unwrap();
+        let mut assembler = PdvAssembler::new();
+        let mut request = None;
+        loop {
+            let Some(Pdu::PData(data)) = read_pdu(&mut stream).await.unwrap() else {
+                panic!("expected DIMSE request");
+            };
+            let mut complete = false;
+            for unit in assembler.push_pdata(&data).unwrap() {
+                if unit.stream == Stream::Command {
+                    let command = command_from_bytes(&unit.bytes).unwrap();
+                    complete = command.no_dataset;
+                    request = Some(command);
+                } else {
+                    complete = true;
+                }
+            }
+            if complete {
+                break;
+            }
+        }
+        let request = request.unwrap();
+        let id = request.message_id;
+        for pdu in script(request) {
+            write_pdu(&mut stream, &pdu).await.unwrap();
+            if matches!(pdu, Pdu::ReleaseRq) {
+                assert!(matches!(
+                    read_pdu(&mut stream).await.unwrap(),
+                    Some(Pdu::ReleaseRp)
+                ));
+            }
+        }
+        id
+    });
+    let mut association =
+        Association::open(addr, "SCU", "SCP", vec![context], ClientOptions::default())
+            .await
+            .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        match operation {
+            "echo-single" => association
+                .send_c_echo(sop_class::VERIFICATION)
+                .await
+                .map(|_| ()),
+            "store-single" => association.send_c_store(&instance_file()).await.map(|_| ()),
+            "echo" => association
+                .send_c_echo_batch(&[CEchoRequest {
+                    message_id: 0,
+                    affected_sop_class_uid: sop_class::VERIFICATION.into(),
+                }])
+                .await
+                .map(|_| ()),
+            "store" => association
+                .send_c_store_batch(&[&instance_file()])
+                .await
+                .map(|_| ()),
+            "find" => association
+                .send_c_find(&crate::cfind::CFindRequest::study_query(0))
+                .await
+                .map(|_| ()),
+            "find-batch" => association
+                .send_c_find_batch(&[crate::cfind::CFindRequest::study_query(0)])
+                .await
+                .map(|_| ()),
+            "move" => association
+                .send_c_move(&crate::cmove::CMoveRequest::study("1.2.3", "DEST", 0))
+                .await
+                .map(|_| ()),
+            "get" => {
+                association.set_reverse_store_handler(Arc::new(|request| {
+                    Ok(CStoreResponse::success(request))
+                }));
+                association
+                    .send_c_get(&crate::cget::CGetRequest::study("1.2.3", 0))
+                    .await
+                    .map(|_| ())
+            }
+            "n-get" => {
+                let mut request = crate::nservice::NServiceRequest::new(CommandField::NGetRq, 0);
+                request.sop_class_uid = Some(COMMIT_SOP_CLASS.into());
+                request.sop_instance_uid = Some("1.2.3".into());
+                association.send_n_service(&request).await.map(|_| ())
+            }
+            _ => unreachable!(),
+        }
+    })
+    .await
+    .expect("a bad response must not stall the SCU");
+    let id = peer.await.unwrap();
+    assert!(
+        !association.pending.contains(id),
+        "{operation}: completed request ID {id} leaked after {result:?}"
+    );
+    result
+}
+
+#[tokio::test]
+async fn scu_batches_reject_wrong_response_uids_and_release_the_message_id() {
+    for operation in [
+        "echo",
+        "store",
+        "find-batch",
+        "find",
+        "move",
+        "get",
+        "n-get",
+    ] {
+        let error = scripted_scu_response(operation, |request| {
+            let mut response = Command::response(&request, crate::dimse::status::SUCCESS).unwrap();
+            response.affected_sop_class_uid = Some("1.2.3.999".into());
+            vec![pdata(1, true, command_bytes(&response).unwrap())]
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, NetworkError::Protocol(_)),
+            "{operation}: {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn scu_operations_report_peer_shutdown_and_clear_outstanding_ids() {
+    for operation in [
+        "echo",
+        "store",
+        "find-batch",
+        "find",
+        "move",
+        "get",
+        "n-get",
+    ] {
+        for ending in ["eof", "abort", "release"] {
+            let error = scripted_scu_response(operation, move |_| match ending {
+                "eof" => vec![],
+                "abort" => vec![Pdu::Abort(Abort {
+                    source: AbortSource::User,
+                    reason: 0,
+                })],
+                "release" => vec![Pdu::ReleaseRq],
+                _ => unreachable!(),
+            })
+            .await
+            .unwrap_err();
+            match ending {
+                "abort" => assert!(
+                    matches!(
+                        error,
+                        NetworkError::Abort {
+                            source_code: 0,
+                            reason: 0
+                        }
+                    ),
+                    "{operation}: {error:?}"
+                ),
+                _ => assert!(
+                    matches!(error, NetworkError::ClosedPrematurely { .. }),
+                    "{operation}: {error:?}"
+                ),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn scu_operations_reject_responses_on_another_context() {
+    for operation in [
+        "echo",
+        "store",
+        "find-batch",
+        "find",
+        "move",
+        "get",
+        "n-get",
+    ] {
+        let error = scripted_scu_response(operation, |request| {
+            let response = Command::response(&request, crate::dimse::status::SUCCESS).unwrap();
+            vec![pdata(3, true, command_bytes(&response).unwrap())]
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, NetworkError::Protocol(_)),
+            "{operation}: {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn scu_operations_reject_orphan_and_overlapping_response_datasets() {
+    for operation in [
+        "echo",
+        "store",
+        "find-batch",
+        "find",
+        "move",
+        "get",
+        "n-get",
+    ] {
+        let error = scripted_scu_response(operation, |_| vec![pdata(1, false, identifier_bytes())])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, NetworkError::Protocol(_)),
+            "{operation}: {error:?}"
+        );
+    }
+    for operation in ["find", "find-batch", "n-get"] {
+        for overlap in [false, true] {
+            let error = scripted_scu_response(operation, move |request| {
+                let mut response =
+                    Command::response(&request, crate::dimse::status::SUCCESS).unwrap();
+                response.no_dataset = false;
+                let first = pdata(1, true, command_bytes(&response).unwrap());
+                response.no_dataset = !overlap;
+                vec![first, pdata(1, true, command_bytes(&response).unwrap())]
+            })
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(error, NetworkError::Protocol(message) if message.contains(if overlap { "overlapping" } else { "before its pending" })),
+                "{operation}: {error:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn scu_retrieve_operations_reject_pending_response_identifiers() {
+    for operation in ["move", "get"] {
+        let error = scripted_scu_response(operation, |request| {
+            let mut response = Command::response(&request, crate::dimse::status::PENDING).unwrap();
+            response.no_dataset = false;
+            response.remaining_suboperations = Some(1);
+            response.completed_suboperations = Some(0);
+            response.failed_suboperations = Some(0);
+            response.warning_suboperations = Some(0);
+            vec![pdata(1, true, command_bytes(&response).unwrap())]
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, NetworkError::Protocol(message) if message.contains("Pending") && message.contains("Identifier")),
+            "{operation}: {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn scu_store_and_n_service_reject_another_sop_instance() {
+    for operation in ["store", "n-get"] {
+        let error = scripted_scu_response(operation, |request| {
+            let mut response = Command::response(&request, crate::dimse::status::SUCCESS).unwrap();
+            response.affected_sop_instance_uid = Some("1.2.3.999".into());
+            vec![pdata(1, true, command_bytes(&response).unwrap())]
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, NetworkError::Protocol(_)),
+            "{operation}: {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn scu_batches_reject_unsolicited_ids_and_control_pdus() {
+    for operation in ["echo", "store", "find-batch"] {
+        for wrong_id in [false, true] {
+            let error = scripted_scu_response(operation, move |request| {
+                if !wrong_id {
+                    return vec![Pdu::ReleaseRp];
+                }
+                let mut response =
+                    Command::response(&request, crate::dimse::status::SUCCESS).unwrap();
+                response.message_id_being_responded_to = Some(555);
+                vec![pdata(1, true, command_bytes(&response).unwrap())]
+            })
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(error, NetworkError::Protocol(_)),
+                "{operation}: {error:?}"
+            );
+        }
+    }
+    let error = scripted_scu_response("find-batch", |request| {
+        let mut response = Command::response(&request, crate::dimse::status::SUCCESS).unwrap();
+        response.message_id_being_responded_to = None;
+        vec![pdata(1, true, command_bytes(&response).unwrap())]
+    })
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, NetworkError::Protocol(message) if message.contains("Message ID") && message.contains("missing")),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn scu_single_requests_wait_for_their_own_response_id() {
+    for operation in [
+        "echo-single",
+        "store-single",
+        "find",
+        "move",
+        "get",
+        "n-get",
+    ] {
+        scripted_scu_response(operation, |request| {
+            let response = Command::response(&request, crate::dimse::status::SUCCESS).unwrap();
+            let mut unrelated = response.clone();
+            unrelated.message_id_being_responded_to = Some(555);
+            vec![
+                pdata(1, true, command_bytes(&unrelated).unwrap()),
+                pdata(1, true, command_bytes(&response).unwrap()),
+            ]
+        })
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn scu_find_and_n_service_bind_response_datasets_to_the_command_context() {
+    for operation in ["find", "find-batch", "n-get"] {
+        let error = scripted_scu_response(operation, |request| {
+            let mut response = Command::response(&request, crate::dimse::status::SUCCESS).unwrap();
+            response.no_dataset = false;
+            vec![
+                pdata(1, true, command_bytes(&response).unwrap()),
+                pdata(3, false, identifier_bytes()),
+            ]
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, NetworkError::Protocol(message) if message.contains("context")),
+            "{operation}: {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn scu_single_requests_validate_responses_and_clean_up_on_peer_shutdown() {
+    for operation in ["echo-single", "store-single"] {
+        for anomaly in ["class", "context", "eof", "abort", "release"] {
+            let error = scripted_scu_response(operation, move |request| {
+                match anomaly {
+                    "eof" => return vec![],
+                    "abort" => {
+                        return vec![Pdu::Abort(Abort {
+                            source: AbortSource::User,
+                            reason: 0,
+                        })]
+                    }
+                    "release" => return vec![Pdu::ReleaseRq],
+                    _ => {}
+                }
+                let mut response =
+                    Command::response(&request, crate::dimse::status::SUCCESS).unwrap();
+                if anomaly == "class" {
+                    response.affected_sop_class_uid = Some("1.2.3.999".into());
+                }
+                vec![pdata(
+                    if anomaly == "context" { 3 } else { 1 },
+                    true,
+                    command_bytes(&response).unwrap(),
+                )]
+            })
+            .await
+            .unwrap_err();
+            match anomaly {
+                "eof" | "release" => assert!(
+                    matches!(error, NetworkError::ClosedPrematurely { .. }),
+                    "{operation}: {error:?}"
+                ),
+                "abort" => assert!(
+                    matches!(error, NetworkError::Abort { .. }),
+                    "{operation}: {error:?}"
+                ),
+                _ => assert!(
+                    matches!(error, NetworkError::Protocol(_)),
+                    "{operation}: {error:?}"
+                ),
+            }
+        }
+    }
+    let error = scripted_scu_response("store-single", |_| {
+        vec![pdata(1, false, identifier_bytes())]
+    })
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, NetworkError::Protocol(message) if message.contains("unexpected dataset")),
+        "{error:?}"
+    );
 }
 
 fn find_request() -> Command {

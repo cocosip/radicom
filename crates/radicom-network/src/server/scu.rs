@@ -1841,7 +1841,7 @@ impl Association {
                             let command = command_from_bytes(&unit.bytes)?;
                             let response = CStoreResponse::from_command(&command)?;
                             let id = response.message_id_being_responded_to;
-                            let index = inflight.remove(&id).ok_or_else(|| {
+                            let index = *inflight.get(&id).ok_or_else(|| {
                                 NetworkError::protocol(
                                     "duplicate or unexpected C-STORE batch response ID",
                                 )
@@ -1878,6 +1878,7 @@ impl Association {
                                     "C-STORE batch response did not echo the requested SOP UIDs",
                                 ));
                             }
+                            inflight.remove(&id);
                             self.pending.remove(id);
                             responses[index] = Some(response);
                         }
@@ -2805,10 +2806,16 @@ impl Association {
     /// The presentation context is chosen from the request's SOP class. The
     /// Requested/Affected tags follow the command field (PS3.7 §10.1). A
     /// request/response dataset is transferred in the negotiated syntax.
+    /// Non-N request fields are rejected before allocating an ID or writing.
     pub async fn send_n_service(
         &mut self,
         request: &crate::nservice::NServiceRequest,
     ) -> Result<crate::nservice::NServiceResponse> {
+        if !crate::nservice::is_n_request(request.field) {
+            return Err(NetworkError::protocol(
+                "N-service request has a non-N command field",
+            ));
+        }
         let mut request = request.clone();
         request.message_id = self.message_id_or_allocate(request.message_id)?;
         let message_id = request.message_id;
