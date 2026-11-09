@@ -71,8 +71,8 @@ jobs:
 
       - uses: taiki-e/install-action@cargo-llvm-cov
 
-      # Production lines only: test/bench/example targets and inline
-      # `#[cfg(test)]` modules are excluded by the xtask.
+      # Production lines only: test/bench/example targets and explicitly gated
+      # inline or external test modules are excluded by the xtask.
       - name: Production line coverage
         run: cargo run --package xtask -- coverage
 

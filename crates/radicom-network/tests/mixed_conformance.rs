@@ -67,6 +67,8 @@ async fn get_and_large_store_complete_with_async_window() {
         .unwrap();
         let addr = server.local_addr();
         let task = tokio::spawn(async move { server.accept_one().await });
+        let received = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = received.clone();
         let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
             .with_options(DicomClientOptions {
                 connection: ClientOptions {
@@ -79,7 +81,10 @@ async fn get_and_large_store_complete_with_async_window() {
                 },
                 ..Default::default()
             })
-            .with_reverse_store_handler(Arc::new(|r| Ok(CStoreResponse::success(r))));
+            .with_reverse_store_handler(Arc::new(move |r| {
+                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(CStoreResponse::success(r))
+            }));
         let mut requests = vec![
             DicomRequest::get(CGetRequest::study("1.2.3", 1), [CLASS]),
             DicomRequest::store(Arc::new(file)),
@@ -87,13 +92,24 @@ async fn get_and_large_store_complete_with_async_window() {
         if !get_first {
             requests.reverse();
         }
+        let started = std::time::Instant::now();
+        let mut completed = 0;
+        // Guard against deadlock without making two 32 MiB transfers a throughput benchmark.
         let outcome = tokio::time::timeout(
-            Duration::from_secs(4),
-            client.send_requests(requests, |_| Ok(())),
+            Duration::from_secs(30),
+            client.send_requests(requests, |event| {
+                completed += usize::from(event.is_final);
+                Ok(())
+            }),
         )
         .await;
-        eprintln!("window={window}: {outcome:?}");
+        eprintln!(
+            "window={window}, get_first={get_first}, elapsed={:?}: {outcome:?}",
+            started.elapsed()
+        );
         assert!(outcome.expect("mixed batch must not deadlock").is_ok());
+        assert_eq!(completed, 2, "both mixed requests must finish");
+        assert_eq!(received.load(std::sync::atomic::Ordering::Relaxed), 1);
         task.abort();
         drop(client);
     }

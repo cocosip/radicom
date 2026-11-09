@@ -2531,7 +2531,7 @@ mod coverage_tests {
         std::fs::remove_file(&name).ok();
 
         // renaming the temp file onto an existing directory fails cleanly
-        let dir = std::env::temp_dir().join(format!("radicom-cov-dir-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("radicom-cov-save-dir-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert!(file.save_with(&dir, &WriteOptions::default()).is_err());
         std::fs::remove_dir_all(&dir).ok();

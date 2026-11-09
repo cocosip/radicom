@@ -1,9 +1,9 @@
 //! `cargo xtask coverage`: measure production line coverage against a floor.
 //!
 //! Runs `cargo llvm-cov --workspace --all-features --lcov`, then keeps only
-//! production lines: test/bench/example targets and inline `#[cfg(test)]`
-//! modules are excluded, so the number reflects the library code, not the test
-//! code that exercises it.
+//! production lines: test/bench/example targets, inline `#[cfg(test)]` modules
+//! and source files starting with `#![cfg(test)]` are excluded, so the number
+//! reflects the library code, not the test code that exercises it.
 //!
 //! ```text
 //! cargo xtask coverage                 # run the suite, fail below 95%
@@ -284,6 +284,9 @@ fn excluded_test_lines(path: &Path) -> std::collections::BTreeSet<u32> {
         return excluded;
     };
     let syntax = rust_syntax(&source);
+    if syntax.trim_start().starts_with("#![cfg(test)]") {
+        return (1..=source.lines().count() as u32).collect();
+    }
     let code_lines: Vec<&str> = syntax.lines().collect();
     let lines: Vec<&str> = source.lines().collect();
     let mut i = 0;
@@ -492,18 +495,25 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("radicom-cov-report-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("crates/demo/src")).unwrap();
         std::fs::create_dir_all(dir.join("crates/demo/tests")).unwrap();
+        std::fs::create_dir_all(dir.join("crates/demo/src/server")).unwrap();
         std::fs::write(
             dir.join("crates/demo/src/lib.rs"),
             "pub fn a() {}\npub fn b() {}\n",
         )
         .unwrap();
         std::fs::write(dir.join("crates/demo/tests/it.rs"), "fn t() {}\n").unwrap();
+        std::fs::write(
+            dir.join("crates/demo/src/server/tests.rs"),
+            "//! An external test module.\n#![cfg(test)]\nfn t() {}\n",
+        )
+        .unwrap();
         let lcov_path = dir.join("coverage.info");
         std::fs::write(
             &lcov_path,
             lcov(&[
                 ("crates/demo/src/lib.rs", &[1], &[2]),
                 ("crates/demo/tests/it.rs", &[1], &[]),
+                ("crates/demo/src/server/tests.rs", &[3], &[]),
                 ("xtask/src/main.rs", &[], &[1]),
             ]),
         )
