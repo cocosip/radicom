@@ -427,13 +427,25 @@ async fn zero_and_finite_windows_negotiate_and_duplicate_echo_ids_are_refused() 
             .send_c_echo_batch(&[rq.clone(), rq])
             .await
             .is_err());
-        assert!(association
-            .send_c_echo_batch(&[CEchoRequest {
-                message_id: 0,
-                affected_sop_class_uid: sop_class::VERIFICATION.into()
-            }])
+        let automatic = association
+            .send_c_echo_batch(&[
+                CEchoRequest {
+                    message_id: 0,
+                    affected_sop_class_uid: sop_class::VERIFICATION.into(),
+                },
+                CEchoRequest {
+                    message_id: 0,
+                    affected_sop_class_uid: sop_class::VERIFICATION.into(),
+                },
+            ])
             .await
-            .is_err());
+            .unwrap();
+        assert_eq!(automatic.len(), 2);
+        assert!(automatic.iter().all(|response| response.status == 0));
+        assert_ne!(
+            automatic[0].message_id_being_responded_to, automatic[1].message_id_being_responded_to,
+            "automatic batch IDs must be unique"
+        );
         assert_eq!(
             association
                 .send_c_echo(sop_class::VERIFICATION)
@@ -442,6 +454,71 @@ async fn zero_and_finite_windows_negotiate_and_duplicate_echo_ids_are_refused() 
                 .status,
             0
         );
+        association.release().await.unwrap();
+        serving.await.unwrap().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn automatic_batch_ids_are_reserved_until_preparation_completes() {
+    struct BatchProvider;
+    #[async_trait::async_trait]
+    impl ServiceProvider for BatchProvider {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec![
+                sop_class::VERIFICATION.into(),
+                sop_class::STUDY_ROOT_QR_FIND.into(),
+            ]
+        }
+    }
+    for find in [false, true] {
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(BatchProvider),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let serving = tokio::spawn(async move { server.accept_one().await });
+        let context = if find { find_context() } else { echo_context() };
+        let mut association =
+            Association::open(addr, "SCU", "SCP", vec![context], ClientOptions::default())
+                .await
+                .unwrap();
+        // Only ID 1 is free. A second automatic request must fail before writing,
+        // rather than wrapping around and preparing ID 1 twice.
+        for id in 2..=u16::MAX {
+            association.pending.insert(id);
+        }
+        let error = if find {
+            association
+                .send_c_find_batch(&[
+                    crate::cfind::CFindRequest::study_query(0),
+                    crate::cfind::CFindRequest::study_query(0),
+                ])
+                .await
+                .unwrap_err()
+        } else {
+            let request = CEchoRequest {
+                message_id: 0,
+                affected_sop_class_uid: sop_class::VERIFICATION.into(),
+            };
+            association
+                .send_c_echo_batch(&[request.clone(), request])
+                .await
+                .unwrap_err()
+        };
+        assert!(error.to_string().contains("all message IDs are in use"));
+        assert!(
+            !association.pending.contains(1),
+            "failed preparation releases its ID"
+        );
+        assert!(
+            association.pending.contains(2),
+            "existing requests remain reserved"
+        );
+        assert_eq!(association.next_message_id().unwrap(), 1);
         association.release().await.unwrap();
         serving.await.unwrap().unwrap();
     }
@@ -1801,6 +1878,114 @@ fn find_context() -> PresentationContext {
         sop_class::STUDY_ROOT_QR_FIND,
         vec!["1.2.840.10008.1.2".to_string()],
     )
+}
+
+#[tokio::test]
+async fn dropping_a_typed_request_keeps_its_outstanding_id_reserved() {
+    struct PendingProvider(Arc<tokio::sync::Notify>);
+    #[async_trait::async_trait]
+    impl ServiceProvider for PendingProvider {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec![
+                sop_class::STUDY_ROOT_QR_FIND.into(),
+                sop_class::STUDY_ROOT_QR_MOVE.into(),
+                sop_class::STUDY_ROOT_QR_GET.into(),
+                COMMIT_SOP_CLASS.into(),
+            ]
+        }
+        fn on_c_find<'a>(
+            &'a self,
+            _: &'a crate::cfind::CFindRequest,
+        ) -> futures::stream::BoxStream<'a, Result<crate::cfind::CFindResponse>> {
+            self.0.notify_one();
+            Box::pin(futures::stream::pending())
+        }
+        fn on_c_move<'a>(
+            &'a self,
+            _: &'a crate::cmove::CMoveRequest,
+        ) -> futures::stream::BoxStream<'a, Result<crate::cmove::CMoveResponse>> {
+            self.0.notify_one();
+            Box::pin(futures::stream::pending())
+        }
+        fn on_c_get<'a>(
+            &'a self,
+            _: &'a crate::cget::CGetRequest,
+        ) -> futures::stream::BoxStream<'a, Result<crate::cget::CGetEvent>> {
+            self.0.notify_one();
+            Box::pin(futures::stream::pending())
+        }
+        async fn on_n_get(
+            &self,
+            _: &crate::nservice::NServiceRequest,
+        ) -> Result<crate::nservice::NServiceResponse> {
+            self.0.notify_one();
+            futures::future::pending().await
+        }
+    }
+    for (operation, class) in [
+        (0, sop_class::STUDY_ROOT_QR_FIND),
+        (1, sop_class::STUDY_ROOT_QR_MOVE),
+        (2, sop_class::STUDY_ROOT_QR_GET),
+        (3, COMMIT_SOP_CLASS),
+    ] {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(PendingProvider(started.clone())),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let serving = tokio::spawn(async move { server.accept_one().await });
+        let context = PresentationContext::new(1, class, vec!["1.2.840.10008.1.2".into()]);
+        let mut association =
+            Association::open(addr, "SCU", "SCP", vec![context], ClientOptions::default())
+                .await
+                .unwrap();
+        association
+            .set_reverse_store_handler(Arc::new(|request| Ok(CStoreResponse::success(request))));
+        {
+            let sending = async {
+                match operation {
+                    0 => association
+                        .send_c_find(&crate::cfind::CFindRequest::study_query(1))
+                        .await
+                        .map(|_| ()),
+                    1 => association
+                        .send_c_move(&crate::cmove::CMoveRequest::study("1.2.3", "DEST", 1))
+                        .await
+                        .map(|_| ()),
+                    2 => association
+                        .send_c_get(&crate::cget::CGetRequest::study("1.2.3", 1))
+                        .await
+                        .map(|_| ()),
+                    _ => {
+                        let mut request =
+                            crate::nservice::NServiceRequest::new(CommandField::NGetRq, 1);
+                        request.sop_class_uid = Some(class.into());
+                        request.sop_instance_uid = Some("1.2.3".into());
+                        association.send_n_service(&request).await.map(|_| ())
+                    }
+                }
+            };
+            tokio::pin!(sending);
+            tokio::time::timeout(Duration::from_secs(2), async {
+                tokio::select! {
+                    _ = started.notified() => {},
+                    result = &mut sending => panic!("request finished before cancellation: {result:?}"),
+                }
+            }).await.unwrap();
+        }
+        assert_eq!(
+            association.next_message_id().unwrap(),
+            2,
+            "dropping the caller's future does not complete the peer's request"
+        );
+        association.abort(0).await.unwrap();
+        serving.abort();
+        let _ = serving.await;
+    }
 }
 
 #[tokio::test]
@@ -3836,11 +4021,12 @@ async fn n_get_response_uses_the_contexts_own_syntax() {
             .await
             .unwrap();
 
-    let mut request = crate::nservice::NServiceRequest::new(CommandField::NGetRq, 1);
+    let mut request = crate::nservice::NServiceRequest::new(CommandField::NGetRq, 0);
     request.sop_class_uid = Some(NGET_SOP_CLASS.to_string());
     request.sop_instance_uid = Some("1.2.3.4".to_string());
     let response = association.send_n_service(&request).await.unwrap();
     assert_eq!(response.status, crate::dimse::status::SUCCESS);
+    assert_ne!(response.message_id_being_responded_to, 0);
     let dataset = response.dataset.expect("N-GET answers with a dataset");
     assert_eq!(dataset.get_str(Tag::PATIENT_NAME).unwrap(), "Doe^Jane");
     assert_eq!(dataset.get_str(Tag::PATIENT_ID).unwrap(), "PID-1");
@@ -7654,6 +7840,27 @@ fn validate_proposed_contexts_checks_ids_and_syntaxes() {
         validate_proposed_contexts(&[no_syntax]).is_err(),
         "no transfer syntax"
     );
+}
+
+#[tokio::test]
+async fn association_open_rejects_invalid_contexts_before_connecting() {
+    let invalid = PresentationContext::new(
+        2,
+        sop_class::VERIFICATION,
+        vec![crate::association::transfer_syntax::IMPLICIT_VR_LITTLE_ENDIAN.to_string()],
+    );
+
+    let error = Association::open(
+        "127.0.0.1:1",
+        "CALLING-SCU",
+        "CALLED-SCP",
+        vec![invalid],
+        ClientOptions::default(),
+    )
+    .await
+    .expect_err("invalid contexts must fail before the TCP connect");
+
+    assert!(matches!(error, NetworkError::Protocol(_)));
 }
 
 #[test]

@@ -700,9 +700,14 @@ impl DicomClient {
             ],
         );
         let cancellation = self.cancellation.clone();
-        let _active = cancellation.register(request.message_id);
-        let (context_id, result) = {
+        let (context_id, message_id, result) = {
             let association = self.ensure_association(vec![context]).await?;
+            let mut request = request.clone();
+            if request.message_id == 0 {
+                request.message_id = association.next_message_id()?;
+            }
+            let message_id = request.message_id;
+            let _active = cancellation.register(message_id);
             let context_id = association
                 .contexts()
                 .pick(&request.sop_class_uid, "")
@@ -711,13 +716,13 @@ impl DicomClient {
             if let Some(context_id) = context_id {
                 association.set_request_cancellation(context_id, cancellation.subscribe());
             }
-            let result = association.send_c_find(request).await;
-            (context_id, result)
+            let result = association.send_c_find(&request).await;
+            (context_id, message_id, result)
         };
         let responses = self.finish_request(result).await?;
         self.sent_on_association += 1;
         if let Some(context_id) = context_id {
-            self.last_request = Some((request.message_id, context_id));
+            self.last_request = Some((message_id, context_id));
         }
         Ok(responses)
     }
@@ -733,9 +738,14 @@ impl DicomClient {
             ],
         );
         let cancellation = self.cancellation.clone();
-        let _active = cancellation.register(request.message_id);
-        let (context_id, result) = {
+        let (context_id, message_id, result) = {
             let association = self.ensure_association(vec![context]).await?;
+            let mut request = request.clone();
+            if request.message_id == 0 {
+                request.message_id = association.next_message_id()?;
+            }
+            let message_id = request.message_id;
+            let _active = cancellation.register(message_id);
             let context_id = association
                 .contexts()
                 .pick(&request.sop_class_uid, "")
@@ -744,13 +754,13 @@ impl DicomClient {
             if let Some(context_id) = context_id {
                 association.set_request_cancellation(context_id, cancellation.subscribe());
             }
-            let result = association.send_c_move(request).await;
-            (context_id, result)
+            let result = association.send_c_move(&request).await;
+            (context_id, message_id, result)
         };
         let responses = self.finish_request(result).await?;
         self.sent_on_association += 1;
         if let Some(context_id) = context_id {
-            self.last_request = Some((request.message_id, context_id));
+            self.last_request = Some((message_id, context_id));
         }
         Ok(responses)
     }
@@ -799,9 +809,14 @@ impl DicomClient {
         }
         let contexts = context_set.to_wire();
         let cancellation = self.cancellation.clone();
-        let _active = cancellation.register(request.message_id);
-        let (context_id, result) = {
+        let (context_id, message_id, result) = {
             let association = self.ensure_association_with_roles(contexts, roles).await?;
+            let mut request = request.clone();
+            if request.message_id == 0 {
+                request.message_id = association.next_message_id()?;
+            }
+            let message_id = request.message_id;
+            let _active = cancellation.register(message_id);
             let context_id = association
                 .contexts()
                 .pick(&request.sop_class_uid, "")
@@ -810,13 +825,13 @@ impl DicomClient {
             if let Some(context_id) = context_id {
                 association.set_request_cancellation(context_id, cancellation.subscribe());
             }
-            let result = association.send_c_get(request).await;
-            (context_id, result)
+            let result = association.send_c_get(&request).await;
+            (context_id, message_id, result)
         };
         let responses = self.finish_request(result).await?;
         self.sent_on_association += 1;
         if let Some(context_id) = context_id {
-            self.last_request = Some((request.message_id, context_id));
+            self.last_request = Some((message_id, context_id));
         }
         Ok(responses)
     }
@@ -1172,7 +1187,7 @@ mod tests {
     use crate::store::StoreSink;
 
     #[tokio::test]
-    async fn independent_handle_cancels_a_live_high_level_find() {
+    async fn independent_handle_cancels_a_find_with_an_automatic_message_id() {
         struct PendingFind {
             started: Arc<tokio::sync::Notify>,
         }
@@ -1183,8 +1198,9 @@ mod tests {
             }
             fn on_c_find<'a>(
                 &'a self,
-                _request: &'a CFindRequest,
+                request: &'a CFindRequest,
             ) -> futures::stream::BoxStream<'a, Result<CFindResponse>> {
+                assert_eq!(request.message_id, 1);
                 self.started.notify_one();
                 Box::pin(futures::stream::pending())
             }
@@ -1206,15 +1222,18 @@ mod tests {
         assert!(!cancel.cancel(42), "no inactive request is cancelled");
         let sending = tokio::spawn(async move {
             let responses = client
-                .send_c_find(&CFindRequest::study_query(42))
+                .send_c_find(&CFindRequest::study_query(0))
                 .await
                 .unwrap();
             client.release().await;
             responses
         });
         started.notified().await;
-        assert!(!cancel.cancel(41), "another request ID is not cancelled");
-        assert!(cancel.cancel(42));
+        assert!(
+            !cancel.cancel(0),
+            "the allocation sentinel is not a live ID"
+        );
+        assert!(cancel.cancel(1));
         let responses = tokio::time::timeout(Duration::from_secs(2), sending)
             .await
             .expect("live C-CANCEL is sent without borrowing the client")
@@ -1223,15 +1242,12 @@ mod tests {
             responses.last().unwrap().status,
             crate::dimse::status::CANCEL
         );
-        assert!(
-            !cancel.cancel(42),
-            "completed requests are no longer active"
-        );
+        assert!(!cancel.cancel(1), "completed requests are no longer active");
         serving.await.unwrap().unwrap();
     }
 
     #[tokio::test]
-    async fn independent_handle_cancels_live_get_and_move_requests() {
+    async fn independent_handle_cancels_get_and_move_with_automatic_message_ids() {
         struct PendingRetrieve {
             started: Arc<tokio::sync::Notify>,
         }
@@ -1279,7 +1295,7 @@ mod tests {
             let sending = tokio::spawn(async move {
                 let terminal = if get {
                     client
-                        .send_c_get(&CGetRequest::study("1.2.3", 42), &[])
+                        .send_c_get(&CGetRequest::study("1.2.3", 0), &[])
                         .await
                         .unwrap()
                         .last()
@@ -1287,7 +1303,7 @@ mod tests {
                         .status
                 } else {
                     client
-                        .send_c_move(&CMoveRequest::study("1.2.3", "DEST", 42))
+                        .send_c_move(&CMoveRequest::study("1.2.3", "DEST", 0))
                         .await
                         .unwrap()
                         .last()
@@ -1298,7 +1314,8 @@ mod tests {
                 terminal
             });
             started.notified().await;
-            assert!(cancel.cancel(42));
+            assert!(!cancel.cancel(0));
+            assert!(cancel.cancel(1));
             assert_eq!(
                 tokio::time::timeout(Duration::from_secs(2), sending)
                     .await
@@ -1306,7 +1323,7 @@ mod tests {
                     .unwrap(),
                 crate::dimse::status::CANCEL
             );
-            assert!(!cancel.cancel(42));
+            assert!(!cancel.cancel(1));
             serving.await.unwrap().unwrap();
         }
     }

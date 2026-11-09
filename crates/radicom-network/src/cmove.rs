@@ -64,6 +64,7 @@ impl SubOperationSummary {
 /// A C-MOVE request (§11.4).
 #[derive(Debug, Clone)]
 pub struct CMoveRequest {
+    /// Message ID; zero asks high-level send APIs to allocate one.
     pub message_id: u16,
     /// The retrieve model's abstract syntax, derived from level + root.
     pub sop_class_uid: String,

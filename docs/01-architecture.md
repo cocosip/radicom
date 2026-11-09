@@ -332,6 +332,8 @@ client/server. One tokio task per association. Locks must not be held across `.a
   its RQ by context id.
 - User-information sub-items:
   - Role selection (`0x54`): `uid_len (u16) + uid + scu (1) + scp (1)`.
+    Roles describe the association requestor; without a selection for a SOP class, the requestor
+    acts as SCU and the acceptor as SCP.
   - Extended negotiation (`0x56`): the application information is a **flat byte array** where the index is
     the field number — not `(field, length, value)` triples.
   - Common extended negotiation (`0x57`): SOP Class UID, Service Class UID, then a u16 total length
@@ -351,8 +353,10 @@ client/server. One tokio task per association. Locks must not be held across `.a
   `0x8000`.
 - An unrecognised command field must answer Processing Failure or send A-ABORT — **never panic**.
 - N-GET/SET/ACTION/DELETE requests use `Requested*`; N-CREATE/EVENT-REPORT use `Affected*`.
+  Responses use `Affected*`, including failure responses built from a request.
 - Command Data Set Type `0101H` means absent; every other value means present (including fo-dicom
-  `0202H`). Message ID zero is valid; required ID fields must still be present.
+  `0202H`). Message ID zero is valid on the wire and required ID fields must still be present;
+  high-level request APIs reserve zero as their automatic-allocation sentinel.
 - C-service response UIDs are optional. Typed response APIs represent absent UIDs as empty strings and
   omit them on encoding; correlation rejects a supplied mismatching UID.
 - Pending C-GET/MOVE responses require all four sub-operation counters; terminal responses may omit

@@ -1,6 +1,9 @@
 //! The DIMSE SCU: Association and its operations.
 
-use super::scp::{connect_with_timeout, transcoder_for, transfer_syntax_of, write_pdata_batch};
+use super::scp::{
+    connect_with_timeout, transcoder_for, transfer_syntax_of, validate_proposed_contexts,
+    write_pdata_batch,
+};
 use super::*;
 
 /// The client-side stream: plain TCP or TLS over TCP.
@@ -203,6 +206,7 @@ impl Association {
         if let Some(identity) = &options.user_identity {
             identity.validate()?;
         }
+        validate_proposed_contexts(&presentation_contexts)?;
 
         let tcp = connect_with_timeout(TcpStream::connect(addr), options.connect_timeout).await?;
         crate::transport::apply_options(&tcp, &options.tcp)?;
@@ -445,19 +449,35 @@ impl Association {
         &mut self,
         requests: &[CEchoRequest],
     ) -> Result<Vec<CEchoResponse>> {
-        let mut ids = std::collections::HashSet::new();
-        let mut context_ids = Vec::with_capacity(requests.len());
-        for request in requests {
-            if request.message_id == 0 || !ids.insert(request.message_id) {
-                return Err(NetworkError::protocol(
-                    "C-ECHO batch message IDs must be unique and nonzero",
-                ));
+        let mut reserved_ids =
+            self.reserve_explicit_ids(requests.iter().map(|request| request.message_id))?;
+        let prepared_result = (|| -> Result<_> {
+            let mut prepared = Vec::with_capacity(requests.len());
+            let mut context_ids = Vec::with_capacity(requests.len());
+            for request in requests {
+                let mut request = request.clone();
+                if request.message_id == 0 {
+                    request.message_id = self.allocate_message_id()?;
+                    self.pending.insert(request.message_id);
+                    reserved_ids.push(request.message_id);
+                }
+                let context = self.contexts.pick(&request.affected_sop_class_uid, "")?;
+                self.contexts
+                    .validate_request(context.id, &request.to_command(), true)?;
+                context_ids.push(context.id);
+                prepared.push(request);
             }
-            let context = self.contexts.pick(&request.affected_sop_class_uid, "")?;
-            self.contexts
-                .validate_request(context.id, &request.to_command(), true)?;
-            context_ids.push(context.id);
-        }
+            Ok((prepared, context_ids))
+        })();
+        let (prepared, context_ids) = match prepared_result {
+            Ok(value) => value,
+            Err(error) => {
+                for id in &reserved_ids {
+                    self.pending.remove(*id);
+                }
+                return Err(error);
+            }
+        };
         // Even a peer granting unlimited operations cannot grow this sender's
         // outstanding table without bound. Other DIMSE service kinds stay serial.
         let window = match self.async_operations.invoked {
@@ -471,7 +491,7 @@ impl Association {
             while next < requests.len() || !inflight.is_empty() {
                 let mut outgoing = Vec::new();
                 while next < requests.len() && inflight.len() < window {
-                    let request = &requests[next];
+                    let request = &prepared[next];
                     outgoing.extend(self.splitter.split_bytes(
                         context_ids[next],
                         true,
@@ -547,8 +567,8 @@ impl Association {
                 .collect())
         }
         .await;
-        for id in inflight.keys() {
-            self.pending.remove(*id);
+        for id in inflight.keys().copied().chain(reserved_ids.iter().copied()) {
+            self.pending.remove(id);
         }
         result
     }
@@ -1743,10 +1763,8 @@ impl Association {
     /// window ahead of the send, so peak memory stays bounded; responses are
     /// matched by message ID, so a peer may answer out of order.
     ///
-    /// **Ceiling:** this crate's SCP still runs providers one at a time (its
-    /// protocol loop owns the socket), so against it a batch removes the
-    /// round-trip stall rather than executing the remote handler in parallel; a
-    /// peer such as fo-dicom does both. One malformed response fails the batch.
+    /// The peer controls provider concurrency through its negotiated window.
+    /// One malformed response fails the batch.
     pub async fn send_c_store_batch(
         &mut self,
         files: &[&radicom::io::file::DicomFile],
@@ -1905,20 +1923,34 @@ impl Association {
         &mut self,
         requests: &[crate::cfind::CFindRequest],
     ) -> Result<Vec<Vec<crate::cfind::CFindResponse>>> {
-        let mut ids = std::collections::HashSet::new();
-        let mut prepared = Vec::with_capacity(requests.len());
-        for request in requests {
-            if request.message_id == 0 || !ids.insert(request.message_id) {
-                return Err(NetworkError::protocol(
-                    "C-FIND batch message IDs must be unique and nonzero",
-                ));
+        let mut reserved_ids =
+            self.reserve_explicit_ids(requests.iter().map(|request| request.message_id))?;
+        let prepared_result = (|| -> Result<_> {
+            let mut prepared = Vec::with_capacity(requests.len());
+            for request in requests {
+                let mut request = request.clone();
+                if request.message_id == 0 {
+                    request.message_id = self.allocate_message_id()?;
+                    self.pending.insert(request.message_id);
+                    reserved_ids.push(request.message_id);
+                }
+                let context = self.contexts.pick(&request.sop_class_uid, "")?;
+                self.contexts
+                    .validate_request(context.id, &request.to_command(), true)?;
+                let syntax = transfer_syntax_of(&context.transfer_syntax)?;
+                prepared.push((request, syntax, context.id));
             }
-            let context = self.contexts.pick(&request.sop_class_uid, "")?;
-            self.contexts
-                .validate_request(context.id, &request.to_command(), true)?;
-            let syntax = transfer_syntax_of(&context.transfer_syntax)?;
-            prepared.push((syntax, request.message_id, context.id));
-        }
+            Ok(prepared)
+        })();
+        let prepared = match prepared_result {
+            Ok(value) => value,
+            Err(error) => {
+                for id in &reserved_ids {
+                    self.pending.remove(*id);
+                }
+                return Err(error);
+            }
+        };
 
         let window = self.window();
         let mut inflight: std::collections::HashMap<u16, usize> = std::collections::HashMap::new();
@@ -1929,19 +1961,19 @@ impl Association {
         let result = async {
             while next < prepared.len() || !inflight.is_empty() {
                 while next < prepared.len() && inflight.len() < window {
-                    let (syntax, message_id, context_id) = &prepared[next];
+                    let (request, syntax, context_id) = &prepared[next];
                     let payload = bytes::Bytes::from(crate::message::encode_dataset(
-                        &requests[next].identifier,
+                        &request.identifier,
                         syntax,
                     )?);
                     let pdus = self.splitter.split_message_bytes(
                         *context_id,
-                        bytes::Bytes::from(command_bytes(&requests[next].to_command())?),
+                        bytes::Bytes::from(command_bytes(&request.to_command())?),
                         Some(payload),
                     )?;
                     write_pdata_batch(&mut self.stream, pdus).await?;
-                    inflight.insert(*message_id, next);
-                    self.pending.insert(*message_id);
+                    inflight.insert(request.message_id, next);
+                    self.pending.insert(request.message_id);
                     next += 1;
                 }
                 let message_id = *inflight.keys().next().expect("a request is pending");
@@ -2006,7 +2038,7 @@ impl Association {
                                         unit.context_id,
                                         "C-FIND batch",
                                     )?;
-                                    let (syntax, _, _) = &prepared[index];
+                                    let (_, syntax, _) = &prepared[index];
                                     let identifier = self.decode_response_body(&unit, syntax).await?;
                                     self.record_find_response(
                                         index,
@@ -2039,8 +2071,8 @@ impl Association {
             Ok(responses)
         }
         .await;
-        for id in inflight.keys() {
-            self.pending.remove(*id);
+        for id in inflight.keys().copied().chain(reserved_ids.iter().copied()) {
+            self.pending.remove(id);
         }
         result
     }
@@ -2101,8 +2133,10 @@ impl Association {
         let context = self.contexts.pick(&request.sop_class_uid, "")?;
         let context_id = context.id;
         let syntax = transfer_syntax_of(&context.transfer_syntax)?;
-        let message_id = request.message_id;
+        let mut request = request.clone();
+        request.message_id = self.message_id_or_allocate(request.message_id)?;
 
+        let message_id = request.message_id;
         let command = bytes::Bytes::from(command_bytes(&request.to_command())?);
         let identifier = bytes::Bytes::from(crate::message::encode_dataset(
             &request.identifier,
@@ -2112,99 +2146,107 @@ impl Association {
             .splitter
             .split_message_bytes(context_id, command, Some(identifier))?;
         write_pdata_batch(&mut self.stream, pdus).await?;
+        self.pending.insert(message_id);
 
         // the Identifier of a Pending response follows its command
-        let mut awaiting_command: Option<(u8, Command)> = None;
-        loop {
-            let Some(pdu) = self.read_request_pdu(message_id).await? else {
-                return Err(NetworkError::ClosedPrematurely { source: None });
-            };
-            match pdu {
-                Pdu::PData(pdata) => {
-                    for unit in self.push_pdata_offloaded(&pdata).await? {
-                        // H2: answer an incoming N-EVENT-REPORT-RQ instead of
-                        // dropping it, before the response filtering below
-                        if self.intercept_event_report(&unit).await? {
-                            continue;
-                        }
-                        match unit.stream {
-                            Stream::Command => {
-                                let command = command_from_bytes(&unit.bytes)?;
-                                if command.field != CommandField::CFindRsp
-                                    || command.message_id_being_responded_to != Some(message_id)
-                                {
-                                    continue;
-                                }
-                                if unit.context_id != context_id {
-                                    return Err(NetworkError::protocol(
-                                        "C-FIND response used the wrong presentation context",
-                                    ));
-                                }
-                                Self::validate_response_sop_class(
-                                    &request.sop_class_uid,
-                                    command.affected_sop_class_uid.as_deref(),
-                                )?;
-                                if command.no_dataset {
-                                    if awaiting_command.is_some() {
+        let result = async {
+            let mut awaiting_command: Option<(u8, Command)> = None;
+            loop {
+                let Some(pdu) = self.read_request_pdu(message_id).await? else {
+                    return Err(NetworkError::ClosedPrematurely { source: None });
+                };
+                match pdu {
+                    Pdu::PData(pdata) => {
+                        for unit in self.push_pdata_offloaded(&pdata).await? {
+                            // H2: answer an incoming N-EVENT-REPORT-RQ instead of
+                            // dropping it, before the response filtering below
+                            if self.intercept_event_report(&unit).await? {
+                                continue;
+                            }
+                            match unit.stream {
+                                Stream::Command => {
+                                    let command = command_from_bytes(&unit.bytes)?;
+                                    if command.field != CommandField::CFindRsp
+                                        || command.message_id_being_responded_to != Some(message_id)
+                                    {
+                                        continue;
+                                    }
+                                    if unit.context_id != context_id {
                                         return Err(NetworkError::protocol(
-                                            "C-FIND response arrived before its pending Identifier",
+                                            "C-FIND response used the wrong presentation context",
                                         ));
                                     }
-                                    let response =
-                                        crate::cfind::CFindResponse::from_command(&command, None)?;
+                                    Self::validate_response_sop_class(
+                                        &request.sop_class_uid,
+                                        command.affected_sop_class_uid.as_deref(),
+                                    )?;
+                                    if command.no_dataset {
+                                        if awaiting_command.is_some() {
+                                            return Err(NetworkError::protocol(
+                                            "C-FIND response arrived before its pending Identifier",
+                                        ));
+                                        }
+                                        let response = crate::cfind::CFindResponse::from_command(
+                                            &command, None,
+                                        )?;
+                                        let terminal = !response.is_pending();
+                                        on_response(response)?;
+                                        if terminal {
+                                            return Ok(());
+                                        }
+                                    } else {
+                                        // the match dataset follows
+                                        Self::put_pending_dataset(
+                                            &mut awaiting_command,
+                                            (unit.context_id, command),
+                                            "C-FIND response carried overlapping datasets",
+                                        )?;
+                                    }
+                                }
+                                Stream::Data => {
+                                    let (command_context, command) = Self::take_pending_dataset(
+                                        &mut awaiting_command,
+                                        "C-FIND Identifier without its response",
+                                    )?;
+                                    if unit.context_id != command_context
+                                        || unit.context_id != context_id
+                                    {
+                                        return Err(NetworkError::protocol(
+                                            "C-FIND Identifier used the wrong presentation context",
+                                        ));
+                                    }
+                                    let identifier =
+                                        self.decode_response_body(&unit, &syntax).await?;
+                                    let response = crate::cfind::CFindResponse::from_command(
+                                        &command,
+                                        Some(identifier),
+                                    )?;
                                     let terminal = !response.is_pending();
                                     on_response(response)?;
                                     if terminal {
                                         return Ok(());
                                     }
-                                } else {
-                                    // the match dataset follows
-                                    Self::put_pending_dataset(
-                                        &mut awaiting_command,
-                                        (unit.context_id, command),
-                                        "C-FIND response carried overlapping datasets",
-                                    )?;
-                                }
-                            }
-                            Stream::Data => {
-                                let (command_context, command) = Self::take_pending_dataset(
-                                    &mut awaiting_command,
-                                    "C-FIND Identifier without its response",
-                                )?;
-                                if unit.context_id != command_context
-                                    || unit.context_id != context_id
-                                {
-                                    return Err(NetworkError::protocol(
-                                        "C-FIND Identifier used the wrong presentation context",
-                                    ));
-                                }
-                                let identifier = self.decode_response_body(&unit, &syntax).await?;
-                                let response = crate::cfind::CFindResponse::from_command(
-                                    &command,
-                                    Some(identifier),
-                                )?;
-                                let terminal = !response.is_pending();
-                                on_response(response)?;
-                                if terminal {
-                                    return Ok(());
                                 }
                             }
                         }
                     }
+                    Pdu::Abort(abort) => {
+                        return Err(NetworkError::Abort {
+                            source_code: abort.source.code(),
+                            reason: abort.reason,
+                        })
+                    }
+                    Pdu::ReleaseRq => {
+                        write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
+                        return Err(NetworkError::ClosedPrematurely { source: None });
+                    }
+                    _ => {}
                 }
-                Pdu::Abort(abort) => {
-                    return Err(NetworkError::Abort {
-                        source_code: abort.source.code(),
-                        reason: abort.reason,
-                    })
-                }
-                Pdu::ReleaseRq => {
-                    write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
-                    return Err(NetworkError::ClosedPrematurely { source: None });
-                }
-                _ => {}
             }
         }
+        .await;
+        self.pending.remove(message_id);
+        result
     }
 
     /// Runs a C-MOVE and collects every progress plus the terminal response
@@ -2237,8 +2279,10 @@ impl Association {
         let context = self.contexts.pick(&request.sop_class_uid, "")?;
         let context_id = context.id;
         let syntax = transfer_syntax_of(&context.transfer_syntax)?;
-        let message_id = request.message_id;
+        let mut request = request.clone();
+        request.message_id = self.message_id_or_allocate(request.message_id)?;
 
+        let message_id = request.message_id;
         let command = bytes::Bytes::from(command_bytes(&request.to_command())?);
         let identifier = bytes::Bytes::from(crate::message::encode_dataset(
             &request.identifier,
@@ -2248,74 +2292,81 @@ impl Association {
             .splitter
             .split_message_bytes(context_id, command, Some(identifier))?;
         write_pdata_batch(&mut self.stream, pdus).await?;
+        self.pending.insert(message_id);
 
-        let mut awaiting_identifier: Option<crate::cmove::CMoveResponse> = None;
-        loop {
-            let Some(pdu) = self.read_request_pdu(message_id).await? else {
-                return Err(NetworkError::ClosedPrematurely { source: None });
-            };
-            match pdu {
-                Pdu::PData(pdata) => {
-                    for unit in self.push_pdata_offloaded(&pdata).await? {
-                        // H2: answer an incoming N-EVENT-REPORT-RQ instead of
-                        // dropping it, before the response filtering below
-                        if self.intercept_event_report(&unit).await? {
-                            continue;
-                        }
-                        if unit.context_id != context_id {
-                            return Err(NetworkError::protocol(
-                                "C-MOVE response on the wrong context",
-                            ));
-                        }
-                        if unit.stream == Stream::Data {
-                            let mut response = awaiting_identifier.take().ok_or_else(|| {
-                                NetworkError::protocol("C-MOVE Identifier without its response")
-                            })?;
-                            response
-                                .set_identifier(&self.decode_response_body(&unit, &syntax).await?);
-                            on_response(response)?;
-                            return Ok(());
-                        }
-                        let command = command_from_bytes(&unit.bytes)?;
-                        if command.field != CommandField::CMoveRsp
-                            || command.message_id_being_responded_to != Some(message_id)
-                        {
-                            continue;
-                        }
-                        let response = crate::cmove::CMoveResponse::from_command(&command)?;
-                        Self::validate_response_sop_class(
-                            &request.sop_class_uid,
-                            command.affected_sop_class_uid.as_deref(),
-                        )?;
-                        let terminal = !response.is_pending();
-                        if !command.no_dataset {
-                            if !terminal {
+        let result = async {
+            let mut awaiting_identifier: Option<crate::cmove::CMoveResponse> = None;
+            loop {
+                let Some(pdu) = self.read_request_pdu(message_id).await? else {
+                    return Err(NetworkError::ClosedPrematurely { source: None });
+                };
+                match pdu {
+                    Pdu::PData(pdata) => {
+                        for unit in self.push_pdata_offloaded(&pdata).await? {
+                            // H2: answer an incoming N-EVENT-REPORT-RQ instead of
+                            // dropping it, before the response filtering below
+                            if self.intercept_event_report(&unit).await? {
+                                continue;
+                            }
+                            if unit.context_id != context_id {
                                 return Err(NetworkError::protocol(
-                                    "Pending C-MOVE response has an Identifier",
+                                    "C-MOVE response on the wrong context",
                                 ));
                             }
-                            awaiting_identifier = Some(response);
-                            continue;
-                        }
-                        on_response(response)?;
-                        if terminal {
-                            return Ok(());
+                            if unit.stream == Stream::Data {
+                                let mut response = awaiting_identifier.take().ok_or_else(|| {
+                                    NetworkError::protocol("C-MOVE Identifier without its response")
+                                })?;
+                                response.set_identifier(
+                                    &self.decode_response_body(&unit, &syntax).await?,
+                                );
+                                on_response(response)?;
+                                return Ok(());
+                            }
+                            let command = command_from_bytes(&unit.bytes)?;
+                            if command.field != CommandField::CMoveRsp
+                                || command.message_id_being_responded_to != Some(message_id)
+                            {
+                                continue;
+                            }
+                            let response = crate::cmove::CMoveResponse::from_command(&command)?;
+                            Self::validate_response_sop_class(
+                                &request.sop_class_uid,
+                                command.affected_sop_class_uid.as_deref(),
+                            )?;
+                            let terminal = !response.is_pending();
+                            if !command.no_dataset {
+                                if !terminal {
+                                    return Err(NetworkError::protocol(
+                                        "Pending C-MOVE response has an Identifier",
+                                    ));
+                                }
+                                awaiting_identifier = Some(response);
+                                continue;
+                            }
+                            on_response(response)?;
+                            if terminal {
+                                return Ok(());
+                            }
                         }
                     }
+                    Pdu::Abort(abort) => {
+                        return Err(NetworkError::Abort {
+                            source_code: abort.source.code(),
+                            reason: abort.reason,
+                        })
+                    }
+                    Pdu::ReleaseRq => {
+                        write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
+                        return Err(NetworkError::ClosedPrematurely { source: None });
+                    }
+                    _ => {}
                 }
-                Pdu::Abort(abort) => {
-                    return Err(NetworkError::Abort {
-                        source_code: abort.source.code(),
-                        reason: abort.reason,
-                    })
-                }
-                Pdu::ReleaseRq => {
-                    write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
-                    return Err(NetworkError::ClosedPrematurely { source: None });
-                }
-                _ => {}
             }
         }
+        .await;
+        self.pending.remove(message_id);
+        result
     }
 
     /// Runs a C-GET, collecting every response (§11.4).
@@ -2350,8 +2401,10 @@ impl Association {
         let context = self.contexts.pick(&request.sop_class_uid, "")?;
         let context_id = context.id;
         let syntax = transfer_syntax_of(&context.transfer_syntax)?;
-        let message_id = request.message_id;
+        let mut request = request.clone();
+        request.message_id = self.message_id_or_allocate(request.message_id)?;
 
+        let message_id = request.message_id;
         let command = bytes::Bytes::from(command_bytes(&request.to_command())?);
         let identifier = bytes::Bytes::from(crate::message::encode_dataset(
             &request.identifier,
@@ -2361,199 +2414,206 @@ impl Association {
             .splitter
             .split_message_bytes(context_id, command, Some(identifier))?;
         write_pdata_batch(&mut self.stream, pdus).await?;
+        self.pending.insert(message_id);
 
         // a reverse C-STORE request awaiting its dataset
-        let mut awaiting_store: Option<(u8, Command)> = None;
-        let mut awaiting_identifier: Option<crate::cget::CGetResponse> = None;
-        loop {
-            let Some(pdu) = self.read_request_pdu(message_id).await? else {
-                return Err(NetworkError::ClosedPrematurely { source: None });
-            };
-            match pdu {
-                Pdu::PData(pdata) => {
-                    for unit in self.push_pdata_offloaded(&pdata).await? {
-                        // H2: answer an incoming N-EVENT-REPORT-RQ instead of
-                        // dropping it, before the response filtering below
-                        if self.intercept_event_report(&unit).await? {
-                            continue;
-                        }
-                        match unit.stream {
-                            Stream::Command => {
-                                let command = command_from_bytes(&unit.bytes)?;
-                                match command.field {
-                                    CommandField::CStoreRq => {
-                                        self.contexts.validate_request(
-                                            unit.context_id,
-                                            &command,
-                                            false,
-                                        )?;
-                                        if command.no_dataset {
-                                            // an instance without a dataset is unusable
-                                            let Some(response) = Command::response(
-                                                &command,
-                                                crate::dimse::status::PROCESSING_FAILURE,
-                                            ) else {
-                                                continue;
-                                            };
-                                            for pdata in self.splitter.split_bytes(
-                                                unit.context_id,
-                                                true,
-                                                bytes::Bytes::from(command_bytes(&response)?),
-                                            )? {
-                                                write_pdu(&mut self.stream, &Pdu::PData(pdata))
-                                                    .await?;
-                                            }
-                                        } else {
-                                            if awaiting_store.is_some() {
-                                                return Err(NetworkError::protocol(
-                                                    "overlapping reverse C-STORE requests",
-                                                ));
-                                            }
-                                            // Spool the instance so a large reverse
-                                            // C-STORE does not sit in memory or block
-                                            // the runtime worker.
-                                            self.assembler.arm_spill(unit.context_id);
-                                            awaiting_store = Some((unit.context_id, command));
-                                        }
-                                    }
-                                    CommandField::CGetRsp => {
-                                        if command.message_id_being_responded_to != Some(message_id)
-                                        {
-                                            continue;
-                                        }
-                                        let response =
-                                            crate::cget::CGetResponse::from_command(&command)?;
-                                        Self::validate_response_sop_class(
-                                            &request.sop_class_uid,
-                                            command.affected_sop_class_uid.as_deref(),
-                                        )?;
-                                        if unit.context_id != context_id {
-                                            return Err(NetworkError::protocol(
-                                                "C-GET response on the wrong context",
-                                            ));
-                                        }
-                                        let terminal = !response.is_pending();
-                                        if !command.no_dataset {
-                                            if !terminal {
-                                                return Err(NetworkError::protocol(
-                                                    "Pending C-GET response has an Identifier",
-                                                ));
-                                            }
-                                            awaiting_identifier = Some(response);
-                                            continue;
-                                        }
-                                        on_response(response)?;
-                                        if terminal {
-                                            return Ok(());
-                                        }
-                                    }
-                                    _ => {}
-                                }
+        let result = async {
+            let mut awaiting_store: Option<(u8, Command)> = None;
+            let mut awaiting_identifier: Option<crate::cget::CGetResponse> = None;
+            loop {
+                let Some(pdu) = self.read_request_pdu(message_id).await? else {
+                    return Err(NetworkError::ClosedPrematurely { source: None });
+                };
+                match pdu {
+                    Pdu::PData(pdata) => {
+                        for unit in self.push_pdata_offloaded(&pdata).await? {
+                            // H2: answer an incoming N-EVENT-REPORT-RQ instead of
+                            // dropping it, before the response filtering below
+                            if self.intercept_event_report(&unit).await? {
+                                continue;
                             }
-                            Stream::Data => {
-                                if unit.context_id == context_id {
-                                    let mut response =
-                                        awaiting_identifier.take().ok_or_else(|| {
+                            match unit.stream {
+                                Stream::Command => {
+                                    let command = command_from_bytes(&unit.bytes)?;
+                                    match command.field {
+                                        CommandField::CStoreRq => {
+                                            self.contexts.validate_request(
+                                                unit.context_id,
+                                                &command,
+                                                false,
+                                            )?;
+                                            if command.no_dataset {
+                                                // an instance without a dataset is unusable
+                                                let Some(response) = Command::response(
+                                                    &command,
+                                                    crate::dimse::status::PROCESSING_FAILURE,
+                                                ) else {
+                                                    continue;
+                                                };
+                                                for pdata in self.splitter.split_bytes(
+                                                    unit.context_id,
+                                                    true,
+                                                    bytes::Bytes::from(command_bytes(&response)?),
+                                                )? {
+                                                    write_pdu(&mut self.stream, &Pdu::PData(pdata))
+                                                        .await?;
+                                                }
+                                            } else {
+                                                if awaiting_store.is_some() {
+                                                    return Err(NetworkError::protocol(
+                                                        "overlapping reverse C-STORE requests",
+                                                    ));
+                                                }
+                                                // Spool the instance so a large reverse
+                                                // C-STORE does not sit in memory or block
+                                                // the runtime worker.
+                                                self.assembler.arm_spill(unit.context_id);
+                                                awaiting_store = Some((unit.context_id, command));
+                                            }
+                                        }
+                                        CommandField::CGetRsp => {
+                                            if command.message_id_being_responded_to
+                                                != Some(message_id)
+                                            {
+                                                continue;
+                                            }
+                                            let response =
+                                                crate::cget::CGetResponse::from_command(&command)?;
+                                            Self::validate_response_sop_class(
+                                                &request.sop_class_uid,
+                                                command.affected_sop_class_uid.as_deref(),
+                                            )?;
+                                            if unit.context_id != context_id {
+                                                return Err(NetworkError::protocol(
+                                                    "C-GET response on the wrong context",
+                                                ));
+                                            }
+                                            let terminal = !response.is_pending();
+                                            if !command.no_dataset {
+                                                if !terminal {
+                                                    return Err(NetworkError::protocol(
+                                                        "Pending C-GET response has an Identifier",
+                                                    ));
+                                                }
+                                                awaiting_identifier = Some(response);
+                                                continue;
+                                            }
+                                            on_response(response)?;
+                                            if terminal {
+                                                return Ok(());
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                Stream::Data => {
+                                    if unit.context_id == context_id {
+                                        let mut response =
+                                            awaiting_identifier.take().ok_or_else(|| {
+                                                NetworkError::protocol(
+                                                    "C-GET Identifier without its response",
+                                                )
+                                            })?;
+                                        response.set_identifier(
+                                            &self.decode_response_body(&unit, &syntax).await?,
+                                        );
+                                        on_response(response)?;
+                                        return Ok(());
+                                    }
+                                    let (store_context_id, store) =
+                                        awaiting_store.take().ok_or_else(|| {
                                             NetworkError::protocol(
-                                                "C-GET Identifier without its response",
+                                                "reverse C-STORE dataset without a command",
                                             )
                                         })?;
-                                    response.set_identifier(
-                                        &self.decode_response_body(&unit, &syntax).await?,
-                                    );
-                                    on_response(response)?;
-                                    return Ok(());
-                                }
-                                let (store_context_id, store) =
-                                    awaiting_store.take().ok_or_else(|| {
-                                        NetworkError::protocol(
-                                            "reverse C-STORE dataset without a command",
+                                    if unit.context_id != store_context_id {
+                                        return Err(NetworkError::protocol(
+                                            "reverse C-STORE dataset on the wrong context",
+                                        ));
+                                    }
+                                    // the reverse C-STORE dataset travels on the
+                                    // storage context the SCP chose, which is not
+                                    // the C-GET request's context: resolve the
+                                    // syntax from the PDV's own context id (#15)
+                                    let store_context =
+                                        self.contexts.by_id(unit.context_id).ok_or_else(|| {
+                                            NetworkError::protocol(
+                                                "reverse C-STORE on an unaccepted context",
+                                            )
+                                        })?;
+                                    let store_syntax =
+                                        transfer_syntax_of(&store_context.transfer_syntax)?;
+                                    let body = unit.body();
+                                    let fallback = self.fallback_encoding;
+                                    let sink = if body.spool().is_some() {
+                                        crate::store::StoreSink::SpoolToTemp
+                                    } else {
+                                        crate::store::StoreSink::Memory
+                                    };
+                                    let decode_syntax = store_syntax.clone();
+                                    let limit = self.max_materialized_length;
+                                    let dataset = tokio::task::spawn_blocking(move || {
+                                        sink.materialize_body_with_fallback_limited(
+                                            &body,
+                                            &decode_syntax,
+                                            fallback,
+                                            limit,
                                         )
-                                    })?;
-                                if unit.context_id != store_context_id {
-                                    return Err(NetworkError::protocol(
-                                        "reverse C-STORE dataset on the wrong context",
-                                    ));
-                                }
-                                // the reverse C-STORE dataset travels on the
-                                // storage context the SCP chose, which is not
-                                // the C-GET request's context: resolve the
-                                // syntax from the PDV's own context id (#15)
-                                let store_context =
-                                    self.contexts.by_id(unit.context_id).ok_or_else(|| {
-                                        NetworkError::protocol(
-                                            "reverse C-STORE on an unaccepted context",
-                                        )
-                                    })?;
-                                let store_syntax =
-                                    transfer_syntax_of(&store_context.transfer_syntax)?;
-                                let body = unit.body();
-                                let fallback = self.fallback_encoding;
-                                let sink = if body.spool().is_some() {
-                                    crate::store::StoreSink::SpoolToTemp
-                                } else {
-                                    crate::store::StoreSink::Memory
-                                };
-                                let decode_syntax = store_syntax.clone();
-                                let limit = self.max_materialized_length;
-                                let dataset = tokio::task::spawn_blocking(move || {
-                                    sink.materialize_body_with_fallback_limited(
-                                        &body,
-                                        &decode_syntax,
-                                        fallback,
-                                        limit,
-                                    )
-                                })
-                                .await
-                                .map_err(|join| {
-                                    NetworkError::Io(std::io::Error::other(format!(
-                                        "reverse C-STORE decode task failed: {join}"
-                                    )))
-                                })??;
-                                let mut file = dataset.file;
-                                file.dataset.set_transfer_syntax(store_syntax.clone());
-                                let request = crate::store::c_store_request_from_message(
-                                    &store,
-                                    crate::store::ReceivedInstance::from_file(file),
-                                )?;
-                                // the handler's verdict goes straight back
-                                let response = match crate::store::dataset_mismatch(&request) {
-                                    Some(comment) => crate::services::CStoreResponse::failure(
-                                        &request,
-                                        crate::store::DATASET_MISMATCH,
-                                        comment,
-                                    ),
-                                    None => match handler(&request) {
-                                        Ok(response) => response,
-                                        Err(error) => {
-                                            crate::store::failure_response(&request, &error)
-                                        }
-                                    },
-                                };
-                                let bytes =
-                                    bytes::Bytes::from(command_bytes(&response.to_command())?);
-                                for pdata in
-                                    self.splitter.split_bytes(unit.context_id, true, bytes)?
-                                {
-                                    write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
+                                    })
+                                    .await
+                                    .map_err(|join| {
+                                        NetworkError::Io(std::io::Error::other(format!(
+                                            "reverse C-STORE decode task failed: {join}"
+                                        )))
+                                    })??;
+                                    let mut file = dataset.file;
+                                    file.dataset.set_transfer_syntax(store_syntax.clone());
+                                    let request = crate::store::c_store_request_from_message(
+                                        &store,
+                                        crate::store::ReceivedInstance::from_file(file),
+                                    )?;
+                                    // the handler's verdict goes straight back
+                                    let response = match crate::store::dataset_mismatch(&request) {
+                                        Some(comment) => crate::services::CStoreResponse::failure(
+                                            &request,
+                                            crate::store::DATASET_MISMATCH,
+                                            comment,
+                                        ),
+                                        None => match handler(&request) {
+                                            Ok(response) => response,
+                                            Err(error) => {
+                                                crate::store::failure_response(&request, &error)
+                                            }
+                                        },
+                                    };
+                                    let bytes =
+                                        bytes::Bytes::from(command_bytes(&response.to_command())?);
+                                    for pdata in
+                                        self.splitter.split_bytes(unit.context_id, true, bytes)?
+                                    {
+                                        write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
+                                    }
                                 }
                             }
                         }
                     }
+                    Pdu::Abort(abort) => {
+                        return Err(NetworkError::Abort {
+                            source_code: abort.source.code(),
+                            reason: abort.reason,
+                        })
+                    }
+                    Pdu::ReleaseRq => {
+                        write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
+                        return Err(NetworkError::ClosedPrematurely { source: None });
+                    }
+                    _ => {}
                 }
-                Pdu::Abort(abort) => {
-                    return Err(NetworkError::Abort {
-                        source_code: abort.source.code(),
-                        reason: abort.reason,
-                    })
-                }
-                Pdu::ReleaseRq => {
-                    write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
-                    return Err(NetworkError::ClosedPrematurely { source: None });
-                }
-                _ => {}
             }
         }
+        .await;
+        self.pending.remove(message_id);
+        result
     }
 
     /// Reads PDUs until the response for `message_id` arrives (§11.2).
@@ -2721,13 +2781,12 @@ impl Association {
         Ok(())
     }
 
-    /// Releases the association gracefully (§11.1).
     /// Sends a C-CANCEL-RQ (0x0FFF) for an in-flight request (§11.4, SRV-08).
     ///
     /// The command carries the target `message_id` in
     /// `(0000,0120) MessageIDBeingRespondedTo`, matching fo-dicom's
-    /// `CCancelRequest = 0x0FFF`. It is sent on `context_id` (a proposed
-    /// presentation context id). Note the SCP collects a query's matches before
+    /// `CCancelRequest = 0x0FFF`. It is sent on the accepted `context_id`
+    /// used by the request being cancelled.
     /// The streaming FIND/MOVE/GET handlers return a terminal `CANCEL`
     /// response when this command names their active request.
     pub async fn send_c_cancel(&mut self, context_id: u8, message_id: u16) -> Result<()> {
@@ -2750,6 +2809,9 @@ impl Association {
         &mut self,
         request: &crate::nservice::NServiceRequest,
     ) -> Result<crate::nservice::NServiceResponse> {
+        let mut request = request.clone();
+        request.message_id = self.message_id_or_allocate(request.message_id)?;
+        let message_id = request.message_id;
         let sop_class = request
             .sop_class_uid
             .as_deref()
@@ -2762,6 +2824,8 @@ impl Association {
         let context = self.contexts.pick(sop_class, request_syntax.uid())?;
         let context_id = context.id;
         let target = transfer_syntax_of(&context.transfer_syntax)?;
+        let expected = crate::dimse::response_field(request.field)
+            .ok_or_else(|| NetworkError::protocol("N-service request has no response field"))?;
 
         let command = request.to_command();
         let command_bytes =
@@ -2778,12 +2842,13 @@ impl Association {
         {
             write_pdu(&mut self.stream, &Pdu::PData(pdata)).await?;
         }
+        self.pending.insert(message_id);
 
-        let expected = crate::dimse::response_field(request.field)
-            .ok_or_else(|| NetworkError::protocol("N-service request has no response field"))?;
-        let (response_command, response_dataset) = self
-            .await_n_response(request.message_id, expected, &target, context_id)
-            .await?;
+        let response = self
+            .await_n_response(message_id, expected, &target, context_id)
+            .await;
+        self.pending.remove(message_id);
+        let (response_command, response_dataset) = response?;
         Self::validate_response_sop_class(
             sop_class,
             response_command.affected_sop_class_uid.as_deref(),
@@ -2931,6 +2996,37 @@ impl Association {
     /// never hand an in-flight ID to a new request.
     pub(crate) fn allocate_message_id(&mut self) -> Result<u16> {
         self.pending.allocate_message_id()
+    }
+
+    fn message_id_or_allocate(&mut self, message_id: u16) -> Result<u16> {
+        let message_id = if message_id == 0 {
+            self.allocate_message_id()
+        } else {
+            Ok(message_id)
+        }?;
+        if self.pending.contains(message_id) {
+            return Err(NetworkError::protocol("message ID is already in use"));
+        }
+        Ok(message_id)
+    }
+
+    fn reserve_explicit_ids<I>(&mut self, ids: I) -> Result<Vec<u16>>
+    where
+        I: IntoIterator<Item = u16>,
+    {
+        let mut explicit = std::collections::HashSet::new();
+        for id in ids {
+            if id != 0 && (!explicit.insert(id) || self.pending.contains(id)) {
+                return Err(NetworkError::protocol(
+                    "batch message ID is already in use or repeated",
+                ));
+            }
+        }
+        let reserved: Vec<_> = explicit.into_iter().collect();
+        for id in &reserved {
+            self.pending.insert(*id);
+        }
+        Ok(reserved)
     }
 }
 

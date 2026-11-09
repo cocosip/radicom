@@ -2367,6 +2367,40 @@ mod tests {
     }
 
     #[test]
+    fn json_export_rejects_truncated_binary_numeric_values() {
+        for vr in [
+            Vr::Us,
+            Vr::Ss,
+            Vr::Ul,
+            Vr::Sl,
+            Vr::Fl,
+            Vr::Fd,
+            Vr::Sv,
+            Vr::Uv,
+            Vr::At,
+        ] {
+            let tag = Tag::new(0x7776, 0x0010);
+            let mut ds = Dataset::new();
+            ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+                tag.clone(),
+                vr,
+                Arc::new(MemoryBuffer::from(vec![0; vr.unit_size() + 1])),
+            )));
+            match dataset_to_json(&ds, &JsonOptions::default()) {
+                Err(JsonError::Malformed {
+                    tag: actual,
+                    reason,
+                }) => {
+                    assert_eq!(actual, tag.to_string());
+                    assert!(reason.contains(&vr.to_string()), "{reason}");
+                    assert!(reason.contains("not a multiple"), "{reason}");
+                }
+                result => panic!("{vr} with a truncated final value must fail: {result:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn binary_numeric_json_from_this_library_reads_back() {
         // FJ-D-06: the writer never emits `null` for a fixed-width binary
         // numeric VR (they are byte-backed), so its own output is readable.

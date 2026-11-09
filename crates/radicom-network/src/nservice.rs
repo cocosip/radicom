@@ -44,6 +44,7 @@ pub fn uses_requested_uids(field: CommandField) -> bool {
 #[derive(Debug, Clone)]
 pub struct NServiceRequest {
     pub field: CommandField,
+    /// Message ID; zero asks high-level send APIs to allocate one.
     pub message_id: u16,
     /// The SOP class/instance the request addresses. `to_command` places it in
     /// the Requested or Affected tags that `field` calls for (PS3.7 §10.1).

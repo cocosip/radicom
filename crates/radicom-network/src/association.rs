@@ -531,11 +531,14 @@ impl AcceptedContexts {
             })
     }
 
-    /// True when this side may act as SCU for the abstract syntax.
+    /// True when the association requestor may act as SCU for the abstract
+    /// syntax. Without Role Selection Negotiation, the requestor's default
+    /// role is SCU (§D.3.3.4).
     pub fn can_scu(&self, abstract_syntax: &str) -> bool {
-        self.contexts
-            .iter()
-            .any(|c| c.abstract_syntax == abstract_syntax && c.roles.iter().any(|r| r.scu_role))
+        self.contexts.iter().any(|c| {
+            c.abstract_syntax == abstract_syntax
+                && (c.roles.is_empty() || c.roles.iter().any(|r| r.scu_role))
+        })
     }
 
     /// True when the peer holds the SCP role for the abstract syntax, so this
@@ -1070,6 +1073,17 @@ mod tests {
         let accepted = AcceptedContexts::from_negotiated(negotiated);
         assert!(accepted.can_scu("A"));
         assert!(!accepted.can_scu("B"));
+    }
+
+    #[test]
+    fn requestor_default_role_is_scu_without_role_selection() {
+        let policy = NegotiationPolicy::new(vec!["A".into()]);
+        let accepted = AcceptedContexts::from_negotiated(policy.negotiate(&[pc(
+            1,
+            "A",
+            &["1.2.840.10008.1.2"],
+        )]));
+        assert!(accepted.can_scu("A"));
     }
 
     #[test]

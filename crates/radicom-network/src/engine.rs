@@ -10,15 +10,22 @@ use crate::error::{NetworkError, Result};
 use std::collections::HashSet;
 
 /// The message IDs with a request in flight (§11.2, D3).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PendingTable {
     entries: HashSet<u16>,
     next_message_id: u16,
 }
 
+impl Default for PendingTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PendingTable {
     pub fn new() -> Self {
-        // message IDs start at 1; 0 is not a valid ID
+        // High-level APIs reserve 0 for automatic allocation; the wire codec
+        // still accepts and preserves an explicit zero Message ID.
         PendingTable {
             entries: HashSet::new(),
             next_message_id: 1,
@@ -84,6 +91,12 @@ mod tests {
             3,
             "in-flight IDs are skipped"
         );
+    }
+
+    #[test]
+    fn default_allocator_reserves_zero_for_automatic_ids() {
+        let mut table = PendingTable::default();
+        assert_eq!(table.allocate_message_id().unwrap(), 1);
     }
 
     #[test]

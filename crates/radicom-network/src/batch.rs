@@ -73,7 +73,8 @@ impl DicomRequest {
         }
     }
 
-    /// Returns the caller-supplied Message ID, when this request has one.
+    /// Returns the caller-supplied nonzero Message ID, when this request has one.
+    /// A zero Message ID is reserved for automatic allocation by high-level APIs.
     pub fn message_id(&self) -> Option<u16> {
         match self {
             Self::Echo(request) => (request.message_id != 0).then_some(request.message_id),

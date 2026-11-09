@@ -136,6 +136,7 @@ const PATIENT_KEYS: &[(u16, u16, Vr)] = &[(0x0010, 0x0010, Vr::Pn)];
 /// A C-FIND request (§11.4).
 #[derive(Debug, Clone)]
 pub struct CFindRequest {
+    /// Message ID; zero asks high-level send APIs to allocate one.
     pub message_id: u16,
     /// The abstract syntax the query runs under, derived from level + root.
     pub sop_class_uid: String,

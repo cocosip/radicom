@@ -12,6 +12,7 @@ use radicom::io::file::DicomFile;
 /// A C-ECHO request (§11.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CEchoRequest {
+    /// Message ID; zero asks high-level send APIs to allocate one.
     pub message_id: u16,
     pub affected_sop_class_uid: String,
 }
@@ -93,6 +94,7 @@ impl CEchoResponse {
 /// A C-STORE request (§11.4).
 #[derive(Debug, Clone)]
 pub struct CStoreRequest {
+    /// Message ID; zero asks high-level send APIs to allocate one.
     pub message_id: u16,
     pub affected_sop_class_uid: String,
     pub affected_sop_instance_uid: String,

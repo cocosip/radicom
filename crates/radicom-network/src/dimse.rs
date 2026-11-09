@@ -264,11 +264,17 @@ impl Command {
         let mut out = Command::request(field, request.message_id);
         out.message_id_being_responded_to = Some(request.message_id);
         out.status = Some(status);
-        out.affected_sop_class_uid = request.affected_sop_class_uid.clone();
-        // Preserve optional affected UIDs supplied by the request.
-        out.affected_sop_instance_uid = request.affected_sop_instance_uid.clone();
-        out.requested_sop_class_uid = request.requested_sop_class_uid.clone();
-        out.requested_sop_instance_uid = request.requested_sop_instance_uid.clone();
+        let requested = crate::nservice::uses_requested_uids(request.field);
+        out.affected_sop_class_uid = request.affected_sop_class_uid.clone().or_else(|| {
+            requested
+                .then(|| request.requested_sop_class_uid.clone())
+                .flatten()
+        });
+        out.affected_sop_instance_uid = request.affected_sop_instance_uid.clone().or_else(|| {
+            requested
+                .then(|| request.requested_sop_instance_uid.clone())
+                .flatten()
+        });
         out.no_dataset = true;
         Some(out)
     }
@@ -1074,6 +1080,32 @@ mod tests {
         assert_eq!(back.field, CommandField::CFindRsp);
         assert_eq!(back.message_id_being_responded_to, Some(11));
         assert_eq!(back.status, Some(status::PENDING));
+    }
+
+    #[test]
+    fn n_service_response_does_not_echo_requested_uids() {
+        let mut request = Command::request(CommandField::NGetRq, 11);
+        request.requested_sop_class_uid = Some("1.2.3".into());
+        request.requested_sop_instance_uid = Some("1.2.3.4".into());
+
+        let response =
+            Command::response(&request, status::PROCESSING_FAILURE).expect("N-GET has a response");
+
+        assert!(response.requested_sop_class_uid.is_none());
+        assert!(response.requested_sop_instance_uid.is_none());
+        assert_eq!(response.affected_sop_class_uid.as_deref(), Some("1.2.3"));
+        assert_eq!(
+            response.affected_sop_instance_uid.as_deref(),
+            Some("1.2.3.4")
+        );
+        assert!(response
+            .to_dataset()
+            .get::<String>(tag::REQUESTED_SOP_CLASS_UID)
+            .is_err());
+        assert!(response
+            .to_dataset()
+            .get::<String>(tag::REQUESTED_SOP_INSTANCE_UID)
+            .is_err());
     }
 
     #[test]

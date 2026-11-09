@@ -45,7 +45,8 @@ Deliberate, tested ceilings. Change one only together with the tests that descri
 - Concrete request objects (`CEchoRequest`, `CStoreRequest`, `CFindRequest`, `CGetRequest`,
   `CMoveRequest`, and `NServiceRequest`) convert into `DicomRequest` and `DicomClient::send_requests` covers
   heterogeneous C-ECHO, C-STORE, C-FIND, C-GET, C-MOVE and N-service requests. It admits at most
-  `min(invoked, 64)` requests at a time and routes pending and terminal responses by Message ID; the
+  `min(invoked, 64)` requests at a time for a finite invoked window, or 64 when invoked is zero
+  (unlimited), and routes pending and terminal responses by Message ID; the
   peer may still execute them serially. C-GET runs with no other in-flight mixed request to keep reverse
   C-STORE progress independent of later streamed writes. `DicomRequestQueue` and `send_queue` remain optional wrappers,
   while `send_batch(Vec<DicomRequest>, ...)` and the older typed batch methods remain compatibility APIs.
