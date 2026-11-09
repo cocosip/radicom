@@ -158,8 +158,9 @@ different code path.
 ### 3.9 Coverage
 
 Production-line coverage has a **95% floor**. `cargo run --package xtask -- coverage` runs
-`cargo llvm-cov` and keeps only production lines: test/bench/example targets, `xtask` and inline
-`#[cfg(test)]` modules are excluded. CI runs the same command and publishes the measured numbers.
+`cargo llvm-cov` and keeps only production lines: test/bench/example targets, `xtask`, inline
+`#[cfg(test)]` modules and source files starting with `#![cfg(test)]` are excluded. External test
+modules must carry that file-level marker. CI runs the same command and publishes the measured numbers.
 
 ## 4. Interop Testing Against Real Peers
 
@@ -282,7 +283,7 @@ untracked `.cargo/` directory.
 | interop | local / self-hosted | DCMTK / fo-dicom matrix |
 | bench | local/manual | `cargo bench` against a baseline |
 | coverage | push to `master`/`main`, pull request, `workflow_dispatch` | `cargo run --package xtask -- coverage`, 95% production-line floor |
-| release | push of a `v*` tag | `release.yml`: first `verify-tag` (the tag must equal every publishable crate's version, and the publishable set must equal the list `publish` pushes); then the same gates as `ci.yml` — `fmt --check`, clippy and tests with default **and** all features, `cargo doc` with `-D warnings`, `gen-dict --check`, `cargo package --list` proving `LICENSE` + `README.md` ship in every crate — plus the MSRV (1.89) check; only then are `radicom-dict` → `radicom` → `radicom-json` → `radicom-network` published to crates.io, in that dependency order, and a GitHub release is created with generated notes. Versions already on crates.io are skipped, so a failed tag run can be re-run from the same tag. A manual (`workflow_dispatch`) run with a tag input regenerates the release notes only and never publishes. |
+| release | push of a `v*` tag | `release.yml`: first `verify-tag` (the tag must equal every publishable crate's version, and the publishable set must equal the list `publish` pushes); then Ubuntu release gates — `fmt --check`, clippy and tests with default **and** all features, `cargo doc` with `-D warnings`, `gen-dict --check`, 95% production-line coverage, `cargo package --list` proving `LICENSE` + `README.md` ship in every crate — plus the MSRV (1.89) check; only then are `radicom-dict` → `radicom` → `radicom-json` → `radicom-network` published to crates.io, in that dependency order, and a GitHub release is created with generated notes. Versions already on crates.io are skipped, so a failed tag run can be re-run from the same tag. A manual (`workflow_dispatch`) run with a tag input regenerates the release notes only and never publishes. |
 
 ### 6.2 Versioning and publishing
 
@@ -294,7 +295,7 @@ untracked `.cargo/` directory.
   pins under `[workspace.dependencies]` — followed by the normal checks, a commit, and a `vX.Y.Z` tag. Keep the
   tag equal to the version: `release.yml` rejects any other tag.
 - A bump also renames the peer-visible Implementation Version Name (`RADICOM <workspace version>`, currently
-  `RADICOM 0.1.2`): file meta (`radicom`) and association user information (`radicom-network`) both derive it
+  `RADICOM 0.2.0`): file meta (`radicom`) and association user information (`radicom-network`) both derive it
   from `CARGO_PKG_VERSION`, and a compile-time check rejects any name longer than the 16-byte SH limit, so a
   pre-release version must be shortened first.
 - Publishing needs a `CARGO_REGISTRY_TOKEN` repository secret (crates.io API token with `publish-new` and
@@ -307,7 +308,9 @@ untracked `.cargo/` directory.
   non-merge commit subject between the previous tag and this one, plus a `compare` link. The first release lists
   the whole history instead. A `workflow_dispatch` run with a tag input regenerates those notes for an existing
   tag without publishing anything, which is how a release that predates the notes job is backfilled.
-- The first public release was `v0.1.0`; the current release line is `v0.1.2`. Local `cargo package`
+- The first public release was `v0.1.0`; the current release line is `v0.2.0`. See the root README's
+  migration section for Common Extended Negotiation initializers and the companion codec version requirement.
+  Local `cargo package`
   verification for `radicom`, `radicom-json` and `radicom-network` cannot resolve their own unpublished
   dependencies; that is expected, and the tag run publishes the crates in dependency order.
 

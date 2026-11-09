@@ -72,7 +72,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, llvm-tools-preview
 
       - uses: Swatinem/rust-cache@v2
 
@@ -100,6 +100,11 @@ jobs:
 
       - name: Generated dictionary is up to date
         run: cargo run --package xtask -- gen-dict --check
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Production line coverage (95% floor)
+        run: cargo run --package xtask -- coverage
 
       # `--list` only: before the first release the dependents' own path deps
       # are not on crates.io yet, so `cargo package` cannot resolve them; the

@@ -380,8 +380,9 @@ client/server. One tokio task per association. Locks must not be held across `.a
   C-GET drains earlier requests and blocks later admissions until completion, allowing reverse C-STORE
   traffic without competing streamed writes. Each distinct source storage syntax has its own context;
   mixed requests support cancellation by active Message ID.
-- Reverse C-STORE (C-GET / C-MOVE) requires role selection; register a handler with
-  `with_reverse_store_handler` or `collect_reverse_stores`.
+- Reverse C-STORE on a C-GET association requires role selection; register a handler with
+  `with_reverse_store_handler` or `collect_reverse_stores` and declare its storage SOP classes.
+  C-MOVE delivers C-STORE on a separate association to the configured destination AE.
 - Received bodies obey configured limits even below the spool threshold; deflated output has the same
   hard limit on both memory and spool paths. Blocking file reads and parsing run on the blocking pool.
 - Sub-operation counters must be populated from the actual results. Returning a defaulted summary makes a

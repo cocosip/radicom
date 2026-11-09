@@ -31,9 +31,10 @@ pub struct SpoolConfig {
     ///
     /// The default (1 MiB) buffers a small instance in memory and only opens the
     /// temp file once it grows past this; `0` spills from the first PDV (always a
-    /// temp file). Applies to the C-STORE / reverse C-STORE receive path.
+    /// temp file). Applies to every receive path using this spool configuration.
     pub memory_threshold: usize,
-    /// Hard bound on one spooled dataset. A larger message is refused.
+    /// Hard bound on one dataset using this configuration, including messages
+    /// below the memory threshold and their inflated output.
     ///
     /// This replaces the flat [`PdvAssembler::DEFAULT_MAX_MESSAGE_LENGTH`]
     /// refusal for armed streams, so a valid whole-slide instance above 1 GiB

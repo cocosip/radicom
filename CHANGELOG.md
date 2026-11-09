@@ -2,12 +2,46 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-09
+
 ### Changed
 
-- The DICOM **Implementation Version Name** now derives from the workspace version — `RADICOM 0.1.2` instead of
+- **Breaking:** `CommonExtended` requires `sop_class_uid`; `common_extended` on `ClientOptions` and
+  `UserInformation` is now `Vec<CommonExtended>` instead of `Option<CommonExtended>`. See the README's
+  migration section for updated initializers.
+- The default receive spool limit is 4 GiB with a 1 MiB memory threshold. Incoming storage values retain
+  their spool ownership; receive and deflate limits apply to memory and file paths.
+- Message ID zero requests automatic allocation in high-level send APIs; the wire codec preserves it.
+- Codec traits and the transcoder interface are unchanged. Companion codecs must depend on `radicom 0.2`
+  to share this release's registry; `radicom-codecs 0.1.2` targets the `0.1` core.
+- The DICOM **Implementation Version Name** now derives from the workspace version — `RADICOM 0.2.0` instead of
   the fixed `RADICOM_0_1` — in both file meta (0002,0013) and association user information, so a release bump
   updates the peer-visible identity automatically. A compile-time check rejects a name longer than the 16-byte
   SH limit.
+
+### Added
+
+- Concrete DIMSE request objects convert into `DicomRequest` for heterogeneous `DicomClient::send_requests`
+  collections with response callbacks, bounded asynchronous windows and active-request cancellation.
+- `with_reverse_store_classes` and `send_c_get_registered` declare C-GET storage classes once per client.
+
+### Fixed
+
+- DICOM UL item lengths, common and extended negotiation layouts, default roles, optional response UIDs,
+  terminal retrieve counters, N-service Type IDs and Requested/Affected UID fields follow the standard.
+- Request ID reservation prevents collisions across allocation, batches and abandoned request futures;
+  cancellation state is reset when a later request reuses an ID.
+- `Association::send_n_service` rejects C-service and response command fields before sending.
+- A rejected C-STORE batch response releases its reserved Message ID after context or UID validation
+  fails; wire-peer regressions cover malformed responses and interrupted operations across SCU services.
+- Text VR multiplicity, character decoding, date/time validation, pixel and rendering edge cases, and safe
+  serialization have additional conformance checks and regression coverage.
+- README examples document current mixed requests, C-GET handling, cancellation and migration APIs.
+- Tag releases enforce the 95% production-line coverage gate before publishing.
+- Concurrent filesystem tests use distinct temporary directories to avoid deleting each other's fixtures.
+- The large mixed-transfer test checks both terminal responses and the reverse store, with a deadlock
+  watchdog separate from its two-second request inactivity timeout.
+- Production coverage excludes explicitly gated external test modules as well as inline tests.
 
 ## [0.1.2] - 2026-11-05
 
