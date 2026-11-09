@@ -272,6 +272,73 @@ async fn cancellation_routes_each_live_mixed_request() {
 }
 
 #[tokio::test]
+async fn cancellation_works_when_a_later_mixed_request_reuses_the_id() {
+    use futures::StreamExt;
+    use radicom_network::cfind::{CFindRequest, CFindResponse};
+    use radicom_network::dimse::status;
+
+    struct P;
+    #[async_trait]
+    impl ServiceProvider for P {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec![radicom_network::association::sop_class::STUDY_ROOT_QR_FIND.into()]
+        }
+        fn on_c_find<'a>(
+            &'a self,
+            request: &'a CFindRequest,
+        ) -> futures::stream::BoxStream<'a, radicom_network::Result<CFindResponse>> {
+            Box::pin(
+                futures::stream::once(async move {
+                    Ok(CFindResponse::pending(request, Dataset::new()))
+                })
+                .chain(futures::stream::pending()),
+            )
+        }
+    }
+
+    let server = DicomServer::bind("127.0.0.1:0", Arc::new(P), ServerOptions::default())
+        .await
+        .unwrap();
+    let addr = server.local_addr();
+    let task = tokio::spawn(async move { server.accept_one().await });
+    let mut client =
+        DicomClient::new("SCU", "SCP", addr.to_string()).with_options(DicomClientOptions {
+            connection: ClientOptions {
+                request_timeout: Some(Duration::from_secs(2)),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+    let cancel = client.cancellation_handle();
+    let mut pending_ids = Vec::new();
+    let mut completed = Vec::new();
+    let outcome = client
+        .send_requests(
+            vec![CFindRequest::study_query(1), CFindRequest::study_query(0)],
+            |event| {
+                if event.is_final {
+                    let radicom_network::batch::DicomResponse::CFind(response) = event.response
+                    else {
+                        panic!("expected FIND")
+                    };
+                    assert_eq!(response.status, status::CANCEL);
+                    completed.push(event.request_index);
+                } else {
+                    pending_ids.push(event.message_id);
+                    assert!(cancel.cancel(event.message_id));
+                }
+                Ok(())
+            },
+        )
+        .await;
+    task.abort();
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert_eq!(pending_ids, [1, 1]);
+    assert_eq!(completed, [0, 1]);
+    assert!(!cancel.cancel(1));
+}
+
+#[tokio::test]
 async fn association_accept_ignores_reserved_ae_bytes_and_unknown_version_bits_and_rejected_syntax()
 {
     use radicom_network::{

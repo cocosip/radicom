@@ -819,6 +819,7 @@ impl Association {
         let result = async {
             while next < requests.len() || !inflight.is_empty() {
                 active.retain(|id, _| inflight.contains_key(id));
+                cancel_sent.retain(|id| inflight.contains_key(id));
                 while next < requests.len() && inflight.len() < window {
                     // Reverse C-STORE needs the peer to read: drain earlier work and keep GET alone.
                     if inflight.values().any(|pending| pending.kind == crate::batch::RequestKind::Get)
