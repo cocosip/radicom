@@ -238,8 +238,8 @@ pub struct UserInformation {
     pub async_operations: Option<AsyncOperations>,
     pub role_selections: Vec<RoleSelection>,
     pub extended_negotiations: Vec<ExtendedNegotiation>,
-    /// Common extended negotiation (RQ only).
-    pub common_extended: Option<CommonExtended>,
+    /// Common extended negotiation items, one per SOP class (RQ only).
+    pub common_extended: Vec<CommonExtended>,
     pub user_identity: Option<UserIdentity>,
     /// AC only: the server's answer to a user identity request.
     pub user_identity_response: Option<Vec<u8>>,
@@ -248,7 +248,11 @@ pub struct UserInformation {
 /// SOP class common extended negotiation (§11.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommonExtended {
+    /// SOP class whose service class and generalizations are identified.
+    pub sop_class_uid: String,
+    /// Service class of `sop_class_uid`.
     pub service_class_uid: String,
+    /// Related general SOP classes; an empty list is permitted.
     pub related_general_sop_classes: Vec<String>,
 }
 
@@ -589,7 +593,7 @@ fn decode_user_information(value: &[u8], is_rq: bool) -> Result<UserInformation>
             item::SOP_CLASS_COMMON_EXTENDED => {
                 // common extended negotiation is RQ-only (PS3.7)
                 if is_rq {
-                    out.common_extended = Some(decode_common_extended(raw)?);
+                    out.common_extended.push(decode_common_extended(raw)?);
                 }
             }
             item::USER_IDENTITY_RQ => {
@@ -665,13 +669,7 @@ fn decode_extended_negotiation(raw: &[u8]) -> Result<ExtendedNegotiation> {
     let uid = raw.get(2..2 + uid_len).ok_or(NetworkError::protocol(
         "extended negotiation UID runs past the item",
     ))?;
-    let mut requested = raw[2 + uid_len..].to_vec();
-    // The flat Service Class Application Information array is even-padded by the
-    // item framing; strip a lone trailing pad so an AC does not echo a phantom
-    // field the peer never sent.
-    if requested.len() % 2 == 1 && requested.last() == Some(&0) {
-        requested.pop();
-    }
+    let requested = raw[2 + uid_len..].to_vec();
     Ok(ExtendedNegotiation {
         sop_class: String::from_utf8_lossy(uid).to_string(),
         requested,
@@ -680,33 +678,45 @@ fn decode_extended_negotiation(raw: &[u8]) -> Result<ExtendedNegotiation> {
 }
 
 fn decode_common_extended(raw: &[u8]) -> Result<CommonExtended> {
-    if raw.len() < 2 {
+    let mut offset = 0;
+    let read_uid = |offset: &mut usize, message| -> Result<String> {
+        let len = u16_at(raw, *offset)? as usize;
+        let start = *offset + 2;
+        let uid = raw
+            .get(start..start + len)
+            .ok_or(NetworkError::protocol(message))?;
+        *offset = start + len;
+        Ok(String::from_utf8_lossy(uid).to_string())
+    };
+    let sop_class_uid = read_uid(
+        &mut offset,
+        "common extended SOP class UID runs past the item",
+    )?;
+    let service_class_uid = read_uid(
+        &mut offset,
+        "common extended service class UID runs past the item",
+    )?;
+    let related_len = u16_at(raw, offset)? as usize;
+    offset += 2;
+    if offset + related_len != raw.len() {
         return Err(NetworkError::protocol(
-            "common extended negotiation is truncated",
+            "common extended related SOP class aggregate length does not match the item",
         ));
     }
-    let uid_len = u16::from_be_bytes([raw[0], raw[1]]) as usize;
-    let service_class_uid = String::from_utf8_lossy(raw.get(2..2 + uid_len).ok_or(
-        NetworkError::protocol("common extended service class UID runs past the item"),
-    )?)
-    .to_string();
-    let mut offset = 2 + uid_len;
     let mut related = Vec::new();
-    while offset + 2 <= raw.len() {
-        let len = u16::from_be_bytes([raw[offset], raw[offset + 1]]) as usize;
-        let start = offset + 2;
-        // a length that overruns the item is malformed input, not a place to
-        // stop reading: match `item_header` and fail loudly
-        let uid = raw.get(start..start + len).ok_or(NetworkError::protocol(
+    while offset < raw.len() {
+        related.push(read_uid(
+            &mut offset,
             "common extended related SOP class runs past the item",
-        ))?;
-        related.push(String::from_utf8_lossy(uid).to_string());
-        offset = start + len;
+        )?);
     }
-    Ok(CommonExtended {
+    let common = CommonExtended {
+        sop_class_uid,
         service_class_uid,
         related_general_sop_classes: related,
-    })
+    };
+    crate::extended::validate_common_extended(&common)?;
+    Ok(common)
 }
 
 fn decode_associate_rj(body: &[u8]) -> Result<AssociateRj> {
@@ -820,21 +830,15 @@ fn encode_body(pdu: &Pdu) -> Result<Vec<u8>> {
 
 /// `type(1) reserved(1) length(2) value`, the item framing used inside A-ASSOCIATE
 /// (PS3.8 §9.3.2: items carry a 16-bit Item-length, unlike P-DATA PDVs whose
-/// length is 32-bit). Every item value must have even length; an odd value is
-/// padded with a single trailing 0x00 — strict peers (fo-dicom, DCMTK, ...)
-/// reject an A-ASSOCIATE whose item header or value length is wrong.
+/// length is 32-bit). UL item values use their actual length without padding.
 fn push_item(out: &mut Vec<u8>, item_type: u8, value: &[u8]) -> Result<()> {
-    let pad = value.len() & 1;
-    let len = u16::try_from(value.len() + pad).map_err(|_| {
+    let len = u16::try_from(value.len()).map_err(|_| {
         NetworkError::protocol("A-ASSOCIATE item value exceeds the 16-bit item length")
     })?;
     out.push(item_type);
     out.push(0); // reserved
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(value);
-    if pad == 1 {
-        out.push(0x00);
-    }
     Ok(())
 }
 
@@ -855,8 +859,7 @@ fn item_header(buf: &[u8], at: usize) -> Result<(u8, usize, usize)> {
     Ok((hdr[0], start, end))
 }
 
-/// Decodes a UID / string item value, trimming the even-length pad a peer may
-/// have appended (a single trailing 0x00, or spaces some senders use).
+/// Tolerates UID/string padding from nonconforming peers on the read path.
 fn decode_string(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw)
         .trim_end_matches(['\0', ' '])
@@ -893,11 +896,16 @@ fn encode_associate(a: &Associate, is_rq: bool) -> Result<Vec<u8>> {
             for syntax in &pc.transfer_syntaxes {
                 push_item(&mut body, item::TRANSFER_SYNTAX, syntax.as_bytes())?;
             }
-        } else if pc.result == 0 {
-            let Some(syntax) = pc.transfer_syntaxes.first() else {
-                return Err(NetworkError::protocol(
-                    "accepted presentation context has no transfer syntax",
-                ));
+        } else {
+            let syntax = if pc.result == 0 {
+                pc.transfer_syntaxes
+                    .first()
+                    .map(String::as_str)
+                    .ok_or(NetworkError::protocol(
+                        "accepted presentation context has no transfer syntax",
+                    ))?
+            } else {
+                "1.2.840.10008.1.2"
             };
             // an A-ASSOCIATE-AC carries exactly one accepted transfer syntax and
             // never repeats the abstract syntax (§9.3.3)
@@ -956,11 +964,27 @@ fn encode_associate(a: &Associate, is_rq: bool) -> Result<Vec<u8>> {
         value.extend_from_slice(info);
         push_item(&mut user, item::SOP_CLASS_EXTENDED_NEGOTIATION, &value)?;
     }
-    if let Some(common) = &a.user_information.common_extended {
-        if is_rq {
+    if is_rq {
+        for common in &a.user_information.common_extended {
+            crate::extended::validate_common_extended(common)?;
             let mut value = Vec::new();
+            value.extend_from_slice(&(common.sop_class_uid.len() as u16).to_be_bytes());
+            value.extend_from_slice(common.sop_class_uid.as_bytes());
             value.extend_from_slice(&(common.service_class_uid.len() as u16).to_be_bytes());
             value.extend_from_slice(common.service_class_uid.as_bytes());
+            let related_len = u16::try_from(
+                common
+                    .related_general_sop_classes
+                    .iter()
+                    .map(|uid| 2 + uid.len())
+                    .sum::<usize>(),
+            )
+            .map_err(|_| {
+                NetworkError::protocol(
+                    "common extended related SOP classes exceed the 16-bit item length",
+                )
+            })?;
+            value.extend_from_slice(&related_len.to_be_bytes());
             for uid in &common.related_general_sop_classes {
                 value.extend_from_slice(&(uid.len() as u16).to_be_bytes());
                 value.extend_from_slice(uid.as_bytes());
@@ -1031,6 +1055,113 @@ fn encode_pdata_into(p: &PData, out: &mut Vec<u8>) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn standard_common_extended_fixture_has_sop_service_and_related_lengths() {
+        // PS3.7 Table D.3-12: SOP UID, service UID, aggregate related length.
+        let raw = b"\x00\x051.2.3\x00\x051.2.4\x00\x07\x00\x051.2.5";
+        let common = super::decode_common_extended(raw).unwrap();
+        assert_eq!(common.sop_class_uid, "1.2.3");
+        assert_eq!(common.service_class_uid, "1.2.4");
+        let mut rq = Associate::new("SCP", "SCU");
+        rq.user_information.common_extended.push(common.clone());
+        assert_eq!(
+            item_value(
+                &user_items(&encode(&Pdu::AssociateRq(rq))),
+                item::SOP_CLASS_COMMON_EXTENDED
+            )
+            .unwrap(),
+            raw
+        );
+        assert_eq!(common.related_general_sop_classes, ["1.2.5"]);
+    }
+
+    #[test]
+    fn standard_common_extended_retains_multiple_items() {
+        let raw = b"\x57\x00\x00\x13\x00\x051.2.3\x00\x051.2.4\x00\x03\x00\x011\x57\x00\x00\x13\x00\x051.2.6\x00\x051.2.4\x00\x03\x00\x012";
+        let user = super::decode_user_information(raw, true).unwrap();
+        assert_eq!(user.common_extended.len(), 2);
+        assert_eq!(user.common_extended[0].sop_class_uid, "1.2.3");
+        assert_eq!(user.common_extended[1].sop_class_uid, "1.2.6");
+        let empty = super::decode_common_extended(b"\x00\x051.2.7\x00\x051.2.4\x00\x00").unwrap();
+        assert!(empty.related_general_sop_classes.is_empty());
+        let mut rq = Associate::new("SCP", "SCU");
+        rq.user_information.common_extended = user.common_extended;
+        rq.user_information.common_extended.push(empty);
+        let wire = encode(&Pdu::AssociateRq(rq));
+        assert_eq!(
+            &user_items(&wire)[8..],
+            [
+                raw.as_slice(),
+                b"\x57\x00\x00\x10\x00\x051.2.7\x00\x051.2.4\x00\x00"
+            ]
+            .concat()
+        );
+        let Pdu::AssociateRq(back) = decode(&wire).unwrap() else {
+            panic!("expected RQ")
+        };
+        assert_eq!(back.user_information.common_extended.len(), 3);
+    }
+
+    #[test]
+    fn standard_common_extended_rejects_inconsistent_related_lengths() {
+        for raw in [
+            &b"\x00\x051.2.3\x00\x051.2.4\x00\x04\x00\x011"[..], // aggregate overrun
+            &b"\x00\x051.2.3\x00\x051.2.4\x00\x02\x00\x011"[..], // aggregate underrun
+            &b"\x00\x051.2.3\x00\x051.2.4\x00\x01\x00"[..],      // partial length
+            &b"\x00\x051.2.3\x00\x051.2.4\x00\x03\x00\x021"[..], // UID overrun
+        ] {
+            assert!(super::decode_common_extended(raw).is_err(), "{raw:?}");
+        }
+        let mut rq = Associate::new("SCP", "SCU");
+        rq.user_information.common_extended.push(CommonExtended {
+            sop_class_uid: "1.2.3".into(),
+            service_class_uid: "1.2.4".into(),
+            related_general_sop_classes: vec!["1".repeat(65_534)],
+        });
+        assert!(super::encode(&Pdu::AssociateRq(rq)).is_err());
+    }
+
+    #[test]
+    fn standard_extended_fixture_preserves_a_zero_final_field() {
+        let ext = super::decode_extended_negotiation(b"\x00\x051.2.3\x01\x01\x00").unwrap();
+        assert_eq!(ext.requested, [1, 1, 0]);
+    }
+
+    #[test]
+    fn standard_role_items_keep_exact_odd_lengths_and_adjacent_headers() {
+        let mut rq = Associate::new("SCP", "SCU");
+        for uid in ["1.2.840.10008.5.1.4.1.1.2", "1.2.840.10008.5.1.4.1.1.4"] {
+            rq.user_information.role_selections.push(RoleSelection {
+                sop_class: uid.into(),
+                scu_role: false,
+                scp_role: true,
+            });
+        }
+        let wire = encode(&Pdu::AssociateRq(rq));
+        let user = user_items(&wire);
+        let expected = b"\x54\x00\x00\x1d\x00\x191.2.840.10008.5.1.4.1.1.2\x00\x01\x54\x00\x00\x1d\x00\x191.2.840.10008.5.1.4.1.1.4\x00\x01";
+        assert!(user.windows(expected.len()).any(|bytes| bytes == expected));
+        assert_eq!(
+            super::decode_user_information(expected, true)
+                .unwrap()
+                .role_selections
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn standard_rejected_ac_context_contains_a_transfer_syntax_placeholder() {
+        let mut ac = Associate::new("SCP", "SCU");
+        let mut pc = PresentationContext::new(1, "1.2.3", vec![]);
+        pc.result = 3;
+        ac.presentation_contexts.push(pc);
+        let wire = encode(&Pdu::AssociateAc(ac));
+        assert_eq!(
+            item_value(&wire[74..], item::PRESENTATION_CONTEXT_AC).unwrap(),
+            b"\x01\x00\x03\x00\x40\x00\x00\x111.2.840.10008.1.2"
+        );
+    }
     /// An item header plus body, as it appears inside a user-information item.
     fn user_item(item_type: u8, body: &[u8]) -> Vec<u8> {
         let mut out = vec![item_type, 0x00];
@@ -1091,7 +1222,7 @@ mod tests {
         assert!(decode_user_information(&item, true)
             .unwrap_err()
             .to_string()
-            .contains("common extended negotiation is truncated"));
+            .contains("truncated"));
 
         // user identity: primary and secondary fields past the item
         let item = user_item(item::USER_IDENTITY_RQ, &[1, 1, 0x00, 0x09, b'a']);
@@ -1129,10 +1260,11 @@ mod tests {
             primary: b"user".to_vec(),
             secondary: b"pass".to_vec(),
         });
-        association.user_information.common_extended = Some(CommonExtended {
+        association.user_information.common_extended = vec![CommonExtended {
+            sop_class_uid: "1.2.3".into(),
             service_class_uid: "1.2.3".to_string(),
             related_general_sop_classes: vec!["1.2.840.10008.5.1.4.1.1.7".to_string()],
-        });
+        }];
         association.user_information.extended_negotiations = vec![ExtendedNegotiation {
             sop_class: "1.2.840.10008.5.1.4.1.1.7".to_string(),
             requested: vec![1, 0],
@@ -1153,10 +1285,7 @@ mod tests {
             })
         );
         assert_eq!(
-            back.user_information
-                .common_extended
-                .unwrap()
-                .service_class_uid,
+            back.user_information.common_extended[0].service_class_uid,
             "1.2.3"
         );
         assert_eq!(back.user_information.extended_negotiations.len(), 1);
@@ -1242,16 +1371,14 @@ mod tests {
     /// Storage SOP class used by the byte-layout fixtures below.
     const STORAGE_CLASS: &str = "1.2.840.10008.5.1.4.1.1.7";
 
-    /// `type(1) reserved(1) length(2) value`, padded to an even value length.
+    /// `type(1) reserved(1) length(2) value`, without UL padding.
     ///
     /// Hand-built on purpose: the wire-layout tests must not reuse the encoder
     /// under test, or a shared wrong assumption would stay invisible.
     fn item(item_type: u8, value: &[u8]) -> Vec<u8> {
-        let pad = value.len() & 1;
         let mut out = vec![item_type, 0];
-        out.extend_from_slice(&((value.len() + pad) as u16).to_be_bytes());
+        out.extend_from_slice(&(value.len() as u16).to_be_bytes());
         out.extend_from_slice(value);
-        out.resize(out.len() + pad, 0);
         out
     }
 
@@ -1494,62 +1621,29 @@ mod tests {
     }
 
     #[test]
-    fn associate_item_values_are_even_length_on_the_wire() {
-        // Odd-length UIDs (application context 21 bytes, Verification abstract
-        // syntax 17, Explicit-VR-LE transfer syntax 19) must be padded to even
-        // length everywhere (PS3.8 §9.3). Strict peers (fo-dicom/DCMTK) reject
-        // an A-ASSOCIATE whose item values are odd.
-        fn assert_items_even(buf: &[u8], depth: usize) {
-            let mut offset = 0usize;
-            while offset + 4 <= buf.len() {
-                let item_type = buf[offset];
-                let len = u16::from_be_bytes([buf[offset + 2], buf[offset + 3]]) as usize;
-                assert_eq!(
-                    len % 2,
-                    0,
-                    "item 0x{item_type:02X} at depth {depth} has odd value length {len}"
-                );
-                let val = &buf[offset + 4..offset + 4 + len];
-                match item_type {
-                    item::PRESENTATION_CONTEXT_RQ | item::PRESENTATION_CONTEXT_AC => {
-                        assert_items_even(&val[4..], depth + 1)
-                    }
-                    item::USER_INFORMATION => assert_items_even(val, depth + 1),
-                    _ => {}
-                }
-                offset += 4 + len;
-            }
-            // any remaining bytes must be even-length padding zeros
-            assert!(
-                buf[offset..].iter().all(|&b| b == 0),
-                "non-pad trailing bytes at depth {depth}"
-            );
-        }
-
-        let mut assoc = Associate::new("NETGATE", "NETPUSH"); // both 7 chars (odd)
+    fn association_uid_items_are_not_padded() {
+        let mut assoc = Associate::new("NETGATE", "NETPUSH");
         assoc.presentation_contexts.push(PresentationContext::new(
             1,
             "1.2.840.10008.1.1",
-            vec!["1.2.840.10008.1.2.1".to_string()],
+            vec!["1.2.840.10008.1.2.1".into()],
         ));
         let bytes = encode(&Pdu::AssociateRq(assoc));
-        assert_items_even(&bytes[6 + 68..], 0); // skip the 6-byte PDU header + 68-byte fixed part
-
-        // decode round-trips the padded UIDs without a trailing NUL
-        match decode(&bytes).unwrap() {
-            Pdu::AssociateRq(back) => {
-                assert_eq!(back.application_context, APPLICATION_CONTEXT);
-                assert_eq!(
-                    back.presentation_contexts[0].abstract_syntax,
-                    "1.2.840.10008.1.1"
-                );
-                assert_eq!(
-                    back.presentation_contexts[0].transfer_syntaxes[0],
-                    "1.2.840.10008.1.2.1"
-                );
-            }
-            other => panic!("expected AssociateRq, got {other:?}"),
-        }
+        assert_eq!(
+            item_value(&bytes[74..], item::APPLICATION_CONTEXT).unwrap(),
+            b"1.2.840.10008.3.1.1.1"
+        );
+        assert_eq!(
+            item_value(&bytes[74..], item::PRESENTATION_CONTEXT_RQ).unwrap(),
+            b"\x01\x00\x00\x00\x30\x00\x00\x111.2.840.10008.1.1\x40\x00\x00\x131.2.840.10008.1.2.1"
+        );
+        let Pdu::AssociateRq(back) = decode(&bytes).unwrap() else {
+            panic!("expected RQ")
+        };
+        assert_eq!(
+            back.presentation_contexts[0].abstract_syntax,
+            "1.2.840.10008.1.1"
+        );
     }
 
     #[test]
@@ -1610,10 +1704,11 @@ mod tests {
                 requested: vec![1, 0, 1],
                 accepted: Vec::new(),
             });
-        assoc.user_information.common_extended = Some(CommonExtended {
+        assoc.user_information.common_extended = vec![CommonExtended {
+            sop_class_uid: "1.2.3".into(),
             service_class_uid: "1.2.840.10008.4.2".into(),
             related_general_sop_classes: vec!["1.2.840.10008.5.1.4.1.1.7".into()],
-        });
+        }];
         assoc.user_information.user_identity = Some(UserIdentity {
             identity_type: 2,
             primary: b"alice".to_vec(),
@@ -1634,10 +1729,7 @@ mod tests {
                 assert!(ui.role_selections[0].scu_role);
                 assert!(!ui.role_selections[0].scp_role);
                 assert_eq!(ui.extended_negotiations[0].requested, vec![1, 0, 1]);
-                assert_eq!(
-                    ui.common_extended.unwrap().service_class_uid,
-                    "1.2.840.10008.4.2"
-                );
+                assert_eq!(ui.common_extended[0].service_class_uid, "1.2.840.10008.4.2");
                 let identity = ui.user_identity.unwrap();
                 assert_eq!(identity.identity_type, 2);
                 assert_eq!(identity.primary, b"alice");
@@ -2029,8 +2121,8 @@ mod tests {
         );
         assert_eq!(
             frame.len(),
-            176,
-            "the standard 176-byte A-ASSOCIATE-AC fixture"
+            173,
+            "the standard A-ASSOCIATE-AC fixture uses unpadded UIDs"
         );
 
         match decode(&frame).expect("decode") {
@@ -2340,60 +2432,15 @@ mod tests {
     }
 
     #[test]
-    fn a_common_extended_length_that_overruns_the_item_is_an_error() {
-        // 0x57: uid_len(2) + service class UID + (len(2) + related UID)*.
-        // A length pointing past the item is malformed input, not a reason to
-        // stop reading and report a partial list.
-        let mut value = Vec::new();
-        value.extend_from_slice(&4u16.to_be_bytes());
-        value.extend_from_slice(b"1.2.");
-        value.extend_from_slice(&9u16.to_be_bytes()); // claims 9 bytes, 5 remain
-        value.extend_from_slice(b"1.2.3");
-        let frame = associate_frame(
-            0x01,
-            &[
-                item(item::APPLICATION_CONTEXT, APPLICATION_CONTEXT.as_bytes()),
-                item(
-                    item::USER_INFORMATION,
-                    &[
-                        item(item::MAX_PDU_LENGTH, &16384u32.to_be_bytes()),
-                        item(item::SOP_CLASS_COMMON_EXTENDED, &value),
-                    ]
-                    .concat(),
-                ),
-            ],
-        );
-        match decode(&frame) {
-            Err(NetworkError::Protocol(message)) => {
-                assert!(message.contains("related SOP class"), "got {message}")
-            }
-            other => panic!("expected a Protocol error, got {other:?}"),
+    fn common_extended_rejects_truncated_uid_and_length_fields() {
+        let complete = b"\x00\x051.2.3\x00\x051.2.4\x00\x07\x00\x051.2.5";
+        for end in 0..complete.len() {
+            assert!(
+                super::decode_common_extended(&complete[..end]).is_err(),
+                "end {end}"
+            );
         }
-
-        // the service class UID length is checked the same way
-        let mut value = Vec::new();
-        value.extend_from_slice(&100u16.to_be_bytes());
-        value.extend_from_slice(b"1.2.3");
-        let frame = associate_frame(
-            0x01,
-            &[
-                item(item::APPLICATION_CONTEXT, APPLICATION_CONTEXT.as_bytes()),
-                item(
-                    item::USER_INFORMATION,
-                    &[
-                        item(item::MAX_PDU_LENGTH, &16384u32.to_be_bytes()),
-                        item(item::SOP_CLASS_COMMON_EXTENDED, &value),
-                    ]
-                    .concat(),
-                ),
-            ],
-        );
-        match decode(&frame) {
-            Err(NetworkError::Protocol(message)) => {
-                assert!(message.contains("service class UID"), "got {message}")
-            }
-            other => panic!("expected a Protocol error, got {other:?}"),
-        }
+        assert!(super::decode_common_extended(complete).is_ok());
     }
 
     #[test]

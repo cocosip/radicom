@@ -15,19 +15,19 @@ use crate::pdu::{CommonExtended, ExtendedNegotiation, UserInformation};
 
 /// Field numbers shared by all three application-info models (§11.2).
 mod field {
-    /// Storage: 1 = level of support, 2 = digital signature, 3 = element coercion.
+    /// Storage: fields 1/3/5; fields 2/4/6 are reserved.
     pub const STORAGE_LEVEL_OF_SUPPORT: u8 = 1;
-    pub const STORAGE_DIGITAL_SIGNATURE: u8 = 2;
-    pub const STORAGE_ELEMENT_COERCION: u8 = 3;
+    pub const STORAGE_DIGITAL_SIGNATURE: u8 = 3;
+    pub const STORAGE_ELEMENT_COERCION: u8 = 5;
     /// C-FIND: 1..5 relational/datetime/fuzzy/timezone/enhanced-multiframe.
     pub const FIND_RELATIONAL_QUERIES: u8 = 1;
     pub const FIND_DATETIME_MATCHING: u8 = 2;
     pub const FIND_FUZZY_MATCHING: u8 = 3;
     pub const FIND_TIMEZONE_ADJUSTMENT: u8 = 4;
     pub const FIND_ENHANCED_MULTIFRAME: u8 = 5;
-    /// C-GET/C-MOVE: 1 = relational retrieval, 4 = enhanced multiframe.
+    /// C-GET/C-MOVE: 1 = relational retrieval, 2 = enhanced multiframe.
     pub const RETRIEVE_RELATIONAL: u8 = 1;
-    pub const RETRIEVE_ENHANCED_MULTIFRAME: u8 = 4;
+    pub const RETRIEVE_ENHANCED_MULTIFRAME: u8 = 2;
 }
 
 /// The Service Class Application Information of one SOP class (§11.2).
@@ -96,11 +96,11 @@ impl AppInfo {
 /// Storage Service Class application info (§11.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StorageAppInfo {
-    /// 1 = level 2 (coercion) supported; 0 = level 1.
+    /// 0/1/2 = SCP support level; 3 = requester is SCU only.
     pub level_of_support: u8,
-    /// 1 = digital signatures supported.
+    /// Digital signature support level (0 = unspecified, 1/2/3 = level).
     pub digital_signature: u8,
-    /// 1 = element coercion supported.
+    /// 0 = no coercion; 1 = may coerce; 2 = requester is SCU only.
     pub element_coercion: u8,
 }
 
@@ -110,6 +110,7 @@ impl StorageAppInfo {
             .with_field(field::STORAGE_LEVEL_OF_SUPPORT, self.level_of_support)
             .with_field(field::STORAGE_DIGITAL_SIGNATURE, self.digital_signature)
             .with_field(field::STORAGE_ELEMENT_COERCION, self.element_coercion)
+            .with_field(6, 0)
     }
 
     pub fn from_app_info(info: &AppInfo) -> Self {
@@ -132,7 +133,7 @@ impl StorageAppInfo {
         match what {
             StorageOption::DigitalSignature => self.digital_signature == 1,
             StorageOption::ElementCoercion => self.element_coercion == 1,
-            StorageOption::Level2 => self.level_of_support >= 1,
+            StorageOption::Level2 => self.level_of_support == 2,
         }
     }
 }
@@ -270,14 +271,23 @@ pub fn apply_answer(user_information: &mut UserInformation, policy: &ExtendedNeg
 
 /// Validates a common extended negotiation item (§11.2).
 pub fn validate_common_extended(common: &CommonExtended) -> Result<()> {
+    if common.sop_class_uid.is_empty() {
+        return Err(NetworkError::protocol(
+            "common extended negotiation has no SOP class UID",
+        ));
+    }
     if common.service_class_uid.is_empty() {
         return Err(NetworkError::protocol(
             "common extended negotiation has no service class UID",
         ));
     }
-    if common.related_general_sop_classes.is_empty() {
+    if common
+        .related_general_sop_classes
+        .iter()
+        .any(String::is_empty)
+    {
         return Err(NetworkError::protocol(
-            "common extended negotiation must name at least one related general SOP class",
+            "common extended negotiation has an empty related general SOP class UID",
         ));
     }
     Ok(())
@@ -288,6 +298,59 @@ mod tests {
     use super::*;
     use crate::pdu::{RoleSelection, UserIdentity};
 
+    #[test]
+    fn standard_storage_fixture_uses_six_bytes_and_reserved_positions() {
+        let typed = StorageAppInfo {
+            level_of_support: 2,
+            digital_signature: 3,
+            element_coercion: 1,
+        };
+        assert_eq!(typed.to_app_info().fields, [2, 0, 3, 0, 1, 0]);
+        assert_eq!(
+            StorageAppInfo::from_app_info(&AppInfo {
+                fields: vec![2, 0, 3, 0, 1, 0]
+            }),
+            typed
+        );
+    }
+
+    #[test]
+    fn standard_storage_level_two_excludes_level_one_and_scu_only() {
+        for (level, supported) in [(0, false), (1, false), (2, true), (3, false)] {
+            assert_eq!(
+                StorageAppInfo {
+                    level_of_support: level,
+                    ..Default::default()
+                }
+                .peer_supports(StorageOption::Level2),
+                supported,
+                "level {level}"
+            );
+        }
+    }
+
+    #[test]
+    fn standard_retrieve_fixture_places_conversion_in_second_byte() {
+        let typed = RetrieveAppInfo {
+            relational_retrieval: 0,
+            enhanced_multiframe_conversion: 1,
+        };
+        assert_eq!(
+            RetrieveAppInfo::from_app_info(&AppInfo { fields: vec![0, 1] }),
+            typed
+        );
+        assert_eq!(typed.to_app_info().fields, [0, 1]);
+    }
+
+    #[test]
+    fn standard_common_extended_allows_no_related_classes() {
+        assert!(validate_common_extended(&CommonExtended {
+            sop_class_uid: "1.2.3".into(),
+            service_class_uid: "1.2.4".into(),
+            related_general_sop_classes: vec![],
+        })
+        .is_ok());
+    }
     fn storage_ext(sop_class: &str, level: u8, signature: u8) -> ExtendedNegotiation {
         ExtendedNegotiation {
             sop_class: sop_class.into(),
@@ -322,7 +385,7 @@ mod tests {
     #[test]
     fn storage_typed_round_trip() {
         let typed = StorageAppInfo {
-            level_of_support: 1,
+            level_of_support: 2,
             digital_signature: 1,
             element_coercion: 0,
         };
@@ -387,7 +450,7 @@ mod tests {
         );
         assert_eq!(
             answered[0].accepted,
-            vec![0, 0, 0],
+            vec![0; 6],
             "every requested field is answered with 0"
         );
     }
@@ -441,10 +504,11 @@ mod tests {
         // user information for an AC would lose data the caller still needs.
         let mut user = UserInformation::new(16384);
         user.extended_negotiations = vec![storage_ext("1.2.3", 1, 1)];
-        user.common_extended = Some(CommonExtended {
+        user.common_extended = vec![CommonExtended {
+            sop_class_uid: "1.2.3".into(),
             service_class_uid: "1.2.840.10008.4.2".into(),
             related_general_sop_classes: vec!["1.2.840.10008.5.1.4.1.1.7".into()],
-        });
+        }];
         user.role_selections.push(RoleSelection {
             sop_class: "1.2.3".into(),
             scu_role: true,
@@ -458,31 +522,46 @@ mod tests {
         );
         assert_eq!(
             user.extended_negotiations[0].accepted,
-            vec![0, 0, 0],
+            vec![0; 6],
             "answered with 'not supported'"
         );
         assert!(
-            user.common_extended.is_some(),
+            !user.common_extended.is_empty(),
             "unrelated user information is left alone"
         );
         assert_eq!(user.role_selections.len(), 1);
     }
 
     #[test]
-    fn common_extended_needs_a_service_class_and_a_related_class() {
+    fn common_extended_requires_sop_and_service_uids_but_related_is_optional() {
         let empty_service = CommonExtended {
+            sop_class_uid: "1.2.3".into(),
             service_class_uid: String::new(),
             related_general_sop_classes: vec!["1".into()],
         };
         assert!(validate_common_extended(&empty_service).is_err());
+        assert!(validate_common_extended(&CommonExtended {
+            sop_class_uid: String::new(),
+            service_class_uid: "1.2.4".into(),
+            related_general_sop_classes: vec![],
+        })
+        .is_err());
+        assert!(validate_common_extended(&CommonExtended {
+            sop_class_uid: "1.2.3".into(),
+            service_class_uid: "1.2.4".into(),
+            related_general_sop_classes: vec![String::new()],
+        })
+        .is_err());
 
         let no_related = CommonExtended {
+            sop_class_uid: "1.2.3".into(),
             service_class_uid: "1.2.3".into(),
             related_general_sop_classes: Vec::new(),
         };
-        assert!(validate_common_extended(&no_related).is_err());
+        assert!(validate_common_extended(&no_related).is_ok());
 
         let ok = CommonExtended {
+            sop_class_uid: "1.2.3".into(),
             service_class_uid: "1.2.3".into(),
             related_general_sop_classes: vec!["1.2.4".into()],
         };

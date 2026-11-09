@@ -265,9 +265,7 @@ impl Command {
         out.message_id_being_responded_to = Some(request.message_id);
         out.status = Some(status);
         out.affected_sop_class_uid = request.affected_sop_class_uid.clone();
-        // PS3.7 Table 9.3-2: a C-STORE-RSP must name the instance in
-        // (0000,1000), including on the failure path. Mirror the request's
-        // requested UIDs too when present (N-services name them as Requested).
+        // Preserve optional affected UIDs supplied by the request.
         out.affected_sop_instance_uid = request.affected_sop_instance_uid.clone();
         out.requested_sop_class_uid = request.requested_sop_class_uid.clone();
         out.requested_sop_instance_uid = request.requested_sop_instance_uid.clone();
@@ -413,16 +411,10 @@ impl Command {
         let data_set_type: u16 = ds
             .get(tag::COMMAND_DATA_SET_TYPE)
             .map_err(|_| NetworkError::protocol("command set has no Command Data Set Type"))?;
-        if data_set_type != NO_DATA_SET && data_set_type != 0x0001 {
-            return Err(NetworkError::protocol(
-                "command set has an invalid Command Data Set Type",
-            ));
-        }
-        let message_id = ds.get(tag::MESSAGE_ID).unwrap_or(0);
-        if field.writes_message_id() && message_id == 0 {
-            return Err(NetworkError::protocol(
-                "request Message ID must be present and nonzero",
-            ));
+        // PS3.7: only 0101H means absent; fo-dicom uses 0202H for a dataset.
+        let message_id = ds.get(tag::MESSAGE_ID).ok();
+        if field.writes_message_id() && message_id.is_none() {
+            return Err(NetworkError::protocol("request Message ID is missing"));
         }
         let message_id_being_responded_to = ds.get(tag::MESSAGE_ID_BEING_RESPONDED_TO).ok();
         if (!field.is_request() || field == CommandField::CCancelRq)
@@ -430,11 +422,6 @@ impl Command {
         {
             return Err(NetworkError::protocol(
                 "response Message ID Being Responded To is missing",
-            ));
-        }
-        if message_id_being_responded_to == Some(0) {
-            return Err(NetworkError::protocol(
-                "Message ID Being Responded To must be nonzero",
             ));
         }
         // PS3.7 Table E.1-1: every response carries (0000,0900) Status (Type 1).
@@ -451,7 +438,7 @@ impl Command {
             requested_sop_class_uid: ds
                 .try_get_str(tag::REQUESTED_SOP_CLASS_UID)
                 .map(|s| s.trim().to_string()),
-            message_id,
+            message_id: message_id.unwrap_or(0),
             message_id_being_responded_to,
             status: ds.get(tag::STATUS).ok(),
             error_comment: ds
@@ -1163,11 +1150,10 @@ mod tests {
         let mut ds = Dataset::new();
         ds.insert_value(tag::COMMAND_FIELD, CommandField::CFindRq.code());
         ds.insert_value(tag::MESSAGE_ID, 1u16);
-        ds.insert_value(tag::COMMAND_DATA_SET_TYPE, 2u16);
         assert!(Command::from_dataset(&ds).is_err());
 
         ds.insert_value(tag::COMMAND_DATA_SET_TYPE, NO_DATA_SET);
-        ds.insert_value(tag::MESSAGE_ID, 0u16);
+        ds.remove(&tag::MESSAGE_ID);
         assert!(Command::from_dataset(&ds).is_err());
 
         let mut response = Dataset::new();

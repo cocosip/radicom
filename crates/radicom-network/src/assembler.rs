@@ -421,6 +421,32 @@ impl PdvAssembler {
         } else {
             Stream::Data
         };
+        // The spool cap applies even when the body stays below the memory threshold.
+        if stream == Stream::Data {
+            if let Some(config) = &self.spool {
+                let buffered = self
+                    .buffers
+                    .get(&(pdv.context_id, stream))
+                    .map_or(0, bytes::BytesMut::len);
+                let written = self
+                    .spilling
+                    .get(&pdv.context_id)
+                    .map_or(0, SpillWriter::written);
+                if written
+                    .saturating_add(buffered as u64)
+                    .saturating_add(pdv.data.len() as u64)
+                    > config.max_message_length
+                {
+                    self.drop_buffer((pdv.context_id, stream));
+                    self.spilling.remove(&pdv.context_id);
+                    self.spilled = self.spilled.saturating_sub(written as usize);
+                    self.armed.remove(&pdv.context_id);
+                    return Err(NetworkError::protocol(
+                        "DIMSE message exceeds the maximum size",
+                    ));
+                }
+            }
+        }
         // H3: an armed dataset stream goes to a temporary file as it arrives.
         if stream == Stream::Data && self.armed.contains(&pdv.context_id) {
             return self.push_spilled_pdv(pdv);

@@ -68,7 +68,8 @@ impl CEchoResponse {
             Command::request(CommandField::CEchoRsp, self.message_id_being_responded_to);
         command.message_id_being_responded_to = Some(self.message_id_being_responded_to);
         command.status = Some(self.status);
-        command.affected_sop_class_uid = Some(self.affected_sop_class_uid.clone());
+        command.affected_sop_class_uid =
+            (!self.affected_sop_class_uid.is_empty()).then(|| self.affected_sop_class_uid.clone());
         command.no_dataset = true;
         command
     }
@@ -168,8 +169,10 @@ impl CStoreResponse {
             Command::request(CommandField::CStoreRsp, self.message_id_being_responded_to);
         command.message_id_being_responded_to = Some(self.message_id_being_responded_to);
         command.status = Some(self.status);
-        command.affected_sop_class_uid = Some(self.affected_sop_class_uid.clone());
-        command.affected_sop_instance_uid = Some(self.affected_sop_instance_uid.clone());
+        command.affected_sop_class_uid =
+            (!self.affected_sop_class_uid.is_empty()).then(|| self.affected_sop_class_uid.clone());
+        command.affected_sop_instance_uid = (!self.affected_sop_instance_uid.is_empty())
+            .then(|| self.affected_sop_instance_uid.clone());
         command.error_comment = self.error_comment.clone();
         command.no_dataset = true;
         command
@@ -179,29 +182,20 @@ impl CStoreResponse {
         if command.field != CommandField::CStoreRsp {
             return Err(NetworkError::protocol("not a C-STORE response"));
         }
-        let message_id_being_responded_to = command
-            .message_id_being_responded_to
-            .filter(|id| *id != 0)
-            .ok_or(NetworkError::protocol(
-                "C-STORE response has no valid Message ID Being Responded To",
-            ))?;
+        let message_id_being_responded_to =
+            command
+                .message_id_being_responded_to
+                .ok_or(NetworkError::protocol(
+                    "C-STORE response has no valid Message ID Being Responded To",
+                ))?;
         let status = command
             .status
             .ok_or(NetworkError::protocol("C-STORE response has no Status"))?;
-        let affected_sop_class_uid = command
-            .affected_sop_class_uid
-            .clone()
-            .filter(|uid| !uid.is_empty())
-            .ok_or(NetworkError::protocol(
-                "C-STORE response has no Affected SOP Class UID",
-            ))?;
+        let affected_sop_class_uid = command.affected_sop_class_uid.clone().unwrap_or_default();
         let affected_sop_instance_uid = command
             .affected_sop_instance_uid
             .clone()
-            .filter(|uid| !uid.is_empty())
-            .ok_or(NetworkError::protocol(
-                "C-STORE response has no Affected SOP Instance UID",
-            ))?;
+            .unwrap_or_default();
         Ok(CStoreResponse {
             message_id_being_responded_to,
             status,
@@ -573,10 +567,16 @@ mod tests {
         assert!(CStoreResponse::from_command(&command).is_err());
         command.status = Some(status::SUCCESS);
         command.affected_sop_class_uid = None;
-        assert!(CStoreResponse::from_command(&command).is_err());
+        assert!(CStoreResponse::from_command(&command)
+            .unwrap()
+            .affected_sop_class_uid
+            .is_empty());
         command.affected_sop_class_uid = Some("1.2.3".into());
         command.affected_sop_instance_uid = None;
-        assert!(CStoreResponse::from_command(&command).is_err());
+        assert!(CStoreResponse::from_command(&command)
+            .unwrap()
+            .affected_sop_instance_uid
+            .is_empty());
     }
 
     #[test]

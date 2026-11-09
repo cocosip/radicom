@@ -101,13 +101,44 @@ impl StoreSink {
         syntax: &Arc<TransferSyntax>,
         fallback: Option<&str>,
     ) -> Result<ReceivedInstance> {
+        self.materialize_body_with_fallback_limited(
+            body,
+            syntax,
+            fallback,
+            body.spool().map_or(
+                crate::assembler::SpoolConfig::DEFAULT_MAX_SPILLED_LENGTH,
+                |spool| spool.max_message_length(),
+            ),
+        )
+    }
+
+    /// Materializes a received body with a hard cap on decoded dataset bytes.
+    pub fn materialize_body_with_fallback_limited(
+        &self,
+        body: &MessageBody,
+        syntax: &Arc<TransferSyntax>,
+        fallback: Option<&str>,
+        max_materialized_length: u64,
+    ) -> Result<ReceivedInstance> {
         let MessageBody::Spilled(spool) = body else {
             let bytes = body.in_memory().expect("a non-spilled body is in memory");
-            return self.materialize_with_fallback(bytes, syntax, fallback);
+            return self.materialize_with_fallback_limited(
+                bytes,
+                syntax,
+                fallback,
+                max_materialized_length,
+            );
         };
+        let max_materialized_length = max_materialized_length.min(spool.max_message_length());
+        if spool.len() > max_materialized_length {
+            return Err(NetworkError::protocol(
+                "DIMSE dataset exceeds the maximum size",
+            ));
+        }
         match self {
             StoreSink::Memory => {
-                let file = file_from_spooled_file(spool, syntax, fallback)?;
+                let file =
+                    file_from_spooled_file(spool, syntax, fallback, max_materialized_length)?;
                 spool.keep();
                 Ok(ReceivedInstance {
                     file,
@@ -116,7 +147,8 @@ impl StoreSink {
                 })
             }
             StoreSink::SpoolToTemp => {
-                let file = file_from_spooled_file(spool, syntax, fallback)?;
+                let file =
+                    file_from_spooled_file(spool, syntax, fallback, max_materialized_length)?;
                 spool.keep();
                 Ok(ReceivedInstance {
                     file,
@@ -132,18 +164,14 @@ impl StoreSink {
                 std::io::copy(&mut source, &mut file).map_err(NetworkError::Io)?;
                 file.flush().map_err(NetworkError::Io)?;
                 drop(file);
-                let dataset = match decode_spooled_file(
-                    &path,
-                    syntax,
-                    fallback,
-                    spool.max_message_length(),
-                ) {
-                    Ok(dataset) => dataset,
-                    Err(error) => {
-                        let _ = std::fs::remove_file(&path);
-                        return Err(error);
-                    }
-                };
+                let dataset =
+                    match decode_spooled_file(&path, syntax, fallback, max_materialized_length) {
+                        Ok(dataset) => dataset,
+                        Err(error) => {
+                            let _ = std::fs::remove_file(&path);
+                            return Err(error);
+                        }
+                    };
                 Ok(ReceivedInstance {
                     file: DicomFile::from_dataset(dataset),
                     path: Some(path),
@@ -170,12 +198,27 @@ impl StoreSink {
         syntax: &Arc<TransferSyntax>,
         fallback: Option<&str>,
     ) -> Result<ReceivedInstance> {
+        self.materialize_with_fallback_limited(
+            bytes,
+            syntax,
+            fallback,
+            crate::assembler::SpoolConfig::DEFAULT_MAX_SPILLED_LENGTH,
+        )
+    }
+
+    fn materialize_with_fallback_limited(
+        &self,
+        bytes: &[u8],
+        syntax: &Arc<TransferSyntax>,
+        fallback: Option<&str>,
+        max_materialized_length: u64,
+    ) -> Result<ReceivedInstance> {
         match self {
             StoreSink::Memory => {
                 // PS3.7 §9.3: the dataset is encoded in the negotiated transfer
                 // syntax and carries no file meta, so it must be parsed *with*
                 // that syntax instead of being sniffed (NET-24)
-                let dataset = decode(bytes, syntax, fallback)?;
+                let dataset = decode_limited(bytes, syntax, fallback, max_materialized_length)?;
                 Ok(ReceivedInstance::from_file(DicomFile::from_dataset(
                     dataset,
                 )))
@@ -190,7 +233,14 @@ impl StoreSink {
                         .map_err(NetworkError::Io)?;
                 // the guard removes the file on every error path below
                 let temp = TempSpool(path.clone());
-                let file = write_and_parse(&path, file, bytes, syntax, fallback)?;
+                let file = write_and_parse(
+                    &path,
+                    file,
+                    bytes,
+                    syntax,
+                    fallback,
+                    max_materialized_length,
+                )?;
                 // the instance is parsed from memory, so the spool file has no
                 // reader: the guard deletes it as soon as the instance is done
                 Ok(ReceivedInstance {
@@ -205,7 +255,15 @@ impl StoreSink {
                 // directory, so a planted path cannot be followed
                 let (path, file) =
                     create_unique_file(dir, "radicom-store", "dcm").map_err(NetworkError::Io)?;
-                write_and_parse(&path, file, bytes, syntax, fallback).map(|file| ReceivedInstance {
+                write_and_parse(
+                    &path,
+                    file,
+                    bytes,
+                    syntax,
+                    fallback,
+                    max_materialized_length,
+                )
+                .map(|file| ReceivedInstance {
                     file,
                     path: Some(path),
                     temp: None,
@@ -272,8 +330,9 @@ fn file_from_spooled_file(
     spool: &crate::assembler::SpoolFile,
     syntax: &Arc<TransferSyntax>,
     fallback: Option<&str>,
+    max_materialized_length: u64,
 ) -> Result<DicomFile> {
-    let dataset = decode_spooled_file(spool.path(), syntax, fallback, spool.max_message_length())?;
+    let dataset = decode_spooled_file(spool.path(), syntax, fallback, max_materialized_length)?;
     let owner = radicom::model::buffer::TempFileSpill::from_temp_file(
         spool.path().to_path_buf(),
         spool.len(),
@@ -293,6 +352,7 @@ fn write_and_parse(
     bytes: &[u8],
     syntax: &Arc<TransferSyntax>,
     fallback: Option<&str>,
+    max_materialized_length: u64,
 ) -> Result<DicomFile> {
     file.write_all(bytes).map_err(NetworkError::Io)?;
     file.flush().map_err(NetworkError::Io)?;
@@ -300,7 +360,7 @@ fn write_and_parse(
 
     // the spooled bytes are a bare dataset: parse them with the negotiated
     // syntax, never by sniffing (NET-24)
-    match decode(bytes, syntax, fallback) {
+    match decode_limited(bytes, syntax, fallback, max_materialized_length) {
         Ok(dataset) => Ok(DicomFile::from_dataset(dataset)),
         Err(e) => {
             let _ = std::fs::remove_file(path);
@@ -317,6 +377,61 @@ fn decode(
     fallback: Option<&str>,
 ) -> Result<radicom::model::dataset::Dataset> {
     crate::message::decode_dataset_with_fallback(bytes, syntax, fallback)
+}
+
+/// Reads and decodes a received body with a hard bound on inflated output.
+///
+/// This performs blocking file IO and parsing; async callers must offload it.
+pub fn decode_body_with_fallback_limited(
+    body: &MessageBody,
+    syntax: &Arc<TransferSyntax>,
+    fallback: Option<&str>,
+    max_materialized_length: u64,
+) -> Result<Dataset> {
+    let limit = body.spool().map_or(max_materialized_length, |spool| {
+        max_materialized_length.min(spool.max_message_length())
+    });
+    if body.len() > limit {
+        return Err(NetworkError::protocol(
+            "DIMSE dataset exceeds the maximum size",
+        ));
+    }
+    let bytes = body.read_all()?;
+    decode_limited(&bytes, syntax, fallback, limit)
+}
+
+fn decode_limited(
+    bytes: &[u8],
+    syntax: &Arc<TransferSyntax>,
+    fallback: Option<&str>,
+    max_materialized_length: u64,
+) -> Result<Dataset> {
+    if bytes.len() as u64 > max_materialized_length {
+        return Err(NetworkError::protocol(
+            "DIMSE dataset exceeds the maximum size",
+        ));
+    }
+    if !syntax.is_deflate() {
+        return decode(bytes, syntax, fallback);
+    }
+    let bytes = radicom::io::reader::inflate_stream_limited(
+        &mut std::io::Cursor::new(bytes),
+        0,
+        max_materialized_length,
+    )
+    .map_err(|error| {
+        NetworkError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            error.to_string(),
+        ))
+    })?;
+    let mut dataset = decode(
+        &bytes,
+        &radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN,
+        fallback,
+    )?;
+    dataset.set_transfer_syntax(syntax.clone());
+    Ok(dataset)
 }
 
 /// The status for a dataset that disagrees with its C-STORE command (§11.4).

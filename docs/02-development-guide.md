@@ -46,11 +46,15 @@ Deliberate, tested ceilings. Change one only together with the tests that descri
   `CMoveRequest`, and `NServiceRequest`) convert into `DicomRequest` and `DicomClient::send_requests` covers
   heterogeneous C-ECHO, C-STORE, C-FIND, C-GET, C-MOVE and N-service requests. It admits at most
   `min(invoked, 64)` requests at a time and routes pending and terminal responses by Message ID; the
-  peer may still execute them serially. `DicomRequestQueue` and `send_queue` remain optional wrappers,
+  peer may still execute them serially. C-GET runs with no other in-flight mixed request to keep reverse
+  C-STORE progress independent of later streamed writes. `DicomRequestQueue` and `send_queue` remain optional wrappers,
   while `send_batch(Vec<DicomRequest>, ...)` and the older typed batch methods remain compatibility APIs.
-- A received C-STORE spills its PDVs to a temporary file (64 GiB bound) before parsing, but the parse
-  still materialises the dataset once (the core exposes only byte-slice `parse_dataset_bytes`), and the
-  SCU reverse-store (C-GET) path still buffers. Send-side streaming does not imply a file-backed parse.
+- Received C-STORE and reverse C-STORE bodies spill above the configured memory threshold; the default
+  spool and inflated-output limit is 4 GiB. Spilled storage bodies retain lazy file-backed values;
+  memory-resident storage bodies are parsed in memory. Non-storage spilled datasets are read and parsed
+  on the blocking pool but still materialise the bounded dataset once.
+- `CommonExtended` now requires `sop_class_uid`; `common_extended` on `UserInformation` and
+  `ClientOptions` is a vector rather than an optional singleton, so callers must migrate initializers.
 - A-ASSOCIATE (and the other non-P-DATA PDUs) are capped at 256 KiB — a deliberate allocation-safety
   deviation, because PS3.8's Max-PDU-Length formally governs only P-DATA-TF. A P-DATA PDU is bounded by
   the locally advertised Maximum-length-received (default 16384, itself capped at 256 KiB), so a peer

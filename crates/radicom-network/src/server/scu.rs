@@ -92,6 +92,7 @@ pub struct Association {
     ignore_unsupported_syntax_change: bool,
     /// Fallback charset for received text without (0008,0005) (item 2).
     fallback_encoding: Option<&'static str>,
+    max_materialized_length: u64,
     /// Reports this association's connection open/close to the client metrics.
     _connection: crate::observability::ConnectionGuard,
     /// Reports this association's open/close to the client metrics.
@@ -247,8 +248,6 @@ impl Association {
         // the AC does not repeat the abstract syntax; keep the RQ around so we
         // can recover it by presentation-context id (§9.3.3)
         let requested_contexts = request.presentation_contexts.clone();
-        let requested_called_ae = request.called_ae.clone();
-        let requested_calling_ae = request.calling_ae.clone();
         write_pdu(&mut stream, &Pdu::AssociateRq(request)).await?;
 
         let response = tokio::time::timeout(options.association_timeout, read_pdu(&mut stream))
@@ -267,16 +266,9 @@ impl Association {
                         "association accept used an unsupported application context",
                     ));
                 }
-                if accept.protocol_version != 1 {
+                if accept.protocol_version & 1 == 0 {
                     return Err(NetworkError::protocol(
                         "association accept used an unsupported protocol version",
-                    ));
-                }
-                if accept.called_ae != requested_called_ae
-                    || accept.calling_ae != requested_calling_ae
-                {
-                    return Err(NetworkError::protocol(
-                        "association accept did not echo the requested AE titles",
                     ));
                 }
                 async_operations = accept.user_information.async_operations.unwrap_or_default();
@@ -317,11 +309,6 @@ impl Association {
                         if pc.result == 0 && pc.transfer_syntaxes.len() != 1 {
                             return Err(NetworkError::protocol(
                                 "accepted presentation context must carry exactly one transfer syntax",
-                            ));
-                        }
-                        if pc.result != 0 && !pc.transfer_syntaxes.is_empty() {
-                            return Err(NetworkError::protocol(
-                                "rejected presentation context must not carry a transfer syntax",
                             ));
                         }
                         let transfer_syntax =
@@ -419,6 +406,12 @@ impl Association {
             peer_identity_response,
             ignore_unsupported_syntax_change: options.ignore_unsupported_syntax_change,
             fallback_encoding: options.fallback_encoding,
+            max_materialized_length: options
+                .reverse_spool
+                .as_ref()
+                .map_or(PdvAssembler::DEFAULT_MAX_MESSAGE_LENGTH as u64, |spool| {
+                    spool.max_message_length
+                }),
             _connection: crate::observability::ConnectionGuard::new(options.metrics.clone()),
             _association: crate::observability::AssociationGuard::new(options.metrics.clone()),
             peer_implementation_class_uid,
@@ -527,6 +520,10 @@ impl Association {
                                     "invalid C-ECHO batch response",
                                 ));
                             }
+                            Self::validate_response_sop_class(
+                                &requests[index].affected_sop_class_uid,
+                                command.affected_sop_class_uid.as_deref(),
+                            )?;
                             self.pending.remove(id);
                             responses[index] = Some(response);
                         }
@@ -672,16 +669,32 @@ impl Association {
                     ));
                 }
                 let syntax = transfer_syntax_of(&self.syntax_of(context_id))?;
-                let dataset = crate::message::decode_dataset_with_fallback(
-                    &unit.bytes,
-                    &syntax,
-                    self.fallback_encoding,
-                )?;
+                let dataset = self.decode_response_body(unit, &syntax).await?;
                 self.answer_event_report(context_id, &handler, &command, Some(dataset))
                     .await?;
                 Ok(true)
             }
         }
+    }
+
+    async fn decode_response_body(
+        &self,
+        unit: &MessageUnit,
+        syntax: &Arc<radicom::model::transfer_syntax::TransferSyntax>,
+    ) -> Result<Dataset> {
+        let body = unit.body();
+        let syntax = syntax.clone();
+        let fallback = self.fallback_encoding;
+        let limit = self.max_materialized_length;
+        tokio::task::spawn_blocking(move || {
+            crate::store::decode_body_with_fallback_limited(&body, &syntax, fallback, limit)
+        })
+        .await
+        .map_err(|join| {
+            NetworkError::Io(std::io::Error::other(format!(
+                "response decode task failed: {join}"
+            )))
+        })?
     }
 
     /// The accepted transfer syntax of `context_id`, Explicit VR LE as a fallback.
@@ -743,7 +756,20 @@ impl Association {
     pub async fn send_mixed_batch<F>(
         &mut self,
         requests: Vec<crate::batch::DicomRequest>,
+        on_response: F,
+    ) -> Result<()>
+    where
+        F: FnMut(crate::batch::DicomResponseEvent) -> std::io::Result<()>,
+    {
+        self.send_mixed_batch_cancellable(requests, on_response, None)
+            .await
+    }
+
+    pub(crate) async fn send_mixed_batch_cancellable<F>(
+        &mut self,
+        requests: Vec<crate::batch::DicomRequest>,
         mut on_response: F,
+        cancellation: Option<crate::client::CancellationHandle>,
     ) -> Result<()>
     where
         F: FnMut(crate::batch::DicomResponseEvent) -> std::io::Result<()>,
@@ -751,6 +777,7 @@ impl Association {
         if requests.is_empty() {
             return Ok(());
         }
+        self.request_cancellation = None;
         if requests
             .iter()
             .any(|request| matches!(request, crate::batch::DicomRequest::Get { .. }))
@@ -785,21 +812,56 @@ impl Association {
             std::collections::HashMap::new();
         let mut next = 0usize;
         let window = self.window().max(1);
+        let mut cancellation_receiver = cancellation.as_ref().map(|handle| handle.subscribe());
+        let mut active = std::collections::HashMap::new();
+        let mut cancel_sent = std::collections::HashSet::new();
 
         let result = async {
             while next < requests.len() || !inflight.is_empty() {
+                active.retain(|id, _| inflight.contains_key(id));
                 while next < requests.len() && inflight.len() < window {
+                    // Reverse C-STORE needs the peer to read: drain earlier work and keep GET alone.
+                    if inflight.values().any(|pending| pending.kind == crate::batch::RequestKind::Get)
+                        || (!inflight.is_empty() && matches!(requests[next], crate::batch::DicomRequest::Get { .. }))
+                    {
+                        break;
+                    }
                     let pending = self.send_mixed_request(next, &requests[next]).await?;
+                    if matches!(pending.kind, crate::batch::RequestKind::Find | crate::batch::RequestKind::Get | crate::batch::RequestKind::Move) {
+                        if let Some(handle) = &cancellation {
+                            active.insert(pending.message_id, handle.register(pending.message_id));
+                        }
+                    }
                     self.pending.insert(pending.message_id);
                     inflight.insert(pending.message_id, pending);
                     next += 1;
+                }
+                if let Some(handle) = &cancellation {
+                    for id in handle.take_cancelled() {
+                        if let Some(pending) = inflight.get(&id) {
+                            if cancel_sent.insert(id) {
+                                self.send_c_cancel(pending.context_id, id).await?;
+                            }
+                        }
+                    }
                 }
 
                 let message_id = *inflight
                     .keys()
                     .next()
                     .expect("a mixed request is in flight");
-                let Some(pdu) = self.read_request_pdu(message_id).await? else {
+                let pdu = if let Some(receiver) = cancellation_receiver.as_mut() {
+                    tokio::select! {
+                        pdu = self.read_request_pdu(message_id) => pdu?,
+                        changed = receiver.changed() => {
+                            if changed.is_err() { cancellation_receiver = None; }
+                            continue;
+                        }
+                    }
+                } else {
+                    self.read_request_pdu(message_id).await?
+                };
+                let Some(pdu) = pdu else {
                     return Err(NetworkError::ClosedPrematurely { source: None });
                 };
                 match pdu {
@@ -884,11 +946,7 @@ impl Association {
                                                 "mixed batch",
                                             )?;
                                             let dataset =
-                                                crate::message::decode_dataset_with_fallback(
-                                                    &unit.bytes,
-                                                    &pending.syntax,
-                                                    self.fallback_encoding,
-                                                )?;
+                                                self.decode_response_body(&unit, &pending.syntax).await?;
                                             Self::emit_mixed_response(
                                                 &mut self.pending,
                                                 pending,
@@ -1219,8 +1277,9 @@ impl Association {
             crate::store::StoreSink::Memory
         };
         let decode_syntax = syntax.clone();
+        let limit = self.max_materialized_length;
         let dataset = tokio::task::spawn_blocking(move || {
-            sink.materialize_body_with_fallback(&body, &decode_syntax, fallback)
+            sink.materialize_body_with_fallback_limited(&body, &decode_syntax, fallback, limit)
         })
         .await
         .map_err(|join| {
@@ -1263,44 +1322,25 @@ impl Association {
     where
         F: FnMut(crate::batch::DicomResponseEvent) -> std::io::Result<()>,
     {
-        let (response, is_final, sop_class, sop_instance) = match pending.kind {
+        let (response, is_final) = match pending.kind {
             crate::batch::RequestKind::Echo => {
                 if dataset.is_some() {
                     return Err(NetworkError::protocol("C-ECHO response carries a Dataset"));
                 }
                 let response = crate::services::CEchoResponse::from_command(&command)?;
-                let sop_class = response.affected_sop_class_uid.clone();
-                (
-                    crate::batch::DicomResponse::CEcho(response),
-                    true,
-                    Some(sop_class),
-                    None,
-                )
+                (crate::batch::DicomResponse::CEcho(response), true)
             }
             crate::batch::RequestKind::Store => {
                 if dataset.is_some() {
                     return Err(NetworkError::protocol("C-STORE response carries a Dataset"));
                 }
                 let response = crate::services::CStoreResponse::from_command(&command)?;
-                let sop_class = response.affected_sop_class_uid.clone();
-                let sop_instance = response.affected_sop_instance_uid.clone();
-                (
-                    crate::batch::DicomResponse::CStore(response),
-                    true,
-                    Some(sop_class),
-                    Some(sop_instance),
-                )
+                (crate::batch::DicomResponse::CStore(response), true)
             }
             crate::batch::RequestKind::Find => {
                 let response = crate::cfind::CFindResponse::from_command(&command, dataset)?;
                 let is_final = !response.is_pending();
-                let sop_class = response.affected_sop_class_uid.clone();
-                (
-                    crate::batch::DicomResponse::CFind(response),
-                    is_final,
-                    Some(sop_class),
-                    None,
-                )
+                (crate::batch::DicomResponse::CFind(response), is_final)
             }
             crate::batch::RequestKind::Get => {
                 let mut response = crate::cget::CGetResponse::from_command(&command)?;
@@ -1313,13 +1353,7 @@ impl Association {
                     }
                     response.set_identifier(&identifier);
                 }
-                let sop_class = response.affected_sop_class_uid.clone();
-                (
-                    crate::batch::DicomResponse::CGet(response),
-                    is_final,
-                    Some(sop_class),
-                    None,
-                )
+                (crate::batch::DicomResponse::CGet(response), is_final)
             }
             crate::batch::RequestKind::Move => {
                 let mut response = crate::cmove::CMoveResponse::from_command(&command)?;
@@ -1332,28 +1366,22 @@ impl Association {
                     }
                     response.set_identifier(&identifier);
                 }
-                let sop_class = response.affected_sop_class_uid.clone();
-                (
-                    crate::batch::DicomResponse::CMove(response),
-                    is_final,
-                    Some(sop_class),
-                    None,
-                )
+                (crate::batch::DicomResponse::CMove(response), is_final)
             }
             crate::batch::RequestKind::NService => {
                 let response = crate::nservice::NServiceResponse::from_command(&command, dataset);
-                (
-                    crate::batch::DicomResponse::NService(response),
-                    true,
-                    command.affected_sop_class_uid.clone(),
-                    command.affected_sop_instance_uid.clone(),
-                )
+                (crate::batch::DicomResponse::NService(response), true)
             }
         };
         if pending
             .expected_sop_class_uid
             .as_deref()
-            .is_some_and(|expected| sop_class.as_deref() != Some(expected))
+            .is_some_and(|expected| {
+                command
+                    .affected_sop_class_uid
+                    .as_deref()
+                    .is_some_and(|actual| actual != expected)
+            })
         {
             return Err(NetworkError::protocol(
                 "mixed response used the wrong SOP Class UID",
@@ -1362,7 +1390,12 @@ impl Association {
         if pending
             .expected_sop_instance_uid
             .as_deref()
-            .is_some_and(|expected| sop_instance.as_deref() != Some(expected))
+            .is_some_and(|expected| {
+                command
+                    .affected_sop_instance_uid
+                    .as_deref()
+                    .is_some_and(|actual| actual != expected)
+            })
         {
             return Err(NetworkError::protocol(
                 "mixed C-STORE response did not echo the requested SOP Instance UID",
@@ -1407,7 +1440,13 @@ impl Association {
             .await_response_for_context(message_id, CommandField::CEchoRsp, context_id)
             .await;
         self.pending.remove(message_id);
-        CEchoResponse::from_command(&response?)
+        let command = response?;
+        Self::validate_response_sop_class(
+            abstract_syntax,
+            command.affected_sop_class_uid.as_deref(),
+        )?;
+        let response = CEchoResponse::from_command(&command)?;
+        Ok(response)
     }
 
     /// Sends a C-STORE and waits for its response (§11.4).
@@ -1629,8 +1668,14 @@ impl Association {
             ));
         }
         let response = CStoreResponse::from_command(&command)?;
-        if response.affected_sop_class_uid.trim() != expected_sop_class_uid
-            || response.affected_sop_instance_uid.trim() != expected_sop_instance_uid
+        if command
+            .affected_sop_class_uid
+            .as_deref()
+            .is_some_and(|actual| actual != expected_sop_class_uid)
+            || command
+                .affected_sop_instance_uid
+                .as_deref()
+                .is_some_and(|actual| actual != expected_sop_instance_uid)
         {
             return Err(NetworkError::protocol(
                 "C-STORE response did not echo the requested SOP UIDs",
@@ -1801,8 +1846,14 @@ impl Association {
                                 .try_get_str(radicom::model::tag::Tag::SOP_INSTANCE_UID)
                                 .map(|s| s.trim().to_string())
                                 .unwrap_or_default();
-                            if response.affected_sop_class_uid.trim() != expected_class
-                                || response.affected_sop_instance_uid.trim() != expected_instance
+                            if command
+                                .affected_sop_class_uid
+                                .as_deref()
+                                .is_some_and(|actual| actual != expected_class)
+                                || command
+                                    .affected_sop_instance_uid
+                                    .as_deref()
+                                    .is_some_and(|actual| actual != expected_instance)
                             {
                                 return Err(NetworkError::protocol(
                                     "C-STORE batch response did not echo the requested SOP UIDs",
@@ -1916,6 +1967,7 @@ impl Association {
                                             "duplicate or unexpected C-FIND batch response ID",
                                         )
                                     })?;
+                                    Self::validate_response_sop_class(&requests[index].sop_class_uid, command.affected_sop_class_uid.as_deref())?;
                                     let expected_context_id = prepared[index].2;
                                     Self::validate_response_context(
                                         expected_context_id,
@@ -1954,11 +2006,7 @@ impl Association {
                                         "C-FIND batch",
                                     )?;
                                     let (syntax, _, _) = &prepared[index];
-                                    let identifier = crate::message::decode_dataset_with_fallback(
-                                        &unit.bytes,
-                                        syntax,
-                                        self.fallback_encoding,
-                                    )?;
+                                    let identifier = self.decode_response_body(&unit, syntax).await?;
                                     self.record_find_response(
                                         index,
                                         command,
@@ -2091,6 +2139,10 @@ impl Association {
                                         "C-FIND response used the wrong presentation context",
                                     ));
                                 }
+                                Self::validate_response_sop_class(
+                                    &request.sop_class_uid,
+                                    command.affected_sop_class_uid.as_deref(),
+                                )?;
                                 if command.no_dataset {
                                     if awaiting_command.is_some() {
                                         return Err(NetworkError::protocol(
@@ -2125,11 +2177,7 @@ impl Association {
                                         "C-FIND Identifier used the wrong presentation context",
                                     ));
                                 }
-                                let identifier = crate::message::decode_dataset_with_fallback(
-                                    &unit.bytes,
-                                    &syntax,
-                                    self.fallback_encoding,
-                                )?;
+                                let identifier = self.decode_response_body(&unit, &syntax).await?;
                                 let response = crate::cfind::CFindResponse::from_command(
                                     &command,
                                     Some(identifier),
@@ -2222,11 +2270,8 @@ impl Association {
                             let mut response = awaiting_identifier.take().ok_or_else(|| {
                                 NetworkError::protocol("C-MOVE Identifier without its response")
                             })?;
-                            response.set_identifier(&crate::message::decode_dataset_with_fallback(
-                                &unit.bytes,
-                                &syntax,
-                                self.fallback_encoding,
-                            )?);
+                            response
+                                .set_identifier(&self.decode_response_body(&unit, &syntax).await?);
                             on_response(response)?;
                             return Ok(());
                         }
@@ -2239,7 +2284,7 @@ impl Association {
                         let response = crate::cmove::CMoveResponse::from_command(&command)?;
                         Self::validate_response_sop_class(
                             &request.sop_class_uid,
-                            &response.affected_sop_class_uid,
+                            command.affected_sop_class_uid.as_deref(),
                         )?;
                         let terminal = !response.is_pending();
                         if !command.no_dataset {
@@ -2379,7 +2424,7 @@ impl Association {
                                             crate::cget::CGetResponse::from_command(&command)?;
                                         Self::validate_response_sop_class(
                                             &request.sop_class_uid,
-                                            &response.affected_sop_class_uid,
+                                            command.affected_sop_class_uid.as_deref(),
                                         )?;
                                         if unit.context_id != context_id {
                                             return Err(NetworkError::protocol(
@@ -2413,11 +2458,7 @@ impl Association {
                                             )
                                         })?;
                                     response.set_identifier(
-                                        &crate::message::decode_dataset_with_fallback(
-                                            &unit.bytes,
-                                            &syntax,
-                                            self.fallback_encoding,
-                                        )?,
+                                        &self.decode_response_body(&unit, &syntax).await?,
                                     );
                                     on_response(response)?;
                                     return Ok(());
@@ -2453,11 +2494,13 @@ impl Association {
                                     crate::store::StoreSink::Memory
                                 };
                                 let decode_syntax = store_syntax.clone();
+                                let limit = self.max_materialized_length;
                                 let dataset = tokio::task::spawn_blocking(move || {
-                                    sink.materialize_body_with_fallback(
+                                    sink.materialize_body_with_fallback_limited(
                                         &body,
                                         &decode_syntax,
                                         fallback,
+                                        limit,
                                     )
                                 })
                                 .await
@@ -2647,8 +2690,8 @@ impl Association {
         Ok(())
     }
 
-    pub(crate) fn validate_response_sop_class(expected: &str, actual: &str) -> Result<()> {
-        if expected != actual {
+    pub(crate) fn validate_response_sop_class(expected: &str, actual: Option<&str>) -> Result<()> {
+        if actual.is_some_and(|actual| expected != actual) {
             return Err(NetworkError::protocol(
                 "response used the wrong SOP Class UID",
             ));
@@ -2740,6 +2783,20 @@ impl Association {
         let (response_command, response_dataset) = self
             .await_n_response(request.message_id, expected, &target, context_id)
             .await?;
+        Self::validate_response_sop_class(
+            sop_class,
+            response_command.affected_sop_class_uid.as_deref(),
+        )?;
+        if let (Some(expected), Some(actual)) = (
+            &request.sop_instance_uid,
+            &response_command.affected_sop_instance_uid,
+        ) {
+            if expected != actual {
+                return Err(NetworkError::protocol(
+                    "N-service response used the wrong SOP Instance UID",
+                ));
+            }
+        }
         Ok(crate::nservice::NServiceResponse::from_command(
             &response_command,
             response_dataset,
@@ -2803,11 +2860,7 @@ impl Association {
                                     unit.context_id,
                                     "N-service",
                                 )?;
-                                let dataset = crate::message::decode_dataset_with_fallback(
-                                    &unit.bytes,
-                                    syntax,
-                                    self.fallback_encoding,
-                                )?;
+                                let dataset = self.decode_response_body(&unit, syntax).await?;
                                 return Ok((command, Some(dataset)));
                             }
                         }
@@ -2928,6 +2981,53 @@ mod mixed_response_tests {
             &mut |_| Ok(()),
         )
         .expect("valid response");
+    }
+
+    #[test]
+    fn typed_response_distinguishes_omitted_and_supplied_uids() {
+        assert!(Association::validate_response_sop_class("1.2.3", None).is_ok());
+        assert!(Association::validate_response_sop_class("1.2.3", Some("1.2.3")).is_ok());
+        assert!(Association::validate_response_sop_class("1.2.3", Some("")).is_err());
+        assert!(Association::validate_response_sop_class("1.2.3", Some("1.2.4")).is_err());
+    }
+
+    #[test]
+    fn mixed_responses_accept_omitted_optional_uids() {
+        for (kind, field) in [
+            (crate::batch::RequestKind::Echo, CommandField::CEchoRq),
+            (crate::batch::RequestKind::Store, CommandField::CStoreRq),
+            (crate::batch::RequestKind::Find, CommandField::CFindRq),
+            (crate::batch::RequestKind::Get, CommandField::CGetRq),
+            (crate::batch::RequestKind::Move, CommandField::CMoveRq),
+            (crate::batch::RequestKind::NService, CommandField::NSetRq),
+        ] {
+            let request = Command::request(field, 7);
+            let response = Command::response(&request, crate::dimse::status::SUCCESS).unwrap();
+            let mut pending = pending(kind);
+            pending.expected_sop_class_uid = Some("1.2.3".into());
+            pending.expected_sop_instance_uid = Some("1.2.3.4".into());
+            emit_ok(pending, response, None);
+        }
+    }
+
+    #[test]
+    fn mixed_n_responses_reject_supplied_wrong_uids() {
+        for wrong_class in [false, true] {
+            let request = Command::request(CommandField::NSetRq, 7);
+            let mut response = Command::response(&request, crate::dimse::status::SUCCESS).unwrap();
+            if wrong_class {
+                response.affected_sop_class_uid = Some("1.2.5".into());
+            } else {
+                response.affected_sop_instance_uid = Some("1.2.3.5".into());
+            }
+            let mut pending = pending(crate::batch::RequestKind::NService);
+            pending.expected_sop_class_uid = Some("1.2.3".into());
+            pending.expected_sop_instance_uid = Some("1.2.3.4".into());
+            assert!(matches!(
+                emit_error(pending, response, None),
+                NetworkError::Protocol(_)
+            ));
+        }
     }
 
     #[test]

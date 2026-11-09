@@ -164,10 +164,14 @@ impl NServiceResponse {
             // PS3.7 §10.1: responses always name the instance as Affected
             affected_sop_class_uid: request.sop_class_uid.clone(),
             affected_sop_instance_uid: request.sop_instance_uid.clone(),
-            // Event Type ID and Action Type ID are request-only fields
-            // (PS3.7 N-EVENT-REPORT/N-ACTION tables).
-            event_type_id: None,
-            action_type_id: None,
+            event_type_id: (request.field == CommandField::NEventReportRq
+                && status == crate::dimse::status::SUCCESS)
+                .then_some(request.event_type_id)
+                .flatten(),
+            action_type_id: (request.field == CommandField::NActionRq
+                && status == crate::dimse::status::SUCCESS)
+                .then_some(request.action_type_id)
+                .flatten(),
             status,
             dataset: None,
         }
@@ -180,10 +184,10 @@ impl NServiceResponse {
         command.status = Some(self.status);
         command.affected_sop_class_uid = self.affected_sop_class_uid.clone();
         command.affected_sop_instance_uid = self.affected_sop_instance_uid.clone();
-        if self.field != CommandField::NEventReportRsp {
+        if self.field == CommandField::NEventReportRsp {
             command.event_type_id = self.event_type_id;
         }
-        if self.field != CommandField::NActionRsp {
+        if self.field == CommandField::NActionRsp {
             command.action_type_id = self.action_type_id;
         }
         command.no_dataset = self.dataset.is_none();

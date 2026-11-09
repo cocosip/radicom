@@ -92,14 +92,14 @@ pub enum ClientEvent {
 #[derive(Clone, Debug)]
 pub struct CancellationHandle {
     signal: tokio::sync::watch::Sender<Option<u16>>,
-    active: Arc<std::sync::Mutex<Option<u16>>>,
+    active: Arc<std::sync::Mutex<std::collections::HashMap<u16, bool>>>,
 }
 
 impl Default for CancellationHandle {
     fn default() -> Self {
         Self {
             signal: tokio::sync::watch::channel(None).0,
-            active: Arc::new(std::sync::Mutex::new(None)),
+            active: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 }
@@ -107,25 +107,37 @@ impl Default for CancellationHandle {
 impl CancellationHandle {
     /// Signals the matching live request. Inactive IDs return false.
     pub fn cancel(&self, message_id: u16) -> bool {
-        let active = self
-            .active
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if *active != Some(message_id) {
-            return false;
-        }
-        self.signal.send_replace(Some(message_id));
-        true
-    }
-
-    fn register(&self, message_id: u16) -> ActiveRequest {
         let mut active = self
             .active
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.signal.send_replace(None);
-        *active = Some(message_id);
-        ActiveRequest(self.clone())
+        let Some(requested) = active.get_mut(&message_id) else {
+            return false;
+        };
+        *requested = true;
+        self.signal.send_replace(Some(message_id));
+        true
+    }
+
+    pub(crate) fn register(&self, message_id: u16) -> ActiveRequest {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active.is_empty() {
+            self.signal.send_replace(None);
+        }
+        active.insert(message_id, false);
+        ActiveRequest(self.clone(), message_id)
+    }
+
+    pub(crate) fn take_cancelled(&self) -> Vec<u16> {
+        self.active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter_mut()
+            .filter_map(|(&id, requested)| std::mem::take(requested).then_some(id))
+            .collect()
     }
 
     pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<Option<u16>> {
@@ -137,14 +149,14 @@ impl CancellationHandle {
     }
 }
 
-struct ActiveRequest(CancellationHandle);
+pub(crate) struct ActiveRequest(CancellationHandle, u16);
 impl Drop for ActiveRequest {
     fn drop(&mut self) {
-        *self
-            .0
+        self.0
             .active
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.1);
     }
 }
 
@@ -498,9 +510,12 @@ impl DicomClient {
         }
         let (contexts, roles) = mixed_contexts(&requests)?;
         let request_count = requests.len();
+        let cancellation = self.cancellation.clone();
         let result = {
             let association = self.ensure_association_with_roles(contexts, roles).await?;
-            association.send_mixed_batch(requests, on_response).await
+            association
+                .send_mixed_batch_cancellable(requests, on_response, Some(cancellation))
+                .await
         };
         let result = self.finish_request(result).await;
         if result.is_ok() {
@@ -950,7 +965,7 @@ fn mixed_contexts(
 ) -> Result<(Vec<PresentationContext>, Vec<crate::pdu::RoleSelection>)> {
     use std::collections::BTreeMap;
 
-    let mut syntax_by_sop: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut proposals: Vec<(String, Vec<String>)> = Vec::new();
     let mut roles: BTreeMap<String, (bool, bool)> = BTreeMap::new();
     let mut add_role = |sop_class: &str, scu: bool, scp: bool| {
         let role = roles.entry(sop_class.to_owned()).or_default();
@@ -958,12 +973,7 @@ fn mixed_contexts(
         role.1 |= scp;
     };
     let mut add_syntaxes = |sop_class: &str, syntaxes: Vec<String>| {
-        let offered = syntax_by_sop.entry(sop_class.to_owned()).or_default();
-        for syntax in syntaxes {
-            if !offered.contains(&syntax) {
-                offered.push(syntax);
-            }
-        }
+        proposals.push((sop_class.to_owned(), syntaxes));
     };
 
     for request in requests {
@@ -1081,7 +1091,7 @@ fn mixed_contexts(
     }
 
     let mut builder = crate::association::ContextSetBuilder::new();
-    for (sop_class, syntaxes) in syntax_by_sop {
+    for (sop_class, syntaxes) in proposals {
         builder.add(sop_class, syntaxes)?;
     }
     let roles = roles

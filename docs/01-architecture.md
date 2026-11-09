@@ -313,8 +313,9 @@ client/server. One tokio task per association. Locks must not be held across `.a
   The negotiated Maximum Length applies to the P-DATA variable field (body); it excludes this header.
 - Sub-item headers are `type (1) + reserved (1) + length (u16)` — 4 bytes, big endian. Only the P-DATA
   PDV length is 32-bit.
-- Item values must have even length; pad odd values with a single `0x00` and strip trailing NUL/space on
-  decode.
+- UL items use exact byte lengths, without dataset-style even padding. UID values are not NUL-padded.
+- Protocol Version is a bit field: bit 0 must be set; other bits are ignored. AC AE-title fields are
+  reserved and are not validated against the request.
 - An A-ASSOCIATE-RJ body is `reserved (1) + result (1) + source (1) + reason (1)`.
 - Presentation context layout is uniform: `id (1) + reserved (1) + result (1) + reserved (1)`. The RQ
   writes result = 0; only the AC carries a real result. **Writing the result at offset 1 instead of 2
@@ -326,12 +327,18 @@ client/server. One tokio task per association. Locks must not be held across `.a
   which is inherent. Each streamed PDU carries one PDV; the final PDV ("last" bit) is only known at the
   end, so the tail is held back until the writer finishes. A failure mid-stream sends A-ABORT, so the
   association must be dropped afterwards.
-- An A-ASSOCIATE-AC echoes only `result` plus **one** accepted transfer syntax per context — no abstract
-  syntax; the client refills the abstract syntax from its RQ by context id.
+- An A-ASSOCIATE-AC carries `result` plus **one** transfer syntax per context, including rejected
+  contexts (where its value is ignored). It carries no abstract syntax; the client refills it from
+  its RQ by context id.
 - User-information sub-items:
   - Role selection (`0x54`): `uid_len (u16) + uid + scu (1) + scp (1)`.
   - Extended negotiation (`0x56`): the application information is a **flat byte array** where the index is
     the field number — not `(field, length, value)` triples.
+  - Common extended negotiation (`0x57`): SOP Class UID, Service Class UID, then a u16 total length
+    and length-prefixed related general SOP Class UIDs; an empty related list is valid.
+    `common_extended` is a `Vec<CommonExtended>`; each entry names its `sop_class_uid`.
+  - Storage application information has six bytes: fields 1/3/5, reserved bytes 2/4/6.
+    Retrieve enhanced-multiframe conversion uses field 2.
   - User identity (`0x58`): `type (1) + positive_response_requested (1) + primary_len (u16) + primary +
     secondary_len (u16) + secondary`.
 - Max-PDU is a u32 in the user information item; do not clamp the engine's framing limit to the u16 range
@@ -343,7 +350,14 @@ client/server. One tokio task per association. Locks must not be held across `.a
 - In the command field, bit 15 marks a response; a response's command field is the request value plus
   `0x8000`.
 - An unrecognised command field must answer Processing Failure or send A-ABORT — **never panic**.
-- N-service requests use `Requested*` fields, not `Affected*`.
+- N-GET/SET/ACTION/DELETE requests use `Requested*`; N-CREATE/EVENT-REPORT use `Affected*`.
+- Command Data Set Type `0101H` means absent; every other value means present (including fo-dicom
+  `0202H`). Message ID zero is valid; required ID fields must still be present.
+- C-service response UIDs are optional. Typed response APIs represent absent UIDs as empty strings and
+  omit them on encoding; correlation rejects a supplied mismatching UID.
+- Pending C-GET/MOVE responses require all four sub-operation counters; terminal responses may omit
+  them. N-ACTION/EVENT-REPORT replies preserve the corresponding Type ID when supplied for a reply.
+- Every outstanding request ID stays registered until a terminal response; Pending never retires it.
 - `Priority`: Low = 2, Medium = 0, High = 1; the default is Medium.
 
 ### 11.4 Server and client
@@ -359,8 +373,13 @@ client/server. One tokio task per association. Locks must not be held across `.a
   negotiates the union of contexts and role selections once, limits in-flight requests by the
   asynchronous-operations window, and routes callback events by Message ID; `send_batch` and the
   existing typed send methods remain compatibility convenience APIs with typed return values.
+  C-GET drains earlier requests and blocks later admissions until completion, allowing reverse C-STORE
+  traffic without competing streamed writes. Each distinct source storage syntax has its own context;
+  mixed requests support cancellation by active Message ID.
 - Reverse C-STORE (C-GET / C-MOVE) requires role selection; register a handler with
   `with_reverse_store_handler` or `collect_reverse_stores`.
+- Received bodies obey configured limits even below the spool threshold; deflated output has the same
+  hard limit on both memory and spool paths. Blocking file reads and parsing run on the blocking pool.
 - Sub-operation counters must be populated from the actual results. Returning a defaulted summary makes a
   failed C-MOVE report success.
 - `max_clients` must actually be enforced (a semaphore or equivalent); a config field that no code path

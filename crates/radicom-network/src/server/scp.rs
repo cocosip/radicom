@@ -236,7 +236,7 @@ where
 
     // PS3.8 §9.3.2: the RQ names the protocol version and the application
     // context; anything else is a rejection, not something to negotiate around.
-    if request.protocol_version != 1 {
+    if request.protocol_version & 1 == 0 {
         let reject = AssociateRj {
             result: RejectResult::Permanent,
             source: RejectSource::ProviderAcse,
@@ -369,6 +369,7 @@ where
         pending_units: VecDeque::new(),
         deferred_units: VecDeque::new(),
         deferred_requests: 0,
+        active_request_ids: Default::default(),
         incoming_window,
         accepted: &accepted,
         reverse_message_id: 1,
@@ -390,7 +391,6 @@ where
     // cancel-safe framer (review #13).
     let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Result<Outgoing>>(64);
     let mut jobs: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
-    let mut active_request_ids = std::collections::HashSet::new();
     // a C-CANCEL for a request running on a task is forwarded through here
     let cancels: CancelMap = CancelMap::default();
     let max_jobs = if incoming_window == 0 {
@@ -412,9 +412,6 @@ where
                             &outgoing.syntax,
                         )
                         .await?;
-                    if let Some(id) = outgoing.command.message_id_being_responded_to {
-                        active_request_ids.remove(&id);
-                    }
                 }
             }
             joined = jobs.join_next(), if !jobs.is_empty() => {
@@ -503,11 +500,6 @@ where
                                 handle_command(&mut serving, unit.context_id, command).await?;
                                 serving.resume_deferred();
                             } else if DispatchJob::is_concurrent(&command) {
-                                if !active_request_ids.insert(command.message_id) {
-                                    return Err(NetworkError::protocol(
-                                        "duplicate outstanding DIMSE Message ID",
-                                    ));
-                                }
                                 // C: keep concurrent providers within the
                                 // negotiated window. When it is full, wait for a
                                 // running job to finish (writing its response)
@@ -526,9 +518,6 @@ where
                                                         &outgoing.syntax,
                                                     )
                                                     .await?;
-                                                if let Some(id) = outgoing.command.message_id_being_responded_to {
-                                                    active_request_ids.remove(&id);
-                                                }
                                             }
                                         }
                                         joined = jobs.join_next() => {
@@ -697,8 +686,30 @@ where
     }
 }
 
+async fn decode_body_offloaded(
+    body: MessageBody,
+    syntax: Arc<radicom::model::transfer_syntax::TransferSyntax>,
+    fallback: Option<&'static str>,
+    max_materialized_length: u64,
+) -> Result<Dataset> {
+    tokio::task::spawn_blocking(move || {
+        crate::store::decode_body_with_fallback_limited(
+            &body,
+            &syntax,
+            fallback,
+            max_materialized_length,
+        )
+    })
+    .await
+    .map_err(|error| {
+        tracing::error!(target: "radicom::network", %error, "dataset decoding task failed");
+        NetworkError::protocol("dataset decoding task failed")
+    })?
+}
+
 /// The C-GET path: deliver instances back as reverse C-STORE sub-operations
 /// (§11.4).
+#[cfg(test)]
 pub async fn handle_c_get<P: ServiceProvider, S>(
     serving: &mut Serving<'_, P, S>,
     context_id: u8,
@@ -709,15 +720,30 @@ pub async fn handle_c_get<P: ServiceProvider, S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let identifier = match crate::message::decode_dataset_with_fallback(
-        dataset_bytes,
-        syntax,
+    let identifier = match decode_body_offloaded(
+        MessageBody::Memory(bytes::Bytes::copy_from_slice(dataset_bytes)),
+        syntax.clone(),
         serving.options.fallback_encoding,
-    ) {
+        serving.options.store_spool.max_message_length,
+    )
+    .await
+    {
         Ok(identifier) => identifier,
         Err(error) => return serving.fail(context_id, &command, &error.to_string()).await,
     };
+    handle_c_get_identifier(serving, context_id, command, identifier, syntax).await
+}
 
+async fn handle_c_get_identifier<P: ServiceProvider, S>(
+    serving: &mut Serving<'_, P, S>,
+    context_id: u8,
+    command: Command,
+    identifier: Dataset,
+    syntax: &Arc<radicom::model::transfer_syntax::TransferSyntax>,
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let request = crate::cget::CGetRequest {
         message_id: command.message_id,
         sop_class_uid: command.affected_sop_class_uid.clone().unwrap_or_default(),
@@ -923,6 +949,7 @@ where
 
 /// The C-MOVE path: decode the Identifier and relay the provider's progress
 /// (§11.4).
+#[cfg(test)]
 pub async fn handle_c_move<P: ServiceProvider, S>(
     serving: &mut Serving<'_, P, S>,
     context_id: u8,
@@ -933,15 +960,30 @@ pub async fn handle_c_move<P: ServiceProvider, S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let identifier = match crate::message::decode_dataset_with_fallback(
-        dataset_bytes,
-        syntax,
+    let identifier = match decode_body_offloaded(
+        MessageBody::Memory(bytes::Bytes::copy_from_slice(dataset_bytes)),
+        syntax.clone(),
         serving.options.fallback_encoding,
-    ) {
+        serving.options.store_spool.max_message_length,
+    )
+    .await
+    {
         Ok(identifier) => identifier,
         Err(error) => return serving.fail(context_id, &command, &error.to_string()).await,
     };
+    handle_c_move_identifier(serving, context_id, command, identifier, syntax).await
+}
 
+async fn handle_c_move_identifier<P: ServiceProvider, S>(
+    serving: &mut Serving<'_, P, S>,
+    context_id: u8,
+    command: Command,
+    identifier: Dataset,
+    syntax: &Arc<radicom::model::transfer_syntax::TransferSyntax>,
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     // the destination AE title is mandatory (PS3.7 §9.3.2)
     let Some(destination_ae) = command.move_destination.clone() else {
         let request = crate::cmove::CMoveRequest {
@@ -1271,8 +1313,14 @@ where
     let sink = serving.options.store_sink.clone();
     let syntax = syntax.clone();
     let fallback = serving.options.fallback_encoding;
+    let max_materialized_length = serving.options.store_spool.max_message_length;
     let instance = match tokio::task::spawn_blocking(move || {
-        sink.materialize_body_with_fallback(&body, &syntax, fallback)
+        sink.materialize_body_with_fallback_limited(
+            &body,
+            &syntax,
+            fallback,
+            max_materialized_length,
+        )
     })
     .await
     {
@@ -1319,6 +1367,8 @@ pub struct Serving<'a, P: ServiceProvider, S> {
     pub(crate) pending_units: VecDeque<MessageUnit>,
     pub(crate) deferred_units: VecDeque<MessageUnit>,
     pub(crate) deferred_requests: usize,
+    /// Registered at command receipt, retained until the terminal response is written.
+    pub(crate) active_request_ids: std::collections::HashSet<u16>,
     pub(crate) incoming_window: usize,
     pub(crate) accepted: &'a AcceptedContexts,
     /// The next message ID for reverse sub-operations (§11.4).
@@ -1391,26 +1441,42 @@ where
         &mut self,
         pdata: &crate::pdu::PData,
     ) -> Result<Vec<crate::assembler::MessageUnit>> {
-        if !self.assembler.would_spill_pdata(pdata) {
-            return self.assembler.push_pdata(pdata);
-        }
-        let mut assembler = std::mem::take(&mut self.assembler);
-        let owned = pdata.clone();
-        match tokio::task::spawn_blocking(move || {
-            let result = assembler.push_pdata(&owned);
-            (assembler, result)
-        })
-        .await
-        {
-            Ok((assembler, result)) => {
-                self.assembler = assembler;
-                result
+        let units = if !self.assembler.would_spill_pdata(pdata) {
+            self.assembler.push_pdata(pdata)?
+        } else {
+            let mut assembler = std::mem::take(&mut self.assembler);
+            let owned = pdata.clone();
+            match tokio::task::spawn_blocking(move || {
+                let result = assembler.push_pdata(&owned);
+                (assembler, result)
+            })
+            .await
+            {
+                Ok((assembler, result)) => {
+                    self.assembler = assembler;
+                    result?
+                }
+                Err(join) => {
+                    tracing::error!(target: "radicom::network", %join, "assembler blocking task failed");
+                    return Err(NetworkError::protocol("assembler blocking task failed"));
+                }
             }
-            Err(join) => {
-                tracing::error!(target: "radicom::network", %join, "assembler blocking task failed");
-                Err(NetworkError::protocol("assembler blocking task failed"))
+        };
+        for unit in &units {
+            if unit.stream == Stream::Command {
+                // Malformed commands keep the dispatcher's existing abort handling.
+                if let Ok(command) = command_from_bytes(&unit.bytes) {
+                    if crate::dimse::response_field(command.field).is_some()
+                        && !self.active_request_ids.insert(command.message_id)
+                    {
+                        return Err(NetworkError::protocol(
+                            "duplicate outstanding DIMSE Message ID",
+                        ));
+                    }
+                }
             }
         }
+        Ok(units)
     }
 
     pub(crate) async fn next_pdu(&mut self) -> Result<Option<Pdu>> {
@@ -1445,7 +1511,9 @@ where
 
     /// Sends one command-only message on `context_id`.
     async fn send(&mut self, context_id: u8, command: &Command) -> Result<()> {
-        send_command(self.stream, self.splitter, context_id, command).await
+        send_command(self.stream, self.splitter, context_id, command).await?;
+        self.retire_request(command);
+        Ok(())
     }
 
     /// Sends a command followed by an optional dataset (§11.1).
@@ -1469,7 +1537,20 @@ where
         let pdus = self
             .splitter
             .split_message_bytes(context_id, command_bytes, payload)?;
-        write_pdata_batch(self.stream, pdus).await
+        write_pdata_batch(self.stream, pdus).await?;
+        self.retire_request(command);
+        Ok(())
+    }
+
+    fn retire_request(&mut self, command: &Command) {
+        if command
+            .status
+            .is_some_and(|status| !crate::dimse::classify(status).is_pending())
+        {
+            if let Some(id) = command.message_id_being_responded_to {
+                self.active_request_ids.remove(&id);
+            }
+        }
     }
 
     /// Answers with ProcessingFailure and a truncated comment.
@@ -1609,11 +1690,13 @@ where
                     }
                     Stream::Data => {
                         if let Some(command) = pending_command.take() {
-                            let dataset = crate::message::decode_dataset_with_fallback(
-                                &unit.bytes,
-                                syntax,
+                            let dataset = decode_body_offloaded(
+                                unit.body(),
+                                syntax.clone(),
                                 self.options.fallback_encoding,
-                            )?;
+                                self.options.store_spool.max_message_length,
+                            )
+                            .await?;
                             return Ok((command, Some(dataset)));
                         }
                         self.park(unit)?;
@@ -2010,8 +2093,14 @@ pub async fn execute_c_store<P: ServiceProvider>(
     let sink = options.store_sink.clone();
     let spool_syntax = syntax.clone();
     let fallback = options.fallback_encoding;
+    let max_materialized_length = options.store_spool.max_message_length;
     let instance = match tokio::task::spawn_blocking(move || {
-        sink.materialize_body_with_fallback(&body, &spool_syntax, fallback)
+        sink.materialize_body_with_fallback_limited(
+            &body,
+            &spool_syntax,
+            fallback,
+            max_materialized_length,
+        )
     })
     .await
     {
@@ -2081,12 +2170,14 @@ pub async fn execute_c_find<P: ServiceProvider>(
     let context_id = job.context_id;
     let command = job.command.clone();
     let syntax = job.syntax.clone();
-    let dataset_bytes = job.body.read_all()?;
-    let identifier = match crate::message::decode_dataset_with_fallback(
-        &dataset_bytes,
-        &syntax,
+    let identifier = match decode_body_offloaded(
+        job.body.clone(),
+        syntax.clone(),
         options.fallback_encoding,
-    ) {
+        options.store_spool.max_message_length,
+    )
+    .await
+    {
         Ok(identifier) => identifier,
         Err(error) => {
             let comment = error.to_string();
@@ -2198,12 +2289,14 @@ pub async fn execute_n_service<P: ServiceProvider>(
     let dataset = if command.no_dataset {
         None
     } else {
-        let dataset_bytes = body.read_all()?;
-        match crate::message::decode_dataset_with_fallback(
-            &dataset_bytes,
-            &syntax,
+        match decode_body_offloaded(
+            body,
+            syntax.clone(),
             options.fallback_encoding,
-        ) {
+            options.store_spool.max_message_length,
+        )
+        .await
+        {
             Ok(dataset) => Some(dataset),
             Err(error) => {
                 let comment = error.to_string();
@@ -2414,25 +2507,30 @@ where
         CommandField::CStoreRq | CommandField::CFindRq => Err(NetworkError::protocol(
             "C-STORE/C-FIND reached the inline dataset dispatcher",
         )),
-        CommandField::CMoveRq => {
-            let dataset_bytes = body.read_all()?;
-            handle_c_move(serving, context_id, command, &dataset_bytes, syntax).await
-        }
-        CommandField::CGetRq => {
-            let dataset_bytes = body.read_all()?;
-            handle_c_get(serving, context_id, command, &dataset_bytes, syntax).await
-        }
-        field if crate::nservice::is_n_request(field) => {
-            let dataset_bytes = body.read_all()?;
-            let dataset = match crate::message::decode_dataset_with_fallback(
-                &dataset_bytes,
-                syntax,
+        field
+            if matches!(field, CommandField::CMoveRq | CommandField::CGetRq)
+                || crate::nservice::is_n_request(field) =>
+        {
+            let dataset = match decode_body_offloaded(
+                body,
+                syntax.clone(),
                 serving.options.fallback_encoding,
-            ) {
+                serving.options.store_spool.max_message_length,
+            )
+            .await
+            {
                 Ok(dataset) => dataset,
                 Err(error) => return serving.fail(context_id, &command, &error.to_string()).await,
             };
-            handle_n_service(serving, context_id, command, Some(dataset), syntax).await
+            match field {
+                CommandField::CMoveRq => {
+                    handle_c_move_identifier(serving, context_id, command, dataset, syntax).await
+                }
+                CommandField::CGetRq => {
+                    handle_c_get_identifier(serving, context_id, command, dataset, syntax).await
+                }
+                _ => handle_n_service(serving, context_id, command, Some(dataset), syntax).await,
+            }
         }
         _ => {
             serving

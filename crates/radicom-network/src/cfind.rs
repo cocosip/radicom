@@ -225,7 +225,7 @@ fn level_keys(level: QueryRetrieveLevel) -> &'static [(u16, u16, Vr)] {
 #[derive(Debug, Clone)]
 pub struct CFindResponse {
     pub message_id_being_responded_to: u16,
-    /// The abstract syntax echoed back in the required `(0000,0002)` field
+    /// The abstract syntax echoed in optional `(0000,0002)`; empty means absent
     /// (PS3.7 Table 9.3-4).
     pub affected_sop_class_uid: String,
     pub status: u16,
@@ -300,9 +300,9 @@ impl CFindResponse {
         let mut command =
             Command::request(CommandField::CFindRsp, self.message_id_being_responded_to);
         command.message_id_being_responded_to = Some(self.message_id_being_responded_to);
-        // Affected SOP Class UID is required in the C-FIND-RSP command set
-        // (PS3.7 Table 9.3-4), even though a C-FIND is not tied to an instance.
-        command.affected_sop_class_uid = Some(self.affected_sop_class_uid.clone());
+        // PS3.7 Table 9.3-4 makes Affected SOP Class UID optional.
+        command.affected_sop_class_uid =
+            (!self.affected_sop_class_uid.is_empty()).then(|| self.affected_sop_class_uid.clone());
         command.status = Some(self.status);
         command.no_dataset = self.identifier.is_none();
         command.error_comment = self.error_comment.clone();
@@ -322,19 +322,13 @@ impl CFindResponse {
                 "C-FIND Pending responses require an Identifier and terminal responses forbid one",
             ));
         }
-        let message_id_being_responded_to = command
-            .message_id_being_responded_to
-            .filter(|id| *id != 0)
-            .ok_or(NetworkError::protocol(
-                "C-FIND response has no valid Message ID Being Responded To",
-            ))?;
-        let affected_sop_class_uid = command
-            .affected_sop_class_uid
-            .clone()
-            .filter(|uid| !uid.is_empty())
-            .ok_or(NetworkError::protocol(
-                "C-FIND response has no Affected SOP Class UID",
-            ))?;
+        let message_id_being_responded_to =
+            command
+                .message_id_being_responded_to
+                .ok_or(NetworkError::protocol(
+                    "C-FIND response has no valid Message ID Being Responded To",
+                ))?;
+        let affected_sop_class_uid = command.affected_sop_class_uid.clone().unwrap_or_default();
         Ok(CFindResponse {
             message_id_being_responded_to,
             affected_sop_class_uid,
@@ -564,14 +558,14 @@ mod tests {
         assert_eq!(
             back.affected_sop_class_uid,
             sop_class::STUDY_ROOT_QR_FIND,
-            "the required (0000,0002) round-trips"
+            "the supplied (0000,0002) round-trips"
         );
         // C-FIND-RSP carries no sub-operation counters (PS3.7 Table 9.3-4).
         assert_eq!(back.completed, 0);
     }
 
     #[test]
-    fn terminal_response_writes_the_required_affected_sop_class_uid() {
+    fn terminal_response_writes_the_supplied_affected_sop_class_uid() {
         let request = CFindRequest::study_query(3);
         let command = CFindResponse::success(&request, 1).to_command();
         let dataset = command.to_dataset();
@@ -624,7 +618,10 @@ mod tests {
         assert!(CFindResponse::from_command(&command, None).is_err());
         command.message_id_being_responded_to = Some(1);
         command.affected_sop_class_uid = None;
-        assert!(CFindResponse::from_command(&command, None).is_err());
+        assert!(CFindResponse::from_command(&command, None)
+            .unwrap()
+            .affected_sop_class_uid
+            .is_empty());
     }
 
     /// A provider yielding a fixed set of items then a terminal response.

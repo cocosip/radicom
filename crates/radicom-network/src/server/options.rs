@@ -230,11 +230,11 @@ pub struct ClientOptions {
     /// off the async worker, mirroring the SCP's C-STORE receive path. `None`
     /// disables spilling and buffers the instance in memory, as before.
     pub reverse_spool: Option<crate::assembler::SpoolConfig>,
-    /// SOP Class Common Extended Negotiation to offer (L4, PS3.7 §D.3.3.6).
+    /// SOP Class Common Extended Negotiation items to offer (PS3.7 §D.3.3.6).
     ///
     /// The item names a service class and its related general SOP classes, so
     /// an SCP can recognise a familiar family under a new class UID.
-    pub common_extended: Option<crate::pdu::CommonExtended>,
+    pub common_extended: Vec<crate::pdu::CommonExtended>,
     /// Role selection items to propose (§11.2).
     ///
     /// A peer may only send C-STORE requests to this side when the SCP role for
@@ -271,7 +271,7 @@ impl Default for ClientOptions {
             ignore_unsupported_syntax_change: false,
             fallback_encoding: None,
             reverse_spool: Some(crate::assembler::SpoolConfig::default()),
-            common_extended: None,
+            common_extended: Vec::new(),
             role_selections: Vec::new(),
             #[cfg(feature = "tls")]
             tls: None,

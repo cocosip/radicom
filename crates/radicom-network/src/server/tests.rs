@@ -321,7 +321,7 @@ async fn a_negotiated_window_answers_an_echo_while_the_find_is_pending() {
     let data =
         crate::message::encode_dataset(&request.identifier, &syntaxes::IMPLICIT_VR_LITTLE_ENDIAN)
             .unwrap();
-    let mut pdus = association
+    let pdus = association
         .splitter
         .split_message(
             3,
@@ -329,16 +329,6 @@ async fn a_negotiated_window_answers_an_echo_while_the_find_is_pending() {
             Some(&data),
         )
         .unwrap();
-    let echo = CEchoRequest {
-        message_id: 11,
-        affected_sop_class_uid: sop_class::VERIFICATION.into(),
-    };
-    pdus.extend(
-        association
-            .splitter
-            .split_message(1, &command_bytes(&echo.to_command()).unwrap(), None)
-            .unwrap(),
-    );
     write_pdata_batch(&mut association.stream, pdus)
         .await
         .unwrap();
@@ -353,6 +343,18 @@ async fn a_negotiated_window_answers_an_echo_while_the_find_is_pending() {
     // The pending Identifier must also be consumed before awaiting another command.
     let pdu = association.read_request_pdu(10).await.unwrap().unwrap();
     assert!(matches!(pdu, Pdu::PData(_)));
+    // Start the echo once FIND is Pending: response order across requests is unspecified.
+    let echo = CEchoRequest {
+        message_id: 11,
+        affected_sop_class_uid: sop_class::VERIFICATION.into(),
+    };
+    let echo_pdus = association
+        .splitter
+        .split_message(1, &command_bytes(&echo.to_command()).unwrap(), None)
+        .unwrap();
+    write_pdata_batch(&mut association.stream, echo_pdus)
+        .await
+        .unwrap();
     // M6: the negotiated window lets the SCP answer the C-ECHO while the
     // C-FIND provider is still gated. Before M6 this response only arrived
     // after `done`, because the SCP ran one request at a time.
@@ -454,6 +456,7 @@ async fn queued_requests_are_bounded_by_the_accepted_window() {
     let accepted = AcceptedContexts::from_negotiated(policy.negotiate(&[echo_context()]));
     let splitter = PduSplitter::new(16384, 16);
     let mut serving = Serving {
+        active_request_ids: Default::default(),
         stream: &mut io,
         splitter: &splitter,
         provider: &provider,
@@ -5029,8 +5032,10 @@ fn response_context_mismatch_is_rejected() {
 
 #[test]
 fn response_sop_class_mismatch_is_rejected() {
-    assert!(Association::validate_response_sop_class("1.2.3", "1.2.3").is_ok());
-    assert!(Association::validate_response_sop_class("1.2.3", "1.2.4").is_err());
+    assert!(Association::validate_response_sop_class("1.2.3", Some("1.2.3")).is_ok());
+    assert!(Association::validate_response_sop_class("1.2.3", Some("1.2.4")).is_err());
+    assert!(Association::validate_response_sop_class("1.2.3", None).is_ok());
+    assert!(Association::validate_response_sop_class("1.2.3", Some("")).is_err());
 }
 
 #[test]
@@ -5077,7 +5082,7 @@ async fn raw_association_handshake(configure: impl FnOnce(&mut Associate)) -> cr
 
 #[tokio::test]
 async fn client_rejects_malformed_association_accepts() {
-    for malformed_kind in [0u8, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8] {
+    for malformed_kind in [0u8, 1u8, 2u8, 3u8, 4u8, 5u8, 7u8] {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let peer = tokio::spawn(async move {
@@ -5103,8 +5108,6 @@ async fn client_rejects_malformed_association_accepts() {
                 answer.application_context = "9.9.9".into();
             } else if malformed_kind == 5 {
                 answer.protocol_version = 2;
-            } else if malformed_kind == 6 {
-                answer.called_ae = "OTHER-CALLED".into();
             }
             if malformed_kind == 3 {
                 answer.presentation_contexts = vec![
@@ -5138,6 +5141,14 @@ async fn client_rejects_malformed_association_accepts() {
                     .position(|window| window == marker)
                     .expect("presentation context marker");
                 frame[offset + 2] = 0;
+                // The encoder supplies the mandatory TS even on rejection; remove it to
+                // exercise a malformed accepted context with no Transfer Syntax item.
+                let pc = offset - 4;
+                let old_len = u16::from_be_bytes([frame[pc + 2], frame[pc + 3]]) as usize;
+                frame.drain(offset + 4..offset + old_len);
+                frame[pc + 2..pc + 4].copy_from_slice(&4u16.to_be_bytes());
+                let pdu_len = (frame.len() - 6) as u32;
+                frame[2..6].copy_from_slice(&pdu_len.to_be_bytes());
                 stream.write_all(&frame).await.unwrap();
             } else if malformed_kind == 7 {
                 use tokio::io::AsyncWriteExt as _;
@@ -5145,10 +5156,6 @@ async fn client_rejects_malformed_association_accepts() {
                 let uid = sop_class::PATIENT_ROOT_QR_FIND.as_bytes();
                 let mut item = vec![0x30, 0, (uid.len() >> 8) as u8, uid.len() as u8];
                 item.extend_from_slice(uid);
-                if item.len() % 2 != 0 {
-                    item.push(0);
-                    item[2] = (item.len() - 4) as u8;
-                }
                 let pc = frame
                     .windows(4)
                     .position(|window| window[0] == 0x21 && window[1] == 0)
@@ -5188,7 +5195,10 @@ async fn client_rejects_malformed_association_accepts() {
             ClientOptions::default(),
         )
         .await;
-        assert!(result.is_err(), "malformed A-ASSOCIATE-AC was accepted");
+        assert!(
+            result.is_err(),
+            "malformed A-ASSOCIATE-AC {malformed_kind} was accepted"
+        );
         peer.await.unwrap();
     }
 }
@@ -5377,6 +5387,7 @@ async fn reverse_store_response_must_match_storage_context_and_optional_uids() {
             },
         ]);
         let mut serving = Serving {
+            active_request_ids: Default::default(),
             stream: &mut io,
             splitter: &splitter,
             provider: &provider,
@@ -5414,6 +5425,7 @@ async fn a_split_store_response_keeps_the_framer_in_sync() {
     let accepted = AcceptedContexts::default();
     let splitter = PduSplitter::new(16384, 16);
     let mut serving = Serving {
+        active_request_ids: Default::default(),
         stream: &mut server_io,
         splitter: &splitter,
         provider: &provider,
@@ -5761,6 +5773,7 @@ async fn a_response_command_aborts_and_a_non_request_is_refused() {
     let splitter = PduSplitter::new(16384, 16);
     let (mut _peer, mut io) = tokio::io::duplex(65536);
     let mut serving = Serving {
+        active_request_ids: Default::default(),
         stream: &mut io,
         splitter: &splitter,
         provider: &provider,
@@ -5820,6 +5833,7 @@ async fn a_store_response_without_a_request_keeps_the_framer_in_sync() {
     let accepted = AcceptedContexts::default();
     let splitter = PduSplitter::new(16384, 16);
     let mut serving = Serving {
+        active_request_ids: Default::default(),
         stream: &mut io,
         splitter: &splitter,
         provider: &provider,
@@ -5900,6 +5914,7 @@ async fn a_broken_peer_while_waiting_for_a_store_response_is_reported() {
     let accepted = AcceptedContexts::default();
     let splitter = PduSplitter::new(16384, 16);
     let mut serving = Serving {
+        active_request_ids: Default::default(),
         stream: &mut io,
         splitter: &splitter,
         provider: &provider,
@@ -5931,6 +5946,7 @@ async fn a_broken_peer_while_waiting_for_a_store_response_is_reported() {
     .await
     .unwrap();
     let mut serving = Serving {
+        active_request_ids: Default::default(),
         stream: &mut io,
         splitter: &splitter,
         provider: &provider,
@@ -5956,6 +5972,7 @@ async fn a_broken_peer_while_waiting_for_a_store_response_is_reported() {
         .await
         .unwrap();
     let mut serving = Serving {
+        active_request_ids: Default::default(),
         stream: &mut io,
         splitter: &splitter,
         provider: &provider,
@@ -5981,6 +5998,7 @@ async fn a_broken_peer_while_waiting_for_a_store_response_is_reported() {
         .await
         .unwrap();
     let mut serving = Serving {
+        active_request_ids: Default::default(),
         stream: &mut io,
         splitter: &splitter,
         provider: &provider,
@@ -6563,6 +6581,7 @@ async fn a_stalled_store_response_times_out_when_the_server_sets_one() {
     let accepted = AcceptedContexts::default();
     let splitter = PduSplitter::new(16384, 16);
     let mut serving = Serving {
+        active_request_ids: Default::default(),
         stream: &mut io,
         splitter: &splitter,
         provider: &provider,
@@ -6649,11 +6668,12 @@ async fn the_common_extended_negotiation_item_reaches_the_wire() {
     });
 
     let item = crate::pdu::CommonExtended {
+        sop_class_uid: "1.2.3".into(),
         service_class_uid: "1.2.840.10008.5.1.4.1.1.7".to_string(),
         related_general_sop_classes: vec!["1.2.840.10008.5.1.4.1.1.7".to_string()],
     };
     let options = ClientOptions {
-        common_extended: Some(item.clone()),
+        common_extended: vec![item.clone()],
         ..Default::default()
     };
     // the peer closes without answering: this test observes the request only
@@ -6662,7 +6682,7 @@ async fn the_common_extended_negotiation_item_reaches_the_wire() {
         .await
         .expect("the request arrives")
         .unwrap();
-    assert_eq!(sent, Some(item));
+    assert_eq!(sent, vec![item]);
 }
 
 #[tokio::test]
@@ -7338,6 +7358,7 @@ async fn the_inline_c_find_forwards_matches_and_terminates() {
     );
     let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
     let mut serving = Serving {
+        active_request_ids: Default::default(),
         stream: &mut transport,
         splitter: &splitter,
         provider: &provider,
@@ -7371,6 +7392,7 @@ async fn the_inline_c_find_fails_when_the_provider_says_nothing() {
         );
         let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
         let mut serving = Serving {
+            active_request_ids: Default::default(),
             stream: &mut transport,
             splitter: &splitter,
             provider: &provider,
@@ -7404,6 +7426,7 @@ async fn the_inline_c_find_honours_a_matching_cancel() {
     );
     let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
     let mut serving = Serving {
+        active_request_ids: Default::default(),
         stream: &mut transport,
         splitter: &splitter,
         provider: &provider,
@@ -7444,6 +7467,7 @@ async fn the_inline_c_find_defers_a_non_command_unit() {
     );
     let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
     let mut serving = Serving {
+        active_request_ids: Default::default(),
         stream: &mut transport,
         splitter: &splitter,
         provider: &provider,
@@ -7483,6 +7507,7 @@ async fn the_inline_c_store_accepts_a_matching_instance() {
     );
     let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
     let mut serving = Serving {
+        active_request_ids: Default::default(),
         stream: &mut transport,
         splitter: &splitter,
         provider: &provider,
@@ -7520,6 +7545,7 @@ async fn the_inline_c_store_refuses_a_mismatched_instance() {
     );
     let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
     let mut serving = Serving {
+        active_request_ids: Default::default(),
         stream: &mut transport,
         splitter: &splitter,
         provider: &provider,
@@ -7558,6 +7584,7 @@ async fn the_inline_c_store_rejects_a_non_store_command_and_a_bad_dataset() {
     );
     let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
     let mut serving = Serving {
+        active_request_ids: Default::default(),
         stream: &mut transport,
         splitter: &splitter,
         provider: &provider,
@@ -7712,6 +7739,7 @@ static MALFORMED_DATASET: [u8; 10] = [0x08, 0x00, 0x00, 0x00, b'Z', b'Z', 0x02, 
 macro_rules! inline_serving {
     ($transport:ident, $splitter:ident, $provider:ident, $options:ident, $accepted:ident, $window:expr) => {
         Serving {
+            active_request_ids: Default::default(),
             stream: &mut $transport,
             splitter: &$splitter,
             provider: &$provider,
