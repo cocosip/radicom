@@ -9,24 +9,36 @@ use crate::error::{NetworkError, Result};
 use crate::pdu::{PresentationContext, RoleSelection, UserInformation};
 
 /// Well-known SOP class UIDs used by the negotiation rules (§11.2).
+///
+/// Bound to the generated `radicom::uids` table so there is a single definition
+/// of each value (docs/01-architecture.md §2.1); the short local names are the
+/// ergonomic aliases the negotiation code reads best with.
 pub mod sop_class {
-    pub const VERIFICATION: &str = "1.2.840.10008.1.1";
-    pub const STORAGE_COMMITMENT_PUSH: &str = "1.2.840.10008.1.20.1";
-    pub const PATIENT_ROOT_QR_FIND: &str = "1.2.840.10008.5.1.4.1.2.1.1";
-    pub const PATIENT_ROOT_QR_MOVE: &str = "1.2.840.10008.5.1.4.1.2.1.2";
-    pub const PATIENT_ROOT_QR_GET: &str = "1.2.840.10008.5.1.4.1.2.1.3";
-    pub const STUDY_ROOT_QR_FIND: &str = "1.2.840.10008.5.1.4.1.2.2.1";
-    pub const STUDY_ROOT_QR_MOVE: &str = "1.2.840.10008.5.1.4.1.2.2.2";
-    pub const STUDY_ROOT_QR_GET: &str = "1.2.840.10008.5.1.4.1.2.2.3";
-    pub const MODALITY_WORKLIST_FIND: &str = "1.2.840.10008.5.1.4.31";
+    pub const VERIFICATION: &str = radicom::uids::VERIFICATION;
+    pub const STORAGE_COMMITMENT_PUSH: &str = radicom::uids::STORAGE_COMMITMENT_PUSH_MODEL;
+    pub const PATIENT_ROOT_QR_FIND: &str =
+        radicom::uids::PATIENT_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND;
+    pub const PATIENT_ROOT_QR_MOVE: &str =
+        radicom::uids::PATIENT_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE;
+    pub const PATIENT_ROOT_QR_GET: &str =
+        radicom::uids::PATIENT_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_GET;
+    pub const STUDY_ROOT_QR_FIND: &str =
+        radicom::uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND;
+    pub const STUDY_ROOT_QR_MOVE: &str =
+        radicom::uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE;
+    pub const STUDY_ROOT_QR_GET: &str =
+        radicom::uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_GET;
+    pub const MODALITY_WORKLIST_FIND: &str =
+        radicom::uids::MODALITY_WORKLIST_INFORMATION_MODEL_FIND;
 }
 
 /// Well-known transfer syntax UIDs used by the negotiation rules.
 pub mod transfer_syntax {
-    pub const IMPLICIT_VR_LITTLE_ENDIAN: &str = "1.2.840.10008.1.2";
-    pub const EXPLICIT_VR_LITTLE_ENDIAN: &str = "1.2.840.10008.1.2.1";
-    pub const DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN: &str = "1.2.840.10008.1.2.1.99";
-    pub const EXPLICIT_VR_BIG_ENDIAN: &str = "1.2.840.10008.1.2.2";
+    pub const IMPLICIT_VR_LITTLE_ENDIAN: &str = radicom::uids::IMPLICIT_VR_LITTLE_ENDIAN;
+    pub const EXPLICIT_VR_LITTLE_ENDIAN: &str = radicom::uids::EXPLICIT_VR_LITTLE_ENDIAN;
+    pub const DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN: &str =
+        radicom::uids::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN;
+    pub const EXPLICIT_VR_BIG_ENDIAN: &str = radicom::uids::EXPLICIT_VR_BIG_ENDIAN_RETIRED;
 }
 
 /// Presentation-context states (§11.2).
@@ -379,13 +391,26 @@ impl NegotiationPolicy {
 #[derive(Debug, Clone, Default)]
 pub struct AcceptedContexts {
     contexts: Vec<NegotiatedContext>,
+    /// Who opened the association; providers read it for routing/audit.
+    peer: crate::services::AssociationInfo,
 }
 
 impl AcceptedContexts {
     pub fn from_negotiated(contexts: Vec<NegotiatedContext>) -> Self {
         AcceptedContexts {
             contexts: contexts.into_iter().filter(|c| c.is_accepted()).collect(),
+            peer: Default::default(),
         }
+    }
+
+    /// Sets the peer identity reported to provider hooks.
+    pub fn set_peer(&mut self, peer: crate::services::AssociationInfo) {
+        self.peer = peer;
+    }
+
+    /// The association requestor's identity (empty until the accept path sets it).
+    pub fn peer(&self) -> &crate::services::AssociationInfo {
+        &self.peer
     }
 
     pub fn all(&self) -> &[NegotiatedContext] {

@@ -29,6 +29,14 @@ pub enum TlsVersion {
 }
 
 impl TlsVersion {
+    /// A hashable code for the config cache key.
+    fn cache_code(self) -> u8 {
+        match self {
+            TlsVersion::Tls12 => 0,
+            TlsVersion::Tls13 => 1,
+        }
+    }
+
     /// The protocol versions to offer, most preferred first.
     fn versions(self) -> &'static [&'static SupportedProtocolVersion] {
         const TLS12_AND_13: &[&SupportedProtocolVersion] = &[&TLS13, &TLS12];
@@ -186,6 +194,37 @@ impl rustls::client::danger::ServerCertVerifier for CallbackVerifier {
         self.inner.supported_verify_schemes()
     }
 }
+/// The on-disk material that determines a built server configuration.
+///
+/// Re-reading the PEM files and reloading the trust store on every accepted
+/// connection is pure overhead; the fingerprint lets a repeated association
+/// reuse the built `Arc`. A config file edited in place while the server runs
+/// is not re-read until the process restarts (the path is the cache identity).
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct ServerKey {
+    cert_file: Option<std::path::PathBuf>,
+    key_file: Option<std::path::PathBuf>,
+    client_ca_file: Option<std::path::PathBuf>,
+    min_version: u8,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct ClientKey {
+    cert_file: Option<std::path::PathBuf>,
+    client_cert_file: Option<std::path::PathBuf>,
+    client_key_file: Option<std::path::PathBuf>,
+    accept_any: bool,
+    min_version: u8,
+}
+
+static SERVER_CONFIGS: once_cell::sync::Lazy<
+    std::sync::Mutex<std::collections::HashMap<ServerKey, Arc<ServerConfig>>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+static CLIENT_CONFIGS: once_cell::sync::Lazy<
+    std::sync::Mutex<std::collections::HashMap<ClientKey, Arc<ClientConfig>>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 impl TlsOptions {
     /// Server material from a PEM certificate chain and private key.
     pub fn server(
@@ -332,7 +371,7 @@ impl TlsOptions {
         &self,
         stream: tokio::net::TcpStream,
     ) -> Result<tokio_rustls::server::TlsStream<tokio::net::TcpStream>> {
-        let config = self.server_config()?;
+        let config = self.cached_server_config()?;
         let acceptor = tokio_rustls::TlsAcceptor::from(config);
         acceptor.accept(stream).await.map_err(tls_err)
     }
@@ -342,11 +381,66 @@ impl TlsOptions {
         &self,
         stream: tokio::net::TcpStream,
     ) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>> {
-        let config = self.client_config()?;
+        let config = self.cached_client_config()?;
         let connector = tokio_rustls::TlsConnector::from(config);
         let peer = stream.peer_addr().map_err(NetworkError::Io)?.ip();
         let name = self.verify_name(peer)?;
         connector.connect(name, stream).await.map_err(tls_err)
+    }
+
+    /// The server configuration, built once per distinct key.
+    fn cached_server_config(&self) -> Result<Arc<ServerConfig>> {
+        let key = ServerKey {
+            cert_file: self.cert_file.clone(),
+            key_file: self.key_file.clone(),
+            client_ca_file: self.client_ca_file.clone(),
+            min_version: self.min_version.cache_code(),
+        };
+        if let Some(cached) = SERVER_CONFIGS
+            .lock()
+            .expect("tls config cache")
+            .get(&key)
+            .cloned()
+        {
+            return Ok(cached);
+        }
+        let config = self.server_config()?;
+        SERVER_CONFIGS
+            .lock()
+            .expect("tls config cache")
+            .insert(key, config.clone());
+        Ok(config)
+    }
+
+    /// The client configuration, built once per distinct key.
+    ///
+    /// A `certificate_validator` callback carries a closure that cannot be
+    /// fingerprinted, so a client with one rebuilds every time.
+    fn cached_client_config(&self) -> Result<Arc<ClientConfig>> {
+        if self.certificate_validator.is_some() {
+            return self.client_config();
+        }
+        let key = ClientKey {
+            cert_file: self.cert_file.clone(),
+            client_cert_file: self.client_cert_file.clone(),
+            client_key_file: self.client_key_file.clone(),
+            accept_any: self.accept_any,
+            min_version: self.min_version.cache_code(),
+        };
+        if let Some(cached) = CLIENT_CONFIGS
+            .lock()
+            .expect("tls config cache")
+            .get(&key)
+            .cloned()
+        {
+            return Ok(cached);
+        }
+        let config = self.client_config()?;
+        CLIENT_CONFIGS
+            .lock()
+            .expect("tls config cache")
+            .insert(key, config.clone());
+        Ok(config)
     }
 }
 

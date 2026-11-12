@@ -135,6 +135,13 @@ impl<P: ServiceProvider + 'static> DicomServer<P> {
                         if let Err(error) = serve_connection(stream, provider, options).await {
                             tracing::debug!(target: "radicom::network", %error, "connection ended with an error");
                         }
+                    } else {
+                        // a failed or timed-out handshake used to vanish; a
+                        // "modality cannot connect" report needs this line
+                        tracing::warn!(
+                            target: "radicom::network",
+                            "TLS handshake failed or timed out; connection dropped"
+                        );
                     }
                     return;
                 }
@@ -224,6 +231,12 @@ where
 
     if let Some(expected) = options.called_ae_title.as_deref() {
         if request.called_ae != expected {
+            tracing::warn!(
+                target: "radicom::network",
+                called_ae = %request.called_ae,
+                expected = %expected,
+                "association rejected: called AE title mismatch"
+            );
             let reject = AssociateRj {
                 result: RejectResult::Permanent,
                 source: RejectSource::User,
@@ -237,6 +250,11 @@ where
     // PS3.8 §9.3.2: the RQ names the protocol version and the application
     // context; anything else is a rejection, not something to negotiate around.
     if request.protocol_version & 1 == 0 {
+        tracing::warn!(
+            target: "radicom::network",
+            protocol_version = request.protocol_version,
+            "association rejected: unsupported protocol version"
+        );
         let reject = AssociateRj {
             result: RejectResult::Permanent,
             source: RejectSource::ProviderAcse,
@@ -246,6 +264,11 @@ where
         return Ok(());
     }
     if request.application_context != APPLICATION_CONTEXT {
+        tracing::warn!(
+            target: "radicom::network",
+            application_context = %request.application_context,
+            "association rejected: unsupported application context"
+        );
         let reject = AssociateRj {
             result: RejectResult::Permanent,
             source: RejectSource::User,
@@ -276,6 +299,11 @@ where
     // reject when nothing was accepted (PS3.8 Table 9-21, source 1, reason 1:
     // "no reason given" — there is no dedicated "no acceptable context" code)
     if !negotiated.iter().any(|c| c.is_accepted()) {
+        tracing::warn!(
+            target: "radicom::network",
+            proposed = request.presentation_contexts.len(),
+            "association rejected: no proposed presentation context is supported"
+        );
         let reject = AssociateRj {
             result: RejectResult::Permanent,
             source: RejectSource::User,
@@ -321,6 +349,11 @@ where
     // user identity: refused identities reject the association (§11.2)
     if let Some(identity) = &request.user_information.user_identity {
         let Some(response) = options.user_identity.answer(identity) else {
+            tracing::warn!(
+                target: "radicom::network",
+                identity_type = identity.identity_type,
+                "association rejected: user identity refused"
+            );
             let reject = AssociateRj {
                 result: RejectResult::Permanent,
                 source: RejectSource::User,
@@ -337,7 +370,11 @@ where
     // the association is now established (OBS-01): report open/close
     let _association = crate::observability::AssociationGuard::new(options.metrics.clone());
 
-    let accepted = AcceptedContexts::from_negotiated(negotiated);
+    let mut accepted = AcceptedContexts::from_negotiated(negotiated);
+    accepted.set_peer(crate::services::AssociationInfo {
+        calling_ae: request.calling_ae.clone(),
+        called_ae: request.called_ae.clone(),
+    });
     // The Max-PDU we send must fit what the peer can receive, but a hostile
     // peer can advertise 0xFFFF_FFFF. Clamp it to our own ceiling so the send
     // path (PduFramer) never pre-allocates a multi-GiB buffer (PS3.8 §9.3.2).
@@ -393,6 +430,10 @@ where
     let mut jobs: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
     // a C-CANCEL for a request running on a task is forwarded through here
     let cancels: CancelMap = CancelMap::default();
+    // A C-CANCEL can arrive after its request's command but before the request
+    // has registered a CancelSlot (its dataset is still arriving). Remember it
+    // so the slot created moments later starts already cancelled.
+    let mut pending_cancels: std::collections::HashSet<u16> = std::collections::HashSet::new();
     let max_jobs = if incoming_window == 0 {
         MAX_CONCURRENT_REQUESTS
     } else {
@@ -495,6 +536,10 @@ where
                                 if let Some(id) = command.message_id_being_responded_to {
                                     if let Some(cancel) = cancels.lock().unwrap().get(&id) {
                                         let _ = cancel.send(true);
+                                    } else {
+                                        // the request is still awaiting its
+                                        // dataset: the slot does not exist yet
+                                        pending_cancels.insert(id);
                                     }
                                 }
                                 handle_command(&mut serving, unit.context_id, command).await?;
@@ -551,6 +596,7 @@ where
                                         body: MessageBody::Memory(bytes::Bytes::new()),
                                         syntax,
                                         cancel: None,
+                                        peer: accepted.peer().clone(),
                                     },
                                     provider.clone(),
                                     options.clone(),
@@ -608,8 +654,14 @@ where
                                         }
                                     }
                                 }
-                                let cancel = (command.field == CommandField::CFindRq)
-                                    .then(|| CancelSlot::register(&cancels, command.message_id));
+                                let cancel = (command.field == CommandField::CFindRq).then(|| {
+                                    let slot = CancelSlot::register(&cancels, command.message_id);
+                                    if pending_cancels.remove(&command.message_id) {
+                                        // a cancel that beat the dataset here
+                                        slot.signal();
+                                    }
+                                    slot
+                                });
                                 jobs.spawn(run_job(
                                     DispatchJob {
                                         context_id,
@@ -617,6 +669,7 @@ where
                                         body: unit.body(),
                                         syntax: syntax.clone(),
                                         cancel,
+                                        peer: accepted.peer().clone(),
                                     },
                                     provider.clone(),
                                     options.clone(),
@@ -753,7 +806,8 @@ where
 
     use futures::StreamExt;
     let provider = serving.provider.clone();
-    let mut stream = provider.on_c_get(&request);
+    let peer = serving.accepted.peer().clone();
+    let mut stream = provider.on_c_get_with(&request, &peer);
     let mut summary = crate::cmove::SubOperationSummary::default();
     let mut provider_summary = None;
     let mut saw_instance = false;
@@ -1044,7 +1098,8 @@ where
     // terminates its stream still gets an answer built from it.
     use futures::StreamExt;
     let provider = serving.provider.clone();
-    let mut stream = provider.on_c_move(&request);
+    let peer = serving.accepted.peer().clone();
+    let mut stream = provider.on_c_move_with(&request, &peer);
     let mut summary = crate::cmove::SubOperationSummary::default();
     let mut remaining = 0u16;
     let mut terminated = false;
@@ -1190,7 +1245,8 @@ where
     // response observable before a provider has finished producing results.
     use futures::StreamExt;
     let provider = serving.provider.clone();
-    let mut stream = provider.on_c_find(&request);
+    let peer = serving.accepted.peer().clone();
+    let mut stream = provider.on_c_find_with(&request, &peer);
     let mut matches = 0u16;
     let mut terminated = false;
     loop {
@@ -1347,7 +1403,11 @@ where
         return serving.send(context_id, &response.to_command()).await;
     }
 
-    let response = match serving.provider.on_c_store(&request).await {
+    let response = match serving
+        .provider
+        .on_c_store_with(&request, serving.accepted.peer())
+        .await
+    {
         Ok(response) => response,
         Err(error) => crate::store::failure_response(&request, &error),
     };
@@ -1735,23 +1795,38 @@ where
     ///
     /// The peer sees SCP-initiated reports on the same association.
     ///
-    /// **Ceiling:** a report is only legal when the peer granted this side the
-    /// SCU role for the service class (PS3.7 §10.1). Without that grant the
-    /// report is skipped rather than failing the association: the N-ACTION was
-    /// answered already, and a peer that rejected the role never agreed to be
-    /// notified. A report with no SOP class UID is a provider bug and fails.
+    /// **Ceiling:** a report is only legal when this side holds the service
+    /// class's SCP role (PS3.4 §J.3.3.1, PS3.7 §10.1). Without role selection
+    /// the acceptor is SCP by default, so the classic Storage Commitment SCU
+    /// receives it. With role selection the check is [`AcceptedContexts::can_scu`],
+    /// the same predicate the receiving side validates with. A rejected role
+    /// skips the report instead of failing the association. A report with no SOP
+    /// class UID is a provider bug and fails.
     async fn send_n_event_reports(
         &mut self,
         action: &crate::nservice::NServiceRequest,
     ) -> Result<()> {
-        let events = self.provider.on_send_n_event_report(action).await?;
+        let events = self
+            .provider
+            .on_send_n_event_report_with(action, self.accepted.peer())
+            .await?;
         for mut event in events {
             let Some(sop_class) = event.sop_class_uid.clone() else {
                 return Err(NetworkError::protocol(
                     "an N-EVENT-REPORT request has no SOP class UID",
                 ));
             };
-            if !self.accepted.peer_holds_scp_role(&sop_class) {
+            // PS3.4 §J.3.3.1: the service-class SCP invokes N-EVENT-REPORT, so
+            // this side must hold the SCP role. Without role selection the
+            // acceptor is SCP by default; with role selection the peer holds
+            // SCU. `can_scu` is exactly that predicate (and it is the same one
+            // `AcceptedContexts::validate_request` applies on the receiving
+            // side).
+            if !self.accepted.can_scu(&sop_class) {
+                tracing::debug!(
+                    sop_class,
+                    "skipping N-EVENT-REPORT: this side is not the service-class SCP"
+                );
                 continue;
             }
             let context = self.accepted.pick(&sop_class, "")?;
@@ -1932,6 +2007,8 @@ pub struct DispatchJob {
     pub(crate) syntax: Arc<radicom::model::transfer_syntax::TransferSyntax>,
     /// Present for a C-FIND: the peer may cancel it with C-CANCEL (SRV-08).
     pub(crate) cancel: Option<CancelSlot>,
+    /// The association requestor's identity, handed to provider hooks.
+    pub(crate) peer: crate::services::AssociationInfo,
 }
 
 /// The cancel table and token of one running request (M6).
@@ -1964,6 +2041,14 @@ impl CancelSlot {
             return;
         }
         let _ = self.rx.changed().await;
+    }
+
+    /// Marks the request cancelled now (a C-CANCEL that arrived before
+    /// registration).
+    fn signal(&self) {
+        if let Some(tx) = self.map.lock().unwrap().get(&self.id) {
+            let _ = tx.send(true);
+        }
     }
 }
 
@@ -2059,7 +2144,7 @@ pub async fn execute_c_echo<P: ServiceProvider>(
     tx: &tokio::sync::mpsc::Sender<Result<Outgoing>>,
 ) -> Result<()> {
     let request = CEchoRequest::from_command(&job.command)?;
-    let outgoing = match provider.on_c_echo(&request).await {
+    let outgoing = match provider.on_c_echo_with(&request, &job.peer).await {
         Ok(response) => Outgoing {
             context_id: job.context_id,
             command: response.to_command(),
@@ -2088,6 +2173,7 @@ pub async fn execute_c_store<P: ServiceProvider>(
         syntax,
         // C-STORE and the N-services are not cancellable (§11.4)
         cancel: _,
+        peer,
     } = job;
     // the spool is synchronous file IO: keep it off the runtime thread
     let sink = options.store_sink.clone();
@@ -2146,7 +2232,7 @@ pub async fn execute_c_store<P: ServiceProvider>(
         return Ok(());
     }
 
-    let response = match provider.on_c_store(&request).await {
+    let response = match provider.on_c_store_with(&request, &peer).await {
         Ok(response) => response,
         Err(error) => crate::store::failure_response(&request, &error),
     };
@@ -2193,7 +2279,7 @@ pub async fn execute_c_find<P: ServiceProvider>(
         identifier,
     };
 
-    let mut stream = provider.on_c_find(&request);
+    let mut stream = provider.on_c_find_with(&request, &job.peer);
     let mut matches = 0u16;
     let mut terminated = false;
     loop {
@@ -2285,6 +2371,7 @@ pub async fn execute_n_service<P: ServiceProvider>(
         syntax,
         // C-STORE and the N-services are not cancellable (§11.4)
         cancel: _,
+        peer,
     } = job;
     let dataset = if command.no_dataset {
         None
@@ -2308,13 +2395,13 @@ pub async fn execute_n_service<P: ServiceProvider>(
     };
     let request = NServiceRequest::from_command(&command, dataset);
     let outcome = match request.field {
-        CommandField::NEventReportRq => provider.on_n_event_report(&request).await,
-        CommandField::NGetRq => provider.on_n_get(&request).await,
-        CommandField::NSetRq => provider.on_n_set(&request).await,
-        CommandField::NCreateRq => provider.on_n_create(&request).await,
+        CommandField::NEventReportRq => provider.on_n_event_report_with(&request, &peer).await,
+        CommandField::NGetRq => provider.on_n_get_with(&request, &peer).await,
+        CommandField::NSetRq => provider.on_n_set_with(&request, &peer).await,
+        CommandField::NCreateRq => provider.on_n_create_with(&request, &peer).await,
         // N-ACTION is dispatched inline (it may push N-EVENT-REPORTs), and
         // N-DELETE has no dataset: both answered the same way here
-        CommandField::NDeleteRq => provider.on_n_delete(&request).await,
+        CommandField::NDeleteRq => provider.on_n_delete_with(&request, &peer).await,
         other => {
             let comment = format!("not an N-service: {other:?}");
             let outgoing = failure_outgoing(context_id, &command, &comment, &syntax);
@@ -2435,7 +2522,11 @@ where
             let request = CEchoRequest::from_command(&command)?;
             // a provider error is a failed operation, not a broken association
             // (the C-STORE and N-service paths already answer a failure status)
-            match serving.provider.on_c_echo(&request).await {
+            match serving
+                .provider
+                .on_c_echo_with(&request, serving.accepted.peer())
+                .await
+            {
                 Ok(response) => serving.send(context_id, &response.to_command()).await,
                 Err(error) => {
                     serving
@@ -2558,12 +2649,42 @@ where
     use crate::nservice::NServiceRequest;
     let request = NServiceRequest::from_command(&command, dataset);
     let outcome = match request.field {
-        CommandField::NEventReportRq => serving.provider.on_n_event_report(&request).await,
-        CommandField::NGetRq => serving.provider.on_n_get(&request).await,
-        CommandField::NSetRq => serving.provider.on_n_set(&request).await,
-        CommandField::NActionRq => serving.provider.on_n_action(&request).await,
-        CommandField::NCreateRq => serving.provider.on_n_create(&request).await,
-        CommandField::NDeleteRq => serving.provider.on_n_delete(&request).await,
+        CommandField::NEventReportRq => {
+            serving
+                .provider
+                .on_n_event_report_with(&request, serving.accepted.peer())
+                .await
+        }
+        CommandField::NGetRq => {
+            serving
+                .provider
+                .on_n_get_with(&request, serving.accepted.peer())
+                .await
+        }
+        CommandField::NSetRq => {
+            serving
+                .provider
+                .on_n_set_with(&request, serving.accepted.peer())
+                .await
+        }
+        CommandField::NActionRq => {
+            serving
+                .provider
+                .on_n_action_with(&request, serving.accepted.peer())
+                .await
+        }
+        CommandField::NCreateRq => {
+            serving
+                .provider
+                .on_n_create_with(&request, serving.accepted.peer())
+                .await
+        }
+        CommandField::NDeleteRq => {
+            serving
+                .provider
+                .on_n_delete_with(&request, serving.accepted.peer())
+                .await
+        }
         other => {
             return serving
                 .fail(

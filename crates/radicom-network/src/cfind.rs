@@ -133,6 +133,28 @@ const IMAGE_KEYS: &[(u16, u16, Vr)] = &[
 
 const PATIENT_KEYS: &[(u16, u16, Vr)] = &[(0x0010, 0x0010, Vr::Pn)];
 
+/// Return keys inside the Scheduled Procedure Step Sequence of a Modality
+/// Worklist query (PS3.4 §K.6.1.2.2, Table K.6-1).
+const WORKLIST_STEP_KEYS: &[(u16, u16, Vr)] = &[
+    (0x0040, 0x0001, Vr::Ae), // Scheduled Station AE Title
+    (0x0040, 0x0002, Vr::Da), // Scheduled Procedure Step Start Date
+    (0x0040, 0x0003, Vr::Tm), // Scheduled Procedure Step Start Time
+    (0x0040, 0x0006, Vr::Pn), // Scheduled Performing Physician's Name
+    (0x0040, 0x0007, Vr::Lo), // Scheduled Procedure Step Description
+    (0x0040, 0x0009, Vr::Sh), // Scheduled Procedure Step ID
+];
+
+/// Top-level return keys a Modality Worklist item also carries.
+const WORKLIST_KEYS: &[(u16, u16, Vr)] = &[
+    (0x0008, 0x0050, Vr::Sh), // Accession Number
+    (0x0010, 0x0010, Vr::Pn), // Patient's Name
+    (0x0010, 0x0020, Vr::Lo), // Patient ID
+    (0x0020, 0x000D, Vr::Ui), // Study Instance UID
+    (0x0032, 0x1060, Vr::Lo), // Requested Procedure Description
+    (0x0040, 0x1001, Vr::Sh), // Requested Procedure ID
+    (0x0040, 0x0011, Vr::Sh), // Scheduled Procedure Step Location
+];
+
 /// A C-FIND request (§11.4).
 #[derive(Debug, Clone)]
 pub struct CFindRequest {
@@ -149,9 +171,24 @@ impl CFindRequest {
     /// Builds a query for `level` with the standard return keys.
     pub fn new(level: QueryRetrieveLevel, root: QueryRoot, message_id: u16) -> Self {
         let mut identifier = Dataset::new();
-        identifier.insert_str(Tag::QUERY_RETRIEVE_LEVEL, Vr::Cs, level.as_str());
-        for (group, element, vr) in level_keys(level) {
-            identifier.insert_empty(Tag::new(*group, *element), *vr);
+        if level == QueryRetrieveLevel::Worklist {
+            // Modality Worklist has no Query/Retrieve Level: its keys live in
+            // the Scheduled Procedure Step Sequence (PS3.4 §K.6.1.2.2), and a
+            // strict MWL SCP answers 0xA900 to a stray (0008,0052).
+            let mut step = Dataset::new();
+            for (group, element, vr) in WORKLIST_STEP_KEYS {
+                step.insert_empty(Tag::new(*group, *element), *vr);
+            }
+            let sequence = identifier.insert_sequence(Tag::SCHEDULED_PROCEDURE_STEP_SEQUENCE);
+            sequence.push(step);
+            for (group, element, vr) in WORKLIST_KEYS {
+                identifier.insert_empty(Tag::new(*group, *element), *vr);
+            }
+        } else {
+            identifier.insert_str(Tag::QUERY_RETRIEVE_LEVEL, Vr::Cs, level.as_str());
+            for (group, element, vr) in level_keys(level) {
+                identifier.insert_empty(Tag::new(*group, *element), *vr);
+            }
         }
         CFindRequest {
             message_id,
@@ -187,17 +224,35 @@ impl CFindRequest {
     }
 
     /// Sets a matching key to `value` (creates the element if absent).
+    ///
+    /// Prefer [`Self::with_tag`]: a raw `(group, element)` pair bypasses the
+    /// dictionary and is the pattern docs/01-architecture.md §2.1 forbids.
     pub fn with_key(mut self, group: u16, element: u16, vr: Vr, value: impl Into<String>) -> Self {
         self.identifier
             .insert_str(Tag::new(group, element), vr, value);
         self
     }
 
+    /// Sets a matching key by [`Tag`] (the dictionary-typed form of
+    /// [`Self::with_key`]).
+    pub fn with_tag(mut self, tag: Tag, vr: Vr, value: impl Into<String>) -> Self {
+        self.identifier.insert_str(tag, vr, value);
+        self
+    }
+
     /// The query level, when the Identifier states one.
     pub fn level(&self) -> Option<QueryRetrieveLevel> {
-        self.identifier
+        if let Some(level) = self
+            .identifier
             .try_get_str(Tag::QUERY_RETRIEVE_LEVEL)
             .and_then(|s| QueryRetrieveLevel::parse(&s))
+        {
+            return Some(level);
+        }
+        // MWL omits (0008,0052); the SPS sequence is its signature
+        self.identifier
+            .contains(&Tag::SCHEDULED_PROCEDURE_STEP_SEQUENCE)
+            .then_some(QueryRetrieveLevel::Worklist)
     }
 
     /// The command for this request; the Identifier travels as the dataset.
@@ -217,8 +272,8 @@ fn level_keys(level: QueryRetrieveLevel) -> &'static [(u16, u16, Vr)] {
         QueryRetrieveLevel::Study => STUDY_KEYS,
         QueryRetrieveLevel::Series => SERIES_KEYS,
         QueryRetrieveLevel::Image => IMAGE_KEYS,
-        // worklist items are shaped like study-level results
-        QueryRetrieveLevel::Worklist => STUDY_KEYS,
+        // worklist has its own shape; `new` builds it separately
+        QueryRetrieveLevel::Worklist => WORKLIST_KEYS,
     }
 }
 
@@ -476,6 +531,29 @@ mod tests {
         let worklist = CFindRequest::worklist_query(1);
         assert_eq!(worklist.sop_class_uid, sop_class::MODALITY_WORKLIST_FIND);
         assert_eq!(worklist.level(), Some(QueryRetrieveLevel::Worklist));
+        // MWL keys live in the Scheduled Procedure Step Sequence, not in a
+        // Query/Retrieve Level (PS3.4 §K.6.1.2.2)
+        assert!(
+            !worklist.identifier.contains(&Tag::QUERY_RETRIEVE_LEVEL),
+            "a worklist query must not carry a Query/Retrieve Level"
+        );
+        let steps = worklist
+            .identifier
+            .try_get_sequence(Tag::SCHEDULED_PROCEDURE_STEP_SEQUENCE)
+            .expect("worklist has an SPS sequence");
+        assert_eq!(steps.len(), 1);
+        assert!(steps.items()[0].contains(&Tag::SCHEDULED_STATION_AE_TITLE));
+        assert!(steps.items()[0].contains(&Tag::SCHEDULED_PROCEDURE_STEP_START_DATE));
+        assert!(worklist.identifier.contains(&Tag::REQUESTED_PROCEDURE_ID));
+    }
+
+    #[test]
+    fn with_tag_sets_a_key_from_the_dictionary() {
+        let request = CFindRequest::study_query(1).with_tag(Tag::PATIENT_ID, Vr::Lo, "PID-9");
+        assert_eq!(
+            request.identifier.get_str(Tag::PATIENT_ID).unwrap(),
+            "PID-9"
+        );
     }
 
     #[test]
@@ -493,6 +571,17 @@ mod tests {
                 .get_str(Tag::MODALITIES_IN_STUDY)
                 .unwrap(),
             "CT"
+        );
+    }
+
+    #[test]
+    fn the_worklist_key_table_is_exposed_for_the_level() {
+        // `new` builds a worklist separately, but level_keys must still answer
+        // for every level (it is the exhaustive match other callers rely on).
+        assert_eq!(
+            level_keys(QueryRetrieveLevel::Worklist),
+            WORKLIST_KEYS,
+            "worklist resolves to its top-level key table"
         );
     }
 

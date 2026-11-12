@@ -115,6 +115,13 @@ pub struct Association {
 }
 
 /// The SCU-side answer to a reverse C-STORE (§11.4).
+///
+/// **Ceiling:** the handler is a synchronous `Fn` and runs inline on the
+/// association task. A handler that persists the instance therefore performs
+/// blocking file IO on a runtime worker; move that work to `spawn_blocking` (or
+/// a dedicated thread) inside the handler. `docs/01-architecture.md` §6 forbids
+/// blocking IO on a worker thread, and the engine cannot lift this without
+/// making the handler `async`.
 pub type ReverseStoreHandler = Arc<
     dyn Fn(&crate::services::CStoreRequest) -> Result<crate::services::CStoreResponse>
         + Send
@@ -280,9 +287,14 @@ impl Association {
                 // the AC echoes the roles it granted; they apply to whichever
                 // context carries that abstract syntax (review #16)
                 let granted_roles = accept.user_information.role_selections;
-                if accept.presentation_contexts.len() != requested_contexts.len() {
+                // A peer may answer only the contexts it accepted (PS3.8 §9.3.3
+                // says it answers each, but real PACS drop the rejected ones).
+                // An AC with no context at all is meaningless, so keep that as
+                // an error; a subset is tolerated and simply leaves the missing
+                // contexts un-negotiated.
+                if accept.presentation_contexts.is_empty() {
                     return Err(NetworkError::protocol(
-                        "association accept must answer every proposed presentation context",
+                        "association accept carries no presentation context",
                     ));
                 }
                 let mut accepted_ids = std::collections::HashSet::new();
@@ -322,15 +334,11 @@ impl Association {
                                 "association accept chose a transfer syntax that was not proposed",
                             ));
                         }
-                        // an A-ASSOCIATE-AC omits the abstract syntax (it is
-                        // implied by the presentation-context id), so reject
-                        // peers that put one on the wire and recover it from
-                        // the request we just sent.
-                        if !pc.abstract_syntax.is_empty() {
-                            return Err(NetworkError::protocol(
-                                "association accept must not carry an abstract syntax",
-                            ));
-                        }
+                        // An A-ASSOCIATE-AC should omit the abstract syntax (it
+                        // is implied by the presentation-context id). Some
+                        // peers echo it anyway; ignore it and take the value
+                        // from the request we just sent rather than failing the
+                        // whole association over a redundant field.
                         let abstract_syntax = rq.abstract_syntax.clone();
                         let roles = granted_roles
                             .iter()
@@ -652,14 +660,13 @@ impl Association {
 
     /// Consumes `unit` when it belongs to an incoming N-EVENT-REPORT-RQ (H2).
     ///
-    /// Returns true when the unit was handled: the report goes to the registered
-    /// handler and its response is written back on the same presentation
-    /// context. A report with no handler is left to the caller, so a client
-    /// that never registered one behaves exactly as before.
+    /// Returns true when the unit was handled. A registered handler answers the
+    /// report; without one the report is still answered (`Unrecognized
+    /// operation`) because the service is confirmed and a silent SCU would
+    /// leave the peer waiting. Before this, an unhandled report fell through to
+    /// the response parsers as a protocol error (or, with no dataset, waited
+    /// forever).
     async fn intercept_event_report(&mut self, unit: &MessageUnit) -> Result<bool> {
-        let Some(handler) = self.n_event.clone() else {
-            return Ok(false);
-        };
         match unit.stream {
             Stream::Command => {
                 let command = command_from_bytes(&unit.bytes)?;
@@ -672,7 +679,7 @@ impl Association {
                     ));
                 }
                 if command.no_dataset {
-                    self.answer_event_report(unit.context_id, &handler, &command, None)
+                    self.answer_event_report(unit.context_id, &command, None)
                         .await?;
                 } else {
                     self.pending_incoming = Some((unit.context_id, command));
@@ -690,7 +697,7 @@ impl Association {
                 }
                 let syntax = transfer_syntax_of(&self.syntax_of(context_id))?;
                 let dataset = self.decode_response_body(unit, &syntax).await?;
-                self.answer_event_report(context_id, &handler, &command, Some(dataset))
+                self.answer_event_report(context_id, &command, Some(dataset))
                     .await?;
                 Ok(true)
             }
@@ -725,25 +732,41 @@ impl Association {
             .unwrap_or_else(|| syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.uid().to_string())
     }
 
-    /// Writes the handler's answer to an N-EVENT-REPORT-RQ (H2).
+    /// Writes the answer to an N-EVENT-REPORT-RQ (H2).
+    ///
+    /// A registered handler owns the answer. Without one the SCU still answers
+    /// `Unrecognized operation`: N-EVENT-REPORT is a confirmed service, so
+    /// staying silent blocks the peer's `await_n_response` until its timeout.
     async fn answer_event_report(
         &mut self,
         context_id: u8,
-        handler: &NEventReportHandler,
         command: &Command,
         dataset: Option<Dataset>,
     ) -> Result<()> {
         let request = crate::nservice::NServiceRequest::from_command(command, dataset);
         let syntax = transfer_syntax_of(&self.syntax_of(context_id))?;
-        let (response_command, response_dataset) = match handler(&request) {
-            Ok(response) => (response.to_command(), response.dataset),
-            Err(error) => {
+        let (response_command, response_dataset) = match self.n_event.clone() {
+            Some(handler) => match handler(&request) {
+                Ok(response) => (response.to_command(), response.dataset),
+                Err(error) => {
+                    let mut failure =
+                        Command::response(command, crate::dimse::status::PROCESSING_FAILURE)
+                            .ok_or_else(|| {
+                                NetworkError::protocol("N-EVENT-REPORT has no response field")
+                            })?;
+                    failure.error_comment = Some(crate::dimse::truncate_lo(&error.to_string()));
+                    (failure, None)
+                }
+            },
+            None => {
                 let mut failure =
-                    Command::response(command, crate::dimse::status::PROCESSING_FAILURE)
+                    Command::response(command, crate::dimse::status::UNRECOGNIZED_OPERATION)
                         .ok_or_else(|| {
                             NetworkError::protocol("N-EVENT-REPORT has no response field")
                         })?;
-                failure.error_comment = Some(crate::dimse::truncate_lo(&error.to_string()));
+                failure.error_comment = Some(crate::dimse::truncate_lo(
+                    "no N-EVENT-REPORT handler is registered",
+                ));
                 (failure, None)
             }
         };
@@ -1428,7 +1451,7 @@ impl Association {
             response,
             is_final,
         })
-        .map_err(NetworkError::Io)?;
+        .map_err(|error| NetworkError::Callback(error.to_string()))?;
         if is_final {
             inflight.remove(&pending.message_id);
             pending_table.remove(pending.message_id);
@@ -2191,7 +2214,9 @@ impl Association {
                                             &command, None,
                                         )?;
                                         let terminal = !response.is_pending();
-                                        on_response(response)?;
+                                        on_response(response).map_err(|error| {
+                                            NetworkError::Callback(error.to_string())
+                                        })?;
                                         if terminal {
                                             return Ok(());
                                         }
@@ -2223,7 +2248,9 @@ impl Association {
                                         Some(identifier),
                                     )?;
                                     let terminal = !response.is_pending();
-                                    on_response(response)?;
+                                    on_response(response).map_err(|error| {
+                                        NetworkError::Callback(error.to_string())
+                                    })?;
                                     if terminal {
                                         return Ok(());
                                     }
@@ -2241,7 +2268,14 @@ impl Association {
                         write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
                         return Err(NetworkError::ClosedPrematurely { source: None });
                     }
-                    _ => {}
+                    // An A-ASSOCIATE-* or A-RELEASE-RP cannot appear now; the
+                    // server already aborts on these (NET-26), so mirror it
+                    // instead of waiting forever for a response that never comes.
+                    _ => {
+                        return Err(NetworkError::protocol(
+                            "unexpected PDU while waiting for a response",
+                        ))
+                    }
                 }
             }
         }
@@ -2321,7 +2355,8 @@ impl Association {
                                 response.set_identifier(
                                     &self.decode_response_body(&unit, &syntax).await?,
                                 );
-                                on_response(response)?;
+                                on_response(response)
+                                    .map_err(|error| NetworkError::Callback(error.to_string()))?;
                                 return Ok(());
                             }
                             let command = command_from_bytes(&unit.bytes)?;
@@ -2345,7 +2380,8 @@ impl Association {
                                 awaiting_identifier = Some(response);
                                 continue;
                             }
-                            on_response(response)?;
+                            on_response(response)
+                                .map_err(|error| NetworkError::Callback(error.to_string()))?;
                             if terminal {
                                 return Ok(());
                             }
@@ -2361,7 +2397,14 @@ impl Association {
                         write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
                         return Err(NetworkError::ClosedPrematurely { source: None });
                     }
-                    _ => {}
+                    // An A-ASSOCIATE-* or A-RELEASE-RP cannot appear now; the
+                    // server already aborts on these (NET-26), so mirror it
+                    // instead of waiting forever for a response that never comes.
+                    _ => {
+                        return Err(NetworkError::protocol(
+                            "unexpected PDU while waiting for a response",
+                        ))
+                    }
                 }
             }
         }
@@ -2499,7 +2542,9 @@ impl Association {
                                                 awaiting_identifier = Some(response);
                                                 continue;
                                             }
-                                            on_response(response)?;
+                                            on_response(response).map_err(|error| {
+                                                NetworkError::Callback(error.to_string())
+                                            })?;
                                             if terminal {
                                                 return Ok(());
                                             }
@@ -2518,7 +2563,9 @@ impl Association {
                                         response.set_identifier(
                                             &self.decode_response_body(&unit, &syntax).await?,
                                         );
-                                        on_response(response)?;
+                                        on_response(response).map_err(|error| {
+                                            NetworkError::Callback(error.to_string())
+                                        })?;
                                         return Ok(());
                                     }
                                     let (store_context_id, store) =
@@ -2608,7 +2655,14 @@ impl Association {
                         write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
                         return Err(NetworkError::ClosedPrematurely { source: None });
                     }
-                    _ => {}
+                    // An A-ASSOCIATE-* or A-RELEASE-RP cannot appear now; the
+                    // server already aborts on these (NET-26), so mirror it
+                    // instead of waiting forever for a response that never comes.
+                    _ => {
+                        return Err(NetworkError::protocol(
+                            "unexpected PDU while waiting for a response",
+                        ))
+                    }
                 }
             }
         }
@@ -2730,7 +2784,11 @@ impl Association {
                     write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
                     return Err(NetworkError::ClosedPrematurely { source: None });
                 }
-                _ => {}
+                _ => {
+                    return Err(NetworkError::protocol(
+                        "unexpected PDU while waiting for a response",
+                    ))
+                }
             }
         }
     }
@@ -2949,7 +3007,11 @@ impl Association {
                     write_pdu(&mut self.stream, &Pdu::ReleaseRp).await?;
                     return Err(NetworkError::ClosedPrematurely { source: None });
                 }
-                _ => {}
+                _ => {
+                    return Err(NetworkError::protocol(
+                        "unexpected PDU while waiting for a response",
+                    ))
+                }
             }
         }
     }

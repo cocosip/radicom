@@ -103,9 +103,11 @@ pub fn register_charset(term: &str, encoding_name: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// Resolves a Specific Character Set term to an encoding; unknown terms
-/// fall back to windows-1252 (encoding_rs's ASCII superset — callers warn,
-/// spec §4).
+/// Resolves a Specific Character Set term to an encoding; unknown terms fall
+/// back to windows-1252 (encoding_rs's ASCII superset) so decoding never fails.
+///
+/// The fallback is deliberate and is not logged; [`is_known_charset`] lets a
+/// caller that cares detect and report it.
 ///
 /// ponytail: every call takes the registry read lock. Parsing only pays this on
 /// a charset switch (the builder caches), so the cost is confined to the write

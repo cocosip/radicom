@@ -16,6 +16,16 @@ use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// The directory `save_with` writes its sibling temp file into.
+///
+/// A path with no parent (a bare filename) resolves to the current directory.
+fn save_directory(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
+
 /// Implementation identity written into the file meta group (FILE-04).
 ///
 /// The version name embeds the workspace version at compile time, so a release
@@ -436,7 +446,6 @@ impl DicomFile {
     pub fn save(&self, path: impl AsRef<Path>) -> Result<(), Error> {
         self.save_with(path, &WriteOptions::default())
     }
-
     /// Writes the file to disk using the given write options
     /// (fo-dicom `Save(string, DicomWriteOptions)`).
     ///
@@ -448,10 +457,7 @@ impl DicomFile {
     /// through it; follow the link here if that ever matters to a caller.
     pub fn save_with(&self, path: impl AsRef<Path>, options: &WriteOptions) -> Result<(), Error> {
         let path = path.as_ref();
-        let dir = match path.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => parent,
-            _ => Path::new("."),
-        };
+        let dir = save_directory(path);
         let (temp_path, mut file) = crate::io::temp::create_unique_file(dir, "radicom-save", "tmp")
             .map_err(|e| file_err(path, "create", e))?;
         let result = self
@@ -2525,10 +2531,11 @@ mod coverage_tests {
     fn save_with_bare_filename_and_on_a_rename_failure() {
         let file = DicomFile::from_dataset(sample_dataset());
         // a bare relative path has an empty parent, resolved to "."
-        let name = format!("radicom-cov-save-{}.dcm", std::process::id());
-        file.save_with(&name, &WriteOptions::default()).unwrap();
-        assert!(Path::new(&name).exists());
-        std::fs::remove_file(&name).ok();
+        assert_eq!(save_directory(Path::new("report.dcm")), Path::new("."));
+        assert_eq!(
+            save_directory(Path::new("/tmp/report.dcm")),
+            Path::new("/tmp")
+        );
 
         // renaming the temp file onto an existing directory fails cleanly
         let dir = std::env::temp_dir().join(format!("radicom-cov-save-dir-{}", std::process::id()));

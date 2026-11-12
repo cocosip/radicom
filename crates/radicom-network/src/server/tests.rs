@@ -1154,7 +1154,10 @@ async fn mixed_batch_propagates_response_callback_errors() {
         })
         .await
         .unwrap_err();
-    assert!(matches!(error, NetworkError::Io(_)));
+    assert!(
+        matches!(error, NetworkError::Callback(_)),
+        "a callback error is its own variant, not an IO failure: {error:?}"
+    );
     let _ = association.abort(0).await;
     let _ = handle.await.unwrap();
 }
@@ -5423,10 +5426,19 @@ async fn client_rejects_malformed_association_accepts() {
             ClientOptions::default(),
         )
         .await;
-        assert!(
-            result.is_err(),
-            "malformed A-ASSOCIATE-AC {malformed_kind} was accepted"
-        );
+        if malformed_kind == 7 {
+            // a peer that echoes the abstract syntax is tolerated now: the
+            // value is taken from the RQ, not the redundant AC field
+            assert!(
+                result.is_ok(),
+                "an AC repeating the abstract syntax must be honoured, got {result:?}"
+            );
+        } else {
+            assert!(
+                result.is_err(),
+                "malformed A-ASSOCIATE-AC {malformed_kind} was accepted"
+            );
+        }
         peer.await.unwrap();
     }
 }
@@ -6336,6 +6348,38 @@ async fn a_peer_accept_with_an_unproposed_syntax_is_rejected() {
         .await
         .expect_err("a syntax that was not proposed cannot be selected");
     assert!(error.to_string().contains("not proposed"), "{error}");
+}
+
+#[tokio::test]
+async fn a_peer_accept_may_answer_only_the_contexts_it_accepted() {
+    // A short AC (some PACS drop the rejected contexts) must not fail the
+    // whole association: the answered context is used, the rest are absent.
+    let addr = mock_associate_answer(|accept, _| {
+        accept.presentation_contexts.truncate(1);
+        Pdu::AssociateAc(accept.clone())
+    })
+    .await;
+    let association = Association::open(
+        addr,
+        "SCU",
+        "SCP",
+        vec![
+            echo_context(),
+            PresentationContext::new(
+                3,
+                sop_class::VERIFICATION,
+                vec!["1.2.840.10008.1.2.1".to_string()],
+            ),
+        ],
+        ClientOptions::default(),
+    )
+    .await
+    .expect("a subset A-ASSOCIATE-AC is valid");
+    assert_eq!(
+        association.contexts().all().len(),
+        1,
+        "only the answered context is negotiated"
+    );
 }
 
 #[tokio::test]
@@ -8578,6 +8622,7 @@ async fn execute_c_store_reports_bad_bodies_and_missing_uids() {
         body: MessageBody::Memory(bytes::Bytes::from_static(&MALFORMED_DATASET)),
         syntax: syntax.clone(),
         cancel: None,
+        peer: Default::default(),
     };
     execute_c_store(job, &provider, &options, &tx)
         .await
@@ -8595,6 +8640,7 @@ async fn execute_c_store_reports_bad_bodies_and_missing_uids() {
         body: store_body(&syntax),
         syntax: syntax.clone(),
         cancel: None,
+        peer: Default::default(),
     };
     execute_c_store(job, &provider, &options, &tx)
         .await
@@ -8617,6 +8663,7 @@ async fn execute_c_find_reports_a_malformed_identifier() {
         body: MessageBody::Memory(bytes::Bytes::from_static(&MALFORMED_DATASET)),
         syntax,
         cancel: None,
+        peer: Default::default(),
     };
     execute_c_find(&mut job, &provider, &options, &tx)
         .await
@@ -8641,6 +8688,7 @@ async fn execute_n_service_routes_and_reports_errors() {
         body: MessageBody::Memory(bytes::Bytes::new()),
         syntax: syntax.clone(),
         cancel: None,
+        peer: Default::default(),
     };
     execute_n_service(job, &provider, &options, &tx)
         .await
@@ -8657,6 +8705,7 @@ async fn execute_n_service_routes_and_reports_errors() {
         body: MessageBody::Memory(bytes::Bytes::from_static(&MALFORMED_DATASET)),
         syntax: syntax.clone(),
         cancel: None,
+        peer: Default::default(),
     };
     execute_n_service(job, &provider, &options, &tx)
         .await
@@ -8673,6 +8722,7 @@ async fn execute_n_service_routes_and_reports_errors() {
         body: MessageBody::Memory(bytes::Bytes::new()),
         syntax,
         cancel: None,
+        peer: Default::default(),
     };
     execute_n_service(job, &provider, &options, &tx)
         .await

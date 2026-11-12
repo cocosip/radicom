@@ -155,6 +155,8 @@ so they cannot drift from it.
 - **Single-byte `ISO_IR nnn` terms must map to the corresponding ISO-8859-x**, never to a Windows code
   page: `ISO_IR 109/110/126/127/138/144/148` map to `iso-8859-3/4/7/6/8/5/9`. The exception is
   `ISO_IR 166`, which maps to `windows-874` — the WHATWG alias of TIS-620, and a superset of it.
+- An unrecognized term falls back to `windows-1252` (never fails to decode); `is_known_charset`
+  exposes the detection so a caller can report the fallback.
 
 ---
 
@@ -210,7 +212,9 @@ Lenient reading is a core acceptance criterion, not a nicety:
 
 **CP-246 condition**: a `UN` with *defined* length that is **not private** is read as a sequence whose
 inner content is little endian even when the outer syntax is big endian. Inverting this condition makes
-big-endian UN sequences read the wrong length.
+big-endian UN sequences read the wrong length. The same *item-shape probe* the private path uses is
+applied first: a defined-length non-private `UN` whose content does not start with an item or sequence
+delimiter is kept as raw `UN` rather than parsed as implicit elements inside a bounded window.
 
 A fragment sequence's `FFFE,E0DD` item delimiter **must consume its 4-byte length field**, exactly like
 the `FFFE,E000` item branch does. Breaking out without consuming it desynchronises the stream for every
@@ -345,6 +349,12 @@ client/server. One tokio task per association. Locks must not be held across `.a
     secondary_len (u16) + secondary`.
 - Max-PDU is a u32 in the user information item; do not clamp the engine's framing limit to the u16 range
   used by sub-item lengths.
+- The receive side caps one PDU at 256 KiB (`pdu::MAX_PDU_SIZE`). A configured `max_pdu_length` above it
+  is advertised clamped to that same ceiling, so the value we announce and the value we accept agree;
+  a peer that sends more is a protocol error.
+- A well-formed but unsupported context set is answered with A-ASSOCIATE-RJ (source user, reason 1);
+  a structurally malformed one (bad context ID, empty abstract syntax, no contexts) is answered with
+  A-ABORT, because no rejection reason describes it. Both are deliberate.
 
 ### 11.3 DIMSE
 
@@ -526,3 +536,12 @@ memory fast path, so one fallible form is both sufficient and checkable.
 
 Invariant for implementors: `size()` stays cheap and non-materialising, `data()` may fail, `as_slice()`
 returns `None` when the value is not contiguous in memory.
+
+### 15.2 Declared ceilings (deliberate, not defects)
+
+- **256 KiB receive cap.** One incoming PDU is bounded by `pdu::MAX_PDU_SIZE`; a larger configured
+  `max_pdu_length` is advertised clamped to that value (see §11.2). This bounds allocation against a
+  hostile peer. Only a non-conforming peer that ignores the advertised limit is rejected.
+- **Defined-length non-private `UN` read as SQ.** This extends PS3.5 CP-246 (which only authorises the
+  undefined-length case) to the defined-length form, with an item-shape probe guarding it (§9,
+  "CP-246 condition"). The tolerance is deliberate; the probe keeps a non-item-shaped value as `UN`.

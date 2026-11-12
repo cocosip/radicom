@@ -647,6 +647,19 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                 vr = Vr::Un;
             }
         }
+        // CP-246: the same probe applies to a non-private *defined-length* UN
+        // the dictionary calls SQ. Without it, a raw UN value that is not
+        // item-shaped would be parsed as implicit elements inside a bounded
+        // window (garbage, but no desync); keeping it UN is the safe read.
+        if vr == Vr::Sq
+            && !tag.is_private()
+            && raw_vr == Vr::Un
+            && defined.is_some()
+            && length > 0
+            && !self.next_is_item_or_delimiter()?
+        {
+            vr = Vr::Un;
+        }
 
         if vr == Vr::Sq {
             let cp246 = raw_vr == Vr::Un && !tag.is_private();
@@ -1395,6 +1408,50 @@ mod tests {
             vlen,
             "the implicit inner value was read with its real length"
         );
+    }
+
+    #[test]
+    fn a_defined_length_non_private_un_is_descended_only_when_item_shaped() {
+        let tag = Tag::new(0x0008, 0x1140); // Referenced Image Sequence (dictionary VR = SQ)
+        let header = |len: usize| {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&0x0008u16.to_le_bytes());
+            bytes.extend_from_slice(&0x1140u16.to_le_bytes());
+            bytes.extend_from_slice(b"UN");
+            bytes.extend_from_slice(&[0, 0]);
+            bytes.extend_from_slice(&(len as u32).to_le_bytes());
+            bytes
+        };
+
+        // content that is not item-shaped: a lone implicit element, no FFFE,E000
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x10, 0x00, 0x10, 0x00, 0x02, 0x00, 0x00, 0x00, b'A', b'B']);
+        let mut bytes = header(body.len());
+        bytes.extend_from_slice(&body);
+        let ds = read_with(&bytes, DicomReader::default()).unwrap();
+        assert!(
+            ds.try_get_sequence(&tag).is_none(),
+            "a non-item-shaped defined-length UN stays UN instead of mis-parsing"
+        );
+
+        // item-shaped content: one item holding an inner element
+        let mut inner = Vec::new();
+        inner.extend_from_slice(&0x0010u16.to_le_bytes());
+        inner.extend_from_slice(&0x0020u16.to_le_bytes());
+        inner.extend_from_slice(&2u32.to_le_bytes());
+        inner.extend_from_slice(b"AB");
+        let mut item = Vec::new();
+        item.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        item.extend_from_slice(&0xE000u16.to_le_bytes());
+        item.extend_from_slice(&(inner.len() as u32).to_le_bytes());
+        item.extend_from_slice(&inner);
+        let mut bytes = header(item.len());
+        bytes.extend_from_slice(&item);
+        let ds = read_with(&bytes, DicomReader::default()).unwrap();
+        let seq = ds
+            .try_get_sequence(tag)
+            .expect("an item-shaped defined-length UN descends as a sequence");
+        assert_eq!(seq.len(), 1);
     }
 
     #[test]

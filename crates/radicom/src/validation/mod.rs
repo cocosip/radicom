@@ -295,6 +295,16 @@ pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
             }
             Ok(())
         }
+        // Unlimited Characters: free text, but no control characters
+        Vr::Uc => validate_text_controls(vr, content),
+        Vr::Ur => {
+            // a URI/URL: no control characters and no embedded whitespace
+            validate_text_controls(vr, content)?;
+            if content.chars().any(char::is_whitespace) {
+                return Err(fail(vr, content, "URI contains whitespace"));
+            }
+            Ok(())
+        }
         // VRs without string validators: AE-family rules cover the rest
         _ => Ok(()),
     }
@@ -802,6 +812,17 @@ mod tests {
         // a VR without a string validator is accepted, and empties always are
         assert!(validate_single(Vr::Ur, "http://x").is_ok());
         assert!(validate_single(Vr::Lo, "").is_ok());
+    }
+
+    #[test]
+    fn uc_and_ur_reject_control_and_whitespace() {
+        // Uc is free text but may not carry control characters
+        assert!(validate_single(Vr::Uc, "free text").is_ok());
+        assert!(validate_single(Vr::Uc, "bad\u{7}text").is_err());
+        // a URI has no embedded whitespace
+        assert!(validate_single(Vr::Ur, "https://example.org/a?b=c").is_ok());
+        assert!(validate_single(Vr::Ur, "http://x y").is_err());
+        assert!(validate_single(Vr::Ur, "http://x\u{0}").is_err());
     }
 
     #[test]

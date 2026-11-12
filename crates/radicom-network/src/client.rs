@@ -187,6 +187,18 @@ pub struct DicomClient {
 }
 
 impl DicomClient {
+    /// The current association, when one is open.
+    ///
+    /// Exposes the negotiated presentation contexts, peer implementation
+    /// identity, user-identity response and granted roles — everything the
+    /// expert [`crate::server::Association`] layer already provides — so an
+    /// integration can log or assert what was actually negotiated without
+    /// dropping to that layer. `None` before the first request or after a
+    /// failure/timed-out association was discarded.
+    pub fn association(&self) -> Option<&Association> {
+        self.association.as_ref()
+    }
+
     /// A client for `addr` (host:port form understood by tokio).
     pub fn new(
         calling_ae: impl Into<String>,
@@ -300,7 +312,10 @@ impl DicomClient {
                 // rather than the connection keep the association.
                 NetworkError::Reject { .. }
                 | NetworkError::SopClassNotSupported { .. }
-                | NetworkError::ScuRoleNotNegotiated { .. } => {}
+                | NetworkError::ScuRoleNotNegotiated { .. }
+                // a callback error is the caller's business error: the batch
+                // may continue on the same association
+                | NetworkError::Callback(_) => {}
                 _ => self.forget_association(),
             }
         }
@@ -583,6 +598,11 @@ impl DicomClient {
     }
 
     /// Sends a C-STORE (§11.4).
+    ///
+    /// Renegotiates when the open association does not already carry this SOP
+    /// class (docs/01-architecture.md §11), so alternating SOP classes across
+    /// `send_*` calls opens a new association each time. For mixed work on one
+    /// association, use [`Self::send_requests`].
     pub async fn send_c_store(&mut self, file: &DicomFile) -> Result<CStoreResponse> {
         let sop_class = file
             .dataset
@@ -3028,6 +3048,9 @@ mod tests {
     /// An SCP that answers N-ACTION and reports the event afterwards (H2).
     struct PrinterScp {
         actions: Arc<std::sync::atomic::AtomicUsize>,
+        /// Whether the pushed report carries Event Information (the N-EVENT-REPORT
+        /// dataset is optional, PS3.7 Table 10.1-1).
+        report_dataset: bool,
     }
 
     #[async_trait::async_trait]
@@ -3061,16 +3084,18 @@ mod tests {
             event.sop_class_uid = request.sop_class_uid.clone();
             event.sop_instance_uid = request.sop_instance_uid.clone();
             event.event_type_id = Some(1);
-            let mut dataset = radicom::model::dataset::Dataset::new();
-            dataset.insert_str(
-                radicom::model::tag::Tag::PATIENT_NAME,
-                radicom::model::vr::Vr::Pn,
-                "Report",
-            );
-            dataset.set_transfer_syntax(
-                radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
-            );
-            event.dataset = Some(dataset);
+            if self.report_dataset {
+                let mut dataset = radicom::model::dataset::Dataset::new();
+                dataset.insert_str(
+                    radicom::model::tag::Tag::PATIENT_NAME,
+                    radicom::model::vr::Vr::Pn,
+                    "Report",
+                );
+                dataset.set_transfer_syntax(
+                    radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+                );
+                event.dataset = Some(dataset);
+            }
             Ok(vec![event])
         }
     }
@@ -3085,6 +3110,7 @@ mod tests {
             "127.0.0.1:0",
             Arc::new(PrinterScp {
                 actions: actions.clone(),
+                report_dataset: true,
             }),
             ServerOptions::default(),
         )
@@ -3138,6 +3164,157 @@ mod tests {
             "the client answered exactly one pushed report"
         );
         assert_eq!(actions.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        client.release().await;
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_pushed_event_report_needs_no_role_selection() {
+        // PS3.7 §D.3.3.4: without Role Selection the requestor is SCU and the
+        // acceptor is SCP, so the acceptor may push the service-class event.
+        // This is the classic Storage Commitment association.
+        let actions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(PrinterScp {
+                actions: actions.clone(),
+                report_dataset: true,
+            }),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let seen: Arc<std::sync::Mutex<Vec<u16>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
+            .with_n_event_report_handler(Arc::new(move |request| {
+                recorded
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(request.event_type_id.unwrap_or(0));
+                Ok(crate::nservice::NServiceResponse::success(request, None))
+            }));
+        assert!(
+            client.options.connection.role_selections.is_empty(),
+            "the test must exercise the default roles"
+        );
+
+        client
+            .send_n_action(PRINTER_SOP_CLASS, "1.2.3.4", 1, None)
+            .await
+            .unwrap();
+        client
+            .send_n_action(PRINTER_SOP_CLASS, "1.2.3.4", 1, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            *seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec![1],
+            "the default acceptor SCP delivered the report"
+        );
+
+        client.release().await;
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unhandled_event_report_is_answered_and_the_association_survives() {
+        // N-EVENT-REPORT is confirmed; a client with no handler must still
+        // answer. Before, the command fell through to the response parser and
+        // the next request failed (with no dataset it waited forever).
+        let actions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(PrinterScp {
+                actions: actions.clone(),
+                report_dataset: false,
+            }),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string());
+        let first = client
+            .send_n_action(PRINTER_SOP_CLASS, "1.2.3.4", 1, None)
+            .await
+            .unwrap();
+        assert_eq!(first.status, crate::dimse::status::SUCCESS);
+        let second = client
+            .send_n_action(PRINTER_SOP_CLASS, "1.2.3.4", 1, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            second.status,
+            crate::dimse::status::SUCCESS,
+            "the unanswered report must not poison the association"
+        );
+
+        client.release().await;
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn providers_see_the_calling_and_called_ae() {
+        // The provider hooks receive the association's AE titles, so a PACS can
+        // keep a per-caller whitelist or audit trail without a second socket.
+        struct PeerEcho {
+            seen: Arc<std::sync::Mutex<Vec<crate::services::AssociationInfo>>>,
+        }
+        #[async_trait::async_trait]
+        impl ServiceProvider for PeerEcho {
+            fn supported_sop_classes(&self) -> Vec<String> {
+                vec![crate::association::sop_class::VERIFICATION.to_string()]
+            }
+            async fn on_c_echo_with(
+                &self,
+                request: &crate::services::CEchoRequest,
+                peer: &crate::services::AssociationInfo,
+            ) -> Result<crate::services::CEchoResponse> {
+                self.seen
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(peer.clone());
+                Ok(crate::services::CEchoResponse::success(request))
+            }
+        }
+
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(PeerEcho { seen: seen.clone() }),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let mut client = DicomClient::new("CALLINGAE", "CALLEDAE", addr.to_string());
+        assert!(
+            client.association().is_none(),
+            "no association before the first request"
+        );
+        client
+            .send_c_echo(crate::association::sop_class::VERIFICATION)
+            .await
+            .unwrap();
+        {
+            let peers = seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert_eq!(peers.len(), 1, "one C-ECHO reached the provider");
+            assert_eq!(peers[0].calling_ae, "CALLINGAE");
+            assert_eq!(peers[0].called_ae, "CALLEDAE");
+        }
+        assert!(
+            client.association().is_some(),
+            "the accessor exposes the open association"
+        );
 
         client.release().await;
         handle.await.unwrap().unwrap();

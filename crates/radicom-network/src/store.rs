@@ -509,6 +509,11 @@ pub fn failure_response(request: &CStoreRequest, error: &NetworkError) -> CStore
         // not supported" (PS3.4 Table B.2-1), not a dataset/command mismatch
         // (NET-18)
         NetworkError::SopClassNotSupported { .. } => status::SOP_CLASS_NOT_SUPPORTED,
+        // a decode failure is "cannot understand this dataset", not a resource
+        // shortfall: 0xC000 says so where 0xA700 would mislead (PS3.4 Table B.2-1)
+        NetworkError::Io(io_error) if io_error.kind() == std::io::ErrorKind::InvalidData => {
+            status::UNABLE_TO_PROCESS
+        }
         NetworkError::Io(_) => status::STORAGE_FAILURE,
         _ => status::PROCESSING_FAILURE,
     };
@@ -847,6 +852,24 @@ mod tests {
             &NetworkError::Io(std::io::Error::other("disk full")),
         );
         assert_eq!(response.status, status::STORAGE_FAILURE);
+    }
+
+    #[test]
+    fn an_invalid_dataset_maps_onto_unable_to_process() {
+        // a decode failure is "cannot understand", not "out of resources"
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let instance = StoreSink::Memory
+            .materialize(&dataset_bytes(&syntax), &syntax)
+            .unwrap();
+        let request = c_store_request_from_message(&c_store_command(), instance).unwrap();
+        let response = failure_response(
+            &request,
+            &NetworkError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "not a dataset",
+            )),
+        );
+        assert_eq!(response.status, status::UNABLE_TO_PROCESS);
     }
 
     fn spilled_body(

@@ -114,6 +114,13 @@ pub enum NetworkError {
     ClosedPrematurely { source: Option<Box<NetworkError>> },
     #[error("protocol violation: {0}")]
     Protocol(&'static str),
+    /// A user callback (the batch response handler) returned an error.
+    ///
+    /// This is the caller's business error, not a transport failure: the
+    /// association stays usable, so a handler can reject one response and keep
+    /// consuming the batch.
+    #[error("response callback failed: {0}")]
+    Callback(String),
     /// The peer broke DIMSE by sending a response where a request belongs.
     ///
     /// The layer that noticed has already sent A-ABORT (PS3.8 §9.3.8), so the

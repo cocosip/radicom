@@ -495,8 +495,8 @@ async fn main() -> radicom_network::Result<()> {
 
     // STUDY level, Study Root information model; 0 allocates a Message ID.
     let request = CFindRequest::study_query(0)
-        .with_key(0x0010, 0x0020, Vr::Lo, "PAT001")   // PatientID (match key)
-        .with_key(0x0010, 0x0010, Vr::Pn, "");        // PatientName (return key)
+        .with_tag(Tag::PATIENT_ID, Vr::Lo, "PAT001")   // PatientID (match key)
+        .with_tag(Tag::PATIENT_NAME, Vr::Pn, "");     // PatientName (return key)
 
     let responses = client.send_c_find(&request).await?;
     for r in responses {

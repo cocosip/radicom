@@ -9,6 +9,20 @@ use crate::error::{NetworkError, Result};
 use async_trait::async_trait;
 use radicom::io::file::DicomFile;
 
+/// The peer's association identity, exposed to provider hooks (fo-dicom
+/// `DicomRequest.Association`).
+///
+/// The calling AE is peer-asserted: it is useful for routing, audit and
+/// per-caller policy, but it is not an authentication result. Use TLS client
+/// certificates or User Identity when the identity must be proven.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AssociationInfo {
+    /// The AE title that opened the association (A-ASSOCIATE-RQ Calling-AE-Title).
+    pub calling_ae: String,
+    /// The AE title the peer addressed (A-ASSOCIATE-RQ Called-AE-Title).
+    pub called_ae: String,
+}
+
 /// A C-ECHO request (§11.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CEchoRequest {
@@ -334,9 +348,10 @@ pub trait ServiceProvider: Send + Sync {
     /// .OnSendNEventReportRequestAsync`: the SCP of the service class answers
     /// N-ACTION, then reports the resulting event to the SCU on the *same*
     /// association. The engine assigns each request's message ID and sends it
-    /// only when the peer granted this side the SCU role for its SOP class
-    /// (§11.2); a peer that rejected the report's status is not treated as a
-    /// failure of the N-ACTION, which was already answered.
+    /// only when this side holds the service class's SCP role (§11.2 — the
+    /// acceptor by default; with role selection the `AcceptedContexts::can_scu`
+    /// predicate decides). A peer that rejected the report's status is not
+    /// treated as a failure of the N-ACTION, which was already answered.
     ///
     /// Defaults to sending nothing, so existing providers are unaffected.
     async fn on_send_n_event_report(
@@ -365,6 +380,152 @@ pub trait ServiceProvider: Send + Sync {
             "N-DELETE is not supported by this provider",
         ))
     }
+
+    /// C-ECHO with the peer's association identity.
+    ///
+    /// Defaults to [`ServiceProvider::on_c_echo`]. Override this method when
+    /// the handler needs the calling/called AE (audit, routing, per-caller
+    /// policy); the calling AE is peer-asserted (see [`AssociationInfo`]).
+    async fn on_c_echo_with(
+        &self,
+        request: &CEchoRequest,
+        peer: &AssociationInfo,
+    ) -> Result<CEchoResponse> {
+        let _ = peer;
+        self.on_c_echo(request).await
+    }
+
+    /// C-STORE with the peer's association identity.
+    ///
+    /// Defaults to [`ServiceProvider::on_c_store`].
+    async fn on_c_store_with(
+        &self,
+        request: &CStoreRequest,
+        peer: &AssociationInfo,
+    ) -> Result<CStoreResponse> {
+        let _ = peer;
+        self.on_c_store(request).await
+    }
+
+    /// C-FIND with the peer's association identity.
+    ///
+    /// Defaults to [`ServiceProvider::on_c_find`].
+    fn on_c_find_with<'a>(
+        &'a self,
+        request: &'a crate::cfind::CFindRequest,
+        peer: &'a AssociationInfo,
+    ) -> futures::stream::BoxStream<'a, Result<crate::cfind::CFindResponse>> {
+        let _ = peer;
+        self.on_c_find(request)
+    }
+
+    /// C-MOVE with the peer's association identity.
+    ///
+    /// Defaults to [`ServiceProvider::on_c_move`].
+    fn on_c_move_with<'a>(
+        &'a self,
+        request: &'a crate::cmove::CMoveRequest,
+        peer: &'a AssociationInfo,
+    ) -> futures::stream::BoxStream<'a, Result<crate::cmove::CMoveResponse>> {
+        let _ = peer;
+        self.on_c_move(request)
+    }
+
+    /// C-GET with the peer's association identity.
+    ///
+    /// Defaults to [`ServiceProvider::on_c_get`].
+    fn on_c_get_with<'a>(
+        &'a self,
+        request: &'a crate::cget::CGetRequest,
+        peer: &'a AssociationInfo,
+    ) -> futures::stream::BoxStream<'a, Result<crate::cget::CGetEvent>> {
+        let _ = peer;
+        self.on_c_get(request)
+    }
+
+    /// N-EVENT-REPORT with the peer's association identity.
+    ///
+    /// Defaults to [`ServiceProvider::on_n_event_report`].
+    async fn on_n_event_report_with(
+        &self,
+        request: &crate::nservice::NServiceRequest,
+        peer: &AssociationInfo,
+    ) -> Result<crate::nservice::NServiceResponse> {
+        let _ = peer;
+        self.on_n_event_report(request).await
+    }
+
+    /// N-GET with the peer's association identity.
+    ///
+    /// Defaults to [`ServiceProvider::on_n_get`].
+    async fn on_n_get_with(
+        &self,
+        request: &crate::nservice::NServiceRequest,
+        peer: &AssociationInfo,
+    ) -> Result<crate::nservice::NServiceResponse> {
+        let _ = peer;
+        self.on_n_get(request).await
+    }
+
+    /// N-SET with the peer's association identity.
+    ///
+    /// Defaults to [`ServiceProvider::on_n_set`].
+    async fn on_n_set_with(
+        &self,
+        request: &crate::nservice::NServiceRequest,
+        peer: &AssociationInfo,
+    ) -> Result<crate::nservice::NServiceResponse> {
+        let _ = peer;
+        self.on_n_set(request).await
+    }
+
+    /// N-ACTION with the peer's association identity.
+    ///
+    /// Defaults to [`ServiceProvider::on_n_action`].
+    async fn on_n_action_with(
+        &self,
+        request: &crate::nservice::NServiceRequest,
+        peer: &AssociationInfo,
+    ) -> Result<crate::nservice::NServiceResponse> {
+        let _ = peer;
+        self.on_n_action(request).await
+    }
+
+    /// N-CREATE with the peer's association identity.
+    ///
+    /// Defaults to [`ServiceProvider::on_n_create`].
+    async fn on_n_create_with(
+        &self,
+        request: &crate::nservice::NServiceRequest,
+        peer: &AssociationInfo,
+    ) -> Result<crate::nservice::NServiceResponse> {
+        let _ = peer;
+        self.on_n_create(request).await
+    }
+
+    /// N-DELETE with the peer's association identity.
+    ///
+    /// Defaults to [`ServiceProvider::on_n_delete`].
+    async fn on_n_delete_with(
+        &self,
+        request: &crate::nservice::NServiceRequest,
+        peer: &AssociationInfo,
+    ) -> Result<crate::nservice::NServiceResponse> {
+        let _ = peer;
+        self.on_n_delete(request).await
+    }
+
+    /// Pushed N-EVENT-REPORTs with the peer's association identity.
+    ///
+    /// Defaults to [`ServiceProvider::on_send_n_event_report`].
+    async fn on_send_n_event_report_with(
+        &self,
+        request: &crate::nservice::NServiceRequest,
+        peer: &AssociationInfo,
+    ) -> Result<Vec<crate::nservice::NServiceRequest>> {
+        let _ = peer;
+        self.on_send_n_event_report(request).await
+    }
 }
 
 /// The built-in Verification SCP: answers C-ECHO with Success (§11.4).
@@ -386,6 +547,98 @@ impl ServiceProvider for VerificationProvider {
             ));
         }
         Ok(CEchoResponse::success(request))
+    }
+}
+
+/// The built-in Storage SCP: writes every received instance into a directory.
+///
+/// This is the built-in equivalent of fo-dicom's `SimpleCStoreProvider`: a
+/// caller that only wants to archive incoming images builds one and passes it
+/// to [`crate::server::DicomServer::bind`], with no boilerplate provider of its
+/// own. [`Self::supported_sop_classes`] lists every registered Storage SOP
+/// Class, so a peer's storage presentation contexts are all accepted instead
+/// of the whole association being rejected for an unlisted class.
+#[derive(Debug, Clone)]
+pub struct FileStoreProvider {
+    directory: std::path::PathBuf,
+}
+
+impl FileStoreProvider {
+    /// Writes instances into `directory` (created on the first C-STORE).
+    pub fn to_dir(directory: impl Into<std::path::PathBuf>) -> Self {
+        FileStoreProvider {
+            directory: directory.into(),
+        }
+    }
+
+    pub fn directory(&self) -> &std::path::Path {
+        &self.directory
+    }
+
+    /// Every registered Storage SOP Class UID (computed once).
+    pub fn storage_sop_classes() -> &'static [String] {
+        static CLASSES: once_cell::sync::Lazy<Vec<String>> = once_cell::sync::Lazy::new(|| {
+            radicom::model::uid::Uid::enumerate()
+                .into_iter()
+                .filter(|uid| uid.storage_category() != radicom::StorageCategory::None)
+                .map(|uid| uid.value().to_string())
+                .collect()
+        });
+        &CLASSES
+    }
+}
+
+/// Reduces a peer-supplied UID to a safe single path component.
+fn store_file_name(instance_uid: &str) -> String {
+    let cleaned: String = instance_uid
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_start_matches('.').to_string();
+    if cleaned.is_empty() {
+        "instance".to_string()
+    } else {
+        cleaned
+    }
+}
+
+#[async_trait]
+impl ServiceProvider for FileStoreProvider {
+    fn supported_sop_classes(&self) -> Vec<String> {
+        Self::storage_sop_classes().to_vec()
+    }
+
+    async fn on_c_store(&self, request: &CStoreRequest) -> Result<CStoreResponse> {
+        let directory = self.directory.clone();
+        let file = request.file.clone();
+        let name = store_file_name(&request.affected_sop_instance_uid);
+        // the write is blocking file IO: keep it off the runtime worker (§6)
+        let written = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            std::fs::create_dir_all(&directory)?;
+            file.save_with(
+                directory.join(format!("{name}.dcm")),
+                &radicom::io::writer::WriteOptions::default(),
+            )
+            .map_err(|error| std::io::Error::other(error.to_string()))
+        })
+        .await;
+        match written {
+            Ok(Ok(())) => Ok(CStoreResponse::success(request)),
+            Ok(Err(error)) => Ok(crate::store::failure_response(
+                request,
+                &NetworkError::Io(error),
+            )),
+            Err(join_error) => Ok(crate::store::failure_response(
+                request,
+                &NetworkError::Io(std::io::Error::other(join_error.to_string())),
+            )),
+        }
     }
 }
 
@@ -726,6 +979,89 @@ mod tests {
             };
             assert!(response.is_err(), "{field:?} must be refused");
         }
+    }
+
+    #[test]
+    fn file_store_provider_lists_storage_classes_and_sanitizes_names() {
+        let classes = FileStoreProvider::storage_sop_classes();
+        assert!(
+            classes.iter().any(|c| c == radicom::uids::CT_IMAGE_STORAGE),
+            "the built-in provider accepts CT Storage"
+        );
+        assert!(
+            !classes.iter().any(|c| c == sop_class::VERIFICATION),
+            "Verification is not a Storage SOP Class"
+        );
+        assert_eq!(store_file_name("1.2.3.4"), "1.2.3.4");
+        assert_eq!(store_file_name("../../etc/passwd"), "_.._etc_passwd");
+        assert_eq!(store_file_name("..."), "instance");
+    }
+
+    #[tokio::test]
+    async fn file_store_provider_writes_the_instance_to_disk() {
+        let dir = std::env::temp_dir().join(format!(
+            "radicom-filestore-{}-{}",
+            std::process::id(),
+            radicom::model::uid::Uid::generate().value()
+        ));
+        let provider = FileStoreProvider::to_dir(dir.clone());
+        assert_eq!(provider.directory(), dir.as_path());
+        assert!(
+            <FileStoreProvider as ServiceProvider>::supported_sop_classes(&provider)
+                .iter()
+                .any(|c| c == radicom::uids::CT_IMAGE_STORAGE),
+            "the trait method advertises Storage classes"
+        );
+        let request = CStoreRequest {
+            message_id: 1,
+            affected_sop_class_uid: "1.2.840.10008.5.1.4.1.1.7".to_string(),
+            affected_sop_instance_uid: "1.2.3.4.5".to_string(),
+            priority: crate::dimse::Priority::Medium,
+            file: sample_file(),
+            move_originator_ae_title: None,
+            move_originator_message_id: None,
+        };
+        let response = provider.on_c_store(&request).await.unwrap();
+        assert_eq!(response.status, status::SUCCESS);
+        let saved = dir.join("1.2.3.4.5.dcm");
+        assert!(
+            saved.exists(),
+            "the instance was written to {}",
+            saved.display()
+        );
+        let reopened = radicom::io::file::DicomFile::open(&saved).unwrap();
+        assert_eq!(
+            reopened
+                .dataset
+                .try_get_str(Tag::SOP_INSTANCE_UID)
+                .as_deref(),
+            Some("1.2.3.4.5")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn file_store_provider_reports_a_write_failure_without_dropping_the_association() {
+        // a path that cannot be created as a directory (an existing file)
+        let file_path = std::env::temp_dir().join(format!(
+            "radicom-filestore-file-{}-{}",
+            std::process::id(),
+            radicom::model::uid::Uid::generate().value()
+        ));
+        std::fs::write(&file_path, b"x").unwrap();
+        let provider = FileStoreProvider::to_dir(file_path.join("sub"));
+        let request = CStoreRequest {
+            message_id: 1,
+            affected_sop_class_uid: "1.2.840.10008.5.1.4.1.1.7".to_string(),
+            affected_sop_instance_uid: "1.2.3.4.5".to_string(),
+            priority: crate::dimse::Priority::Medium,
+            file: sample_file(),
+            move_originator_ae_title: None,
+            move_originator_message_id: None,
+        };
+        let response = provider.on_c_store(&request).await.unwrap();
+        assert_ne!(response.status, status::SUCCESS);
+        std::fs::remove_file(&file_path).ok();
     }
 
     #[test]
