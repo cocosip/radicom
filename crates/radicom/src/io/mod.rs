@@ -1,4 +1,4 @@
-//! File and IO primitives (docs/01-architecture.md §7).
+//! File and IO primitives (docs/architecture.md §7).
 
 pub mod byte_source;
 pub mod dataset_builder;

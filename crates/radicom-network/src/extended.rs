@@ -1,4 +1,4 @@
-//! Extended negotiation (NET-04; docs/01-architecture.md §11).
+//! Extended negotiation (NET-04; docs/architecture.md §11).
 //!
 //! SOP Class Extended Negotiation carries one Service Class Application
 //! Information array per SOP class: a flat byte array where the byte at index

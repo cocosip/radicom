@@ -1,5 +1,5 @@
 //! Dataset items: elements, sequences and fragment sequences
-//! (ELEM-03, ELEM-04; docs/01-architecture.md §3).
+//! (ELEM-03, ELEM-04; docs/architecture.md §3).
 
 use crate::model::buffer::SharedBuffer;
 use crate::model::dataset::Dataset;
@@ -108,9 +108,9 @@ impl DicomFragmentSequence {
     /// Appends a fragment and maintains the basic offset table: each entry is
     /// the byte distance from the first fragment's item tag to this
     /// fragment's item tag, i.e. every preceding fragment contributes its
-    /// 8-byte item header plus its padded length (docs/01-architecture.md §7).
+    /// 8-byte item header plus its padded length (docs/architecture.md §7).
     /// A computed offset beyond `u32::MAX` clears the table (readers then
-    /// fall back to the fragment-count == frame-count mapping, docs/01-architecture.md §9.1).
+    /// fall back to the fragment-count == frame-count mapping, docs/architecture.md §9.1).
     pub fn push_fragment(&mut self, fragment: SharedBuffer) {
         if self.next_offset <= u32::MAX as u64 {
             self.offset_table.push(self.next_offset as u32);

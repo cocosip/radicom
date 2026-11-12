@@ -1,4 +1,4 @@
-//! Person Name (PN) component model (ELEM-01; docs/01-architecture.md §3).
+//! Person Name (PN) component model (ELEM-01; docs/architecture.md §3).
 //!
 //! Value shape: up to three `=`-separated groups (alphabetic, ideographic,
 //! phonetic), each with up to five `^`-separated components:

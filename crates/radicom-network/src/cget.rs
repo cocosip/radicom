@@ -1,4 +1,4 @@
-//! C-GET (SRV-05; docs/01-architecture.md §11).
+//! C-GET (SRV-05; docs/architecture.md §11).
 //!
 //! A C-GET asks the SCP to send instances back on the *same* association. The
 //! SCP issues C-STORE sub-operations there, so the SCU must answer them while

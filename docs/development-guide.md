@@ -1,7 +1,7 @@
 # Development Guide
 
 > Testing, interop, maintenance and release. Design invariants live in
-> [01-architecture.md](01-architecture.md); usage examples are in the root [README.md](../README.md).
+> [architecture.md](architecture.md); usage examples are in the root [README.md](../README.md).
 > This document describes the current state only — history lives in `git log`.
 
 ## 1. Scope and Baseline
@@ -62,8 +62,10 @@ Deliberate, tested ceilings. Change one only together with the tests that descri
   that exceeds the advertised value is a protocol error.
 - An external private sequence written with a *defined* length under Implicit VR still needs a private
   dictionary to recover its structure (its bytes are preserved).
-- CP-246 (`explicit_vr = false`) is applied to the Big-Endian UN-undefined-length-SQ case only; applying
-  it to Little Endian would break the `t3_un_undefined_length_parsed_as_sq` behaviour and real LE files.
+- CP-246 applies whenever a `UN` value is really a sequence, in explicit-VR **Little Endian as well as
+  Big Endian**. The undefined-length case follows CP-246 directly; a *defined-length non-private* `UN`
+  is descended only after an item-shape probe (see `docs/architecture.md` §7, "CP-246 condition"). Inner
+  content is Implicit VR Little Endian when the outer syntax is big endian.
 - Concrete codecs, external peers, print/media hardware and non-Windows behaviour are not established by
   local tests.
 
@@ -316,7 +318,7 @@ untracked `.cargo/` directory.
 
 ## 7. Conventions
 
-- Design changes flow **back** into [01-architecture.md](01-architecture.md) in the same commit as the code;
+- Design changes flow **back** into [architecture.md](architecture.md) in the same commit as the code;
   these documents describe the current state, not history.
 - Source comments reference sections as `docs/<file>.md §N`. Moving or renumbering a document means updating
   those references; `grep -r "docs/" crates xtask` finds them all.

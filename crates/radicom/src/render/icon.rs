@@ -1,5 +1,5 @@
 //! DICOM icon image from an Icon Image Sequence item (REND-10;
-//! docs/01-architecture.md §10).
+//! docs/architecture.md §10).
 //!
 //! `(0088,0200)` IconImageSequence items carry a small preview whose pixel data
 //! is stored native even when the parent image is compressed. This module parses

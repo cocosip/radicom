@@ -2,7 +2,7 @@
 
 > This is the **only design reference** when changing code. It records the invariants and design
 > decisions you must not violate — it does not restate the implementation, which is the source of truth.
-> Testing, interop and release procedures live in [02-development-guide.md](02-development-guide.md).
+> Testing, interop and release procedures live in [development-guide.md](development-guide.md).
 
 ## 0. Workspace and Dependency Direction
 
@@ -89,8 +89,8 @@ dictionary entries.
   charset-sensitivity / multi-value predicates. Validation rules are in §5.
 - **UID** — `Uid` holds an `Arc<str>` interned through a global registry. `Uid::parse` never fails (an
   unknown UID keeps its literal value); `query` returns `Option`. Private UIDs can be registered.
-  `UidGenerator` produces `2.25.<decimal uuid>` UIDs and supports consistent remapping (the same source
-  UID always maps to the same replacement).
+  `Uid::generate` produces `2.25.<decimal uuid>` UIDs; `UidGenerator` performs consistent remapping (the
+  same source UID always maps to the same replacement).
 - **Transfer syntax** — `TransferSyntax` records the UID, endianness, VR explicitness, and whether the
   pixel data is encapsulated/compressed. `syntaxes::*` holds the built-ins; `TransferSyntax::register` is
   the extension point used by application-defined syntaxes and by `radicom-codecs`.
@@ -102,8 +102,10 @@ dictionary entries.
 
 Constants are named after the **PS3.6 keyword** in SCREAMING_SNAKE_CASE, matching fo-dicom one-to-one
 (`DicomTag.PatientName` ↔ `Tag::PATIENT_NAME`, `DicomUID.CTImageStorage` ↔
-`uids::CT_IMAGE_STORAGE`). Do not add short aliases — a second name for the same value is a second thing
-to keep in sync.
+`uids::CT_IMAGE_STORAGE`). Do not add a second **string literal** for the same value — that is a second
+thing to keep in sync. A thin local re-export that binds to the generated constant
+(`pub const VERIFICATION: &str = radicom::uids::VERIFICATION;`) is fine: it is one definition with a
+shorter name at the point of use, not a second source of truth.
 
 Use the constants at every call site:
 
@@ -116,7 +118,8 @@ ds.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
 ```
 
 Never write `Tag::new(0x0010, 0x0010)` or a UID literal. The constants are generated from the dictionary,
-so they cannot drift from it.
+so they cannot drift from it. (A raw `(group, element)` pair in an ad-hoc query-builder convenience —
+`CFindRequest::with_key` — is discouraged in favour of `with_tag(Tag, Vr, ..)` for the same reason.)
 
 ---
 
@@ -333,7 +336,8 @@ client/server. One tokio task per association. Locks must not be held across `.a
   association must be dropped afterwards.
 - An A-ASSOCIATE-AC carries `result` plus **one** transfer syntax per context, including rejected
   contexts (where its value is ignored). It carries no abstract syntax; the client refills it from
-  its RQ by context id.
+  its RQ by context id. A peer that echoes a redundant abstract syntax is tolerated (it is ignored), and
+  a peer may answer only the contexts it accepted.
 - User-information sub-items:
   - Role selection (`0x54`): `uid_len (u16) + uid + scu (1) + scp (1)`.
     Roles describe the association requestor; without a selection for a SOP class, the requestor
@@ -377,9 +381,17 @@ client/server. One tokio task per association. Locks must not be held across `.a
 ### 11.4 Server and client
 
 - The server implements `ServiceProvider`; every operation has a default that refuses, so a provider opts
-  in only to what it serves. The trait is an `async_trait`.
+  in only to what it serves. The trait is an `async_trait`. Each operation also has a `*_with(request,
+  &AssociationInfo)` default method that forwards to the plain form; override it to read the peer's
+  calling/called AE (peer-asserted, not authenticated). `FileStoreProvider` is the built-in Storage SCP
+  that writes each instance as `<sop-instance-uid>.dcm` into a directory.
+- The service-class SCP initiates N-EVENT-REPORT. Without role selection the acceptor is SCP by default;
+  the sender is gated by the same SCU-role predicate the receiver validates with, and a report with no
+  registered handler is answered `Unrecognized Operation` rather than left unacknowledged.
+- A Modality Worklist C-FIND is built from the Scheduled Procedure Step Sequence (§K.6.1.2.2), not from a
+  Query/Retrieve Level; a strict MWL SCP rejects a stray `(0008,0052)`.
 - The client negotiates presentation contexts on the first request and **must renegotiate when switching
-  SOP class**.
+  SOP class**. `DicomClient::association()` exposes the open association for inspection.
 - Concrete request objects (`CEchoRequest`, `CStoreRequest`, `CFindRequest`, `CGetRequest`,
   `CMoveRequest`, and `NServiceRequest`) convert into `DicomRequest` and can be passed together to
   `DicomClient::send_requests` for mixed C-ECHO, C-STORE, C-FIND, C-GET, C-MOVE and N-service traffic.
@@ -389,12 +401,15 @@ client/server. One tokio task per association. Locks must not be held across `.a
   existing typed send methods remain compatibility convenience APIs with typed return values.
   C-GET drains earlier requests and blocks later admissions until completion, allowing reverse C-STORE
   traffic without competing streamed writes. Each distinct source storage syntax has its own context;
-  mixed requests support cancellation by active Message ID.
+  mixed requests support cancellation by active Message ID. A C-CANCEL that arrives before the request's
+  dataset (so no cancel slot exists yet) is remembered and applied when the slot is registered.
 - Reverse C-STORE on a C-GET association requires role selection; register a handler with
   `with_reverse_store_handler` or `collect_reverse_stores` and declare its storage SOP classes.
   C-MOVE delivers C-STORE on a separate association to the configured destination AE.
 - Received bodies obey configured limits even below the spool threshold; deflated output has the same
-  hard limit on both memory and spool paths. Blocking file reads and parsing run on the blocking pool.
+  hard limit on both memory and spool paths. Blocking file reads and parsing run on the blocking pool. A
+  dataset that cannot be decoded is answered `0xC000` (Unable to process), distinct from a resource
+  shortfall (`0xA700`).
 - Sub-operation counters must be populated from the actual results. Returning a defaulted summary makes a
   failed C-MOVE report success.
 - `max_clients` must actually be enforced (a semaphore or equivalent); a config field that no code path
@@ -402,7 +417,10 @@ client/server. One tokio task per association. Locks must not be held across `.a
 - TLS client trust is platform-first: with no CA bundle the client trusts the OS root store
   (`rustls-native-certs`), and a bundle pins the anchors instead of extending them. The certificate is
   verified against `server_name` when set, otherwise the peer address; `accept_any` skips verification
-  and is only for tests (PS3.8 §9.3).
+  and is only for tests (PS3.8 §9.3). Built server/client TLS configurations are cached per distinct
+  on-disk material, so a repeated handshake does not reload PEM files or the trust store.
+- Every association rejection and abort path logs a `tracing::warn!` with the reason, so a peer's
+  "cannot connect" report is diagnosable.
 
 ---
 
@@ -510,38 +528,11 @@ client/server. One tokio task per association. Locks must not be held across `.a
 
 ## 15. Known Deviations (do not copy these; fix them when you touch the area)
 
-There are no known deviations right now: the implementation matches the intended design recorded in this
-document. The section stays so that a deviation found later is written down here — as a defect, not a
-contract — instead of being mistaken for current behaviour to copy.
+There are **no open deviations**: the implementation matches the intended design recorded in this
+document. Record any deviation found later here — as a defect, not a contract — instead of letting it be
+mistaken for current behaviour to copy.
 
-### 15.1 Buffer reads are fallible (adopted design)
-
-`ByteBuffer` reads are fallible. This is the adopted design, not a deferred fix:
-
-```rust
-fn data(&self) -> std::io::Result<std::borrow::Cow<'_, [u8]>>;
-fn as_slice(&self) -> Option<&[u8]>;
-fn get_byte_range(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()>;
-fn copy_to(&self, w: &mut dyn std::io::Write) -> std::io::Result<u64>;
-```
-
-`FileWindow` and `StreamWindow` return real `io::Error`s instead of panicking over a failed file read or a
-failed temp-file spill. An out-of-bounds `get_byte_range` is `ErrorKind::InvalidInput`. The `StreamWindow`
-spill error is sticky: the source is consumed, so the read cannot be retried.
-
-An infallible shadow accessor (`try_data` beside an infallible `data`) was rejected. Panic safety cannot be
-type-checked through `dyn ByteBuffer`: a caller that keeps the infallible form still panics on a deferred
-buffer, and no signature distinguishes the two kinds of caller. `as_slice()` already covers the zero-copy
-memory fast path, so one fallible form is both sufficient and checkable.
-
-Invariant for implementors: `size()` stays cheap and non-materialising, `data()` may fail, `as_slice()`
-returns `None` when the value is not contiguous in memory.
-
-### 15.2 Declared ceilings (deliberate, not defects)
-
-- **256 KiB receive cap.** One incoming PDU is bounded by `pdu::MAX_PDU_SIZE`; a larger configured
-  `max_pdu_length` is advertised clamped to that value (see §11.2). This bounds allocation against a
-  hostile peer. Only a non-conforming peer that ignores the advertised limit is rejected.
-- **Defined-length non-private `UN` read as SQ.** This extends PS3.5 CP-246 (which only authorises the
-  undefined-length case) to the defined-length form, with an item-shape probe guarding it (§9,
-  "CP-246 condition"). The tolerance is deliberate; the probe keeps a non-item-shaped value as `UN`.
+Two behaviours are occasionally reported as defects but are deliberate, so they are not open deviations:
+buffer reads are fallible (see §6) and the receive side caps one PDU at 256 KiB (§11.2). The
+defined-length non-private `UN` tolerance and its item-shape probe are specified in §7 ("CP-246
+condition").

@@ -1,5 +1,5 @@
 //! DICOM element value model and typed access (ELEM-01, ELEM-02;
-//! docs/01-architecture.md §3).
+//! docs/architecture.md §3).
 
 use crate::error::{DataError, Error};
 use crate::model::buffer::{MemoryBuffer, SharedBuffer};

@@ -1,4 +1,4 @@
-//! Config-driven server hosting helper (HOST-01; docs/01-architecture.md §11).
+//! Config-driven server hosting helper (HOST-01; docs/architecture.md §11).
 //!
 //! A thin, framework-agnostic lifecycle wrapper over [`crate::server::DicomServer`]:
 //! it turns a [`HostedServerConfig`] into a bound, running SCP that an application
@@ -24,7 +24,7 @@ use crate::server::{ConnectedClients, DicomServer, ServerOptions};
 use crate::services::ServiceProvider;
 use crate::store::StoreSink;
 
-/// Configuration for a hosted DICOM server (docs/01-architecture.md §11).
+/// Configuration for a hosted DICOM server (docs/architecture.md §11).
 #[derive(Debug, Clone)]
 pub struct HostedServerConfig {
     /// Address to bind (default: all IPv4 interfaces). Set an IPv6 address to

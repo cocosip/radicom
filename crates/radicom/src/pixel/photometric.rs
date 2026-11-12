@@ -1,4 +1,4 @@
-//! Photometric interpretation values (PIX-01; docs/01-architecture.md §9).
+//! Photometric interpretation values (PIX-01; docs/architecture.md §9).
 //!
 //! Only the well-known values are typed; anything else round-trips as the
 //! raw string so unknown vendor values never fail a read.

@@ -44,7 +44,7 @@ The codec implementations are a separate companion workspace, not a member of th
 ### Image Codecs
 
 `radicom` ships the codec **contract** only — `Codec`, `CodecRegistry`, `CodecParams` and the
-`Transcoder` — as a frozen boundary (see [docs/01-architecture.md](docs/01-architecture.md) §9.1).
+`Transcoder` — as a frozen boundary (see [docs/architecture.md](docs/architecture.md) §9.1).
 The implementations live in the companion crate
 [`radicom-codecs`](https://github.com/cocosip/radicom-codecs)
 ([crates.io](https://crates.io/crates/radicom-codecs)): RLE Lossless, JPEG (Process 1, Process 2/4,
@@ -510,8 +510,9 @@ async fn main() -> radicom_network::Result<()> {
 ```
 
 `CFindRequest` also provides `patient_query`, `series_query`, `image_query` and
-`worklist_query`. For the Patient Root information model use
-`CFindRequest::new(QueryRetrieveLevel::Study, QueryRoot::Patient, message_id)`.
+`worklist_query`. `worklist_query` builds the Modality Worklist shape — its keys live inside the
+Scheduled Procedure Step Sequence, with no Query/Retrieve Level. For the Patient Root information model
+use `CFindRequest::new(QueryRetrieveLevel::Study, QueryRoot::Patient, message_id)`.
 
 High-level send APIs treat Message ID `0` as automatic allocation. Nonzero IDs must be unique while
 outstanding; responses expose the actual ID in `message_id_being_responded_to`. The low-level wire
@@ -738,7 +739,7 @@ $env:RADICOM_PEER = "127.0.0.1:11112"
 cargo test -p radicom-network --test interop --all-features
 ```
 
-See [docs/02-development-guide.md](docs/02-development-guide.md) for the full test strategy, data inventory and tolerance corpus.
+See [docs/development-guide.md](docs/development-guide.md) for the full test strategy, data inventory and tolerance corpus.
 
 ### Coverage
 
@@ -777,15 +778,15 @@ This project is a Rust port inspired by [fo-dicom](https://github.com/fo-dicom/f
 
 The mapping from fo-dicom to radicom — scope, intentional divergences and out-of-scope areas — is recorded in:
 
-- [docs/02-development-guide.md](docs/02-development-guide.md) — scope, baseline, known limits, testing, interop and release process
-- [docs/01-architecture.md](docs/01-architecture.md) — architecture and the intentional divergences (§14)
+- [docs/development-guide.md](docs/development-guide.md) — scope, baseline, known limits, testing, interop and release process
+- [docs/architecture.md](docs/architecture.md) — architecture and the intentional divergences (§14)
 
 ## Documentation
 
 | Document | Content |
 |---|---|
-| [docs/01-architecture.md](docs/01-architecture.md) | **What the code must obey**: tag ordering, tolerance rules T1–T10, the frozen codec boundary, wire formats, divergences |
-| [docs/02-development-guide.md](docs/02-development-guide.md) | Scope and baseline, known limits, test strategy, interop testing, code generation, CI and publishing |
+| [docs/architecture.md](docs/architecture.md) | **What the code must obey**: tag ordering, tolerance rules T1–T10, the frozen codec boundary, wire formats, divergences |
+| [docs/development-guide.md](docs/development-guide.md) | Scope and baseline, known limits, test strategy, interop testing, code generation, CI and publishing |
 
 ## License
 

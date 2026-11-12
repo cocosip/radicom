@@ -1,4 +1,4 @@
-//! Workflow benchmarks beyond JSON/XML (docs/02-development-guide.md §3.8).
+//! Workflow benchmarks beyond JSON/XML (docs/development-guide.md §3.8).
 //!
 //! Criterion is not vendored in this workspace's offline cache, so this is a
 //! dependency-free `harness = false` binary timing the non-serialization hot

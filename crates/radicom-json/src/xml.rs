@@ -1,4 +1,4 @@
-//! DICOM XML export (XML-01; docs/01-architecture.md §12).
+//! DICOM XML export (XML-01; docs/architecture.md §12).
 //!
 //! One-way export to fo-dicom's `NativeDicomModel` shape:
 //!

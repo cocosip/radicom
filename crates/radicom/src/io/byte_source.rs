@@ -1,5 +1,5 @@
 //! Byte sources and targets over `Read+Seek` / `Write`
-//! (IO-02; docs/01-architecture.md §7).
+//! (IO-02; docs/architecture.md §7).
 
 use crate::error::ReaderError;
 use crate::model::buffer::{FileWindow, MemoryBuffer, SharedBuffer};

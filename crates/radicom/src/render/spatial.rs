@@ -1,4 +1,4 @@
-//! Spatial 2D transform for the output stage (REND-11; docs/01-architecture.md §10).
+//! Spatial 2D transform for the output stage (REND-11; docs/architecture.md §10).
 //!
 //! Mirrors fo-dicom `SpatialTransform`: scale / rotation (90° steps) / flip_x /
 //! flip_y / pan / reset. Rendering applies rotation first, then flips (fo-dicom

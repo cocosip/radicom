@@ -102,7 +102,7 @@ pub enum ReaderError {
 pub struct WriterError(pub String);
 
 /// Codec/transcoder failures. The single error channel across the
-/// radicom ↔ radicom-codecs boundary (docs/01-architecture.md §9.1).
+/// radicom ↔ radicom-codecs boundary (docs/architecture.md §9.1).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CodecError {
     #[error("no codec registered for transfer syntax {0}")]

@@ -1,4 +1,4 @@
-//! C-FIND (SRV-04; docs/01-architecture.md §11).
+//! C-FIND (SRV-04; docs/architecture.md §11).
 //!
 //! A C-FIND carries an Identifier dataset (the query keys) and is answered by
 //! zero or more Pending responses, each with its own Identifier, followed by
@@ -226,7 +226,7 @@ impl CFindRequest {
     /// Sets a matching key to `value` (creates the element if absent).
     ///
     /// Prefer [`Self::with_tag`]: a raw `(group, element)` pair bypasses the
-    /// dictionary and is the pattern docs/01-architecture.md §2.1 forbids.
+    /// dictionary and is the pattern docs/architecture.md §2.1 forbids.
     pub fn with_key(mut self, group: u16, element: u16, vr: Vr, value: impl Into<String>) -> Self {
         self.identifier
             .insert_str(Tag::new(group, element), vr, value);

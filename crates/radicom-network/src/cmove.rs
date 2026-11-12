@@ -1,4 +1,4 @@
-//! C-MOVE (SRV-06; docs/01-architecture.md §11).
+//! C-MOVE (SRV-06; docs/architecture.md §11).
 //!
 //! A C-MOVE asks the SCP to push instances to a *different* peer. The SCP
 //! answers with Pending progress and one terminal response while it opens its

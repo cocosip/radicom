@@ -1,5 +1,5 @@
 //! Grayscale rendering and a zero-dependency PNG writer (REND-01/03/04/07;
-//! docs/01-architecture.md §10).
+//! docs/architecture.md §10).
 //!
 //! This round delivers the smallest vertical slice that satisfies the milestone
 //! acceptance test — "render a 16-bit CT frame to PNG correctly":
@@ -2289,7 +2289,7 @@ mod tests {
 
     #[test]
     fn monochrome1_renders_inverted_relative_to_monochrome2() {
-        // Same pixels + window, differing PI: MONOCHROME1 must invert (docs/01-architecture.md §10).
+        // Same pixels + window, differing PI: MONOCHROME1 must invert (docs/architecture.md §10).
         let m2 = gray_image(1, 2, 8, &[0, 255], Some(127.5), Some(255.0));
         let mut m1 = m2.clone();
         m1.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME1");

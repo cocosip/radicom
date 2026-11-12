@@ -1,4 +1,4 @@
-//! SR support types (SR-02; docs/01-architecture.md §12).
+//! SR support types (SR-02; docs/architecture.md §12).
 //!
 //! `CodeItem` is the coded-entry triple that SR (and many other IODs) reuse.
 //! PS3.3 §8.8 gives it a single tag set: `CodingSchemeDesignator (0008,0102)`,

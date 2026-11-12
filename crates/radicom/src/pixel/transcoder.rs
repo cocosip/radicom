@@ -1,4 +1,4 @@
-//! Transcoder (TR-01..03; docs/01-architecture.md §9).
+//! Transcoder (TR-01..03; docs/architecture.md §9).
 //!
 //! Decides how to move pixel data between transfer syntaxes, resolves codecs
 //! lazily through the global registry, and keeps the lossy-compression

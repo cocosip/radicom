@@ -1,4 +1,4 @@
-//! DICOMDIR — the Media Storage Directory (MEDIA-01; docs/01-architecture.md §12).
+//! DICOMDIR — the Media Storage Directory (MEDIA-01; docs/architecture.md §12).
 //!
 //! A DICOMDIR is a normal DICOM file whose dataset holds a flat
 //! `DirectoryRecordSequence` (0004,1220). The hierarchy is expressed by record

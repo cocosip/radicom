@@ -1,5 +1,5 @@
 //! Codec interface contract, parameters and registry
-//! (CODEC-01..03/05; docs/01-architecture.md §9).
+//! (CODEC-01..03/05; docs/architecture.md §9).
 //!
 //! The core ships **zero codecs** (divergence D10). Every implementation —
 //! JPEG family, JPEG-LS, J2K, HTJ2K and DICOM RLE — lives in radicom-codecs

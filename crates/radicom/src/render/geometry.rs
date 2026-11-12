@@ -1,5 +1,5 @@
 //! Frame geometry: image↔patient transforms and orientation (REND-08;
-//! docs/01-architecture.md §10).
+//! docs/architecture.md §10).
 //!
 //! Mirrors fo-dicom `Imaging/FrameGeometry`: derives row/column unit vectors and
 //! the normal (row × column), the four image corners, an image↔patient

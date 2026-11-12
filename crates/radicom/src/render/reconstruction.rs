@@ -1,4 +1,4 @@
-//! Multi-planar reconstruction core (REND-09; docs/01-architecture.md §10).
+//! Multi-planar reconstruction core (REND-09; docs/architecture.md §10).
 //!
 //! Stacks native grayscale slices into a [`VolumeData`] and resamples an
 //! arbitrary plane through it with trilinear interpolation (bilinear in-plane,

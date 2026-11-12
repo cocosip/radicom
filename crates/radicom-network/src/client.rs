@@ -1,4 +1,4 @@
-//! The high-level DICOM client (CLI-01; docs/01-architecture.md §11).
+//! The high-level DICOM client (CLI-01; docs/architecture.md §11).
 //!
 //! The client owns a request queue, decides how many requests share one
 //! association, and transparently rolls over to a new association when the
@@ -600,7 +600,7 @@ impl DicomClient {
     /// Sends a C-STORE (§11.4).
     ///
     /// Renegotiates when the open association does not already carry this SOP
-    /// class (docs/01-architecture.md §11), so alternating SOP classes across
+    /// class (docs/architecture.md §11), so alternating SOP classes across
     /// `send_*` calls opens a new association each time. For mixed work on one
     /// association, use [`Self::send_requests`].
     pub async fn send_c_store(&mut self, file: &DicomFile) -> Result<CStoreResponse> {

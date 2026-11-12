@@ -1,4 +1,4 @@
-//! DIMSE command model and status codes (DIMSE-01; docs/01-architecture.md §11).
+//! DIMSE command model and status codes (DIMSE-01; docs/architecture.md §11).
 //!
 //! Commands always travel as Implicit VR Little Endian datasets. This module
 //! builds and parses the command set; the dataset that follows a command is

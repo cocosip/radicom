@@ -1,4 +1,4 @@
-//! Dataset-building parse observer (RD-02; docs/01-architecture.md §7).
+//! Dataset-building parse observer (RD-02; docs/architecture.md §7).
 
 use crate::encoding::charset::{charset_encoding, decode_multi_charset};
 use crate::error::{DataError, Error};

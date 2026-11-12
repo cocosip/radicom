@@ -2,7 +2,7 @@
 //!
 //! PDU codec, association negotiation, the per-connection protocol engine,
 //! SCU/SCP services and the two-layer client. Implementation follows
-//! milestones M5–M6 per docs/01-architecture.md §11.
+//! milestones M5–M6 per docs/architecture.md §11.
 //!
 //! # Quick start
 //!

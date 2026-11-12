@@ -1,4 +1,4 @@
-//! PS3.15 de-identification engine (ANON-01; docs/01-architecture.md §12).
+//! PS3.15 de-identification engine (ANON-01; docs/architecture.md §12).
 //!
 //! Applies a `SecurityProfile` to a dataset: walk every element, resolve the
 //! action for its tag under the chosen option, and mutate. UIDs are rewritten

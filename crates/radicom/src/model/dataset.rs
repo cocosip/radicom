@@ -1,4 +1,4 @@
-//! The dataset container (DS-01..05, DS-09; docs/01-architecture.md §3).
+//! The dataset container (DS-01..05, DS-09; docs/architecture.md §3).
 
 use crate::error::{DataError, Error, TagRef};
 use crate::model::buffer::SharedBuffer;

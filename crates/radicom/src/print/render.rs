@@ -1,8 +1,8 @@
-//! Film layout rendering (PRINT-02; docs/01-architecture.md §12).
+//! Film layout rendering (PRINT-02; docs/architecture.md §12).
 //!
 //! `FilmBox::render_to_image`: fill a background with the EmptyImageDensity,
 //! draw the Trim border, render each ImageBox's first image through the render
-//! pipeline (docs/01-architecture.md §10) and scale it into its layout cell;
+//! pipeline (docs/architecture.md §10) and scale it into its layout cell;
 //! Polarity REVERSE inverts the cell. The film box's Presentation LUT is applied
 //! next: a `(2050,0010)` sequence maps output bytes through its table, otherwise
 //! `IDENTITY` is a no-op and `INVERSE` inverts the cell (`LIN OD` is validated

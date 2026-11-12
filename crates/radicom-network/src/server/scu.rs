@@ -119,7 +119,7 @@ pub struct Association {
 /// **Ceiling:** the handler is a synchronous `Fn` and runs inline on the
 /// association task. A handler that persists the instance therefore performs
 /// blocking file IO on a runtime worker; move that work to `spawn_blocking` (or
-/// a dedicated thread) inside the handler. `docs/01-architecture.md` §6 forbids
+/// a dedicated thread) inside the handler. `docs/architecture.md` §6 forbids
 /// blocking IO on a worker thread, and the engine cannot lift this without
 /// making the handler `async`.
 pub type ReverseStoreHandler = Arc<
@@ -1451,7 +1451,7 @@ impl Association {
             response,
             is_final,
         })
-        .map_err(|error| NetworkError::Callback(error.to_string()))?;
+        .map_err(NetworkError::callback)?;
         if is_final {
             inflight.remove(&pending.message_id);
             pending_table.remove(pending.message_id);
@@ -2214,9 +2214,7 @@ impl Association {
                                             &command, None,
                                         )?;
                                         let terminal = !response.is_pending();
-                                        on_response(response).map_err(|error| {
-                                            NetworkError::Callback(error.to_string())
-                                        })?;
+                                        on_response(response).map_err(NetworkError::callback)?;
                                         if terminal {
                                             return Ok(());
                                         }
@@ -2248,9 +2246,7 @@ impl Association {
                                         Some(identifier),
                                     )?;
                                     let terminal = !response.is_pending();
-                                    on_response(response).map_err(|error| {
-                                        NetworkError::Callback(error.to_string())
-                                    })?;
+                                    on_response(response).map_err(NetworkError::callback)?;
                                     if terminal {
                                         return Ok(());
                                     }
@@ -2355,8 +2351,7 @@ impl Association {
                                 response.set_identifier(
                                     &self.decode_response_body(&unit, &syntax).await?,
                                 );
-                                on_response(response)
-                                    .map_err(|error| NetworkError::Callback(error.to_string()))?;
+                                on_response(response).map_err(NetworkError::callback)?;
                                 return Ok(());
                             }
                             let command = command_from_bytes(&unit.bytes)?;
@@ -2380,8 +2375,7 @@ impl Association {
                                 awaiting_identifier = Some(response);
                                 continue;
                             }
-                            on_response(response)
-                                .map_err(|error| NetworkError::Callback(error.to_string()))?;
+                            on_response(response).map_err(NetworkError::callback)?;
                             if terminal {
                                 return Ok(());
                             }
@@ -2542,9 +2536,8 @@ impl Association {
                                                 awaiting_identifier = Some(response);
                                                 continue;
                                             }
-                                            on_response(response).map_err(|error| {
-                                                NetworkError::Callback(error.to_string())
-                                            })?;
+                                            on_response(response)
+                                                .map_err(NetworkError::callback)?;
                                             if terminal {
                                                 return Ok(());
                                             }
@@ -2563,9 +2556,7 @@ impl Association {
                                         response.set_identifier(
                                             &self.decode_response_body(&unit, &syntax).await?,
                                         );
-                                        on_response(response).map_err(|error| {
-                                            NetworkError::Callback(error.to_string())
-                                        })?;
+                                        on_response(response).map_err(NetworkError::callback)?;
                                         return Ok(());
                                     }
                                     let (store_context_id, store) =

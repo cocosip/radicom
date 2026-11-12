@@ -1,5 +1,5 @@
 //! Association model and presentation-context negotiation
-//! (NET-03/04; docs/01-architecture.md §11).
+//! (NET-03/04; docs/architecture.md §11).
 //!
 //! This module is pure logic: it decides which presentation contexts an SCP
 //! accepts and which one a message should travel on. No IO happens here, so
@@ -11,7 +11,7 @@ use crate::pdu::{PresentationContext, RoleSelection, UserInformation};
 /// Well-known SOP class UIDs used by the negotiation rules (§11.2).
 ///
 /// Bound to the generated `radicom::uids` table so there is a single definition
-/// of each value (docs/01-architecture.md §2.1); the short local names are the
+/// of each value (docs/architecture.md §2.1); the short local names are the
 /// ergonomic aliases the negotiation code reads best with.
 pub mod sop_class {
     pub const VERIFICATION: &str = radicom::uids::VERIFICATION;

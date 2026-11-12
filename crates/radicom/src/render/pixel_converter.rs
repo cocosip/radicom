@@ -1,5 +1,5 @@
 //! Bit-order helpers mirroring fo-dicom `Imaging/PixelDataConverter`
-//! (REND-06, docs/01-architecture.md §10).
+//! (REND-06, docs/architecture.md §10).
 //!
 //! fo-dicom exposes these as members of a static class; that shape is a C#
 //! necessity, not a design. The helpers are stateless, so they are plain

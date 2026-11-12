@@ -1,5 +1,5 @@
 //! End-to-end association and C-ECHO over a real TCP socket
-//! (SRV-01/02; docs/01-architecture.md §11).
+//! (SRV-01/02; docs/architecture.md §11).
 //!
 //! Split into submodules: `options` (option structs), `wire` (command-set
 //! codecs), `scp` (server engine), `scu` (client association).

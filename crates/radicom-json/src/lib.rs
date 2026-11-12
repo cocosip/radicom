@@ -9,7 +9,7 @@
 //! ```
 //!
 //! Fragment sequences are deliberately not representable (§12.1 of
-//! docs/01-architecture.md §12): they return an error that suggests
+//! docs/architecture.md §12): they return an error that suggests
 //! transcoding, matching fo-dicom.
 //!
 //! One deliberate divergence from fo-dicom's `JsonDicomConverter` defaults:

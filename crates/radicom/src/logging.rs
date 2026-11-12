@@ -1,4 +1,4 @@
-//! Logging facade (INF-03; docs/01-architecture.md §12).
+//! Logging facade (INF-03; docs/architecture.md §12).
 //!
 //! A thin `tracing` facade so the whole library logs through one dependency with
 //! consistent, categorized targets. Subscribers filter by target

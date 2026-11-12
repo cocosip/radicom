@@ -1,4 +1,4 @@
-//! Byte buffer abstraction (BUF-01, BUF-02; docs/01-architecture.md §7).
+//! Byte buffer abstraction (BUF-01, BUF-02; docs/architecture.md §7).
 //!
 //! All large values are buffer references, never immediate copies. This
 //! module ships the memory-domain implementations; file/stream windows and
@@ -32,7 +32,7 @@ pub trait ByteBuffer: Send + Sync + std::fmt::Debug {
     }
 
     /// The bulk-data URI this buffer stands for, when it is a [`BulkDataUri`]
-    /// (JSON `BulkDataURI` carrier, docs/01-architecture.md §12.1). Defaults to `None`.
+    /// (JSON `BulkDataURI` carrier, docs/architecture.md §12.1). Defaults to `None`.
     fn bulk_uri(&self) -> Option<&str> {
         None
     }
@@ -90,7 +90,7 @@ fn out_of_range(offset: u64, len: usize, size: u64) -> io::Error {
 }
 
 /// A reference to bytes that live outside the dataset, addressed by URI
-/// (fo-dicom `BulkDataUriByteBuffer`; JSON `BulkDataURI` carrier, docs/01-architecture.md §12.1).
+/// (fo-dicom `BulkDataUriByteBuffer`; JSON `BulkDataURI` carrier, docs/architecture.md §12.1).
 ///
 /// The data itself is not fetched here — the buffer only carries the URI and,
 /// when the caller supplied it, an already-materialized fallback so consumers

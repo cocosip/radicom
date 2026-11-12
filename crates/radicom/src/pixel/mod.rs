@@ -1,4 +1,4 @@
-//! Pixel data facade (PIX-01..03; docs/01-architecture.md §9).
+//! Pixel data facade (PIX-01..03; docs/architecture.md §9).
 //!
 //! `PixelData` is the single read/write gate for `(7FE0,0010)`: codecs, the
 //! transcoder and the render module all go through it. It never mutates

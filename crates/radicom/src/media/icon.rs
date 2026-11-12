@@ -1,4 +1,4 @@
-//! Icon generation for DICOMDIR records (MEDIA-02; docs/01-architecture.md §12).
+//! Icon generation for DICOMDIR records (MEDIA-02; docs/architecture.md §12).
 //!
 //! A DICOMDIR image record may carry an `IconImageSequence` (0088,0200) holding
 //! a small (≤128×128), 8-bit MONOCHROME2 preview of the image. This module

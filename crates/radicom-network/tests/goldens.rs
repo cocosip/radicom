@@ -1,5 +1,5 @@
-//! PDU byte-stream golden baselines (docs/02-development-guide.md §3.4;
-//! docs/01-architecture.md §11.1).
+//! PDU byte-stream golden baselines (docs/development-guide.md §3.4;
+//! docs/architecture.md §11.1).
 //!
 //! The hex fixtures under `tests-data/goldens/` are produced by
 //! `cargo xtask regen-goldens`. Whitespace is ignored, so the comparison pins the

@@ -1,4 +1,4 @@
-//! Printing data models (PRINT-01; docs/01-architecture.md §12).
+//! Printing data models (PRINT-01; docs/architecture.md §12).
 //!
 //! `FilmSession`, `FilmBox` and `ImageBox` wrap a `Dataset` each, exposing the
 //! common attributes and the film-box layout maths. They are the document model

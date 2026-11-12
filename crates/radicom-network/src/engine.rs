@@ -1,5 +1,5 @@
 //! Protocol engine state: the message IDs with a request in flight
-//! (NET-05; docs/01-architecture.md §11).
+//! (NET-05; docs/architecture.md §11).
 //!
 //! The table is deliberately free of IO so the allocator can be tested
 //! deterministically. Deadlines live where they can be armed (the association

@@ -1,4 +1,4 @@
-//! SR content items (SR-01; docs/01-architecture.md §12).
+//! SR content items (SR-01; docs/architecture.md §12).
 //!
 //! An SR is a tree of content items. Each item is one `Dataset` inside a
 //! `ContentSequence` (0040,A730) carrying a `ConceptNameCodeSequence`

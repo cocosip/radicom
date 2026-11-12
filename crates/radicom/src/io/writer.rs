@@ -1,4 +1,4 @@
-//! Dataset writer and length calculator (WR-01..03; docs/01-architecture.md §7).
+//! Dataset writer and length calculator (WR-01..03; docs/architecture.md §7).
 //!
 //! Writing and length computation share one set of header/length helpers so
 //! an explicit-length sequence can never disagree with its own byte count.
@@ -19,7 +19,7 @@ use crate::model::transfer_syntax::TransferSyntax;
 use crate::model::vr::Vr;
 use std::io::Write;
 
-/// Writing switches (WR-03, docs/01-architecture.md §7).
+/// Writing switches (WR-03, docs/architecture.md §7).
 #[derive(Debug, Clone)]
 pub struct WriteOptions {
     /// Emit defined lengths for sequences instead of delimiters.

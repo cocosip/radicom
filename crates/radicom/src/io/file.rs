@@ -1,5 +1,5 @@
 //! DICOM file container: format detection, file meta, open and save
-//! (FILE-01..06; docs/01-architecture.md §7).
+//! (FILE-01..06; docs/architecture.md §7).
 
 use crate::error::{Error, FileError};
 use crate::io::byte_source::ByteSourceReader;

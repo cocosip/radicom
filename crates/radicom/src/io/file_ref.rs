@@ -1,4 +1,4 @@
-//! File and directory references, and temporary files (IO-01; docs/01-architecture.md §7).
+//! File and directory references, and temporary files (IO-01; docs/architecture.md §7).
 //!
 //! A [`PathFile`] is a file that can be opened, created, moved, deleted and
 //! range-read. A [`DirectoryRef`] enumerates a directory's entries with an
