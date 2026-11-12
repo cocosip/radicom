@@ -1,4 +1,4 @@
-//! C-STORE receive path (SRV-03; docs/01-architecture.md §11).
+//! C-STORE receive path (SRV-03; docs/architecture.md §11).
 //!
 //! The receiver streams the inbound dataset PDVs into a temporary file (H3,
 //! fo-dicom `DicomService.CreateCStoreReceiveStream`) and parses that file into
@@ -694,6 +694,102 @@ mod tests {
     }
 
     #[test]
+    fn decode_limited_enforces_the_cap_and_inflates_deflate() {
+        use std::io::Write as _;
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let bytes = dataset_bytes(&syntax);
+
+        // non-deflate content passes through unchanged
+        let dataset = decode_limited(&bytes, &syntax, None, 1 << 20).unwrap();
+        assert!(!dataset.is_empty(), "the dataset decoded");
+
+        // a cap smaller than the body is rejected before parsing
+        match decode_limited(&bytes, &syntax, None, 1) {
+            Err(NetworkError::Protocol(message)) => {
+                assert!(message.contains("maximum"), "got {message}")
+            }
+            other => panic!("expected a size-limit protocol error, got {other:?}"),
+        }
+
+        // the deflated syntax inflates first, then parses as Explicit VR LE
+        let deflated = syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&bytes).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let dataset = decode_limited(&compressed, &deflated, None, 1 << 20).unwrap();
+        assert_eq!(
+            dataset.transfer_syntax().uid().to_string(),
+            deflated.uid().to_string()
+        );
+    }
+
+    #[test]
+    fn decode_spooled_file_handles_plain_and_deflate() {
+        use std::io::Write as _;
+        let dir =
+            std::env::temp_dir().join(format!("radicom-decode-spooled-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let bytes = dataset_bytes(&syntax);
+        let plain = dir.join("plain.dcm");
+        std::fs::write(&plain, &bytes).unwrap();
+        let dataset = decode_spooled_file(&plain, &syntax, None, 1 << 20).unwrap();
+        assert!(
+            !dataset.is_empty(),
+            "the on-demand path decoded the dataset"
+        );
+
+        let deflated = syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&bytes).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let z = dir.join("deflated.dcm");
+        std::fs::write(&z, &compressed).unwrap();
+        let dataset = decode_spooled_file(&z, &deflated, None, 1 << 20).unwrap();
+        assert_eq!(
+            dataset.transfer_syntax().uid().to_string(),
+            deflated.uid().to_string()
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn malformed_spooled_files_are_typed_errors_and_cleaned_up() {
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let malformed = [0x08u8, 0x00, 0x00, 0x00, b'Z', b'Z', 0x02, 0x00, 0x00, 0x00];
+        let dir =
+            std::env::temp_dir().join(format!("radicom-malformed-spool-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // decoding a bad file is a typed IO error, not a panic
+        let bad = dir.join("bad.dcm");
+        std::fs::write(&bad, malformed).unwrap();
+        match decode_spooled_file(&bad, &syntax, None, 1 << 20) {
+            Err(NetworkError::Io(error)) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidData)
+            }
+            other => panic!("expected a typed decode error, got {other:?}"),
+        }
+
+        // the SpoolToDir sink removes its temp file when decoding fails
+        let sink_dir = dir.join("sink");
+        assert!(StoreSink::SpoolToDir(sink_dir.clone())
+            .materialize(&malformed, &syntax)
+            .is_err());
+        assert_eq!(
+            std::fs::read_dir(&sink_dir).unwrap().count(),
+            0,
+            "a failed instance must not leave a spool file behind"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn a_dataset_in_another_syntax_is_not_sniffed_into_place() {
         // NET-24: bytes encoded as implicit cannot be read as the negotiated
         // explicit syntax. The old auto-detect path accepted them and merely
@@ -897,6 +993,27 @@ mod tests {
             .unwrap()
             .expect("one PDV completes the dataset");
         (unit.body(), dir)
+    }
+
+    #[test]
+    fn materialize_body_limits_reject_an_oversized_body() {
+        let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+        let body =
+            crate::assembler::MessageBody::Memory(bytes::Bytes::from(dataset_bytes(&syntax)));
+
+        // the decoded-body helper enforces the cap on an in-memory body
+        match decode_body_with_fallback_limited(&body, &syntax, None, 1) {
+            Err(NetworkError::Protocol(message)) => assert!(message.contains("maximum")),
+            other => panic!("expected a size-limit error, got {other:?}"),
+        }
+
+        // the spilled materialise path enforces the cap before parsing
+        let (spilled, dir) = spilled_body(&syntax, "cap");
+        match StoreSink::Memory.materialize_body_with_fallback_limited(&spilled, &syntax, None, 1) {
+            Err(NetworkError::Protocol(message)) => assert!(message.contains("maximum")),
+            other => panic!("expected a size-limit error, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Network error type (docs/01-architecture.md §11).
+//! Network error type (docs/architecture.md §11).
 //!
 //! Every failure mode of the protocol engine maps onto this set; nothing
 //! escapes as a generic IO error when a specific variant applies.
@@ -90,7 +90,7 @@ impl AbortSource {
     }
 }
 
-/// All network failures (docs/01-architecture.md §11).
+/// All network failures (docs/architecture.md §11).
 #[derive(Debug, thiserror::Error)]
 pub enum NetworkError {
     #[error("association rejected (result {result}, source {source_code}, reason {reason})")]
@@ -155,6 +155,14 @@ impl NetworkError {
     /// Wraps a TLS setup failure.
     pub fn protocol_tls(message: impl Into<String>) -> Self {
         NetworkError::Tls(message.into())
+    }
+
+    /// Wraps an application response-callback error.
+    ///
+    /// The callback is the caller's own code: its failure is not a protocol
+    /// fault, so the association stays usable (see [`Self::Callback`]).
+    pub fn callback(error: std::io::Error) -> Self {
+        NetworkError::Callback(error.to_string())
     }
 }
 
