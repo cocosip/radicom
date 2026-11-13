@@ -60,6 +60,8 @@
 - Writer: nested item group lengths are priced with the character set inherited from the parent.
 - Anonymization: a `D`/`Z`/`U`/`C` action blanks an encapsulated fragment sequence entirely, and the no-op
   "none" option no longer claims de-identification or touches the file meta.
+- Media: a Referenced File ID is split on `\` and `/` on every host, so a conformant `SUB\IMG001` is no
+  longer rejected on Unix, where `\` is not a path separator.
 - Rendering: the whole pixel padding range is cleared, 8-bit samples are spread across a 12-bit Presentation
   LUT domain, and a transcoded dataset drops stale extended offset tables.
 - Networking: a protocol violation sends A-ABORT before the association is dropped, `AssociationReleased` is

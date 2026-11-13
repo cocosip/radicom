@@ -508,7 +508,9 @@ client/server. One tokio task per association. Locks must not be held across `.a
   truncated.
 - Referenced File IDs are validated, not copied: each component is 1-8 characters of `A-Z`, `0-9` or `_`
   (PS3.10 §8.2/§8.5) and a File ID has 1-8 components. A caller path such as `img.dcm` is rejected, so
-  callers must map names (the scanner uppercases stems).
+  callers must map names (the scanner uppercases stems). Components are split on `\` — the separator of
+  `(0004,1500)` — and on `/`, on every host alike: a File ID is not a host path, so the accepted spelling
+  must not depend on the platform.
 - A DICOMDIR is always Explicit VR Little Endian (PS3.10 §8.1); `from_bytes` normalizes the loaded dataset
   so a re-save stays conformant.
 

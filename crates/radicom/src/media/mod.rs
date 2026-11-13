@@ -1043,34 +1043,39 @@ fn required(dataset: &Dataset, tag: Tag, what: &str) -> Result<String, Error> {
 /// `0-9` and `_`; §8.5 caps a File ID at 8 components. A path that cannot be
 /// expressed as a conformant File ID is rejected instead of being written into
 /// the DICOMDIR verbatim.
+///
+/// The components of `(0004,1500)` are separated by `\`, so a File ID is not a
+/// host path: splitting with [`Path::components`] made the accepted spelling
+/// depend on the build host (on Unix a backslash is not a separator, so a
+/// correctly formed `SUB\IMG001` was rejected as one long component). Both `\`
+/// and `/` are accepted on every host.
 fn path_to_file_id(path: &Path) -> Result<String, Error> {
+    let text = path.to_str().ok_or_else(|| {
+        record_error(format!(
+            "Referenced File ID {} is not valid UTF-8",
+            path.display()
+        ))
+    })?;
     let mut components = Vec::new();
-    for part in path.components() {
-        let std::path::Component::Normal(part) = part else {
+    for part in text.split(['\\', '/']) {
+        if part.is_empty() || part == "." || part == ".." {
             return Err(record_error(format!(
                 "Referenced File ID {} must be a relative path",
                 path.display()
             )));
-        };
-        let text = part.to_str().ok_or_else(|| {
-            record_error(format!(
-                "Referenced File ID {} is not valid UTF-8",
-                path.display()
-            ))
-        })?;
-        if text.is_empty()
-            || text.len() > 8
-            || !text
+        }
+        if part.len() > 8
+            || !part
                 .bytes()
                 .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
         {
             return Err(record_error(format!(
-                "Referenced File ID component {text:?} must be 1-8 characters of A-Z, 0-9 or _ (PS3.10 §8.2)"
+                "Referenced File ID component {part:?} must be 1-8 characters of A-Z, 0-9 or _ (PS3.10 §8.2)"
             )));
         }
-        components.push(text);
+        components.push(part);
     }
-    if components.is_empty() || components.len() > 8 {
+    if components.len() > 8 {
         return Err(record_error(format!(
             "Referenced File ID {} must have 1-8 components (PS3.10 §8.5)",
             path.display()
@@ -2420,6 +2425,45 @@ mod tests {
         assert_eq!(
             leaf.transfer_syntax_uid().as_deref(),
             Some("1.2.840.10008.1.2.1")
+        );
+    }
+
+    #[test]
+    fn a_file_id_is_split_the_same_on_every_host() {
+        // PS3.10 §8.2 separates the components of (0004,1500) with "\", so both
+        // spellings must produce the same File ID on every host; splitting with
+        // `Path::components` accepted "\" only where it is a host separator.
+        let mut dir = DicomDirectory::new("FS");
+        let first = instance("P1", "1.2.3", "1.2.4", CT, "1.2.5");
+        let second = instance("P1", "1.2.3", "1.2.4", CT, "1.2.6");
+        let backslash = dir.add_file_entry(&first, "SUB\\IMG001").unwrap();
+        let slash = dir.add_file_entry(&second, "SUB/IMG001").unwrap();
+        assert_eq!(
+            dir.records()[backslash.instance].referenced_file_id(),
+            Some(PathBuf::from("SUB").join("IMG001"))
+        );
+        assert_eq!(
+            dir.records()[slash.instance].referenced_file_id(),
+            Some(PathBuf::from("SUB").join("IMG001"))
+        );
+        // a path that is not relative is still rejected, whichever separator
+        // (a fresh SOP instance each time: an already recorded one short-circuits)
+        for (suffix, id) in [
+            ("1.2.7", "/ABS"),
+            ("1.2.8", "SUB/../IMG"),
+            ("1.2.9", "SUB\\IMG.TXT"),
+        ] {
+            let file = instance("P1", "1.2.3", "1.2.4", CT, suffix);
+            assert!(
+                dir.add_file_entry(&file, id).is_err(),
+                "{id} must be rejected"
+            );
+        }
+        // §8.5 caps a File ID at 8 components
+        let deep = instance("P1", "1.2.3", "1.2.4", CT, "1.2.10");
+        assert!(
+            dir.add_file_entry(&deep, "A/B/C/D/E/F/G/H/I").is_err(),
+            "nine components exceed the File ID limit"
         );
     }
 
