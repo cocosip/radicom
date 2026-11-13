@@ -30,6 +30,9 @@
   (PS3.8 §E.2); a C-STORE without a Dataset and a C-FIND without an Identifier answer Processing Failure.
 - `MagnificationType` `NONE` is nearest-neighbour like `REPLICATE` (it used to interpolate); an odd `Columns`
   for 4:2:2 YBR is rejected for both `YBR_FULL_422` and `YBR_PARTIAL_422`.
+- The production-line coverage gate is **90%** (was 95%, `xtask coverage --min` raises it per run): a
+  `#[cfg(windows)]`/`#[cfg(unix)]` line only executes on one platform, so a single Linux runner cannot
+  reach a Windows measurement, and the suite itself still measures in the mid-90s on Windows.
 
 ### Added
 

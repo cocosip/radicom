@@ -743,11 +743,12 @@ See [docs/development-guide.md](docs/development-guide.md) for the full test str
 
 ### Coverage
 
-The all-feature Windows run measured production-source line coverage at **95.77%** (25,772 / 26,911
+The all-feature Windows run measured production-source line coverage at **95.69%** (26,414 / 27,605
 lines), using `rustc -C instrument-coverage` + `llvm-cov`. Third-party crates, generated dictionary
 tables, `xtask`, test/bench/example targets, inline `#[cfg(test)]` modules and source files starting
-with `#![cfg(test)]` are excluded. The breakdown is core **96.24%**, network **95.03%**, JSON **95.33%**.
-Platform-specific paths can produce different measurements in CI; the production-line floor is 95%.
+with `#![cfg(test)]` are excluded. The breakdown is core **96.09%**, network **95.04%**, JSON **95.39%**.
+Platform-specific paths produce different measurements in CI (`#[cfg(windows)]` lines only execute on
+Windows); the production-line floor is 90%.
 
 Run coverage locally with `llvm-tools-preview` and `cargo-llvm-cov`:
 
@@ -799,7 +800,7 @@ Third-party data: the DICOM dictionary XML files reused from fo-dicom (and the t
 | Trigger | What runs |
 |---|---|
 | push / PR to `master` or `main` | `ci.yml`: clippy and tests with default **and** all features, docs and publishable-metadata checks on Linux + Windows, plus an MSRV (1.89) check. **No publishing.** |
-| push of a `v*` tag | `release.yml`: the tag must equal every publishable crate's version; the release gates run on Ubuntu (`fmt --check`, clippy, tests, docs, gen-dict, 95% production coverage, package metadata, MSRV); then `radicom-dict` → `radicom` → `radicom-json` → `radicom-network` are published to crates.io in that order, and finally a GitHub release is created whose notes list the commits since the previous tag |
+| push of a `v*` tag | `release.yml`: the tag must equal every publishable crate's version; the release gates run on Ubuntu (`fmt --check`, clippy, tests, docs, gen-dict, 90% production coverage, package metadata, MSRV); then `radicom-dict` → `radicom` → `radicom-json` → `radicom-network` are published to crates.io in that order, and finally a GitHub release is created whose notes list the commits since the previous tag |
 
 `dev` is intentionally not wired to CI. Publishing requires a `CARGO_REGISTRY_TOKEN` repository secret (a
 crates.io API token with `publish-new` and `publish-update` scopes); releasing is done by pushing a tag:

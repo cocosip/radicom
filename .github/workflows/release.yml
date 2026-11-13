@@ -103,7 +103,7 @@ jobs:
 
       - uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Production line coverage (95% floor)
+      - name: Production line coverage (90% floor)
         run: cargo run --package xtask -- coverage
 
       # `--list` only: before the first release the dependents' own path deps

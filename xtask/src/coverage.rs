@@ -6,8 +6,8 @@
 //! reflects the library code, not the test code that exercises it.
 //!
 //! ```text
-//! cargo xtask coverage                 # run the suite, fail below 95%
-//! cargo xtask coverage --min 90        # lower the floor
+//! cargo xtask coverage                 # run the suite, fail below 90%
+//! cargo xtask coverage --min 95        # raise the floor
 //! cargo xtask coverage --lcov cov.info # reuse an existing lcov file
 //! ```
 
@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const DEFAULT_MIN: f64 = 95.0;
+const DEFAULT_MIN: f64 = 90.0;
 const DEFAULT_LCOV: &str = "target/cov/coverage.info";
 
 pub fn run(root: &Path, args: &[String]) -> i32 {

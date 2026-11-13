@@ -58,7 +58,7 @@ jobs:
           RUSTDOCFLAGS: "-D warnings"
 
   coverage:
-    name: coverage (95% floor)
+    name: coverage (90% floor)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
