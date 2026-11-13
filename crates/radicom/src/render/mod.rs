@@ -2195,9 +2195,7 @@ fn render_ybr_frame(
             // Rows*Columns*2 (PS3.3 C.7.6.3.1.2 Note 2), which only lines up with
             // whole pixel-pair groups when Columns is even.
             if width % 2 != 0 {
-                return Err(unsupported(
-                    "YBR_FULL_422 requires an even number of columns",
-                ));
+                return Err(unsupported("4:2:2 requires an even number of columns"));
             }
             let row_bytes = (width as usize).div_ceil(2) * 4 * unit;
             if raw.len() < row_bytes * height as usize {
@@ -3747,6 +3745,18 @@ mod tests {
         // so an odd Columns has no defined byte layout; reject instead of
         // silently reading a short/misaligned frame.
         let ds = ybr422_image("YBR_FULL_422", 3, &[76, 76, 85, 255, 76, 0]);
+        let err = render_frame(&ds, 0).unwrap_err();
+        assert!(
+            format!("{err}").to_lowercase().contains("even"),
+            "expected an even-columns error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_ybr_partial_422_frame_with_odd_width_is_rejected() {
+        // The per-pair layout is the same for the studio-range 4:2:2 form, so the
+        // odd-columns rejection must not be limited to YBR_FULL_422.
+        let ds = ybr422_image("YBR_PARTIAL_422", 3, &[126, 126, 128, 128, 126, 0]);
         let err = render_frame(&ds, 0).unwrap_err();
         assert!(
             format!("{err}").to_lowercase().contains("even"),
