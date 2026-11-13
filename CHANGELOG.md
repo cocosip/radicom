@@ -16,6 +16,26 @@
   item, entries high-aligned in 16-bit words.
 - `BulkDataURI` is emitted only for the PS3.18 F.2.2 VRs; Native XML gains `xml:space="preserve"` and drops
   Group Length elements.
+- **Breaking:** `ImageBox` no longer exposes Min/MaxDensity (PS3.3 Table C.13-5 gives the Image Box no density
+  attributes) and the unused `Vr::max_value_length` is removed.
+- **Breaking:** `DicomGenerator::store_as_dicom` always writes native Explicit VR Little Endian MONOCHROME2 and
+  drops inherited colour/palette/ICC/lossy attributes; the film `Trim` border is drawn around each image.
+- **Breaking:** `DicomDirectoryBuilder` skips unreadable files like the scanner (`ScanErrorPolicy::Skip`) instead
+  of aborting the build; a file that parses but cannot be recorded is still an error.
+- Saving keeps `(0002,0003)` in step with `(0008,0018)` and never invents a UID for a dataset that has none; a
+  Media Storage Directory, which has no `(0008,0018)` of its own, keeps its meta instance UID.
+- The File-set ID is validated as `CS` (16 characters, may be empty) and a record offset beyond the 32-bit `UL`
+  range is an error rather than a truncation.
+- Role Selection is merged into one item per SOP Class (PS3.7 §D.3.3.4); PDV reserved control bits are ignored
+  (PS3.8 §E.2); a C-STORE without a Dataset and a C-FIND without an Identifier answer Processing Failure.
+- `MagnificationType` `NONE` is nearest-neighbour like `REPLICATE` (it used to interpolate); an odd `Columns`
+  for 4:2:2 YBR is rejected for both `YBR_FULL_422` and `YBR_PARTIAL_422`.
+
+### Added
+
+- `ReadOptions::max_inflated_bytes` (default 1 GiB) caps deflate expansion of a dataset body.
+- `ServerOptions::progress_timeout` (default 60 s, `None` disables) bounds the wait for the next PDU while a
+  peer has a message in flight, so a stalled peer cannot hold the association and its client slot.
 
 ### Fixed
 
@@ -33,6 +53,17 @@
 - DIMSE-N requests are accepted on any non-Verification presentation context (PS3.7 §10.1); PDV context IDs
   must be odd; Implementation Version Name is length-checked; the worklist return keys place
   ScheduledProcedureStepLocation inside its sequence; Film Size ID parses `8_5INX11IN` and `11INX17IN`.
+- Reader: a defined-length value is bounded by its enclosing item, so a value or header cut by the item
+  boundary ends that item at its declared end instead of desynchronising the following elements.
+- Element access: a huge `get_at` index reports a range error instead of panicking, AT values use the native
+  two-unit layout on either host, and integer values widened into f32/f64 are converted numerically.
+- Writer: nested item group lengths are priced with the character set inherited from the parent.
+- Anonymization: a `D`/`Z`/`U`/`C` action blanks an encapsulated fragment sequence entirely, and the no-op
+  "none" option no longer claims de-identification or touches the file meta.
+- Rendering: the whole pixel padding range is cleared, 8-bit samples are spread across a 12-bit Presentation
+  LUT domain, and a transcoded dataset drops stale extended offset tables.
+- Networking: a protocol violation sends A-ABORT before the association is dropped, `AssociationReleased` is
+  reported only after A-RELEASE-RP, and an unconfirmed release is logged instead of reported as success.
 
 ## [0.2.0] - 2026-11-09
 

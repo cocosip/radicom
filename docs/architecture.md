@@ -249,8 +249,10 @@ header is cut by the item boundary keeps the following element instead of consum
   `RADICOM <workspace version>` name (`0002,0013`); association user information advertises the same
   version name. The name derives from `CARGO_PKG_VERSION`, and a compile-time check enforces the
   16-byte SH limit.
-- `(0002,0003) MediaStorageSOPInstanceUID` is Type 1 and must equal the dataset's Type 1
-  `(0008,0018)`: a dataset without an SOP Instance UID cannot be written, and no UID is invented for it.
+- `(0002,0003) MediaStorageSOPInstanceUID` is Type 1 and is kept equal to the dataset's Type 1
+  `(0008,0018)` on every save. A dataset that has no `(0008,0018)` is written only when the meta group
+  already names the instance, as for a Media Storage Directory, which has no SOP Instance UID of its
+  own; with neither present the save fails instead of inventing a UID that matches nothing in the data.
 - ACR-NEMA format is rejected on save.
 
 ---
@@ -449,10 +451,11 @@ client/server. One tokio task per association. Locks must not be held across `.a
 - Reverse C-STORE on a C-GET association requires role selection; register a handler with
   `with_reverse_store_handler` or `collect_reverse_stores` and declare its storage SOP classes.
   C-MOVE delivers C-STORE on a separate association to the configured destination AE.
-- Received bodies obey configured limits even below the spool threshold; deflated output has the same
-  hard limit on both memory and spool paths. Blocking file reads and parsing run on the blocking pool. A
-  dataset that cannot be decoded is answered `0xC000` (Unable to process), distinct from a resource
-  shortfall (`0xA700`).
+- Received bodies obey configured limits even below the spool threshold; the spool pipeline inflates a
+  deflated body under the same limit, and a body materialised outside that pipeline (a client-side response)
+  is inflated under `ReadOptions::max_inflated_bytes` instead. Blocking file reads and parsing run on the
+  blocking pool. A dataset that cannot be decoded is answered `0xC000` (Unable to process), distinct from a
+  resource shortfall (`0xA700`).
 - Sub-operation counters must be populated from the actual results. Returning a defaulted summary makes a
   failed C-MOVE report success.
 - `max_clients` must actually be enforced (a semaphore or equivalent); a config field that no code path
