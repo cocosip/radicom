@@ -477,7 +477,8 @@ where
                     return Err(NetworkError::protocol("a dispatched request task failed"));
                 }
             }
-            maybe = serving.next_pdu() => {
+            // a command still awaiting its dataset counts as a message in flight
+            maybe = serving.next_pdu_with_progress(!awaiting_dataset.is_empty()) => {
         let Some(pdu) = maybe? else {
             return Ok(()); // peer closed
         };
@@ -1554,10 +1555,36 @@ where
     }
 
     pub(crate) async fn next_pdu(&mut self) -> Result<Option<Pdu>> {
-        // The idle dispatcher waits unbounded: `request_timeout` governs only
-        // responses to requests this SCP issues (see `next_pdu_with_deadline`).
-        // Bounding the idle read by it would abort quiet-but-healthy peers.
-        self.pdu_reader.read_pdu(self.stream).await
+        self.next_pdu_with_progress(false).await
+    }
+
+    /// Reads the next PDU, bounding the wait while a message is incomplete.
+    ///
+    /// The idle dispatcher waits unbounded for a *new* request:
+    /// `request_timeout` governs only responses to requests this SCP issues (see
+    /// `next_pdu_with_deadline`), and bounding the idle read by it would abort
+    /// quiet-but-healthy peers.
+    ///
+    /// A message *in flight* is different. A peer that sent a command or the
+    /// first dataset PDVs and then stalls would hold the association (and its
+    /// client slot) forever, so the wait for the next PDU is bounded by
+    /// `progress_timeout` whenever the assembler holds an unfinished command or
+    /// dataset, or the caller still awaits a command's dataset
+    /// (`awaiting_dataset`). The bound applies per PDU, so a slow but
+    /// progressing transfer is never cut off.
+    async fn next_pdu_with_progress(&mut self, awaiting_dataset: bool) -> Result<Option<Pdu>> {
+        let in_flight = awaiting_dataset || self.assembler.holds_partial();
+        match self.options.progress_timeout {
+            Some(limit) if in_flight => {
+                match tokio::time::timeout(limit, self.pdu_reader.read_pdu(self.stream)).await {
+                    Ok(pdu) => pdu,
+                    Err(_) => Err(NetworkError::Protocol(
+                        "peer stalled inside an unfinished message",
+                    )),
+                }
+            }
+            _ => self.pdu_reader.read_pdu(self.stream).await,
+        }
     }
 
     /// Reads the next PDU, bounded by `ServerOptions::request_timeout` (M8).

@@ -404,6 +404,14 @@ impl PdvAssembler {
         self.peak_buffered
     }
 
+    /// True while the peer is in the middle of a message: bytes of an unfinished
+    /// command or dataset are held, or a dataset stream is still being written to
+    /// its spool file. A reader can use this to bound the wait for the next PDU,
+    /// since an idle association is not the same as a stalled message.
+    pub fn holds_partial(&self) -> bool {
+        self.buffered > 0 || self.spilled > 0 || !self.spilling.is_empty()
+    }
+
     /// Feeds one P-DATA-TF, returning every unit it completed.
     pub fn push_pdata(&mut self, pdata: &PData) -> Result<Vec<MessageUnit>> {
         let mut completed = Vec::new();

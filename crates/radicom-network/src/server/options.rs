@@ -68,6 +68,19 @@ pub struct ServerOptions {
     /// Applies to reverse C-STORE sub-operations and to N-EVENT-REPORT requests
     /// sent on this association; `None` keeps the wait unbounded.
     pub request_timeout: Option<Duration>,
+    /// How long a peer may stay silent *inside* an unfinished message.
+    ///
+    /// A peer that sends a command (or the first dataset PDVs) and then stalls
+    /// would otherwise hold the association and its client slot forever. The
+    /// bound applies only while a message is incomplete — a command waiting for
+    /// its dataset, or a partially received command/dataset — and it is measured
+    /// per PDU, so a slow but progressing transfer is never cut off. An idle
+    /// association stays unbounded. `None` disables the check.
+    ///
+    /// The default 60 s is deliberately generous: raise it for links whose peers
+    /// legitimately pause mid-dataset, or set `None` where an idle-association
+    /// watchdog exists instead.
+    pub progress_timeout: Option<Duration>,
     /// Answers SOP Class Extended Negotiation requests (§11.2).
     pub extended_negotiation: crate::extended::ExtendedNegotiationPolicy,
     /// User identity types this SCP accepts, and the response to echo (§11.2).
@@ -160,6 +173,7 @@ impl Default for ServerOptions {
             ignore_unsupported_syntax_change: false,
             fallback_encoding: None,
             request_timeout: None,
+            progress_timeout: Some(Duration::from_secs(60)),
             extended_negotiation: crate::extended::ExtendedNegotiationPolicy::decline_all(),
             user_identity: UserIdentityPolicy::default(),
             #[cfg(feature = "tls")]

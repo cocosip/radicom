@@ -5993,6 +5993,125 @@ async fn a_zero_context_association_request_is_aborted() {
 }
 
 #[tokio::test]
+async fn a_peer_that_stalls_inside_a_message_is_aborted() {
+    // A peer that sends the first PDVs of a message and then stops must not hold
+    // the association (and its client slot) forever: `progress_timeout` bounds
+    // the wait for the next PDU while a message is incomplete.
+    let server = DicomServer::bind(
+        "127.0.0.1:0",
+        Arc::new(VerificationProvider),
+        ServerOptions {
+            progress_timeout: Some(std::time::Duration::from_millis(50)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let addr = server.local_addr();
+    let handle = tokio::spawn(async move { server.accept_one().await });
+
+    let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut request = Associate::new("CALLED-SCP", "CALLING-SCU");
+    request.presentation_contexts = vec![echo_context()];
+    write_pdu(&mut tcp, &Pdu::AssociateRq(request))
+        .await
+        .unwrap();
+    match read_pdu(&mut tcp).await.unwrap() {
+        Some(Pdu::AssociateAc(_)) => {}
+        other => panic!("expected an accept, got {other:?}"),
+    }
+
+    // The first half of a command PDV, and then silence: the message is now
+    // incomplete on the SCP side.
+    let mut command = Command::request(CommandField::CEchoRq, 1);
+    command.no_dataset = true;
+    let bytes = command_bytes(&command).unwrap();
+    write_pdu(
+        &mut tcp,
+        &Pdu::PData(crate::pdu::PData {
+            pdvs: vec![crate::pdu::Pdv {
+                context_id: 1,
+                is_command: true,
+                is_last: false,
+                data: bytes[..8].to_vec().into(),
+            }],
+        }),
+    )
+    .await
+    .unwrap();
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect("the SCP must stop waiting for a stalled message");
+    assert!(
+        outcome.unwrap().is_err(),
+        "an unfinished message ends the association with an error"
+    );
+    match read_pdu(&mut tcp).await.unwrap() {
+        Some(Pdu::Abort(_)) => {}
+        other => panic!("expected an A-ABORT after the stall, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_request_whose_dataset_never_starts_is_aborted() {
+    // The other half of the stall: the command arrived whole, no dataset PDV ever
+    // follows. The assembler is empty, so only the SCP's own "waiting for this
+    // command's dataset" state can tell this from an idle association.
+    let server = DicomServer::bind(
+        "127.0.0.1:0",
+        Arc::new(OkStore),
+        ServerOptions {
+            progress_timeout: Some(std::time::Duration::from_millis(50)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let addr = server.local_addr();
+    let handle = tokio::spawn(async move { server.accept_one().await });
+
+    let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut request = Associate::new("CALLED-SCP", "CALLING-SCU");
+    request.presentation_contexts = vec![PresentationContext::new(
+        1,
+        "1.2.840.10008.5.1.4.1.1.7",
+        vec![
+            radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN
+                .uid()
+                .to_string(),
+        ],
+    )];
+    write_pdu(&mut tcp, &Pdu::AssociateRq(request))
+        .await
+        .unwrap();
+    match read_pdu(&mut tcp).await.unwrap() {
+        Some(Pdu::AssociateAc(_)) => {}
+        other => panic!("expected an accept, got {other:?}"),
+    }
+
+    // A complete C-STORE command that announces its dataset, and then silence.
+    write_pdu(
+        &mut tcp,
+        &pdata(1, true, command_bytes(&store_command("1.2.3.4.5")).unwrap()),
+    )
+    .await
+    .unwrap();
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect("the SCP must stop waiting for a dataset that never starts");
+    assert!(
+        outcome.unwrap().is_err(),
+        "the missing dataset ends the association with an error"
+    );
+    match read_pdu(&mut tcp).await.unwrap() {
+        Some(Pdu::Abort(_)) => {}
+        other => panic!("expected an A-ABORT after the stall, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn an_unexpected_pdu_after_association_is_aborted() {
     for anomaly in [
         Pdu::AssociateRq(Associate::new("A", "B")),

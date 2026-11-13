@@ -457,6 +457,11 @@ client/server. One tokio task per association. Locks must not be held across `.a
   failed C-MOVE report success.
 - `max_clients` must actually be enforced (a semaphore or equivalent); a config field that no code path
   reads is a bug. The same applies to `association_timeout` on the server side.
+- A peer cannot hold an association by stalling *inside* a message: while a command still awaits its
+  dataset, or a command/dataset PDU sequence is only partly received, the wait for the next PDU is
+  bounded by `progress_timeout` (default 60 s; `None` disables it). The bound is per PDU, so a slow but
+  progressing transfer is never cut off, and an idle association stays unbounded. The stalled
+  association is ended with A-ABORT.
 - TLS client trust is platform-first: with no CA bundle the client trusts the OS root store
   (`rustls-native-certs`), and a bundle pins the anchors instead of extending them. The certificate is
   verified against `server_name` when set, otherwise the peer address; `accept_any` skips verification
@@ -617,11 +622,6 @@ condition").
 
 Known limitations (recorded so they are not mistaken for conformance):
 
-- The SCP has no *in-message* progress timeout: a peer that sends a command or the first dataset PDUs and
-  then stalls holds the association (and its client slot) until TCP fails or the process exits.
-  `association_timeout` covers the A-ASSOCIATE-RQ and `request_timeout` covers responses to requests the
-  SCP issues, but neither bounds a half-delivered message. Add a per-association progress deadline when
-  an idle-association policy exists (it must not abort quiet but healthy peers).
 - An ICC profile `(0028,2000)` is neither applied when rendering nor written into output images.
 - `YBR_FULL_422`/`YBR_PARTIAL_422` frames with an odd `Columns` are rejected instead of rendered.
 - `(7FE0,0001)`/`(7FE0,0002)` extended offset tables are read as plain values and never generated; a
