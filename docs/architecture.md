@@ -170,6 +170,13 @@ so they cannot drift from it. (A raw `(group, element)` pair in an ad-hoc query-
   skipped, parsing may not**.
 - `Dataset::validate()` is on demand, like fo-dicom's `Validate()`. The writer and parser deliberately do
   **not** call it, so tolerant real-world round-trips keep working.
+- The strict validators follow the VR grammar, not the tolerant parsers: TM accepts only
+  `HH[MM[SS[.F{1,6}]]]` (no ACR-NEMA `HH:MM:SS`/`HH.MM.SS`) and DT only
+  `YYYY[MM[DD[HH[MM[SS[.F{1,6}]]]]]]` with an `&ZZXX` offset (no bare `±HHMM`, no dotted dates).
+  Control characters below 0x20 (except the allowed escapes) and DEL (0x7F) are rejected in text VRs.
+- VM checks honour the multiplicity step: `2-2n` requires an even value count, `3-3n` a multiple of three.
+- Every value of Specific Character Set (0008,0005) must be a term the charset registry knows (PS3.5
+  §6.1.1); a zero-length first value means the default repertoire.
 
 ---
 
@@ -204,7 +211,7 @@ Lenient reading is a core acceptance criterion, not a nicety:
 |---|---|---|
 | T1 | Explicit VR bytes are two spaces | use the dictionary VR, stay explicit |
 | T2 | Explicit VR is garbage | rewind, parse that element as implicit |
-| T3 | UN with undefined length that is really SQ | parse as SQ (inner LE when outer is BE, CP-246) |
+| T3 | UN with undefined length (in any transfer syntax) | parse as a sequence whose items are Implicit VR Little Endian (PS3.5 §6.2.2, CP-246). A *defined*-length UN the dictionary calls SQ is probed for item shape and stays UN bytes when the value is not item-shaped |
 | T4 | Private SQ encoded explicitly inside an implicit dataset (and the inverse) | probe, then switch mode for the subtree |
 | T5 | Orphan item tag | implicit undefined-length SQ |
 | T6 | Fragment sequence missing its final delimiter at EOF | accept (fo-dicom #1339) |
@@ -269,8 +276,15 @@ Changing it breaks `radicom-codecs`.
   `Error::Codec`; it must **never fall back to pretending success**.
 - Frame-size math must handle 1-bit packing, YBR 4:2:2 and 4:2:0 chroma subsampling, and multi-frame
   slicing. Single-bit samples pack **continuously** across row boundaries (PS3.5 Annex D), so one frame
-  is `ceil(rows * columns * samples / 8)` bytes — not `rows * ceil(columns / 8)`. A zero-sized frame is
-  an error, not an empty success.
+  is `ceil(rows * columns * samples / 8)` bytes — not `rows * ceil(columns / 8)`. Multi-frame 1-bit data
+  is continuous across *frames* too (PS3.5 §8.1.1 Note 2): frame `n` starts at bit
+  `n * rows * columns * samples` and may begin mid-byte, so `native_frame` re-aligns it and `add_frame`
+  ORs it into the shared byte. A zero-sized frame is an error, not an empty success.
+- 4:2:2 frame size follows the standard formula `Rows * Columns * 2 * bytes` (no column rounding); the
+  4:2:0 padded-plane model (`2 * ceil(Columns/2) * Rows`) exists only because 4:2:0 is encapsulated-only
+  and the renderer uses padded planes.
+- In-memory pixel/element buffers are **host byte order**: reads use `from_ne_bytes` and writes
+  `to_ne_bytes`; only `EndianBuffer::data()` swaps for a big-endian file.
 
 ### 9.2 Photometric interpretation and LUTs
 
@@ -432,6 +446,9 @@ client/server. One tokio task per association. Locks must not be held across `.a
 - A value lives in exactly one of `Value` (array), `InlineBinary` (base64) or `BulkDataURI`.
 - A deferred value (a `FileWindow`/`StreamWindow`/`TempFileSpill`) is written as `BulkDataURI` when
   `JsonOptions::bulk_data_uri` names one, and is then never materialised; otherwise it is base64-encoded.
+- `BulkDataURI` is legal only for the PS3.18 F.2.2 VRs (DS, FL, FD, IS, LT, OB, OD, OF, OL, OV, OW, SL,
+  SS, ST, SV, UC, UL, UN, US, UT, UV); deferring any other VR by URI is an error, never a silent drop.
+- Native XML (PS3.19) carries `xml:space="preserve"` on the root and never encodes Group Length.
 - PN uses the three groups (Alphabetic / Ideographic / Phonetic).
 - Numeric mode is configurable (AsNumber / AsString / PreferablyAsNumber); DS keeps trailing zeros.
 - **Group length elements `(gggg,0000)` must be stripped at every level of the tree.**
@@ -445,6 +462,11 @@ client/server. One tokio task per association. Locks must not be held across `.a
   `FFFE,E000` headers. A record containing an embedded sequence (an icon, for instance) makes the scan
   return the wrong item — a PATIENT record would be mistaken for a STUDY.
 - `add_file` deduplicates through Patient → Study → Series → Instance, reusing nodes by UID.
+- Referenced File IDs are validated, not copied: each component is 1-8 characters of `A-Z`, `0-9` or `_`
+  (PS3.10 §8.2/§8.5) and a File ID has 1-8 components. A caller path such as `img.dcm` is rejected, so
+  callers must map names (the scanner uppercases stems).
+- A DICOMDIR is always Explicit VR Little Endian (PS3.10 §8.1); `from_bytes` normalizes the loaded dataset
+  so a re-save stays conformant.
 
 ### 12.3 Structured Reports (SR-01/02)
 
@@ -465,7 +487,11 @@ client/server. One tokio task per association. Locks must not be held across `.a
 - `StructuredReport::validate` checks common SR document attributes (identity, instance/content date/time,
   study/series identity, Type 2 patient/study/equipment fields), completion/verification and the conditional
   verifying observers. It rechecks imported value macros, coded-entry cardinality, finite spatial/temporal
-  data, reference identity and by-reference paths; legitimate empty Type 2 NUM values remain permitted.
+  data, reference identity and by-reference paths.
+- PS3.3 C.18.1: a NUM item has a Type 2 Measured Value Sequence (zero or one item); an empty sequence is
+  valid only with the Type 1C Numeric Value Qualifier Code Sequence, which explains the missing value.
+- PS3.3 C.18.3/C.18.4/C.18.5: a COMPOSITE, IMAGE or WAVEFORM item carries exactly one Referenced SOP
+  Sequence item, so the constructors take a single reference.
   It does not certify a clinical template (TID) or every SOP-specific relationship table.
 - WAVEFORM channel pairs live inside each ReferencedSOPSequence item (C.18.5).
   `waveform_references()` preserves per-reference selections; the legacy common-channel `value()` view
@@ -480,6 +506,8 @@ client/server. One tokio task per association. Locks must not be held across `.a
   Image Box SmoothingType overrides the film value (Table C.13-5).
 - Verify every tag against PS3.3 before use: `(2010,0120)` is MinDensity, `(2010,0500)` is
   ReferencedFilmSessionSequence, and `(2010,0510)` is ReferencedImageBoxSequence.
+- The Presentation LUT Descriptor is strict (PS3.3 C.11.4.1): bit depth 10-16 (never 8), first mapped value
+  always 0, one sequence item, and entries stored high-aligned in 16-bit words (`value >> (16 - bits)`).
 
 ### 12.5 Anonymization (ANON-01)
 
@@ -494,6 +522,9 @@ client/server. One tokio task per association. Locks must not be held across `.a
 - Recurse into sequences; an `X` action removes the whole sequence, not just its children.
 - The `D` action must respect VR: numeric-string VRs (DS/IS) get a valid number such as `"0"`, never the
   word `ANONYMOUS`.
+- De-identification is declared, not implied (PS3.15 E.1.1): `anonymize_in_place` sets
+  PatientIdentityRemoved `(0012,0062)` = `YES` and DeidentificationMethod `(0012,0063)`, and
+  `anonymize_file_in_place` syncs MediaStorageSOPInstanceUID with the anonymized dataset.
 
 ---
 

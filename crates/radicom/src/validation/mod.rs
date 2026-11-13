@@ -166,6 +166,148 @@ fn validate_is(content: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// One TM component per PS3.5 §6.2: `HH[MM[SS[.F{1,6}]]]`. The ACR-NEMA forms
+/// `HH:MM:SS` and `HH.MM.SS` are not conformant and are rejected here even
+/// though the tolerant `parse_tm` accepts them.
+fn validate_tm_component(part: &str) -> Result<(), String> {
+    let part = part.trim_end_matches(' ');
+    let (main, fraction) = match part.split_once('.') {
+        Some((main, fraction)) => (main, Some(fraction)),
+        None => (part, None),
+    };
+    if !matches!(main.len(), 2 | 4 | 6) || !main.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("expected HH[MM[SS]]".into());
+    }
+    if let Some(fraction) = fraction {
+        // PS3.5: the fractional part only follows seconds and has 1-6 digits.
+        if main.len() != 6
+            || fraction.is_empty()
+            || fraction.len() > 6
+            || !fraction.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err("fraction needs SS and 1-6 digits".into());
+        }
+    }
+    parse_tm(main)
+        .map(|_| ())
+        .map_err(|_| "not a valid time".to_string())
+}
+
+/// TM per PS3.5 §6.2: a single value or a `-` range of single values.
+fn validate_tm(content: &str) -> Result<(), String> {
+    let trimmed = content.trim_end_matches(' ');
+    let mut parts = trimmed.split('-');
+    let first = parts.next().unwrap_or("");
+    let second = parts.next();
+    if parts.next().is_some() {
+        return Err("more than one range separator".into());
+    }
+    if first.is_empty() {
+        return Err("missing time component".into());
+    }
+    validate_tm_component(first)?;
+    match second {
+        // a trailing separator ("0900-") is an open range
+        Some("") | None => Ok(()),
+        Some(second) => validate_tm_component(second),
+    }
+}
+
+/// One DT component per PS3.5 §6.2: `YYYY[MM[DD[HH[MM[SS[.F{1,6}]]]]]]`
+/// followed by an optional `&ZZXX` UTC offset. Dotted/slashed dates and a bare
+/// `±HHMM` offset are ACR-NEMA forms, not conformant DT.
+fn validate_dt_component(part: &str) -> Result<(), String> {
+    let part = part.trim_end_matches(' ');
+    let (body, offset) = match part.split_once('&') {
+        Some((body, offset)) => (body, Some(offset)),
+        None => (part, None),
+    };
+    let (digits, fraction) = match body.split_once('.') {
+        Some((digits, fraction)) => (digits, Some(fraction)),
+        None => (body, None),
+    };
+    if !matches!(digits.len(), 4 | 6 | 8 | 10 | 12 | 14)
+        || !digits.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err("expected YYYY[MM[DD[HH[MM[SS]]]]]".into());
+    }
+    if let Some(fraction) = fraction {
+        if digits.len() != 14
+            || fraction.is_empty()
+            || fraction.len() > 6
+            || !fraction.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err("fraction needs seconds and 1-6 digits".into());
+        }
+    }
+    // the tolerant parser validates the calendar date and the clock ranges
+    parse_dt(digits).map_err(|_| "not a valid date or time".to_string())?;
+    if let Some(offset) = offset {
+        let mut chars = offset.chars();
+        let sign = match chars.next() {
+            Some('+') => 1i32,
+            Some('-') => -1i32,
+            _ => return Err("UTC offset must start with + or -".into()),
+        };
+        let nums: String = chars.collect();
+        if !matches!(nums.len(), 2 | 4) || !nums.bytes().all(|b| b.is_ascii_digit()) {
+            return Err("UTC offset needs 2 or 4 digits".into());
+        }
+        let hour: i32 = nums[..2]
+            .parse()
+            .map_err(|_| "UTC offset hour".to_string())?;
+        let minute: i32 = if nums.len() == 4 {
+            nums[2..]
+                .parse()
+                .map_err(|_| "UTC offset minute".to_string())?
+        } else {
+            0
+        };
+        // PS3.3 §6.2: positive offsets cap at 14h, negative at 12h.
+        let max = if sign > 0 { 14 } else { 12 };
+        if hour > max || minute > 59 || (hour == max && minute != 0) {
+            return Err("UTC offset out of range".into());
+        }
+    }
+    Ok(())
+}
+
+/// DT per PS3.5 §6.2: a single value or a `-` range. A `-` inside `&ZZXX` is
+/// the offset sign, not the range separator.
+fn validate_dt(content: &str) -> Result<(), String> {
+    let trimmed = content.trim_end_matches(' ');
+    let bytes = trimmed.as_bytes();
+    let is_separator =
+        |index: usize| bytes[index] == b'-' && (index == 0 || bytes[index - 1] != b'&');
+    match bytes.iter().enumerate().find(|(i, _)| is_separator(*i)) {
+        None => validate_dt_component(trimmed),
+        Some((index, _)) => {
+            let first = &trimmed[..index];
+            let second = &trimmed[index + 1..];
+            if second
+                .bytes()
+                .enumerate()
+                .any(|(i, _)| second.as_bytes()[i] == b'-' && is_separator(index + 1 + i))
+            {
+                return Err("more than one range separator".into());
+            }
+            validate_dt_component(first)?;
+            if second.is_empty() {
+                return Ok(());
+            }
+            validate_dt_component(second)?;
+            // DT values are big-endian, so the raw digits order chronologically
+            // (a shorter partial value sorts before its extension).
+            let first_body = first.split('&').next().unwrap_or(first);
+            let second_body = second.split('&').next().unwrap_or(second);
+            if first_body > second_body {
+                return Err("range ends before it begins".into());
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Validates one `\`-separated value per its VR rules (VAL-01).
 pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
     if content.is_empty() {
@@ -177,7 +319,8 @@ pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
             if allow_esc && code == 0x1B {
                 return false;
             }
-            code < 0x20
+            // 0x7F (DEL) is a control character too (PS3.5 §6.1.3).
+            code < 0x20 || code == 0x7F
         })
     };
     let no_backslash = |s: &str| !s.contains('\\');
@@ -224,14 +367,7 @@ pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
             }
             validate_ds(content).map_err(|reason| fail(vr, content, reason))
         }
-        Vr::Dt => {
-            if crate::model::dicom_datetime::has_invalid_dt_offset(content) {
-                return Err(fail(vr, content, "UTC offset hour out of range"));
-            }
-            parse_dt(content)
-                .map(|_| ())
-                .map_err(|_| fail(vr, content, "not a valid DT value or range"))
-        }
+        Vr::Dt => validate_dt(content).map_err(|reason| fail(vr, content, reason)),
         Vr::Is => validate_is(content).map_err(|reason| fail(vr, content, reason)),
         Vr::Lo => {
             if content.chars().count() > 64 {
@@ -283,9 +419,7 @@ pub fn validate_single(vr: Vr, content: &str) -> Result<(), String> {
             validate_text_controls(vr, content)
         }
         Vr::Ut => validate_text_controls(vr, content),
-        Vr::Tm => parse_tm(content)
-            .map(|_| ())
-            .map_err(|_| fail(vr, content, "not a valid TM value or range")),
+        Vr::Tm => validate_tm(content).map_err(|reason| fail(vr, content, reason)),
         Vr::Ui => {
             if content.chars().count() > 64 {
                 return Err(fail(vr, content, "length exceeds 64"));
@@ -385,6 +519,24 @@ pub fn validate_element(element: &DicomElement) -> Result<(), Error> {
                 reason,
             })
         })?;
+        // PS3.5 §6.1.1: every Specific Character Set value must be a Defined
+        // Term. A zero-length first value means the default repertoire; any
+        // other unrecognized term cannot be encoded or decoded.
+        if element.tag() == &crate::model::tag::Tag::SPECIFIC_CHARACTER_SET {
+            for (index, term) in s.split('\\').enumerate() {
+                if term.is_empty() && index == 0 {
+                    continue;
+                }
+                if !crate::encoding::charset::is_known_charset(term) {
+                    return Err(Error::Validation(ValidationFailure {
+                        tag: tag_ref,
+                        vr: element.vr().code(),
+                        content: s.clone(),
+                        reason: format!("undefined Specific Character Set term {term:?}"),
+                    }));
+                }
+            }
+        }
     }
     validate_vm(element).map_err(|reason| {
         Error::Validation(ValidationFailure {
@@ -441,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn date_time_rules_delegate_to_parsers() {
+    fn date_time_rules_are_strict() {
         assert!(validate_single(Vr::Da, "20240305").is_ok());
         assert!(validate_single(Vr::Da, "20241301").is_err());
         assert!(
@@ -450,24 +602,41 @@ mod tests {
         );
         assert!(validate_single(Vr::Tm, "103015").is_ok());
         assert!(validate_single(Vr::Tm, "240000").is_err());
-        assert!(validate_single(Vr::Dt, "20240305103015+0530").is_ok());
+
+        // PS3.5 §6.2: DT offsets use `&ZZXX`; a bare ±HHMM is ACR-NEMA.
+        assert!(validate_single(Vr::Dt, "20240305103015&+0530").is_ok());
         assert!(
-            validate_single(Vr::Dt, "20240305103015-1500").is_err(),
+            validate_single(Vr::Dt, "20240305103015+0530").is_err(),
+            "a bare offset is not a DT value"
+        );
+        assert!(
+            validate_single(Vr::Dt, "20240305103015&+1500").is_err(),
             "offset hour 15"
         );
         // PS3.3 §6.2: negative offsets cap at 12h, positive at 14h.
         assert!(
-            validate_single(Vr::Dt, "20240305103015-1300").is_err(),
+            validate_single(Vr::Dt, "20240305103015&-1300").is_err(),
             "negative offset hour 13"
         );
         assert!(
-            validate_single(Vr::Dt, "20240305103015-1200").is_ok(),
+            validate_single(Vr::Dt, "20240305103015&-1200").is_ok(),
             "negative offset hour 12"
         );
         assert!(
-            validate_single(Vr::Dt, "20240305103015+1400").is_ok(),
+            validate_single(Vr::Dt, "20240305103015&+1400").is_ok(),
             "positive offset hour 14"
         );
+
+        // ACR-NEMA `HH:MM:SS`, `HH.MM.SS` and dotted dates are not conformant.
+        assert!(validate_single(Vr::Tm, "10:30:15").is_err());
+        assert!(validate_single(Vr::Tm, "10.30.15").is_err());
+        assert!(validate_single(Vr::Dt, "2024.03.05").is_err());
+        assert!(validate_single(Vr::Tm, "10").is_ok());
+        assert!(validate_single(Vr::Tm, "1030").is_ok());
+        assert!(validate_single(Vr::Tm, "103015.123456").is_ok());
+        assert!(validate_single(Vr::Tm, "103015-110000").is_ok());
+        assert!(validate_single(Vr::Dt, "20240305103015&+0530-20240306103015&+0530").is_ok());
+        assert!(validate_single(Vr::Dt, "20240306103015-20240305103015").is_err());
     }
 
     #[test]

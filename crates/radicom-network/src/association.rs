@@ -446,10 +446,15 @@ impl AcceptedContexts {
             command.affected_sop_class_uid.as_deref()
         }
         .ok_or_else(|| NetworkError::protocol("request has no SOP Class UID"))?;
+        // PS3.7 §10.1: "The Affected SOP Class UID in the DIMSE-N command need
+        // not match the SOP Class UID in the Presentation Context negotiated for
+        // the association over which the DIMSE-N command has been sent. PS3.4
+        // specifies which combinations are valid." A DIMSE-N request is
+        // therefore accepted on any non-Verification context; DIMSE-C still
+        // requires the context's abstract syntax to be the SOP class.
+        let is_n = crate::nservice::is_n_request(command.field);
         let matches = sop == context.abstract_syntax
-            || (crate::nservice::is_n_request(command.field)
-                && crate::print_sop::MetaSopClasses::sub_sop_classes(&context.abstract_syntax)
-                    .is_some_and(|classes| classes.contains(&sop)));
+            || (is_n && context.abstract_syntax != sop_class::VERIFICATION);
         if !matches {
             return Err(NetworkError::protocol(
                 "request SOP Class does not match its presentation context",
@@ -677,10 +682,18 @@ mod tests {
             "the print meta-SOP includes Film Box"
         );
         command.field = CommandField::NGetRq;
-        command.requested_sop_class_uid = Some("9.9.9".into());
+        command.affected_sop_class_uid = Some(crate::print_sop::uids::BASIC_FILM_BOX.into());
+        command.requested_sop_class_uid = None;
         assert!(
             accepted.validate_request(3, &command, true).is_err(),
-            "N-GET must validate Requested, not Affected, UID"
+            "N-GET validates the Requested SOP Class UID, not the Affected one"
+        );
+        // PS3.7 §10.1: the DIMSE-N SOP Class need not match the presentation
+        // context's abstract syntax, so a print meta context accepts it.
+        command.requested_sop_class_uid = Some("9.9.9".into());
+        assert!(
+            accepted.validate_request(3, &command, true).is_ok(),
+            "a DIMSE-N SOP Class need not match the presentation context"
         );
     }
 

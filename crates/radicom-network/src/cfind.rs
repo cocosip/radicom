@@ -142,6 +142,7 @@ const WORKLIST_STEP_KEYS: &[(u16, u16, Vr)] = &[
     (0x0040, 0x0006, Vr::Pn), // Scheduled Performing Physician's Name
     (0x0040, 0x0007, Vr::Lo), // Scheduled Procedure Step Description
     (0x0040, 0x0009, Vr::Sh), // Scheduled Procedure Step ID
+    (0x0040, 0x0011, Vr::Sh), // Scheduled Procedure Step Location
 ];
 
 /// Top-level return keys a Modality Worklist item also carries.
@@ -152,7 +153,6 @@ const WORKLIST_KEYS: &[(u16, u16, Vr)] = &[
     (0x0020, 0x000D, Vr::Ui), // Study Instance UID
     (0x0032, 0x1060, Vr::Lo), // Requested Procedure Description
     (0x0040, 0x1001, Vr::Sh), // Requested Procedure ID
-    (0x0040, 0x0011, Vr::Sh), // Scheduled Procedure Step Location
 ];
 
 /// A C-FIND request (§11.4).

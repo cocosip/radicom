@@ -397,12 +397,13 @@ mod tests {
     }
 
     #[test]
-    fn undefined_length_non_ob_fragments_are_skipped_not_an_error() {
-        // fo-dicom's observer ignores a fragment sequence whose VR is not OB/OW
-        // instead of failing the whole file (review CORE-08).
+    fn undefined_length_un_is_read_as_an_implicit_vr_sequence() {
+        // PS3.5 §6.2.2 / CP-246: a UN element with an undefined length holds a
+        // sequence whose items are Implicit VR Little Endian, so the item-shaped
+        // value is kept as a sequence instead of being dropped.
         let mut bytes = Vec::new();
-        // (0044,1001) UN with undefined length, then an empty offset table and
-        // one fragment, then the sequence delimiter
+        // (0044,1001) UN with undefined length, then an empty item and one item
+        // holding four bytes, then the sequence delimiter
         bytes.extend_from_slice(&[
             0x44, 0x00, 0x01, 0x10, b'U', b'N', 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF,
         ]);
@@ -413,7 +414,10 @@ mod tests {
         bytes.extend_from_slice(&el_header(0x0010, 0x0010, "PN", b"Doe^John"));
 
         let ds = parse(&bytes, &le());
-        assert!(!ds.contains(&Tag::new(0x0044, 0x1001)));
+        let seq = ds
+            .try_get_sequence(Tag::new(0x0044, 0x1001))
+            .expect("UN with undefined length is a sequence");
+        assert_eq!(seq.items().len(), 2);
         assert_eq!(ds.get_str(Tag::PATIENT_NAME).unwrap(), "Doe^John");
     }
 

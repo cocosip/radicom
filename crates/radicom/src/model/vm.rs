@@ -69,13 +69,15 @@ impl Vm {
         }
     }
 
-    /// Whether `count` values satisfy the min/max bounds. The multiplicity
-    /// step is metadata only: fo-dicom `DicomVM` stores `Minimum`/`Maximum`/
-    /// `Multiplicity` but validates only min/max, so `2-2n` accepts 3 here too
-    /// (review needs-verification: confirmed not a defect vs DicomVM.cs).
+    /// Whether `count` values satisfy the min/max bounds and the multiplicity
+    /// step. PS3.5 §6.4: an even VM such as `2-2n` requires the number of values
+    /// to be a multiple of the step (`2-2n` accepts 2, 4, 6, ...; `3-3n` accepts
+    /// 3, 6, 9, ...). A step of 1 imposes no additional restriction.
     pub fn matches(&self, count: usize) -> bool {
         let count = count as u32;
-        count >= self.min && self.max.is_none_or(|max| count <= max)
+        count >= self.min
+            && self.max.is_none_or(|max| count <= max)
+            && (self.multiplicity <= 1 || count.is_multiple_of(self.multiplicity))
     }
 }
 
@@ -199,9 +201,16 @@ mod tests {
         assert!(!Vm::parse("1").unwrap().matches(2));
         assert!(Vm::parse("1-n").unwrap().matches(999));
         assert!(Vm::parse("2-2n").unwrap().matches(2));
+        assert!(
+            !Vm::parse("2-2n").unwrap().matches(3),
+            "2-2n requires an even number of values"
+        );
+        assert!(Vm::parse("2-2n").unwrap().matches(4));
         assert!(!Vm::parse("2-2n").unwrap().matches(1));
         assert!(Vm::parse("1-3").unwrap().matches(3));
         assert!(!Vm::parse("1-3").unwrap().matches(4));
+        assert!(Vm::parse("3-3n").unwrap().matches(6));
+        assert!(!Vm::parse("3-3n").unwrap().matches(4));
         assert!(Vm::ONE.matches(1));
     }
 }

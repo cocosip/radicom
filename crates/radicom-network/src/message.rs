@@ -604,7 +604,7 @@ mod tests {
     #[test]
     fn an_empty_dataset_still_emits_one_last_pdv() {
         let mut frames: Vec<bytes::Bytes> = Vec::new();
-        let mut framer = PduFramer::new(2, 64, |frame| {
+        let mut framer = PduFramer::new(1, 64, |frame| {
             frames.push(frame);
             Ok(())
         });

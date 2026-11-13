@@ -1072,7 +1072,7 @@ mod tests {
         let mut item = Dataset::new();
         let mut descriptor = Vec::new();
         for value in [entries.len() as u16, 0, 16] {
-            descriptor.extend_from_slice(&value.to_le_bytes());
+            descriptor.extend_from_slice(&value.to_ne_bytes());
         }
         item.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
             Tag::LUT_DESCRIPTOR,
@@ -1081,7 +1081,7 @@ mod tests {
         )));
         let mut data = Vec::new();
         for value in entries {
-            data.extend_from_slice(&value.to_le_bytes());
+            data.extend_from_slice(&value.to_ne_bytes());
         }
         item.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
             Tag::LUT_DATA,

@@ -348,7 +348,16 @@ impl DicomDirectory {
 
     /// Parses a DICOMDIR from bytes (§12.2).
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        let file = DicomFile::from_bytes(bytes, &ReadOptions::default())?;
+        let mut file = DicomFile::from_bytes(bytes, &ReadOptions::default())?;
+        // PS3.10 §8.1: the media directory is always Explicit VR Little Endian.
+        // Normalizing on load keeps a re-save conformant even when the source
+        // used another transfer syntax.
+        if file.dataset.transfer_syntax().uid() != syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.uid()
+            || file.dataset.transfer_syntax().is_encapsulated()
+        {
+            file.dataset
+                .set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        }
         let (records, roots) = stitch(bytes, &file.dataset);
         let children_by_parent = build_children_map(&records);
         Ok(DicomDirectory {
@@ -599,7 +608,7 @@ impl DicomDirectory {
         record.insert_str(
             tags::REFERENCED_FILE_ID,
             Vr::Cs,
-            path_to_file_id(referenced_file_id),
+            path_to_file_id(referenced_file_id)?,
         );
 
         // Identifying attributes of the leaf record, matching fo-dicom's
@@ -1020,12 +1029,46 @@ fn required(dataset: &Dataset, tag: Tag, what: &str) -> Result<String, Error> {
         .ok_or_else(|| record_error(format!("{what} is required for a directory record")))
 }
 
-/// `\`-separated file ID from a path (§12.2).
-fn path_to_file_id(path: &Path) -> String {
-    path.iter()
-        .filter_map(|part| part.to_str())
-        .collect::<Vec<_>>()
-        .join("\\")
+/// `\`-separated File ID from a path, validated against the File ID grammar.
+///
+/// PS3.10 §8.2: each File ID component is 1-8 characters drawn from `A-Z`,
+/// `0-9` and `_`; §8.5 caps a File ID at 8 components. A path that cannot be
+/// expressed as a conformant File ID is rejected instead of being written into
+/// the DICOMDIR verbatim.
+fn path_to_file_id(path: &Path) -> Result<String, Error> {
+    let mut components = Vec::new();
+    for part in path.components() {
+        let std::path::Component::Normal(part) = part else {
+            return Err(record_error(format!(
+                "Referenced File ID {} must be a relative path",
+                path.display()
+            )));
+        };
+        let text = part.to_str().ok_or_else(|| {
+            record_error(format!(
+                "Referenced File ID {} is not valid UTF-8",
+                path.display()
+            ))
+        })?;
+        if text.is_empty()
+            || text.len() > 8
+            || !text
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        {
+            return Err(record_error(format!(
+                "Referenced File ID component {text:?} must be 1-8 characters of A-Z, 0-9 or _ (PS3.10 §8.2)"
+            )));
+        }
+        components.push(text);
+    }
+    if components.is_empty() || components.len() > 8 {
+        return Err(record_error(format!(
+            "Referenced File ID {} must have 1-8 components (PS3.10 §8.5)",
+            path.display()
+        )));
+    }
+    Ok(components.join("\\"))
 }
 
 fn record_error(message: impl Into<String>) -> Error {
@@ -2176,10 +2219,24 @@ mod tests {
     #[test]
     fn file_ids_use_backslashes() {
         assert_eq!(
-            path_to_file_id(Path::new("STUDY1/SERIES1/img.dcm")),
-            "STUDY1\\SERIES1\\img.dcm"
+            path_to_file_id(Path::new("STUDY1/SERIES1/IMG0001")).unwrap(),
+            "STUDY1\\SERIES1\\IMG0001"
         );
-        assert_eq!(path_to_file_id(Path::new("img.dcm")), "img.dcm");
+        assert_eq!(path_to_file_id(Path::new("IMG0001")).unwrap(), "IMG0001");
+    }
+
+    #[test]
+    fn nonconformant_file_ids_are_rejected() {
+        // PS3.10 §8.2: lowercase letters, the dot of a file name and a
+        // component longer than 8 characters are all invalid File IDs.
+        for bad in ["img.dcm", "Img0001", "TOOLONGCOMPONENT", "A/B/c"] {
+            let error = path_to_file_id(Path::new(bad)).unwrap_err();
+            assert!(error.to_string().contains("File ID"), "{bad}: got {error}");
+        }
+        // §8.5: at most 8 components.
+        let deep = (0..9).map(|_| "A").collect::<Vec<_>>().join("/");
+        assert!(path_to_file_id(Path::new(&deep)).is_err());
+        assert!(path_to_file_id(Path::new("../A")).is_err());
     }
 
     #[test]

@@ -534,6 +534,12 @@ fn validate_item(item: &ContentItem, root: &Dataset, path: &[u32]) -> Result<(),
         ValueType::Code => validate_code_sequence(dataset, tags::CONCEPT_CODE_SEQUENCE)?,
         ValueType::Num => {
             let sequence = required_sequence(dataset, tags::MEASURED_VALUE_SEQUENCE, 0, Some(1))?;
+            // PS3.3 Table C.18.1-1: an empty Measured Value Sequence conveys a
+            // measurement with no known value, and then the Type 1C Numeric
+            // Value Qualifier Code Sequence explains the absence.
+            if sequence.items().is_empty() {
+                validate_code_sequence(dataset, tags::NUMERIC_VALUE_QUALIFIER_CODE_SEQUENCE)?;
+            }
             for measured in sequence.items() {
                 required_text(measured, tags::NUMERIC_VALUE, Vr::Ds)?;
                 let value = MeasuredValue::read_from(measured)?;
@@ -700,6 +706,19 @@ mod tests {
             .write_into(&mut name);
         child.insert_sequence(tags::CONCEPT_NAME).push(name);
         child.insert_sequence(tags::MEASURED_VALUE_SEQUENCE);
+        root.add_child(ContentItem::from_dataset(child.clone()));
+        // PS3.3 Table C.18.1-1: a Type 2 (empty) Measured Value Sequence is
+        // legal only with the Type 1C Numeric Value Qualifier Code Sequence.
+        assert!(report_with(root).validate().is_err());
+
+        let mut qualifier = Dataset::new();
+        CodeItem::new("114000", "DCM")
+            .with_meaning("Not a number")
+            .write_into(&mut qualifier);
+        child
+            .insert_sequence(tags::NUMERIC_VALUE_QUALIFIER_CODE_SEQUENCE)
+            .push(qualifier);
+        let mut root = container();
         root.add_child(ContentItem::from_dataset(child));
         report_with(root).validate().unwrap();
 
@@ -714,7 +733,7 @@ mod tests {
             tags::GRAPHIC_DATA,
             Vr::Fl,
             std::sync::Arc::new(crate::model::buffer::MemoryBuffer::new(
-                [f32::NAN.to_le_bytes(), 1f32.to_le_bytes()].concat(),
+                [f32::NAN.to_ne_bytes(), 1f32.to_ne_bytes()].concat(),
             )),
         ));
         let mut root = container();
@@ -778,7 +797,7 @@ mod tests {
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::new(
                     target
                         .iter()
-                        .flat_map(|n| n.to_le_bytes())
+                        .flat_map(|n| n.to_ne_bytes())
                         .collect::<Vec<_>>(),
                 )),
             ));
@@ -1078,7 +1097,7 @@ mod tests {
         root.add_child(ContentItem::waveform(
             name,
             Relationship::Contains,
-            std::slice::from_ref(&reference),
+            reference.clone(),
             &[(1, 2)],
         ));
 

@@ -15,7 +15,6 @@ use crate::error::{DataError, Error};
 use crate::model::dataset::Dataset;
 use crate::model::item::DicomItem;
 use crate::model::tag::Tag;
-use crate::model::vr::Vr;
 
 /// Presentation LUT Shape `(2050,0020)` values (PS3.3 C.11.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,60 +76,48 @@ impl PresentationLutTable {
                 "Presentation LUT Descriptor is shorter than 3 US values",
             ));
         }
-        let raw_entries = match descriptor.vr() {
-            Vr::Ss => i16::from_le_bytes([desc[0], desc[1]]) as i32,
-            _ => u16::from_le_bytes([desc[0], desc[1]]) as i32,
-        };
-        // fo-dicom treats a nonsensical negative entry count as its absolute value.
-        let count = if raw_entries == 0 {
+        // PS3.3 C.11.4.1: all three descriptor values are always interpreted as
+        // unsigned (the explicit VR used is always US), and a count of 0 means
+        // 65536 entries.
+        let entries = u16::from_ne_bytes([desc[0], desc[1]]);
+        let count = if entries == 0 {
             65536usize
         } else {
-            raw_entries.unsigned_abs() as usize
+            entries as usize
         };
-        let first_mapped = i16::from_le_bytes([desc[2], desc[3]]) as i32;
-        let bits = u16::from_le_bytes([desc[4], desc[5]]);
-        // PS3.3 C.11.4 allows 8 or 10–16 bits per entry (10–15 read as 16-bit words).
-        if !(bits == 8 || (10..=16).contains(&bits)) {
+        // "The second Value is the first input value mapped, and shall always be
+        // 0." A nonzero value is a broken presentation LUT, not a usable shift.
+        let first_mapped = u16::from_ne_bytes([desc[2], desc[3]]) as i32;
+        if first_mapped != 0 {
             return Err(data_error(format!(
-                "Presentation LUT Descriptor bit depth {bits} is not 8 or 10-16"
+                "Presentation LUT Descriptor first mapped value {first_mapped} is not 0"
+            )));
+        }
+        let bits = u16::from_ne_bytes([desc[4], desc[5]]);
+        // "It shall be between 10 and 16 inclusive."
+        if !(10..=16).contains(&bits) {
+            return Err(data_error(format!(
+                "Presentation LUT Descriptor bit depth {bits} is not 10-16"
             )));
         }
 
         let data = element_bytes(item, Tag::LUT_DATA)?
             .ok_or_else(|| data_error("Presentation LUT Sequence item has no LUT Data"))?;
-        let data_vr = item
-            .get_element(Tag::LUT_DATA)
-            .map(|e| e.vr())
-            .unwrap_or(Vr::Ow);
 
         let mut entries = Vec::with_capacity(count);
-        // The entry width comes from the descriptor's bit depth, never from the
-        // LUT Data length: a 16-bit descriptor whose data is truncated to exactly
-        // `count` bytes must be an error, not silently read as 8-bit entries.
-        if bits == 8 {
-            if data.len() < count {
-                return Err(data_error(format!(
-                    "Presentation LUT has {count} 8-bit entries but only {} data bytes",
-                    data.len()
-                )));
-            }
-            entries.extend(data[..count].iter().map(|b| *b as i32));
-        } else {
-            // bits >= 10 (10–16) use the 16-bit word path per PS3.3 C.11.4
-            if data.len() < count * 2 {
-                return Err(data_error(format!(
-                    "Presentation LUT has {count} 16-bit entries but only {} data bytes",
-                    data.len()
-                )));
-            }
-            for i in 0..count {
-                let pair = [data[i * 2], data[i * 2 + 1]];
-                entries.push(if data_vr == Vr::Ss {
-                    i16::from_le_bytes(pair) as i32
-                } else {
-                    u16::from_le_bytes(pair) as i32
-                });
-            }
+        if data.len() < count * 2 {
+            return Err(data_error(format!(
+                "Presentation LUT has {count} entries but only {} data bytes",
+                data.len()
+            )));
+        }
+        // The entries are 16-bit words with the value high-aligned: "stored in a
+        // format equivalent to 16 bits allocated where the high bit is equal to
+        // bits stored - 1". Shift down to the P-value, which is always unsigned.
+        let shift = 16 - bits;
+        for i in 0..count {
+            let word = u16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]);
+            entries.push((word >> shift) as i32);
         }
         Ok(PresentationLutTable {
             first_mapped,
@@ -215,6 +202,12 @@ impl PresentationLut {
         };
         let table = match dataset.try_get_sequence(Tag::PRESENTATION_LUT_SEQUENCE) {
             Some(sequence) => {
+                // PS3.3 C.11.4: "Only a single Item shall be included".
+                if sequence.items().len() > 1 {
+                    return Err(data_error(
+                        "Presentation LUT Sequence shall contain a single item",
+                    ));
+                }
                 let item = sequence
                     .items()
                     .first()
@@ -270,6 +263,7 @@ mod tests {
     use super::*;
     use crate::model::buffer::MemoryBuffer;
     use crate::model::element::DicomElement;
+    use crate::model::vr::Vr;
     use crate::print::models::FilmBox;
     use std::sync::Arc;
 
@@ -295,9 +289,9 @@ mod tests {
 
     #[test]
     fn a_presentation_lut_sequence_is_parsed() {
-        // 8-bit, 4 entries, first mapped 0: values 0, 85, 170, 255
+        // 12-bit, 4 entries, first mapped 0: 0, 0x555, 0xAAA, 0xFFF (high-aligned)
         let mut item = Dataset::new();
-        let descriptor = [4u8, 0x00, 0x00, 0x00, 0x08, 0x00]; // US 4, SS 0, US 8
+        let descriptor = [4u8, 0x00, 0x00, 0x00, 0x0C, 0x00]; // US 4, US 0, US 12
         item.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
             Tag::LUT_DESCRIPTOR,
             Vr::Us,
@@ -306,7 +300,9 @@ mod tests {
         item.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
             Tag::LUT_DATA,
             Vr::Ow,
-            Arc::new(MemoryBuffer::from(vec![0u8, 85, 170, 255])),
+            Arc::new(MemoryBuffer::from(vec![
+                0x00u8, 0x00, 0x50, 0x55, 0xA0, 0xAA, 0xF0, 0xFF,
+            ])),
         )));
 
         let mut film = Dataset::new();
@@ -315,9 +311,9 @@ mod tests {
         let lut = FilmBox::from_dataset(film).presentation_lut().unwrap();
         let table = lut.table().expect("table parsed");
         assert_eq!(table.len(), 4);
-        assert_eq!(table.bits(), 8);
+        assert_eq!(table.bits(), 12);
         assert_eq!(table.first_mapped(), 0);
-        assert_eq!(table.value_at(2), Some(170));
+        assert_eq!(table.value_at(2), Some(0xAAA));
         assert_eq!(table.map_byte(3), 255);
         assert_eq!(table.value_at(9), None);
     }
@@ -397,12 +393,16 @@ mod tests {
         // descriptor shorter than three US values
         assert!(film_with_lut_item(lut_item(&[1, 0, 0], &[0], Vr::Ow)).is_err());
 
-        // bits per entry outside 8 and 10–16
+        // PS3.3 C.11.4.1: the bit depth is 10-16 inclusive, never 8.
+        assert!(film_with_lut_item(lut_item(&[1, 0, 0, 0, 8, 0], &[0, 0], Vr::Ow)).is_err());
         assert!(film_with_lut_item(lut_item(&[1, 0, 0, 0, 9, 0], &[0, 0], Vr::Ow)).is_err());
         assert!(film_with_lut_item(lut_item(&[1, 0, 0, 0, 17, 0], &[0, 0], Vr::Ow)).is_err());
 
+        // the first mapped value "shall always be 0"
+        assert!(film_with_lut_item(lut_item(&[1, 5, 0, 0, 12, 0], &[0, 0], Vr::Ow)).is_err());
+
         // no data element
-        assert!(film_with_lut_item(lut_item(&[1, 0, 0, 0, 8, 0], &[], Vr::Ow)).is_err());
+        assert!(film_with_lut_item(lut_item(&[1, 0, 0, 0, 16, 0], &[], Vr::Ow)).is_err());
     }
 
     #[test]
@@ -414,22 +414,31 @@ mod tests {
             film_with_lut_item(lut_item(&[4, 0, 0, 0, 16, 0], &[1, 0, 2, 0], Vr::Ow)).is_err(),
             "a 16-bit table needs 8 data bytes for 4 entries"
         );
-        // and the same byte count as an 8-bit table is fine
-        assert!(film_with_lut_item(lut_item(&[4, 0, 0, 0, 8, 0], &[1, 2, 3, 4], Vr::Ow)).is_ok());
+        // two bytes per entry is the only legal length, whatever the bit depth
+        assert!(film_with_lut_item(lut_item(
+            &[4, 0, 0, 0, 12, 0],
+            &[1, 0, 2, 0, 3, 0, 4, 0],
+            Vr::Ow
+        ))
+        .is_ok());
     }
 
     #[test]
-    fn eight_and_sixteen_bit_tables_produce_expected_bytes() {
-        // 8-bit, four entries: one byte per entry
-        let table = film_with_lut_item(lut_item(&[4, 0, 0, 0, 8, 0], &[0, 85, 170, 255], Vr::Ow))
-            .unwrap()
-            .table()
-            .unwrap()
-            .clone();
+    fn ten_to_sixteen_bit_tables_produce_expected_bytes() {
+        // 12-bit, four entries high-aligned in 16-bit words: 0, 0x555, 0xAAA, 0xFFF
+        let table = film_with_lut_item(lut_item(
+            &[4, 0, 0, 0, 12, 0],
+            &[0x00, 0x00, 0x50, 0x55, 0xA0, 0xAA, 0xF0, 0xFF],
+            Vr::Ow,
+        ))
+        .unwrap()
+        .table()
+        .unwrap()
+        .clone();
         assert_eq!(table.len(), 4);
         assert!(!table.is_empty());
         assert_eq!(table.first_mapped(), 0);
-        assert_eq!(table.value_at(1), Some(85));
+        assert_eq!(table.value_at(1), Some(0x555));
         assert_eq!(table.value_at(-1), None);
         assert_eq!(table.map_byte(0), 0);
         assert_eq!(table.map_byte(3), 255);
@@ -447,26 +456,13 @@ mod tests {
         assert_eq!(table.bits(), 16);
         assert_eq!(table.map_byte(0), 0);
         assert_eq!(table.map_byte(1), 255);
-
-        // 16-bit signed data is sign-extended before clamping
-        let table = film_with_lut_item(lut_item(
-            &[2, 0, 0, 0, 16, 0],
-            &[0xFF, 0xFF, 0x10, 0x00],
-            Vr::Ss,
-        ))
-        .unwrap()
-        .table()
-        .unwrap()
-        .clone();
-        assert_eq!(table.value_at(0), Some(-1));
-        assert_eq!(table.map_byte(0), 0, "negative entries clamp to black");
-        assert_eq!(table.map_byte(1), 0, "16 of 65535 is below one 8-bit step");
     }
 
     #[test]
     fn a_twelve_bit_descriptor_parses_via_the_16_bit_path() {
-        // PS3.3 C.11.4 allows 10–15 bits per entry; they are stored as 16-bit
-        // words. A 12-bit descriptor must parse, not be rejected.
+        // PS3.3 C.11.4 allows 10-15 bits per entry; they are stored as 16-bit
+        // words with the value high-aligned. A 12-bit descriptor must parse,
+        // not be rejected.
         let table = film_with_lut_item(lut_item(
             &[2, 0, 0, 0, 12, 0],
             &[0x00, 0x00, 0xFF, 0xFF],
@@ -478,8 +474,9 @@ mod tests {
         .clone();
         assert_eq!(table.bits(), 12);
         assert_eq!(table.len(), 2);
+        assert_eq!(table.value_at(1), Some(0x0FFF), "high-aligned 4095");
         assert_eq!(table.map_byte(0), 0);
-        assert_eq!(table.map_byte(1), 255, "65535 clamps to the 12-bit max");
+        assert_eq!(table.map_byte(1), 255, "4095 is the 12-bit maximum");
     }
 
     #[test]
@@ -493,9 +490,11 @@ mod tests {
     }
     #[test]
     fn out_of_range_inputs_clamp_to_the_end_entries() {
-        // first mapped 10: inputs 10 and 11 select 100 and 200
+        // PS3.3 C.11.4.1: the first mapped value is always 0; inputs outside the
+        // table clamp to its first/last entry. 12-bit entries 100 and 200 are
+        // high-aligned in 16-bit words (0x0640, 0x0C80).
         let mut item = Dataset::new();
-        let descriptor = [2u8, 0x00, 0x0A, 0x00, 0x08, 0x00]; // US 2, SS 10, US 8
+        let descriptor = [2u8, 0x00, 0x00, 0x00, 0x0C, 0x00]; // US 2, first 0, 12 bits
         item.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
             Tag::LUT_DESCRIPTOR,
             Vr::Us,
@@ -504,7 +503,7 @@ mod tests {
         item.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
             Tag::LUT_DATA,
             Vr::Ow,
-            Arc::new(MemoryBuffer::from(vec![100u8, 200])),
+            Arc::new(MemoryBuffer::from(vec![0x40u8, 0x06, 0x80, 0x0C])),
         )));
         let mut film = Dataset::new();
         film.insert_sequence(Tag::PRESENTATION_LUT_SEQUENCE)
@@ -515,18 +514,19 @@ mod tests {
             .table()
             .cloned()
             .unwrap();
-        assert_eq!(table.map_byte(10), 100);
-        assert_eq!(table.map_byte(11), 200);
+        assert_eq!(table.value_at(0), Some(100));
+        assert_eq!(table.value_at(1), Some(200));
+        assert_eq!(table.map_byte(0), 6, "100 out of the 4095 output range");
+        assert_eq!(table.map_byte(1), 12, "200 out of the 4095 output range");
         assert_eq!(
-            table.map_byte(0),
-            100,
-            "below first_mapped clamps to entry 0"
-        );
-        assert_eq!(table.map_byte(-5), 100);
-        assert_eq!(
-            table.map_byte(999),
-            200,
+            table.map_byte(99),
+            12,
             "past the table clamps to the last entry"
+        );
+        assert_eq!(
+            table.map_byte(-5),
+            6,
+            "below the table clamps to the first entry"
         );
     }
 }

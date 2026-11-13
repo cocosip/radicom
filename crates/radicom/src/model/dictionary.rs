@@ -30,10 +30,14 @@ pub struct DictionaryEntry {
 
 impl DictionaryEntry {
     /// Fallback entry for tags unknown to the dictionary: accepts any VR,
-    /// VM 1-n (spec §2 step 4).
+    /// VM 1-n (spec §2 step 4). `UN` comes first so a value written without an
+    /// explicit VR resolves through `Dataset::resolve_vr`: text becomes `LO`
+    /// rather than `AE`, whose 16-byte limit and restricted alphabet would
+    /// silently truncate/reject it.
     pub fn unknown(tag: Tag) -> Arc<DictionaryEntry> {
         static ALL_VRS: Lazy<Box<[Vr]>> = Lazy::new(|| {
             Box::from([
+                Vr::Un,
                 Vr::Ae,
                 Vr::As,
                 Vr::At,
@@ -63,7 +67,6 @@ impl DictionaryEntry {
                 Vr::Uc,
                 Vr::Ui,
                 Vr::Ul,
-                Vr::Un,
                 Vr::Ur,
                 Vr::Us,
                 Vr::Ut,

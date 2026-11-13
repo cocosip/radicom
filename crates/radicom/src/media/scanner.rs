@@ -741,7 +741,14 @@ mod tests {
             scan_directory(&dir, &options, &mut |_| {}, &mut collector).unwrap();
         }
         let directory = builder
-            .build::<Error>(|path| PathBuf::from(path.file_name().unwrap()))
+            .build::<Error>(|path| {
+                // PS3.10 §8.2: a File ID is 1-8 characters of A-Z, 0-9, _.
+                let stem = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("IMG");
+                PathBuf::from(stem.to_uppercase())
+            })
             .unwrap();
         // one patient, one study, one series, two images
         assert_eq!(directory.records().len(), 5);

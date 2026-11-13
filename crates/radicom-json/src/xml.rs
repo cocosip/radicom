@@ -30,7 +30,8 @@ use std::fmt::Write as _;
 pub fn dataset_to_xml(dataset: &Dataset) -> Result<String, Error> {
     let mut out = String::with_capacity(1024);
     out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-    out.push_str("<NativeDicomModel>\n");
+    // PS3.19 A.1.1: white space in text values is significant.
+    out.push_str("<NativeDicomModel xml:space=\"preserve\">\n");
     write_dataset(&mut out, dataset, 1)?;
     out.push_str("</NativeDicomModel>\n");
     Ok(out)
@@ -39,6 +40,10 @@ pub fn dataset_to_xml(dataset: &Dataset) -> Result<String, Error> {
 /// Writes one dataset's items at `depth`.
 fn write_dataset(out: &mut String, dataset: &Dataset, depth: usize) -> Result<(), Error> {
     for item in dataset.items() {
+        // PS3.19 A.1.2: Group Length elements are not encoded.
+        if item.tag().element() == 0x0000 {
+            continue;
+        }
         match item {
             DicomItem::Element(element) => write_element(out, element, depth)?,
             DicomItem::Sequence(sequence) => write_sequence(out, sequence, depth)?,
@@ -403,8 +408,17 @@ mod tests {
     fn the_document_has_the_native_model_root() {
         let xml = dataset_to_xml(&dataset()).unwrap();
         assert!(xml.starts_with("<?xml"));
-        assert!(xml.contains("<NativeDicomModel>"));
+        assert!(xml.contains("<NativeDicomModel xml:space=\"preserve\">"));
         assert!(xml.trim_end().ends_with("</NativeDicomModel>"));
+    }
+
+    #[test]
+    fn group_length_elements_are_not_encoded() {
+        // PS3.19 A.1.2: Group Length (gggg,0000) never appears in Native XML.
+        let mut ds = dataset();
+        ds.insert_value(Tag::new(0x0010, 0x0000), 4u32);
+        let xml = dataset_to_xml(&ds).unwrap();
+        assert!(!xml.contains("tag=\"00100000\""), "{xml}");
     }
 
     #[test]

@@ -41,6 +41,10 @@ pub mod tags {
     pub const MEASURED_VALUE_SEQUENCE: Tag = Tag::MEASURED_VALUE_SEQUENCE;
     /// (0040,A30A) NumericValue (DS), inside a MeasuredValueSequence item.
     pub const NUMERIC_VALUE: Tag = Tag::NUMERIC_VALUE;
+    /// (0040,A301) NumericValueQualifierCodeSequence: required when the
+    /// MeasuredValueSequence is empty (PS3.3 Table C.18.1-1).
+    pub const NUMERIC_VALUE_QUALIFIER_CODE_SEQUENCE: Tag =
+        Tag::NUMERIC_VALUE_QUALIFIER_CODE_SEQUENCE;
     /// (0040,08EA) MeasurementUnitsCodeSequence.
     pub const MEASUREMENT_UNITS_CODE_SEQUENCE: Tag = Tag::MEASUREMENT_UNITS_CODE_SEQUENCE;
     /// (0008,1199) ReferencedSOPSequence.
@@ -778,20 +782,19 @@ impl ContentItem {
         Ok(item)
     }
 
-    /// A COMPOSITE/IMAGE value: ReferencedSOPSequence items (§12.3).
+    /// A COMPOSITE/IMAGE value: the single ReferencedSOPSequence item that
+    /// PS3.3 C.18.3/C.18.4 permit.
     pub fn referenced_sop(
         concept_name: CodeItem,
         relationship: Relationship,
         value_type: ValueType,
-        references: &[ReferencedSop],
+        reference: ReferencedSop,
     ) -> Self {
         let mut item = Self::base(concept_name, value_type, Some(relationship));
         let sequence = item.dataset.insert_sequence(tags::REFERENCED_SOP_SEQUENCE);
-        for reference in references {
-            let mut reference_item = Dataset::new();
-            reference.write_into(&mut reference_item);
-            sequence.push(reference_item);
-        }
+        let mut reference_item = Dataset::new();
+        reference.write_into(&mut reference_item);
+        sequence.push(reference_item);
         item
     }
 
@@ -812,8 +815,8 @@ impl ContentItem {
             .insert_str(tags::GRAPHIC_TYPE, Vr::Cs, value.graphic_type.as_str());
         let mut bytes = Vec::with_capacity(value.points.len() * 8);
         for (column, row) in &value.points {
-            bytes.extend_from_slice(&(*column as f32).to_le_bytes());
-            bytes.extend_from_slice(&(*row as f32).to_le_bytes());
+            bytes.extend_from_slice(&(*column as f32).to_ne_bytes());
+            bytes.extend_from_slice(&(*row as f32).to_ne_bytes());
         }
         insert_bytes(&mut item.dataset, tags::GRAPHIC_DATA, Vr::Fl, bytes);
         item
@@ -836,9 +839,9 @@ impl ContentItem {
         );
         let mut bytes = Vec::with_capacity(value.points.len() * 12);
         for (x, y, z) in &value.points {
-            bytes.extend_from_slice(&(*x as f32).to_le_bytes());
-            bytes.extend_from_slice(&(*y as f32).to_le_bytes());
-            bytes.extend_from_slice(&(*z as f32).to_le_bytes());
+            bytes.extend_from_slice(&(*x as f32).to_ne_bytes());
+            bytes.extend_from_slice(&(*y as f32).to_ne_bytes());
+            bytes.extend_from_slice(&(*z as f32).to_ne_bytes());
         }
         insert_bytes(&mut item.dataset, tags::GRAPHIC_DATA, Vr::Fl, bytes);
         item
@@ -858,7 +861,7 @@ impl ContentItem {
             TemporalRange::SamplePositions(values) => {
                 let mut bytes = Vec::with_capacity(values.len() * 4);
                 for value in values {
-                    bytes.extend_from_slice(&value.to_le_bytes());
+                    bytes.extend_from_slice(&value.to_ne_bytes());
                 }
                 insert_bytes(
                     &mut item.dataset,
@@ -884,34 +887,32 @@ impl ContentItem {
         item
     }
 
-    /// A WAVEFORM value: the composite object reference plus the optional
-    /// (multiplex group, channel) pairs (PS3.3 C.18.5).
+    /// A WAVEFORM value: the single composite object reference plus the
+    /// optional (multiplex group, channel) pairs (PS3.3 C.18.5).
     pub fn waveform(
         concept_name: CodeItem,
         relationship: Relationship,
-        references: &[ReferencedSop],
+        reference: ReferencedSop,
         channels: &[(u16, u16)],
     ) -> Self {
         let mut item = Self::base(concept_name, ValueType::Waveform, Some(relationship));
         let sequence = item.dataset.insert_sequence(tags::REFERENCED_SOP_SEQUENCE);
-        for reference in references {
-            let mut reference_item = Dataset::new();
-            reference.write_into(&mut reference_item);
-            if !channels.is_empty() {
-                let mut bytes = Vec::with_capacity(channels.len() * 4);
-                for (group, channel) in channels {
-                    bytes.extend_from_slice(&group.to_le_bytes());
-                    bytes.extend_from_slice(&channel.to_le_bytes());
-                }
-                insert_bytes(
-                    &mut reference_item,
-                    tags::REFERENCED_WAVEFORM_CHANNELS,
-                    Vr::Us,
-                    bytes,
-                );
+        let mut reference_item = Dataset::new();
+        reference.write_into(&mut reference_item);
+        if !channels.is_empty() {
+            let mut bytes = Vec::with_capacity(channels.len() * 4);
+            for (group, channel) in channels {
+                bytes.extend_from_slice(&group.to_ne_bytes());
+                bytes.extend_from_slice(&channel.to_ne_bytes());
             }
-            sequence.push(reference_item);
+            insert_bytes(
+                &mut reference_item,
+                tags::REFERENCED_WAVEFORM_CHANNELS,
+                Vr::Us,
+                bytes,
+            );
         }
+        sequence.push(reference_item);
         item
     }
 
@@ -1363,21 +1364,21 @@ mod tests {
 
     #[test]
     fn an_odd_waveform_channel_list_reads_as_empty() {
-        let mut item = ContentItem::waveform(
-            CodeItem::new("111030", "DCM"),
-            Relationship::Contains,
-            &[],
-            &[(1, 2)],
-        );
-        let mut dataset = item.clone().into_dataset();
+        let mut reference_item = Dataset::new();
+        ReferencedSop::new("1.2.3", "1.2.4").write_into(&mut reference_item);
         // one US value cannot be a (group, channel) pair
         insert_bytes(
-            &mut dataset,
+            &mut reference_item,
             tags::REFERENCED_WAVEFORM_CHANNELS,
             Vr::Us,
             vec![0u8; 2],
         );
-        item = ContentItem::from_dataset(dataset);
+        let mut dataset = Dataset::new();
+        dataset.insert_str(tags::VALUE_TYPE, Vr::Cs, "WAVEFORM");
+        dataset
+            .insert_sequence(tags::REFERENCED_SOP_SEQUENCE)
+            .push(reference_item);
+        let item = ContentItem::from_dataset(dataset);
         assert!(item.waveform_channels().is_empty());
     }
 
@@ -1447,19 +1448,25 @@ mod tests {
     }
 
     #[test]
-    fn a_referenced_sop_item_carries_its_references() {
-        let references = vec![
-            ReferencedSop::new("1.2.840.10008.5.1.4.1.1.2", "1.2.3.4"),
-            ReferencedSop::new("1.2.840.10008.5.1.4.1.1.2", "1.2.3.5"),
-        ];
+    fn a_referenced_sop_item_carries_its_reference() {
+        let reference = ReferencedSop::new("1.2.840.10008.5.1.4.1.1.2", "1.2.3.4");
         let item = ContentItem::referenced_sop(
             concept(),
             Relationship::Contains,
             ValueType::Image,
-            &references,
+            reference.clone(),
         );
         assert_eq!(item.value_type(), Some(ValueType::Image));
-        assert_eq!(item.referenced_sops(), references);
+        assert_eq!(item.referenced_sops(), vec![reference]);
+        // PS3.3 C.18.3/C.18.4: only a single item is permitted.
+        assert_eq!(
+            item.dataset()
+                .try_get_sequence(tags::REFERENCED_SOP_SEQUENCE)
+                .unwrap()
+                .items()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -1787,7 +1794,7 @@ mod tests {
         let item = ContentItem::waveform(
             concept(),
             Relationship::Contains,
-            std::slice::from_ref(&reference),
+            reference.clone(),
             &[(1, 0), (3, 2)],
         );
         assert_eq!(item.value_type(), Some(ValueType::Waveform));
@@ -1829,7 +1836,7 @@ mod tests {
                 &mut reference,
                 tags::REFERENCED_WAVEFORM_CHANNELS,
                 Vr::Us,
-                [group.to_le_bytes(), channel.to_le_bytes()].concat(),
+                [group.to_ne_bytes(), channel.to_ne_bytes()].concat(),
             );
             match dataset.sequence_mut(tags::REFERENCED_SOP_SEQUENCE) {
                 Some(sequence) => sequence.push(reference),
@@ -1855,7 +1862,7 @@ mod tests {
         let item = ContentItem::waveform(
             concept(),
             Relationship::Contains,
-            &[ReferencedSop::new("1.2.3", "1.2.4")],
+            ReferencedSop::new("1.2.3", "1.2.4"),
             &[(1, 2)],
         );
         assert!(!item.dataset().contains(&tags::REFERENCED_WAVEFORM_CHANNELS));
@@ -2009,7 +2016,7 @@ mod tests {
                     name.clone(),
                     Relationship::Contains,
                     ValueType::Composite,
-                    std::slice::from_ref(&reference),
+                    reference.clone(),
                 ),
                 ContentValue::References(vec![reference.clone()]),
             ),
@@ -2018,7 +2025,7 @@ mod tests {
                     name.clone(),
                     Relationship::Contains,
                     ValueType::Image,
-                    std::slice::from_ref(&reference),
+                    reference.clone(),
                 ),
                 ContentValue::References(vec![reference.clone()]),
             ),
@@ -2026,7 +2033,7 @@ mod tests {
                 ContentItem::waveform(
                     name.clone(),
                     Relationship::Contains,
-                    std::slice::from_ref(&reference),
+                    reference.clone(),
                     &[(1, 1)],
                 ),
                 ContentValue::Waveform {

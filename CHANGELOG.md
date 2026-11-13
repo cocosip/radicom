@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `ContentItem::referenced_sop` and `ContentItem::waveform` take one `ReferencedSop` instead of
+  a slice; PS3.3 C.18.3-C.18.5 allow exactly one Referenced SOP Sequence item.
+- `DicomDirectory::add_file*` rejects paths that are not conformant File IDs (PS3.10 §8.2/§8.5: 1-8
+  characters of `A-Z`, `0-9`, `_`, 1-8 components) instead of writing them verbatim.
+- Strict validation rejects ACR-NEMA date/time forms (bare `±HHMM` DT offsets, `HH:MM:SS` TM), DEL in text
+  VRs, undefined Specific Character Set terms, and VM counts that violate the multiplicity step.
+- Presentation LUT Descriptor follows PS3.3 C.11.4.1: bit depth 10-16, first mapped value 0, one sequence
+  item, entries high-aligned in 16-bit words.
+- `BulkDataURI` is emitted only for the PS3.18 F.2.2 VRs; Native XML gains `xml:space="preserve"` and drops
+  Group Length elements.
+
+### Fixed
+
+- Multi-frame 1-bit pixel data is bit-continuous across frames (PS3.5 §8.1.1 Note 2) in both frame reads and
+  `add_frame`; 4:2:2 frame size uses the standard formula without column rounding.
+- Explicit-VR UN with undefined length is read as an Implicit VR LE item sequence (PS3.5 §6.2.2, CP-246).
+- In-memory pixel, LUT, SR and print buffers are host byte order (`from_ne_bytes`/`to_ne_bytes`), so big-endian
+  hosts no longer misread them; 8/16-bit LUT descriptor counts, first mapped values and entry ranges follow
+  PS3.3 C.11.2.1.1/C.11.4.1.
+- Reader tolerates a nonzero delimiter/fragment-item length; writer rejects a defined length that collides
+  with the undefined-length marker.
+- Anonymization sets PatientIdentityRemoved and DeidentificationMethod and always syncs the file-meta SOP
+  instance UID; DICOMDIR normalizes to Explicit VR Little Endian on load.
+- DIMSE-N requests are accepted on any non-Verification presentation context (PS3.7 §10.1); PDV context IDs
+  must be odd; Implementation Version Name is length-checked; the worklist return keys place
+  ScheduledProcedureStepLocation inside its sequence; Film Size ID parses `8_5INX11IN` and `11INX17IN`.
+
 ## [0.2.0] - 2026-11-09
 
 ### Changed

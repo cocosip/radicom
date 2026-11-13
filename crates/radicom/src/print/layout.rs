@@ -32,9 +32,11 @@ impl FilmSize {
         // named sizes in millimetres (PS3.3 C.13.3.1 table)
         let named = match text.as_str() {
             "8INX10IN" => Some((203.0, 254.0)),
+            "8_5INX11IN" => Some((215.0, 279.0)),
             "10INX12IN" => Some((254.0, 305.0)),
             "10INX14IN" => Some((254.0, 356.0)),
             "11INX14IN" => Some((279.0, 356.0)),
+            "11INX17IN" => Some((279.0, 431.0)),
             "14INX14IN" => Some((356.0, 356.0)),
             "14INX17IN" => Some((356.0, 432.0)),
             "A3" => Some((297.0, 420.0)),
@@ -411,6 +413,15 @@ mod tests {
         assert_eq!(
             FilmSize::parse("8INX10IN"),
             Some(FilmSize::new(203.0, 254.0))
+        );
+        assert_eq!(
+            FilmSize::parse("8_5INX11IN"),
+            Some(FilmSize::new(215.0, 279.0)),
+            "the PS3.3 C.13.3.1 defined term"
+        );
+        assert_eq!(
+            FilmSize::parse("11INX17IN"),
+            Some(FilmSize::new(279.0, 431.0))
         );
         assert_eq!(
             FilmSize::parse("24CMX30CM"),

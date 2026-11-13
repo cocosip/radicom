@@ -753,7 +753,8 @@ fn decode_pdata_bytes(body: Bytes) -> Result<PData> {
         }
         let context_id = body[start];
         let header = body[start + 1];
-        if context_id == 0 || header & 0xFC != 0 {
+        // PS3.8 §9.3.2: a presentation-context-id is odd and 1..=255.
+        if context_id == 0 || context_id & 1 == 0 || header & 0xFC != 0 {
             return Err(NetworkError::protocol(
                 "PDV has an invalid presentation context or control header",
             ));
@@ -932,6 +933,12 @@ fn encode_associate(a: &Associate, is_rq: bool) -> Result<Vec<u8>> {
         push_item(&mut user, item::IMPLEMENTATION_CLASS_UID, uid.as_bytes())?;
     }
     if let Some(version) = &a.user_information.implementation_version_name {
+        // PS3.7 §D.3.3.2.2: Implementation Version Name is SH, at most 16 bytes.
+        if version.len() > 16 {
+            return Err(NetworkError::protocol(
+                "Implementation Version Name exceeds the 16-byte SH limit",
+            ));
+        }
         push_item(
             &mut user,
             item::IMPLEMENTATION_VERSION_NAME,

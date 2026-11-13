@@ -198,7 +198,7 @@ macro_rules! pixel_read_methods {
         pub fn uncompressed_frame_size(&self) -> Result<u64, Error> {
             let bits = self.bits_allocated()? as u64;
             let samples = self.samples_per_pixel() as u64;
-            let mut columns = self.width() as u64;
+            let columns = self.width() as u64;
             let rows = self.height() as u64;
             // A zero dimension is always a broken dataset, never a zero-byte
             // frame: returning Ok(0) would let the frame bounds check pass and
@@ -217,20 +217,20 @@ macro_rules! pixel_read_methods {
                 return Ok((columns * rows * samples.max(1)).div_ceil(8));
             }
             if pi.is_some_and(|p| p.is_subsampled()) {
-                // Chroma subsampling: every row is padded to an even pixel count,
-                // so luma is over the rounded-up width. Chroma plane size is
-                // ceil(cols/2) x rows for 4:2:2 and ceil(cols/2) x ceil(rows/2)
-                // for 4:2:0 (an odd height keeps an extra chroma row, PR-09).
-                columns = columns.div_ceil(2) * 2;
                 let sample_bytes = bits.div_ceil(8);
+                // PS3.3 C.7.6.3.1.2 Note 2: a 4:2:2 frame is
+                // `Rows * Columns * 2 * bytes`; the standard formula does not
+                // round Columns up to an even number, so an odd width keeps
+                // exactly `Columns` luma samples per row.
+                if !pi.is_some_and(|p| p.is_420()) {
+                    return Ok(2 * columns * rows * sample_bytes);
+                }
+                // 4:2:0 is encapsulated-only (PS3.5 §8.2), so this is the padded
+                // plane model the renderer/codecs use: luma over the rounded-up
+                // width plus two chroma planes at ceil(Columns/2) x ceil(Rows/2).
+                let columns = columns.div_ceil(2) * 2;
                 let luma = columns * rows * sample_bytes;
-                let chroma_columns = columns / 2;
-                let chroma_rows = if pi.is_some_and(|p| p.is_420()) {
-                    rows.div_ceil(2)
-                } else {
-                    rows
-                };
-                let chroma = chroma_columns * chroma_rows * sample_bytes;
+                let chroma = (columns / 2) * rows.div_ceil(2) * sample_bytes;
                 return Ok(luma + 2 * chroma);
             }
             let bytes_per_sample = bits.div_ceil(8);
@@ -273,26 +273,55 @@ macro_rules! pixel_read_methods {
                         self.height()
                     )));
                 }
-                // ceil(rows*cols*samples/8) bytes and the next frame starts on
-                // the following byte boundary (fo-dicom DicomPixelData
-                // UncompressedFrameSize; docs §9.1 "one frame is ceil(...) bytes").
+                // PS3.5 §8.1.1 Note 2: in a native multi-frame image with Bits
+                // Allocated 1 the frames are not padded, so frame `index` starts
+                // at bit `index * rows * cols * samples` and may begin in the
+                // middle of a byte. A frame sharing a byte with its neighbours is
+                // re-aligned to bit 0 in a fresh buffer; the zero-copy window is
+                // used only when it starts on a byte boundary.
                 let frame_bits = (self.width() as usize)
                     * (self.height() as usize)
                     * (self.samples_per_pixel() as usize);
-                let frame_bytes = frame_bits.div_ceil(8);
-                let offset = index as usize * frame_bytes;
-                if (offset + frame_bytes) as u64 > buffer.size() {
+                let start_bit = index as usize * frame_bits;
+                let first_byte = start_bit / 8;
+                let end_byte = (start_bit + frame_bits).div_ceil(8);
+                if end_byte as u64 > buffer.size() {
                     return Err(pixel_err(format!(
-                        "frame {index} needs bytes {offset}..{} but pixel data holds {}",
-                        offset + frame_bytes,
+                        "frame {index} needs bytes {first_byte}..{end_byte} but pixel data holds {}",
                         buffer.size()
                     )));
                 }
-                return Ok(Arc::new(RangeBuffer::new(
-                    buffer,
-                    offset as u64,
-                    frame_bytes as u64,
-                )));
+                let frame_bytes = frame_bits.div_ceil(8);
+                let shift = start_bit % 8;
+                let tail = frame_bits % 8;
+                if shift == 0 && tail == 0 {
+                    return Ok(Arc::new(RangeBuffer::new(
+                        buffer,
+                        first_byte as u64,
+                        frame_bytes as u64,
+                    )));
+                }
+                let mut source = vec![0u8; end_byte - first_byte];
+                buffer
+                    .get_byte_range(first_byte as u64, &mut source)
+                    .map_err(|e| pixel_err(format!("pixel data read failed: {e}")))?;
+                let mut frame = vec![0u8; frame_bytes];
+                if shift == 0 {
+                    frame.copy_from_slice(&source[..frame_bytes]);
+                } else {
+                    for (i, out) in frame.iter_mut().enumerate() {
+                        let low = source.get(i).copied().unwrap_or(0) >> shift;
+                        let high = source.get(i + 1).map_or(0, |byte| byte << (8 - shift));
+                        *out = low | high;
+                    }
+                }
+                // Drop the next frame's bits from the final partial byte.
+                if tail != 0 {
+                    if let Some(last) = frame.last_mut() {
+                        *last &= (1u8 << tail) - 1;
+                    }
+                }
+                return Ok(Arc::new(MemoryBuffer::from(frame)));
             }
             let frame_size = self.uncompressed_frame_size()?;
             let offset = index as u64 * frame_size;
@@ -501,8 +530,8 @@ macro_rules! pixel_read_methods {
             }
             let first = [desc[2], desc[3]];
             Some(match element.vr() {
-                Vr::Ss => i16::from_le_bytes(first) as i32,
-                _ => u16::from_le_bytes(first) as i32,
+                Vr::Ss => i16::from_ne_bytes(first) as i32,
+                _ => u16::from_ne_bytes(first) as i32,
             })
         }
 
@@ -523,30 +552,20 @@ macro_rules! pixel_read_methods {
             if desc.len() < 6 {
                 return Err(pixel_err("palette LUT descriptor is shorter than 6 bytes"));
             }
-            let entries = u16::from_le_bytes([desc[0], desc[1]]);
+            // The descriptor is little-endian on the wire, but the element buffer
+            // is host order in memory (docs §9.1 invariant).
+            let entries = u16::from_ne_bytes([desc[0], desc[1]]);
             // a descriptor count of 0 means 65536 entries (PS3.3 C.7.6.3.1.5)
             let count = if entries == 0 {
                 65536usize
             } else {
                 entries as usize
             };
-            let _first_mapped = u16::from_le_bytes([desc[2], desc[3]]);
-            let bits = u16::from_le_bytes([desc[4], desc[5]]);
+            let bits = u16::from_ne_bytes([desc[4], desc[5]]);
             if !matches!(bits, 8 | 16) {
                 return Err(pixel_err(format!(
                     "palette LUT bits per entry {bits} is not 8 or 16"
                 )));
-            }
-            // An explicit count may not exceed the index range BitsStored addresses.
-            // A descriptor count of 0 is exempt (it means the full 65536 table).
-            let bits_stored = self.bits_stored();
-            if entries != 0 && bits_stored > 0 && bits_stored < 31 {
-                let addressable = 1usize << bits_stored;
-                if count > addressable {
-                    return Err(pixel_err(format!(
-                        "palette LUT entry count {count} exceeds 2^BitsStored ({addressable})"
-                    )));
-                }
             }
 
             let data = self
@@ -556,13 +575,16 @@ macro_rules! pixel_read_methods {
                 .ok_or_else(|| pixel_err("palette LUT data missing"))?;
             let raw = data.data()?;
 
+            // PS3.3 C.7.6.3.1.5 Note: an 8-bit table is `count` bytes, plus the
+            // single even-length padding byte that an odd entry count needs
+            // (`count + 1`), so both lengths are legal. A table that stores its
+            // 8-bit entries in 16-bit words is tolerated too.
             let mut out = Vec::with_capacity(count);
-            if raw.len() == count {
-                // 8-bit entries (one byte per entry)
+            if bits == 8 && raw.len() >= count && raw.len() <= count + 1 {
                 out.extend_from_slice(&raw[..count]);
             } else if raw.len() >= count * 2 {
-                // data is two bytes per entry: fo-dicom takes one byte per entry,
-                // the high byte (offset 1) when 16-bit-allocated, else the low byte
+                // Two bytes per entry: an 8-bit descriptor inside 16-bit words
+                // takes the low byte, a 16-bit descriptor the high byte.
                 let offset = if bits == 16 { 1 } else { 0 };
                 for i in 0..count {
                     out.push(raw[i * 2 + offset]);
@@ -703,23 +725,25 @@ impl<'a> PixelData<'a> {
                     _ => Vec::new(),
                 };
                 if self.bits_allocated()? == 1 {
-                    // Each 1-bit frame is byte-aligned: frame `index` starts at
-                    // `index * ceil(frame_bits/8)` and occupies its own bytes
-                    // (fo-dicom DicomPixelData; docs §9.1). Keep earlier frames,
-                    // drop any trailing pad, then write this frame LSB-first.
+                    // PS3.5 §8.1.1 Note 2: 1-bit native frames are bit-continuous,
+                    // so frame `index` starts at bit `index * rows * cols` and may
+                    // share a byte with the previous/next frame. Keep the bytes
+                    // already written (including a shared first byte), extend the
+                    // value, then OR this frame's bits into place.
                     let frame_bits = (self.width() as usize)
                         * (self.height() as usize)
                         * (self.samples_per_pixel() as usize);
-                    let frame_bytes = frame_bits.div_ceil(8);
-                    let offset = index as usize * frame_bytes;
-                    combined.truncate(offset.min(combined.len()));
-                    combined.resize(offset + frame_bytes, 0);
+                    let start_bit = index as usize * frame_bits;
+                    let end_byte = (start_bit + frame_bits).div_ceil(8);
+                    combined.truncate(end_byte.min(combined.len()));
+                    combined.resize(end_byte, 0);
                     let src = data.as_ref();
                     for bit_index in 0..frame_bits {
                         let bit =
                             (src.get(bit_index / 8).copied().unwrap_or(0) >> (bit_index % 8)) & 1;
                         if bit == 1 {
-                            combined[offset + bit_index / 8] |= 1u8 << (bit_index % 8);
+                            let position = start_bit + bit_index;
+                            combined[position / 8] |= 1u8 << (position % 8);
                         }
                     }
                 } else {
@@ -1056,7 +1080,8 @@ mod tests {
             20
         );
 
-        // 4:2:2 on the same odd geometry stays 24 (ceil(3/2)*4 bytes * 3 rows).
+        // 4:2:2 on the same odd geometry is Rows*Columns*2 bytes = 18; the
+        // standard formula does not round Columns up (PS3.3 C.7.6.3.1.2 Note 2).
         let mut ds = mono_dataset(3, 3, 8, 1);
         ds.insert_value(SAMPLES_PER_PIXEL, 3u16);
         ds.insert_str(PHOTOMETRIC_INTERPRETATION, Vr::Cs, "YBR_FULL_422");
@@ -1065,7 +1090,7 @@ mod tests {
                 .unwrap()
                 .uncompressed_frame_size()
                 .unwrap(),
-            24
+            18
         );
     }
 
@@ -1129,28 +1154,27 @@ mod tests {
     }
 
     #[test]
-    fn single_bit_frames_are_byte_aligned_per_frame() {
-        // Each 1-bit frame occupies its own ceil(frame_bits/8) bytes; the next
-        // frame starts on the following byte boundary (fo-dicom DicomPixelData
-        // UncompressedFrameSize, docs §9.1 "one frame is ceil(...) bytes").
-        // Frames do NOT share a byte.
+    fn single_bit_frames_are_bit_continuous() {
+        // PS3.5 §8.1.1 Note 2: 1-bit native frames are not padded, so the next
+        // frame starts at the next bit, not at the next byte. Two 1x1 frames
+        // therefore share one byte; frame 1 starts at bit 1.
         let mut ds = mono_dataset(1, 1, 1, 2);
         {
             let mut pd = PixelData::create_new(&mut ds).unwrap();
             pd.add_frame([0x01]).unwrap();
             pd.add_frame([0x00]).unwrap();
         }
-        // two 1x1 frames => two stored bytes (one per frame), not one shared byte
         let stored = match ds.item(&PIXEL_DATA) {
             Some(DicomItem::Element(e)) => e.value().as_buffer().map(|b| b.size()).unwrap_or(0),
             _ => 0,
         };
-        assert_eq!(stored, 2, "1-bit frames must be byte-aligned per frame");
+        // one data byte, plus the even-length pad of the Value Field
+        assert_eq!(stored, 2, "1-bit frames share a byte");
         let view = PixelDataRef::from_dataset(&ds).unwrap();
         assert_eq!(view.get_frame(0).unwrap().data().unwrap().as_ref(), &[0x01]);
         assert_eq!(view.get_frame(1).unwrap().data().unwrap().as_ref(), &[0x00]);
 
-        // 3x1: frame_bits=3 => 1 byte per frame; two frames => 2 stored bytes
+        // 3x1: frame 0 is bits 0..3, frame 1 bits 3..6 of the same byte.
         let mut ds = mono_dataset(3, 1, 1, 2);
         {
             let mut pd = PixelData::create_new(&mut ds).unwrap();
@@ -1162,6 +1186,7 @@ mod tests {
             view.get_frame(0).unwrap().data().unwrap().as_ref(),
             &[0b0000_0101]
         );
+        // the frame is re-aligned to bit 0 when it starts mid-byte
         assert_eq!(
             view.get_frame(1).unwrap().data().unwrap().as_ref(),
             &[0b0000_0110]
@@ -1460,7 +1485,7 @@ mod tests {
         let us = |vals: &[u16]| {
             let mut b = Vec::new();
             for &v in vals {
-                b.extend_from_slice(&v.to_le_bytes());
+                b.extend_from_slice(&v.to_ne_bytes());
             }
             Arc::new(MemoryBuffer::from(b)) as SharedBuffer
         };
@@ -1470,7 +1495,7 @@ mod tests {
             for &v in &vals {
                 // low byte = 0xEE filler, high byte = value
                 let word = ((v) << 8) | 0x00EE;
-                b.extend_from_slice(&word.to_le_bytes());
+                b.extend_from_slice(&word.to_ne_bytes());
             }
             Arc::new(MemoryBuffer::from(b)) as SharedBuffer
         };
@@ -1523,7 +1548,7 @@ mod tests {
         let us = |vals: &[u16]| {
             let mut b = Vec::new();
             for &v in vals {
-                b.extend_from_slice(&v.to_le_bytes());
+                b.extend_from_slice(&v.to_ne_bytes());
             }
             std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(b)) as SharedBuffer
         };
@@ -1574,7 +1599,7 @@ mod tests {
         let us = |vals: &[u16]| {
             let mut b = Vec::new();
             for &v in vals {
-                b.extend_from_slice(&v.to_le_bytes());
+                b.extend_from_slice(&v.to_ne_bytes());
             }
             std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(b)) as SharedBuffer
         };
@@ -1606,9 +1631,9 @@ mod tests {
         let mut ds = mono_dataset(1, 1, 8, 1);
         ds.insert_str(PHOTOMETRIC_INTERPRETATION, Vr::Cs, "PALETTE COLOR");
         let mut desc = Vec::new();
-        desc.extend_from_slice(&entries.to_le_bytes());
-        desc.extend_from_slice(&0u16.to_le_bytes());
-        desc.extend_from_slice(&bits.to_le_bytes());
+        desc.extend_from_slice(&entries.to_ne_bytes());
+        desc.extend_from_slice(&0u16.to_ne_bytes());
+        desc.extend_from_slice(&bits.to_ne_bytes());
         let desc: SharedBuffer = Arc::new(MemoryBuffer::from(desc));
         let data: SharedBuffer = Arc::new(MemoryBuffer::from(data.to_vec()));
         for (d, t) in [
@@ -1652,14 +1677,29 @@ mod tests {
     }
 
     #[test]
-    fn palette_lut_rejects_a_descriptor_count_beyond_bits_stored() {
-        // BitsStored=8 addresses at most 2^8 = 256 entries; 300 is malformed.
+    fn palette_lut_accepts_more_entries_than_bits_stored_addresses() {
+        // The standard puts no cap on the descriptor count beyond 2^16; entries
+        // the indexed input can never reach are legal, just unreachable.
         let data = vec![0u8; 300];
         let mut ds = palette_dataset(300, 8, &data);
-        assert!(PixelData::from_dataset(&mut ds)
+        let lut = PixelData::from_dataset(&mut ds)
             .unwrap()
             .palette_color_lut_checked()
-            .is_err());
+            .expect("300 entries are legal");
+        assert_eq!(lut.len(), 300);
+    }
+
+    #[test]
+    fn palette_lut_accepts_an_odd_entry_count_with_a_padding_byte() {
+        // PS3.3 C.7.6.3.1.5 Note: an 8-bit table with an odd entry count stores
+        // `count + 1` bytes because the Value Field must have even length.
+        let mut ds = palette_dataset(3, 8, &[10, 20, 30, 0]);
+        let lut = PixelData::from_dataset(&mut ds)
+            .unwrap()
+            .palette_color_lut_checked()
+            .expect("odd 8-bit palette");
+        assert_eq!(lut.len(), 3);
+        assert_eq!(lut[2], Color32::new(30, 30, 30));
     }
 
     #[test]
@@ -1667,7 +1707,7 @@ mod tests {
         let mut ds = palette_dataset(2, 8, &[10, 20]);
         let descriptor = [2u16, (-2i16) as u16, 8]
             .into_iter()
-            .flat_map(u16::to_le_bytes)
+            .flat_map(u16::to_ne_bytes)
             .collect::<Vec<_>>();
         ds.insert_or_update(DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
@@ -2046,9 +2086,9 @@ mod tests {
         let mut ds = Dataset::new();
         ds.insert_str(PHOTOMETRIC_INTERPRETATION, Vr::Cs, "PALETTE COLOR");
         let mut desc = Vec::new();
-        desc.extend_from_slice(&2u16.to_le_bytes());
-        desc.extend_from_slice(&0u16.to_le_bytes());
-        desc.extend_from_slice(&12u16.to_le_bytes());
+        desc.extend_from_slice(&2u16.to_ne_bytes());
+        desc.extend_from_slice(&0u16.to_ne_bytes());
+        desc.extend_from_slice(&12u16.to_ne_bytes());
         for tag in [
             Tag::RED_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR,
             Tag::GREEN_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR,

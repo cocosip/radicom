@@ -661,7 +661,7 @@ mod tests {
         let mut item = Dataset::new();
         let mut descriptor = Vec::new();
         for value in [entries.len() as u16, 0, 16] {
-            descriptor.extend_from_slice(&value.to_le_bytes());
+            descriptor.extend_from_slice(&value.to_ne_bytes());
         }
         item.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
@@ -672,7 +672,7 @@ mod tests {
         ));
         let mut data = Vec::new();
         for value in entries {
-            data.extend_from_slice(&value.to_le_bytes());
+            data.extend_from_slice(&value.to_ne_bytes());
         }
         item.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
@@ -1535,12 +1535,13 @@ mod tests {
 
     #[test]
     fn a_presentation_lut_sequence_maps_the_cell() {
-        // a 256-entry 8-bit table that maps every grey to 200
+        // a 256-entry 12-bit table whose P-value 3212 maps every grey to 200
+        // (3212 * 255 / 4095 rounds to 200)
         let mut item = Dataset::new();
         let mut desc = Vec::new();
-        desc.extend_from_slice(&256u16.to_le_bytes());
-        desc.extend_from_slice(&0u16.to_le_bytes());
-        desc.extend_from_slice(&8u16.to_le_bytes());
+        desc.extend_from_slice(&256u16.to_ne_bytes());
+        desc.extend_from_slice(&0u16.to_ne_bytes());
+        desc.extend_from_slice(&12u16.to_ne_bytes());
         item.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
                 Tag::LUT_DESCRIPTOR,
@@ -1548,11 +1549,16 @@ mod tests {
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(desc)),
             ),
         ));
+        // 3212 high-aligned in a 16-bit word = 0xC8C0
+        let mut data = Vec::with_capacity(512);
+        for _ in 0..256 {
+            data.extend_from_slice(&0xC8C0u16.to_ne_bytes());
+        }
         item.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
                 Tag::LUT_DATA,
                 Vr::Ow,
-                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![200u8; 256])),
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(data)),
             ),
         ));
         let mut film = film_with_one_box("", 128);

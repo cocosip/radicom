@@ -351,6 +351,15 @@ impl DicomWriter {
         out: &mut ByteTargetWriter<W>,
     ) -> Result<u64, Error> {
         let len = value_len.unwrap_or(0xFFFF_FFFF);
+        // 0xFFFFFFFF is the undefined-length marker; a computed *defined*
+        // length with that exact value cannot be encoded (PS3.5 §7.1).
+        if len == 0xFFFF_FFFF && value_len.is_some() {
+            return Err(Error::Data(DataError::Other {
+                message: format!(
+                    "{tag}: encoded length {len} collides with the undefined-length marker"
+                ),
+            }));
+        }
         out.write_u16(tag.group()).map_err(io_err)?;
         out.write_u16(tag.element()).map_err(io_err)?;
         let mut written = 4u64;
@@ -651,11 +660,18 @@ fn write_item_tag<W: Write>(
     out.write_u16(0xE000).map_err(io_err)?;
     let value = if defined {
         // CORE-27: never truncate an item length into the 32-bit field
-        u32::try_from(len).map_err(|_| {
+        let value = u32::try_from(len).map_err(|_| {
             Error::Data(DataError::Other {
                 message: format!("item length {len} exceeds the 4 GiB DICOM limit"),
             })
-        })?
+        })?;
+        // 0xFFFFFFFF is the undefined-length marker, never a defined length.
+        if value == 0xFFFF_FFFF {
+            return Err(Error::Data(DataError::Other {
+                message: format!("item length {len} collides with the undefined-length marker"),
+            }));
+        }
+        value
     } else {
         0xFFFF_FFFF
     };

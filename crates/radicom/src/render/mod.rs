@@ -61,6 +61,9 @@ pub const DEFAULT_OVERLAY_COLOR: crate::pixel::Color32 =
 pub struct LutTable {
     first_mapped: i32,
     entries: Vec<i32>,
+    /// Bits per output entry (PS3.3 C.11.2.1.1 third Value: 8 or 16). It defines
+    /// the unsigned output range `0..2^bits-1`.
+    bits: u16,
 }
 
 impl LutTable {
@@ -73,20 +76,17 @@ impl LutTable {
         if desc.len() < 6 {
             return None;
         }
-        let raw_entries = match descriptor.vr() {
-            Vr::Ss => i16::from_le_bytes([desc[0], desc[1]]) as i32,
-            _ => u16::from_le_bytes([desc[0], desc[1]]) as i32,
+        // The buffer is host order in memory (docs §9.1), so `ne` bytes.
+        // PS3.3 C.11.2.1.1 Note 1: the first and third Values are always
+        // interpreted as unsigned, whatever the descriptor's VR.
+        let entries = u16::from_ne_bytes([desc[0], desc[1]]);
+        // The second Value's VR is US or SS and follows the input's signedness
+        // (C.11.2.1.1); the descriptor's VR says which one was used.
+        let first_mapped = match descriptor.vr() {
+            Vr::Ss => i16::from_ne_bytes([desc[2], desc[3]]) as i32,
+            _ => u16::from_ne_bytes([desc[2], desc[3]]) as i32,
         };
-        // fo-dicom `VOISequenceLUT.GetLUTDescriptor`: a negative entry count
-        // "makes no sense" but is accepted as its absolute value
-        let count = if raw_entries == 0 {
-            65536usize
-        } else {
-            raw_entries.unsigned_abs() as usize
-        };
-        // first mapped pixel value is SS (signed) per PS3.3
-        let first_mapped = u16::from_le_bytes([desc[2], desc[3]]) as i16 as i32;
-        let bits = u16::from_le_bytes([desc[4], desc[5]]);
+        let bits = u16::from_ne_bytes([desc[4], desc[5]]);
         if !matches!(bits, 8 | 16) {
             return None;
         }
@@ -96,12 +96,40 @@ impl LutTable {
             .map(|e| e.vr())
             .unwrap_or(Vr::Ow);
 
+        // PS3.3 C.11.2.1.1: a count of 0 means 65536 entries. The unsigned
+        // reading is the standard one; a nonconformant writer that stored a
+        // two's-complement count is tolerated only when the unsigned count cannot
+        // cover the data it actually wrote (fo-dicom compatibility).
+        let fits = |count: usize| {
+            if bits == 8 {
+                data.len() >= count
+            } else {
+                data.len() >= count.saturating_mul(2)
+            }
+        };
+        let unsigned_count = if entries == 0 {
+            65536usize
+        } else {
+            entries as usize
+        };
+        let signed_count = if entries == 0 {
+            65536usize
+        } else {
+            (entries as i16).unsigned_abs() as usize
+        };
+        let count = if fits(unsigned_count) || !fits(signed_count) {
+            unsigned_count
+        } else {
+            signed_count
+        };
+
         let mut out = Vec::with_capacity(count);
         if bits == 8 {
-            // 8-bit entries: one byte per entry when byte-packed, otherwise the
-            // low byte of a 16-bit word. Choose by the descriptor, not by length
-            // (PR-12).
-            if data.len() == count {
+            // 8-bit entries: one byte per entry; `count + 1` bytes are legal when
+            // the odd count needs one even-length padding byte (C.11.2.1.1
+            // Note 2). A table whose 8-bit entries sit in 16-bit words is
+            // tolerated by taking the low byte.
+            if data.len() >= count && data.len() <= count + 1 {
                 out.extend(data[..count].iter().map(|b| *b as i32));
             } else if data.len() >= count * 2 {
                 for i in 0..count {
@@ -119,9 +147,9 @@ impl LutTable {
             for i in 0..count {
                 let pair = [data[i * 2], data[i * 2 + 1]];
                 let v = if data_vr == Vr::Ss {
-                    i16::from_le_bytes(pair) as i32
+                    i16::from_ne_bytes(pair) as i32
                 } else {
-                    u16::from_le_bytes(pair) as i32
+                    u16::from_ne_bytes(pair) as i32
                 };
                 out.push(v);
             }
@@ -129,6 +157,7 @@ impl LutTable {
         Some(LutTable {
             first_mapped,
             entries: out,
+            bits,
         })
     }
 
@@ -144,36 +173,18 @@ impl LutTable {
         Some(self.entries[clamped])
     }
 
-    /// Maps an input value to an 8-bit display byte. fo-dicom's grayscale
-    /// pipeline re-windows the LUT output through `VOILinearLUT(min, max)`
-    /// using the LUT's first/last entries, so a table that does not span the
-    /// full 0..2^n-1 range still reaches white at its top entry. The byte
-    /// truncates (`(int)_lut[i]`), not rounds.
+    /// Maps an input value to an 8-bit display byte through the LUT's declared
+    /// output range. PS3.3 C.11.2.1.1: "The output range is from 0 to 2^n-1
+    /// where n is the third Value of LUT Descriptor. This range is always
+    /// unsigned." With no following Presentation LUT that range is implicitly
+    /// scaled to the full display range, so an `n`-bit table maps its entries
+    /// by `v * 255 / (2^n - 1)`; out-of-range entries clamp at both ends.
     pub fn map_byte(&self, value: f64) -> u8 {
         let Some(v) = self.at(value) else {
             return 0;
         };
-        let (Some(&first), Some(&last)) = (self.entries.first(), self.entries.last()) else {
-            return 0;
-        };
-        let (min, max) = (first as f64, last as f64);
-        let width = max - min;
-        let center = (max + min) / 2.0;
-        let out = if width == 1.0 {
-            // A one-wide output range (two consecutive entries) is a threshold,
-            // not the general formula: (width - 1) would divide by zero (PR-C-04).
-            // fo-dicom `VOILinearLUT` uses `WindowCenterMin05 = center - 0.5`.
-            if (v as f64) < center - 0.5 {
-                0.0
-            } else {
-                255.0
-            }
-        } else if width < 1.0 {
-            linear_exact(v as f64, center, width)
-        } else {
-            ((v as f64 - (center - 0.5)) / (width - 1.0) + 0.5) * 255.0
-        };
-        out.clamp(0.0, 255.0) as u8
+        let max = ((1u32 << self.bits) - 1) as f64;
+        ((v.max(0) as f64) * 255.0 / max).clamp(0.0, 255.0) as u8
     }
 
     /// Maps an input value to its raw table value (modality form).
@@ -649,9 +660,9 @@ impl GrayscaleRenderOptions {
             VoiFunction::Linear => {
                 let w = self.window_width;
                 if w == 1.0 {
-                    // fo-dicom VOILinearLUT: a width of exactly one is a
-                    // threshold at the centre, not the general formula
-                    if value < self.window_center - 0.5 {
+                    // PS3.3 C.11.2.1.2.1: a width of exactly one is a threshold
+                    // at the centre — `x <= c - 0.5` is the minimum output.
+                    if value <= self.window_center - 0.5 {
                         0.0
                     } else {
                         255.0
@@ -902,13 +913,13 @@ fn visit_frame_stored_values(
     } else if depth.allocated == 32 {
         for c in raw.as_chunks::<4>().0 {
             f(sample32_value(
-                u32::from_le_bytes([c[0], c[1], c[2], c[3]]),
+                u32::from_ne_bytes([c[0], c[1], c[2], c[3]]),
                 depth,
             ));
         }
     } else {
         for c in raw.as_chunks::<2>().0 {
-            f(value(u16::from_le_bytes([c[0], c[1]])));
+            f(value(u16::from_ne_bytes([c[0], c[1]])));
         }
     }
     Ok(())
@@ -1434,7 +1445,7 @@ fn render_grayscale_with_threshold(
         }
     } else {
         for c in raw[..count * 2].as_chunks::<2>().0 {
-            let v = depth.normalize(u16::from_le_bytes([c[0], c[1]]));
+            let v = depth.normalize(u16::from_ne_bytes([c[0], c[1]]));
             min = min.min(v);
             max = max.max(v);
         }
@@ -1491,7 +1502,7 @@ fn render_grayscale_32(
     }
     let mut bytes = Vec::with_capacity(count * 4);
     for i in 0..count {
-        let v = u32::from_le_bytes([raw[i * 4], raw[i * 4 + 1], raw[i * 4 + 2], raw[i * 4 + 3]]);
+        let v = u32::from_ne_bytes([raw[i * 4], raw[i * 4 + 1], raw[i * 4 + 2], raw[i * 4 + 3]]);
         let gray = options.map(sample32_value(v, depth));
         bytes.extend_from_slice(&[gray, gray, gray, 0xFF]);
     }
@@ -1522,7 +1533,7 @@ fn emit_rows(
             }
         } else {
             for c in row.as_chunks::<2>().0 {
-                let v = depth.normalize(u16::from_le_bytes([c[0], c[1]]));
+                let v = depth.normalize(u16::from_ne_bytes([c[0], c[1]]));
                 let gray = lut[(v - min) as usize];
                 dst[o..o + 4].copy_from_slice(&[gray, gray, gray, 0xFF]);
                 o += 4;
@@ -1978,7 +1989,7 @@ fn render_rgb_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error> {
         if unit == 1 {
             raw[index] as u16
         } else {
-            u16::from_le_bytes([raw[index * 2], raw[index * 2 + 1]])
+            u16::from_ne_bytes([raw[index * 2], raw[index * 2 + 1]])
         }
     };
     // Normalise stored samples to the low BitsStored bits, then scale to 8-bit
@@ -2049,7 +2060,7 @@ fn render_palette_frame(dataset: &Dataset, frame: u32) -> Result<RawImage, Error
         let sample = if unit == 1 {
             raw[i] as u16
         } else {
-            u16::from_le_bytes([raw[i * 2], raw[i * 2 + 1]])
+            u16::from_ne_bytes([raw[i * 2], raw[i * 2 + 1]])
         };
         let index = depth.normalize(sample);
         let entry = index as i32 - first_mapped;
@@ -2137,7 +2148,7 @@ fn render_ybr_frame(
         if bits == 8 {
             to8(raw[byte_index] as u16)
         } else {
-            to8(u16::from_le_bytes([raw[byte_index], raw[byte_index + 1]]))
+            to8(u16::from_ne_bytes([raw[byte_index], raw[byte_index + 1]]))
         }
     };
     let unit = if bits == 8 { 1usize } else { 2usize };
@@ -2156,8 +2167,14 @@ fn render_ybr_frame(
     let mut bytes = Vec::with_capacity(count * 4);
     match sampling {
         YbrSampling::H2 => {
-            // 4:2:2: per 2 pixels a group of Y1, Y2, Cb, Cr; every row is padded
-            // to an even pixel count in the stored data.
+            // 4:2:2: per 2 pixels a group of Y1, Y2, Cb, Cr. The frame length is
+            // Rows*Columns*2 (PS3.3 C.7.6.3.1.2 Note 2), which only lines up with
+            // whole pixel-pair groups when Columns is even.
+            if width % 2 != 0 {
+                return Err(unsupported(
+                    "YBR_FULL_422 requires an even number of columns",
+                ));
+            }
             let row_bytes = (width as usize).div_ceil(2) * 4 * unit;
             if raw.len() < row_bytes * height as usize {
                 return Err(unsupported(
@@ -2271,7 +2288,7 @@ mod tests {
             if bits == 8 {
                 bytes.push(s as u8);
             } else {
-                bytes.extend_from_slice(&s.to_le_bytes());
+                bytes.extend_from_slice(&s.to_ne_bytes());
             }
         }
         ds.insert_or_update(crate::model::item::DicomItem::Element(
@@ -2387,19 +2404,21 @@ mod tests {
     }
 
     /// Inserts a LUT sequence at `seq_tag` whose one item maps stored values
-    /// `[first .. first+entries)` through `data` (8-bit entries).
+    /// `[first .. first+entries)` through `data` (8-bit entries). A negative
+    /// first-mapped value is written with an `SS` descriptor, as the standard
+    /// requires for a signed input (PS3.3 C.11.2.1.1).
     fn put_lut_seq(ds: &mut Dataset, seq_tag: Tag, first: i16, data: &[u8]) {
         let seq = ds.insert_sequence(seq_tag);
         let mut item = Dataset::new();
         let entries = data.len() as u16;
         let mut desc = Vec::new();
-        desc.extend_from_slice(&entries.to_le_bytes()); // number of entries
-        desc.extend_from_slice(&(first as u16).to_le_bytes()); // first mapped (SS)
-        desc.extend_from_slice(&8u16.to_le_bytes()); // bits per entry
+        desc.extend_from_slice(&entries.to_ne_bytes()); // number of entries
+        desc.extend_from_slice(&(first as u16).to_ne_bytes()); // first mapped
+        desc.extend_from_slice(&8u16.to_ne_bytes()); // bits per entry
         item.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
                 Tag::LUT_DESCRIPTOR,
-                Vr::Us,
+                if first < 0 { Vr::Ss } else { Vr::Us },
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(desc)),
             ),
         ));
@@ -2426,19 +2445,19 @@ mod tests {
         let seq = ds.insert_sequence(Tag::VOILUT_SEQUENCE);
         let mut item = Dataset::new();
         let mut desc = Vec::new();
-        desc.extend_from_slice(&(data.len() as u16).to_le_bytes());
-        desc.extend_from_slice(&(first as u16).to_le_bytes());
-        desc.extend_from_slice(&16u16.to_le_bytes()); // 16 bits per entry
+        desc.extend_from_slice(&(data.len() as u16).to_ne_bytes());
+        desc.extend_from_slice(&(first as u16).to_ne_bytes());
+        desc.extend_from_slice(&16u16.to_ne_bytes()); // 16 bits per entry
         item.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
                 Tag::LUT_DESCRIPTOR,
-                Vr::Us,
+                if first < 0 { Vr::Ss } else { Vr::Us },
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(desc)),
             ),
         ));
         let mut bytes = Vec::new();
         for &v in data {
-            bytes.extend_from_slice(&v.to_le_bytes());
+            bytes.extend_from_slice(&v.to_ne_bytes());
         }
         item.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
@@ -2463,9 +2482,9 @@ mod tests {
         let seq = ds.insert_sequence(Tag::VOILUT_SEQUENCE);
         let mut item = Dataset::new();
         let mut desc = Vec::new();
-        desc.extend_from_slice(&entries.to_le_bytes());
-        desc.extend_from_slice(&(first as u16).to_le_bytes());
-        desc.extend_from_slice(&bits.to_le_bytes());
+        desc.extend_from_slice(&entries.to_ne_bytes());
+        desc.extend_from_slice(&(first as u16).to_ne_bytes());
+        desc.extend_from_slice(&bits.to_ne_bytes());
         item.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
                 Tag::LUT_DESCRIPTOR,
@@ -2484,36 +2503,43 @@ mod tests {
     }
 
     #[test]
-    fn a_16_bit_voi_lut_is_recalibrated_to_its_own_output_range() {
-        // fo-dicom re-windows the LUT through VOILinearLUT(first, last), so a
-        // narrow 16-bit table reaches white at its top entry instead of
-        // scaling by >>8 (which mapped 1000 to 3)
+    fn a_16_bit_voi_lut_scales_by_its_descriptor_bit_depth() {
+        // PS3.3 C.11.2.1.1: the output range is 0..2^n-1 with n the third
+        // descriptor value. A 16-bit table therefore scales by 255/65535; only
+        // an 8-bit table maps its entries straight to display bytes.
         let mut ds = gray_image(1, 1, 8, &[5], None, None);
         put_voi_lut_16(&mut ds, 5, &[0, 250, 500, 750, 1000]);
         let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
         assert_eq!(o.map(5.0), 0, "first entry is black");
-        assert_eq!(o.map(9.0), 255, "top entry is white");
-        let mid = o.map(7.0);
-        assert!(mid.abs_diff(128) <= 1, "middle entry is mid grey: {mid}");
+        assert_eq!(o.map(6.0), 0, "250/65535 rounds down to black");
+        assert_eq!(o.map(7.0), 1, "500 of 65535 is one display level");
+        assert_eq!(o.map(9.0), 3, "1000 of 65535 is three display levels");
+
+        // An 8-bit table whose entries reach 255 already spans the display range.
+        let mut ds = gray_image(2, 1, 8, &[0, 1], None, None);
+        put_voi_lut(&mut ds, 0, &[0, 255]);
+        let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
+        assert_eq!(o.map(0.0), 0);
+        assert_eq!(o.map(1.0), 255);
     }
 
     #[test]
     fn a_voi_lut_sequence_overrides_the_window_function() {
         // Stored values 10, 11 with a VOI LUT at first_mapped=10 and data
-        // [0, 200]: 10 → first entry → 0, 11 → last entry → 255 (the LUT is
-        // re-windowed to its own output range, as fo-dicom does).
+        // [0, 200]: 10 → first entry → 0, 11 → last entry → 200 (an 8-bit
+        // table's entries are display bytes, PS3.3 C.11.2.1.1).
         let mut ds = gray_image(2, 1, 8, &[10, 11], None, None);
         put_voi_lut(&mut ds, 10, &[0, 200]);
 
         let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
         assert!(o.use_voi_lut && o.voi_lut.is_some(), "VOI LUT detected");
         assert_eq!(o.map(10.0), 0);
-        assert_eq!(o.map(11.0), 255);
+        assert_eq!(o.map(11.0), 200);
 
         let image = render_frame(&ds, 0).unwrap();
         let b = image.as_bytes();
         assert_eq!(b[0], 0, "pixel 0 through the LUT");
-        assert_eq!(b[4], 255, "pixel 1 through the LUT");
+        assert_eq!(b[4], 200, "pixel 1 through the LUT");
     }
 
     #[test]
@@ -2522,7 +2548,7 @@ mod tests {
         // first_mapped=10, two entries [0, 250]; value 50 is beyond the top
         put_voi_lut(&mut ds, 10, &[0, 250]);
         let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
-        assert_eq!(o.map(50.0), 255, "above range clamps to the last entry");
+        assert_eq!(o.map(50.0), 250, "above range clamps to the last entry");
         assert_eq!(o.map(0.0), 0, "below range clamps to the first entry");
     }
 
@@ -2546,8 +2572,9 @@ mod tests {
 
     #[test]
     fn a_negative_voi_lut_entry_count_uses_its_absolute_value() {
-        // A negative SS entry count is invalid in principle, but fo-dicom
-        // accepts it by taking the absolute value for compatibility.
+        // The count is unsigned per PS3.3 C.11.2.1.1; a nonconformant writer
+        // that stored a two's-complement count is tolerated by falling back to
+        // its absolute value when the unsigned count cannot cover the data.
         let mut ds = gray_image(1, 1, 8, &[0], None, None);
         put_voi_lut_raw(&mut ds, (-3i16) as u16, -1, 8, Vr::Ow, &[10, 20, 30]);
         let options = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
@@ -2555,31 +2582,36 @@ mod tests {
             .voi_lut
             .as_ref()
             .expect("the three-entry LUT is accepted");
-        assert_eq!(lut.map(-1.0), 0, "the first entry remains the low endpoint");
-        assert_eq!(lut.map(0.0), 134, "the middle entry remains the midpoint");
-        assert_eq!(
-            lut.map(1.0),
-            255,
-            "the last entry remains the high endpoint"
-        );
+        assert_eq!(lut.map(-1.0), 10, "the first entry is a display byte");
+        assert_eq!(lut.map(0.0), 20, "the middle entry is a display byte");
+        assert_eq!(lut.map(1.0), 30, "the last entry is a display byte");
     }
 
     #[test]
     fn a_voi_lut_with_ss_data_keeps_negative_entries() {
         // SS data (not US/OW) with negative entries; first mapped -1, 3 entries.
-        // -1 → -1000 (black), 0 → 0 (mid), 1 → 1000 (white). If the bytes were
-        // read unsigned they would be 64536 and never map correctly.
+        // If the bytes were read unsigned they would be 64536 and never map
+        // correctly.
         let mut data = Vec::new();
         for v in [-1000i16, 0, 1000] {
-            data.extend_from_slice(&v.to_le_bytes());
+            data.extend_from_slice(&v.to_ne_bytes());
         }
         let mut ds = gray_image(1, 1, 8, &[0], None, None);
         put_voi_lut_raw(&mut ds, 3, -1, 16, Vr::Ss, &data);
+        let item = &ds.try_get_sequence(Tag::VOILUT_SEQUENCE).unwrap().items()[0];
+        let table = super::LutTable::from_item(item).unwrap();
+        assert_eq!(
+            table.entries,
+            vec![-1000, 0, 1000],
+            "SS entries keep their sign"
+        );
         let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
-        assert_eq!(o.map(-1.0), 0, "first SS entry is black");
-        // 127.5 truncates to 127, matching fo-dicom's PrecalculatedLUT
-        assert_eq!(o.map(0.0), 127, "middle SS entry (0) is mid grey");
-        assert_eq!(o.map(1.0), 255, "last SS entry is white");
+        assert_eq!(o.map(-1.0), 0, "a negative entry clamps to black");
+        assert_eq!(
+            o.map(1.0),
+            3,
+            "1000 of a 16-bit output range is nearly black"
+        );
     }
 
     #[test]
@@ -2912,7 +2944,7 @@ mod tests {
         ds.insert_str(Tag::WINDOW_WIDTH, Vr::Ds, format!("{width_ds}"));
         let mut bytes = Vec::new();
         for &s in samples {
-            bytes.extend_from_slice(&s.to_le_bytes());
+            bytes.extend_from_slice(&s.to_ne_bytes());
         }
         ds.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
@@ -3119,9 +3151,9 @@ mod tests {
             let mut fg = Dataset::new();
             let mut lut_item = Dataset::new();
             let mut desc = Vec::new();
-            desc.extend_from_slice(&2u16.to_le_bytes()); // 2 entries
-            desc.extend_from_slice(&0u16.to_le_bytes()); // first mapped 0
-            desc.extend_from_slice(&8u16.to_le_bytes()); // 8 bits per entry
+            desc.extend_from_slice(&2u16.to_ne_bytes()); // 2 entries
+            desc.extend_from_slice(&0u16.to_ne_bytes()); // first mapped 0
+            desc.extend_from_slice(&8u16.to_ne_bytes()); // 8 bits per entry
             lut_item.insert_or_update(crate::model::item::DicomItem::Element(
                 crate::model::element::DicomElement::new_bytes(
                     Tag::LUT_DESCRIPTOR,
@@ -3308,19 +3340,16 @@ mod tests {
     }
 
     #[test]
-    fn voi_lut_output_width_of_one_does_not_divide_by_zero() {
-        // PR-C-04: two entries differing by 1 give an output range of width 1;
-        // the re-window used `(width - 1.0)` and divided by zero.
-        // fo-dicom VOILinearLUT tests `value < WindowCenterMin05` where
-        // `WindowCenterMin05 = center - 0.5`. With entries [10, 11] the center is
-        // 10.5 and the threshold 10.0, so both entries land above it (white); the
-        // important property is that this is a clean threshold, never a NaN panic.
+    fn voi_lut_8_bit_entries_are_display_bytes() {
+        // Two entries differing by 1 used to re-window through (width - 1) and
+        // divide by zero. PS3.3 C.11.2.1.1 puts an 8-bit table's output directly
+        // in 0..255, so each entry is already a display byte.
         let mut ds = gray_image(1, 1, 8, &[0], None, None);
         put_voi_lut(&mut ds, 0, &[10, 11]);
         let item = &ds.try_get_sequence(Tag::VOILUT_SEQUENCE).unwrap().items()[0];
         let table = super::LutTable::from_item(item).unwrap();
-        assert_eq!(table.map_byte(0.0), 255, "10 is not < 10.0 → white");
-        assert_eq!(table.map_byte(1.0), 255, "11 is not < 10.0 → white");
+        assert_eq!(table.map_byte(0.0), 10);
+        assert_eq!(table.map_byte(1.0), 11);
     }
 
     #[test]
@@ -3465,7 +3494,7 @@ mod tests {
             if bits == 8 {
                 bytes.push(s as u8);
             } else {
-                bytes.extend_from_slice(&s.to_le_bytes());
+                bytes.extend_from_slice(&s.to_ne_bytes());
             }
         }
         ds.insert_or_update(crate::model::item::DicomItem::Element(
@@ -3662,20 +3691,17 @@ mod tests {
     }
 
     #[test]
-    fn a_ybr_full_422_frame_with_odd_width_pads_the_last_group() {
-        // width 3 → ceil(3/2)=2 groups = 8 stored bytes; the last group's Y2 is
-        // padding. All three pixels are pure red (Y=76, Cb=85, Cr=255).
-        let ds = ybr422_image("YBR_FULL_422", 3, &[76, 76, 85, 255, 76, 0, 85, 255]);
-        let image = render_frame(&ds, 0).unwrap();
-        assert_eq!(image.width(), 3);
-        let b = image.as_bytes();
-        for p in 0..3 {
-            let px = &b[p * 4..p * 4 + 4];
-            assert!(
-                px[2] > 240 && px[1] < 16 && px[0] < 16,
-                "pixel {p} red-ish: {px:?}"
-            );
-        }
+    fn a_ybr_full_422_frame_with_odd_width_is_rejected() {
+        // PS3.3 C.7.6.3.1.2 Note 2 gives a 4:2:2 frame the length
+        // Rows*Columns*2*bytes, but the stored layout is per-pixel-pair groups,
+        // so an odd Columns has no defined byte layout; reject instead of
+        // silently reading a short/misaligned frame.
+        let ds = ybr422_image("YBR_FULL_422", 3, &[76, 76, 85, 255, 76, 0]);
+        let err = render_frame(&ds, 0).unwrap_err();
+        assert!(
+            format!("{err}").to_lowercase().contains("even"),
+            "expected an even-columns error, got: {err}"
+        );
     }
 
     #[test]
@@ -3738,7 +3764,7 @@ mod tests {
     fn us_bytes(values: &[u16]) -> crate::model::buffer::SharedBuffer {
         let mut bytes = Vec::with_capacity(values.len() * 2);
         for &v in values {
-            bytes.extend_from_slice(&v.to_le_bytes());
+            bytes.extend_from_slice(&v.to_ne_bytes());
         }
         std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(bytes))
     }
@@ -4352,8 +4378,8 @@ mod tests {
         ds.insert_value(Tag::new(0x6000, 0x0102), 8u16); // bit position = stored bits
                                                          // OverlayOrigin (6000,0050) is row\column, 1-based: row 1 \ column 1
         let mut origin = Vec::new();
-        origin.extend_from_slice(&1i16.to_le_bytes());
-        origin.extend_from_slice(&1i16.to_le_bytes());
+        origin.extend_from_slice(&1i16.to_ne_bytes());
+        origin.extend_from_slice(&1i16.to_ne_bytes());
         ds.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
                 Tag::new(0x6000, 0x0050),
@@ -4370,7 +4396,7 @@ mod tests {
                 if overlay_pixels.contains(&(x, y)) {
                     v |= 1 << 8; // overlay bit
                 }
-                bytes.extend_from_slice(&v.to_le_bytes());
+                bytes.extend_from_slice(&v.to_ne_bytes());
             }
         }
         ds.insert_or_update(crate::model::item::DicomItem::Element(
@@ -4458,8 +4484,8 @@ mod tests {
         ds.insert_value(Tag::new(0x6000, 0x0051), 2u16); // ImageFrameOrigin = 2
         ds.insert_str(Tag::new(0x6000, 0x0015), Vr::Is, "1"); // NumberOfFrames = 1
         let mut origin = Vec::new();
-        origin.extend_from_slice(&1i16.to_le_bytes());
-        origin.extend_from_slice(&1i16.to_le_bytes());
+        origin.extend_from_slice(&1i16.to_ne_bytes());
+        origin.extend_from_slice(&1i16.to_ne_bytes());
         ds.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
                 Tag::new(0x6000, 0x0050),
@@ -4523,8 +4549,8 @@ mod tests {
             ),
         ));
         let mut origin = Vec::new();
-        origin.extend_from_slice(&3i16.to_le_bytes()); // row
-        origin.extend_from_slice(&3i16.to_le_bytes()); // column
+        origin.extend_from_slice(&3i16.to_ne_bytes()); // row
+        origin.extend_from_slice(&3i16.to_ne_bytes()); // column
         ds.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
                 Tag::new(0x6000, 0x0050),
@@ -4646,10 +4672,11 @@ mod tests {
 
     #[test]
     fn a_window_width_of_one_is_a_threshold() {
+        // PS3.3 C.11.2.1.2.1: with width 1 the boundary is `x <= c - 0.5`.
         let ds = gray_image(1, 1, 8, &[0], Some(40.0), Some(1.0));
         let o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
         assert_eq!(o.map(39.0), 0, "below the centre is black");
-        assert_eq!(o.map(39.5), 255, "at the centre maps to white (fo-dicom)");
+        assert_eq!(o.map(39.5), 0, "the boundary x = c - 0.5 is black");
         assert_eq!(o.map(40.0), 255, "above the centre is white");
     }
 
@@ -4666,8 +4693,8 @@ mod tests {
         ds.insert_value(Tag::new(0x6000, 0x0100), 1u16);
         ds.insert_value(Tag::new(0x6000, 0x0102), 8u16);
         let mut origin = Vec::new();
-        origin.extend_from_slice(&2i16.to_le_bytes()); // row
-        origin.extend_from_slice(&2i16.to_le_bytes()); // column
+        origin.extend_from_slice(&2i16.to_ne_bytes()); // row
+        origin.extend_from_slice(&2i16.to_ne_bytes()); // column
         ds.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
                 Tag::new(0x6000, 0x0050),
@@ -4682,7 +4709,7 @@ mod tests {
                 if (x, y) == (1, 1) || (x, y) == (2, 2) {
                     v |= 1 << 8;
                 }
-                pixels.extend_from_slice(&v.to_le_bytes());
+                pixels.extend_from_slice(&v.to_ne_bytes());
             }
         }
         ds.insert_or_update(crate::model::item::DicomItem::Element(

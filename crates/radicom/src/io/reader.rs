@@ -553,11 +553,28 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         }
         let (group, element) = self.read_tag(tag_pos)?;
 
+        // A header must fit inside a defined-length item/sequence. If only the
+        // tag is inside the limit, the header is truncated: end the level (T6)
+        // instead of consuming bytes that belong to the parent level.
+        if let Mode::Limited { limit } = mode {
+            if self.position()? + 4 > level_start + limit {
+                return Ok(Step::End(LevelEnd::Limit));
+            }
+        }
+
         if group == 0xFFFE {
             let length = self
                 .source
                 .read_u32()
                 .map_err(|e| io_err_need(e, tag_pos + 4, 4))?;
+            // PS3.5 §7.5: item and sequence delimiters have a zero length. A
+            // nonzero length is nonconformant but unambiguous: skip the declared
+            // value bytes so the stream stays aligned for the next element.
+            if matches!(element, 0xE00D | 0xE0DD) && length != 0 && length != 0xFFFF_FFFF {
+                self.source
+                    .skip(length as u64)
+                    .map_err(|e| io_err(e, tag_pos + 4))?;
+            }
             let defined = (length != 0xFFFF_FFFF).then_some(length);
             return Ok(match element {
                 0xE00D => match mode {
@@ -700,18 +717,18 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                     buffer,
                 });
             }
-            // CORE-20 / fo-dicom `DicomReader.ParseValue`: an unknown tag with
-            // an undefined length is a sequence. With implicit VR there is no
-            // VR on the wire, so an unresolved (UN) non-private tag cannot be
-            // a known binary VR - it is an anonymous SQ, not pixel data.
-            if vr == Vr::Un && !explicit {
+            // PS3.5 §6.2.2: an element with an undefined length whose VR is UN
+            // holds a sequence of items encoded in Implicit VR Little Endian,
+            // whatever the enclosing dataset's transfer syntax (CP-246). This
+            // holds for explicit VR too - an actual sequence would carry SQ.
+            if vr == Vr::Un {
                 return Ok(Step::Sequence {
                     raw,
                     tag,
                     pos: value_start,
                     defined: None,
                     private_probe: false,
-                    cp246: false,
+                    cp246: true,
                 });
             }
             return Ok(Step::Fragments {
@@ -876,11 +893,18 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                     // the delimiter is tag(4) + length(4); consuming only the
                     // tag leaves the length in the stream and desynchronizes
                     // every following element
-                    let _ = self
+                    let length = self
                         .source
                         .read_u32()
                         .map_err(|e| io_err_need(e, pos + 4, 4))?;
-                    debug_assert_eq!(self.position()?, pos + 8);
+                    // PS3.5 §7.5: a delimiter's length shall be 0; skip any
+                    // nonconformant value bytes so the stream stays aligned.
+                    if length != 0 && length != 0xFFFF_FFFF {
+                        self.source
+                            .skip(length as u64)
+                            .map_err(|e| io_err(e, pos + 4))?;
+                    }
+                    debug_assert_eq!(self.position()?, pos + 8 + length as u64);
                     break;
                 }
                 _ => {
@@ -1520,17 +1544,44 @@ mod tests {
 
     #[test]
     fn undefined_length_fragment_and_unexpected_tag_are_errors() {
+        // An encapsulated (OB) fragment item cannot itself have an undefined
+        // length.
         let mut bytes = vec![
-            0x44, 0x00, 0x01, 0x10, b'U', b'N', 0, 0, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xE0, 0x7F, 0x10, 0x00, b'O', b'B', 0, 0, 0xFF, 0xFF, 0xFF, 0xFF,
         ];
         bytes.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 0xFF, 0xFF, 0xFF, 0xFF]);
         assert!(read_with(&bytes, DicomReader::default()).is_err());
 
+        // A fragment sequence may only contain item tags.
         let mut bytes = vec![
-            0x44, 0x00, 0x01, 0x10, b'U', b'N', 0, 0, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xE0, 0x7F, 0x10, 0x00, b'O', b'B', 0, 0, 0xFF, 0xFF, 0xFF, 0xFF,
         ];
         bytes.extend_from_slice(&[0x10, 0x00, 0x10, 0x00, b'P', b'N', 0x02, 0x00, b'X', b' ']);
         assert!(read_with(&bytes, DicomReader::default()).is_err());
+    }
+
+    #[test]
+    fn explicit_un_with_undefined_length_is_an_implicit_vr_sequence() {
+        // PS3.5 §6.2.2 / CP-246: the undefined-length UN value is a sequence
+        // whose items are Implicit VR Little Endian, even in an explicit-VR
+        // dataset.
+        let mut bytes = vec![
+            0x44, 0x00, 0x01, 0x10, b'U', b'N', 0, 0, 0xFF, 0xFF, 0xFF, 0xFF,
+        ];
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 0x0A, 0x00, 0x00, 0x00]);
+        // (0010,0010) PN "AB" in implicit VR inside the item
+        bytes.extend_from_slice(&[0x10, 0x00, 0x10, 0x00, 0x02, 0x00, 0x00, 0x00]);
+        bytes.extend_from_slice(b"AB");
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0xDD, 0xE0, 0, 0, 0, 0]);
+        let ds = read_with(&bytes, DicomReader::default()).unwrap();
+        let seq = ds
+            .try_get_sequence(Tag::new(0x0044, 0x1001))
+            .expect("UN with undefined length is a sequence");
+        assert_eq!(seq.items().len(), 1);
+        assert_eq!(
+            seq.items()[0].get_str(Tag::PATIENT_NAME).unwrap().trim(),
+            "AB"
+        );
     }
 
     #[test]

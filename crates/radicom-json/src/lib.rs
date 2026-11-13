@@ -272,16 +272,50 @@ fn is_binary(vr: Vr) -> bool {
     )
 }
 
+/// VRs for which PS3.18 F.2.2 permits a `BulkDataURI` carrier: DS, FL, FD,
+/// IS, LT, OB, OD, OF, OL, OV, OW, SL, SS, ST, SV, UC, UL, UN, US, UT, UV.
+fn allows_bulk_data_uri(vr: Vr) -> bool {
+    matches!(
+        vr,
+        Vr::Ds
+            | Vr::Fl
+            | Vr::Fd
+            | Vr::Is
+            | Vr::Lt
+            | Vr::Ob
+            | Vr::Od
+            | Vr::Of
+            | Vr::Ol
+            | Vr::Ov
+            | Vr::Ow
+            | Vr::Sl
+            | Vr::Ss
+            | Vr::St
+            | Vr::Sv
+            | Vr::Uc
+            | Vr::Ul
+            | Vr::Un
+            | Vr::Us
+            | Vr::Ut
+            | Vr::Uv
+    )
+}
+
 fn element_to_value(element: &DicomElement, options: &JsonOptions) -> Result<Value> {
     let vr = element.vr();
     let mut object = Map::new();
     object.insert("vr".to_string(), Value::String(vr.code().to_string()));
 
-    // A BulkDataURI is legal on any VR that can carry a buffer (PS3.18 F.2.2),
-    // not just the binary ones: check it first so a DS/IS/UT/... URI is not
-    // silently dropped by the value path below.
+    // PS3.18 F.2.2 lists the VRs a BulkDataURI may carry; for any other VR the
+    // value must be in `Value`, so a caller that deferred it by URI cannot be
+    // honoured.
     if let Some(buffer) = element.value().as_buffer() {
         if let Some(uri) = buffer.bulk_uri() {
+            if !allows_bulk_data_uri(vr) {
+                return Err(JsonError::Unsupported(
+                    "BulkDataURI is not permitted for this VR (PS3.18 F.2.2)",
+                ));
+            }
             object.insert("BulkDataURI".to_string(), Value::String(uri.to_string()));
             return Ok(Value::Object(object));
         }
@@ -2601,5 +2635,14 @@ mod tests {
             dataset_to_json(&back, &JsonOptions::default()).unwrap(),
             dataset_to_json(&sample(), &JsonOptions::default()).unwrap()
         );
+    }
+
+    #[test]
+    fn a_bulk_data_uri_on_a_forbidden_vr_is_an_error() {
+        // PS3.18 F.2.2 lists the VRs a BulkDataURI may carry; PN is not one, so
+        // the value must be materialised rather than emitted as an invalid URI.
+        let json = r#"{"00100010":{"vr":"PN","BulkDataURI":"http://example/pn"}}"#;
+        let ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
+        assert!(dataset_to_value(&ds, &JsonOptions::default()).is_err());
     }
 }

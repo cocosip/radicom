@@ -104,19 +104,28 @@ impl Anonymizer {
     /// Anonymizes a dataset in place (§12.5).
     pub fn anonymize_in_place(&self, dataset: &mut Dataset) -> Result<(), Error> {
         let mut replaced = lock(&self.replaced);
-        self.walk(dataset, &mut replaced)
+        self.walk(dataset, &mut replaced)?;
+        // PS3.15 E.1.1: a de-identified dataset declares that it has been
+        // de-identified and by which method. Both are required output of the
+        // Basic Profile (they are what tells a reader the PHI is gone).
+        dataset.insert_str(Tag::PATIENT_IDENTITY_REMOVED, Vr::Cs, "YES");
+        dataset.insert_str(
+            Tag::DEIDENTIFICATION_METHOD,
+            Vr::Lo,
+            "RADICOM Basic Profile",
+        );
+        Ok(())
     }
 
     /// Anonymizes a file in place, syncing the media-storage SOP instance UID.
     pub fn anonymize_file_in_place(&self, file: &mut DicomFile) -> Result<(), Error> {
         self.anonymize_in_place(&mut file.dataset)?;
-        // §12.5: keep the file-meta instance UID equal to the (now anonymized)
-        // dataset SOP instance UID so the two never disagree
-        if file.file_meta.contains(&MEDIA_STORAGE_SOP_INSTANCE_UID) {
-            if let Some(sop_instance) = file.dataset.try_get_str(SOP_INSTANCE_UID) {
-                file.file_meta
-                    .insert_str(MEDIA_STORAGE_SOP_INSTANCE_UID, Vr::Ui, sop_instance);
-            }
+        // PS3.10 Table 7.1-1 / PS3.15 E.1.1: the file-meta instance UID must
+        // equal the (now anonymized) dataset SOP instance UID, whether or not
+        // the source file already carried one.
+        if let Some(sop_instance) = file.dataset.try_get_str(SOP_INSTANCE_UID) {
+            file.file_meta
+                .insert_str(MEDIA_STORAGE_SOP_INSTANCE_UID, Vr::Ui, sop_instance);
         }
         Ok(())
     }
