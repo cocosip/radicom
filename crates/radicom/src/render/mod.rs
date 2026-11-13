@@ -401,10 +401,10 @@ impl GrayscaleRenderOptions {
         // to fill the histogram. Never materialises the frame as a `Vec` (§10).
         // Padding is excluded from the bin range (and cleared below) so a large
         // 0x0000/0xFFFF spike cannot stretch or dominate the derived window.
-        let pad = first_number(dataset, Tag::PIXEL_PADDING_VALUE);
+        let pad = padding_range(dataset);
         let mut range: Option<(f64, f64)> = None;
         visit_frame_stored_values(dataset, frame, |v| {
-            if Some(v) == pad {
+            if is_padding(v, pad) {
                 return;
             }
             range = Some(match range {
@@ -426,9 +426,16 @@ impl GrayscaleRenderOptions {
         visit_frame_stored_values(dataset, frame, |v| histogram.add(v.round() as i32))
             .map_err(|_| unsupported("histogram window needs native 8/16-bit samples"))?;
         // fo-dicom clears the padding bin before choosing the window
-        // (GrayscaleRenderOptions.cs:505 `histogram.Clear(padding)`).
-        if let Some(pad) = pad {
-            histogram.clear(pad.round() as i32);
+        // (GrayscaleRenderOptions.cs:505 `histogram.Clear(padding)`); the whole
+        // padding range is cleared, not just its first value.
+        if let Some((low, high)) = pad {
+            let low = (low.round() as i32).max(min);
+            let high = (high.round() as i32).min(max);
+            if low <= high {
+                for value in low..=high {
+                    histogram.clear(value);
+                }
+            }
         }
         histogram.apply_window_percent(percent.clamp(1, 100));
 
@@ -454,18 +461,18 @@ impl GrayscaleRenderOptions {
     }
 
     /// Options whose window is the frame's min/max of non-padding pixels
-    /// (REND-04 `from_min_max`, docs §4 priority 4). `PixelPaddingValue` pixels are
-    /// filtered; values are mapped through the modality LUT first.
+    /// (REND-04 `from_min_max`, docs §4 priority 4). Pixels in the
+    /// `PixelPaddingValue`/`PixelPaddingRangeLimit` range are filtered; values
+    /// are mapped through the modality LUT first.
     pub fn from_min_max(dataset: &Dataset, frame: u32) -> Result<Self, Error> {
         let mut base = GrayscaleRenderOptions::from_window_level(0.0, 1.0);
         base.apply_dataset_modality_and_invert(dataset);
 
         // Stream the non-padding min/max in one pass; no whole-frame `Vec` (§10).
-        let pad = first_number(dataset, Tag::PIXEL_PADDING_VALUE);
+        let pad = padding_range(dataset);
         let mut range: Option<(f64, f64)> = None;
         visit_frame_stored_values(dataset, frame, |v| {
-            // filter padding pixels (both the signed and unsigned readings of the tag)
-            if Some(v) == pad {
+            if is_padding(v, pad) {
                 return;
             }
             range = Some(match range {
@@ -844,6 +851,23 @@ fn first_number(dataset: &Dataset, tag: Tag) -> Option<f64> {
     }
     let text = dataset.try_get_str_ref(tag)?;
     text.split('\\').next()?.trim().parse::<f64>().ok()
+}
+
+/// The pixel padding range (PS3.3 C.7.6.3.1.2.3): `PixelPaddingValue` alone, or
+/// the inclusive `[PixelPaddingValue, PixelPaddingRangeLimit]` range when the
+/// limit is present. A limit below the value is malformed and ignored, so the
+/// single padding value still applies.
+fn padding_range(dataset: &Dataset) -> Option<(f64, f64)> {
+    let value = first_number(dataset, Tag::PIXEL_PADDING_VALUE)?;
+    match first_number(dataset, Tag::PIXEL_PADDING_RANGE_LIMIT) {
+        Some(limit) if limit >= value => Some((value, limit)),
+        _ => Some((value, value)),
+    }
+}
+
+/// Whether a stored sample falls in the padding range (both ends inclusive).
+fn is_padding(value: f64, range: Option<(f64, f64)>) -> bool {
+    range.is_some_and(|(low, high)| value >= low && value <= high)
 }
 
 /// Borrows one native 1/8/16/32-bit frame's byte window plus its [`BitDepth`] and
@@ -3071,6 +3095,32 @@ mod tests {
         let o = GrayscaleRenderOptions::from_min_max(&ds, 0).unwrap();
         assert_eq!(o.window_center, 20.0);
         assert_eq!(o.window_width, 20.0);
+    }
+
+    #[test]
+    fn from_min_max_filters_the_whole_pixel_padding_range() {
+        // PS3.3 C.7.6.3.1.2.3: with a range limit the padding is the whole
+        // inclusive range, so 10 and 20 are excluded and only 0 remains.
+        let mut ds = gray_image(3, 1, 8, &[0, 10, 20], None, None);
+        ds.insert_value(Tag::PIXEL_PADDING_VALUE, 10u16);
+        ds.insert_value(Tag::PIXEL_PADDING_RANGE_LIMIT, 20u16);
+        let o = GrayscaleRenderOptions::from_min_max(&ds, 0).unwrap();
+        assert_eq!(o.window_center, 0.0);
+        assert_eq!(o.window_width, 1.0);
+    }
+
+    #[test]
+    fn from_histogram_clears_the_whole_pixel_padding_range() {
+        // 200..=210 is padding: clearing only the value 200 would leave the
+        // 201..=210 spike and stretch the window to 100..=210.
+        let mut samples = vec![100u16; 100];
+        samples.extend(200..=210u16);
+        let mut ds = gray_image(samples.len() as u16, 1, 8, &samples, None, None);
+        ds.insert_value(Tag::PIXEL_PADDING_VALUE, 200u16);
+        ds.insert_value(Tag::PIXEL_PADDING_RANGE_LIMIT, 210u16);
+        let o = GrayscaleRenderOptions::from_histogram(&ds, 0, 100).unwrap();
+        assert_eq!(o.window_center, 100.0);
+        assert_eq!(o.window_width, 1.0);
     }
 
     #[test]

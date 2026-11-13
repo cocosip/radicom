@@ -756,14 +756,19 @@ impl TempFileSpill {
     pub fn from_bytes(bytes: impl AsRef<[u8]>) -> io::Result<Self> {
         use std::io::Write as _;
         let bytes = bytes.as_ref();
-        let (path, mut file) = create_temp("spill")?;
-        file.write_all(bytes)?;
-        file.flush()?;
-        drop(file);
-        let window = FileWindow::open(&path, 0, bytes.len() as u64)?;
+        let (path, file) = create_temp("spill")?;
+        // The guard owns the path from here on, so a failed write or open still
+        // deletes the file. The handle is closed inside the closure first:
+        // Windows cannot delete an open file.
+        let temp = TempFile { path };
+        (|mut file: std::fs::File| -> io::Result<()> {
+            file.write_all(bytes)?;
+            file.flush()
+        })(file)?;
+        let window = FileWindow::open(&temp.path, 0, bytes.len() as u64)?;
         Ok(TempFileSpill {
             window,
-            _temp: TempFile { path },
+            _temp: temp,
         })
     }
 
@@ -771,31 +776,34 @@ impl TempFileSpill {
     /// when the spill (and therefore the parsed dataset) drops (M2: a spooled
     /// stream becomes the lazy backing store for its large values).
     pub fn from_temp_file(path: PathBuf, len: u64) -> io::Result<Self> {
-        let window = FileWindow::open(&path, 0, len)?;
+        let temp = TempFile { path };
+        let window = FileWindow::open(&temp.path, 0, len)?;
         Ok(TempFileSpill {
             window,
-            _temp: TempFile { path },
+            _temp: temp,
         })
     }
 
     /// Reads exactly `len` bytes from `reader` into a temp file, then windows it.
     pub fn from_reader<R: Read>(mut reader: R, len: u64) -> io::Result<Self> {
         use std::io::Write as _;
-        let (path, mut file) = create_temp("spill")?;
-        let mut remaining = len;
-        let mut chunk = vec![0u8; 8192];
-        while remaining > 0 {
-            let take = remaining.min(chunk.len() as u64) as usize;
-            reader.read_exact(&mut chunk[..take])?;
-            file.write_all(&chunk[..take])?;
-            remaining -= take as u64;
-        }
-        file.flush()?;
-        drop(file);
-        let window = FileWindow::open(&path, 0, len)?;
+        let (path, file) = create_temp("spill")?;
+        let temp = TempFile { path };
+        (|mut file: std::fs::File| -> io::Result<()> {
+            let mut remaining = len;
+            let mut chunk = vec![0u8; 8192];
+            while remaining > 0 {
+                let take = remaining.min(chunk.len() as u64) as usize;
+                reader.read_exact(&mut chunk[..take])?;
+                file.write_all(&chunk[..take])?;
+                remaining -= take as u64;
+            }
+            file.flush()
+        })(file)?;
+        let window = FileWindow::open(&temp.path, 0, len)?;
         Ok(TempFileSpill {
             window,
-            _temp: TempFile { path },
+            _temp: temp,
         })
     }
 }

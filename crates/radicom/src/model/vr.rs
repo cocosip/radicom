@@ -174,31 +174,6 @@ impl Vr {
         }
     }
 
-    /// Maximum encoded length per value; 0 = unlimited (spec §2 "max len").
-    pub const fn max_value_length(self) -> u32 {
-        match self {
-            Vr::Ae | Vr::Cs | Vr::Ds | Vr::Sh => 16,
-            Vr::As => 4,
-            Vr::At => 4,
-            Vr::Da => 18,
-            Vr::Dt => 54,
-            Vr::Fd => 8,
-            Vr::Fl => 4,
-            Vr::Is => 12,
-            Vr::Lo => 64,
-            Vr::Lt => 10240,
-            Vr::Pn => 64,
-            Vr::Sl | Vr::Ul => 4,
-            Vr::Ss | Vr::Us => 2,
-            Vr::St => 1024,
-            Vr::Sv | Vr::Uv => 8,
-            Vr::Tm => 16,
-            Vr::Ui => 64,
-            // OB/OD/OF/OL/OV/OW/SQ/UC/UN/UR/UT: unlimited
-            _ => 0,
-        }
-    }
-
     /// True for the signed integer VRs (SS/SL/SV). Used so binary widening
     /// sign-extends only for signed source values (CM-02).
     pub const fn is_signed_integer(self) -> bool {
@@ -370,56 +345,55 @@ mod tests {
 
     /// The authoritative attribute table from docs/architecture.md §2, asserted as one
     /// golden matrix over every standard VR: (code, string, charset, len16,
-    /// pad, max_len, unit, swap).
+    /// pad, unit, swap).
     #[test]
     fn golden_attribute_table() {
-        /// (Vr, code, is_string, charset_sensitive, is_16bit_len, pad, max_len, unit, swap)
-        type Row = (Vr, &'static str, bool, bool, bool, u8, u32, usize, usize);
-        //        VR    code  str  charset 16bit pad    max   unit swap
+        /// (Vr, code, is_string, charset_sensitive, is_16bit_len, pad, unit, swap)
+        type Row = (Vr, &'static str, bool, bool, bool, u8, usize, usize);
+        //        VR    code  str  charset 16bit pad    unit swap
         let table: &[Row] = &[
-            (Vr::Ae, "AE", true, false, true, b' ', 16, 1, 1),
-            (Vr::As, "AS", true, false, true, b' ', 4, 1, 1),
-            (Vr::At, "AT", false, false, true, 0x00, 4, 4, 2),
-            (Vr::Cs, "CS", true, false, true, b' ', 16, 1, 1),
-            (Vr::Da, "DA", true, false, true, b' ', 18, 1, 1),
-            (Vr::Ds, "DS", true, false, true, b' ', 16, 1, 1),
-            (Vr::Dt, "DT", true, false, true, b' ', 54, 1, 1),
-            (Vr::Fd, "FD", false, false, true, 0x00, 8, 8, 8),
-            (Vr::Fl, "FL", false, false, true, 0x00, 4, 4, 4),
-            (Vr::Is, "IS", true, false, true, b' ', 12, 1, 1),
-            (Vr::Lo, "LO", true, true, true, b' ', 64, 1, 1),
-            (Vr::Lt, "LT", true, true, true, b' ', 10240, 1, 1),
-            (Vr::Ob, "OB", false, false, false, 0x00, 0, 1, 1),
-            (Vr::Od, "OD", false, false, false, 0x00, 0, 8, 8),
-            (Vr::Of, "OF", false, false, false, 0x00, 0, 4, 4),
-            (Vr::Ol, "OL", false, false, false, 0x00, 0, 4, 4),
-            (Vr::Ov, "OV", false, false, false, 0x00, 0, 8, 8),
-            (Vr::Ow, "OW", false, false, false, 0x00, 0, 2, 2),
-            (Vr::Pn, "PN", true, true, true, b' ', 64, 1, 1),
-            (Vr::Sh, "SH", true, true, true, b' ', 16, 1, 1),
-            (Vr::Sl, "SL", false, false, true, 0x00, 4, 4, 4),
-            (Vr::Sq, "SQ", false, false, false, b' ', 0, 0, 0),
-            (Vr::Ss, "SS", false, false, true, 0x00, 2, 2, 2),
-            (Vr::St, "ST", true, true, true, b' ', 1024, 1, 1),
-            (Vr::Sv, "SV", false, false, false, 0x00, 8, 8, 8),
-            (Vr::Tm, "TM", true, false, true, b' ', 16, 1, 1),
-            (Vr::Uc, "UC", true, true, false, b' ', 0, 1, 1),
-            (Vr::Ui, "UI", true, false, true, 0x00, 64, 1, 1),
-            (Vr::Ul, "UL", false, false, true, 0x00, 4, 4, 4),
-            (Vr::Un, "UN", false, false, false, 0x00, 0, 1, 1),
-            (Vr::Ur, "UR", true, false, false, b' ', 0, 1, 1),
-            (Vr::Us, "US", false, false, true, 0x00, 2, 2, 2),
-            (Vr::Ut, "UT", true, true, false, b' ', 0, 1, 1),
-            (Vr::Uv, "UV", false, false, false, 0x00, 8, 8, 8),
+            (Vr::Ae, "AE", true, false, true, b' ', 1, 1),
+            (Vr::As, "AS", true, false, true, b' ', 1, 1),
+            (Vr::At, "AT", false, false, true, 0x00, 4, 2),
+            (Vr::Cs, "CS", true, false, true, b' ', 1, 1),
+            (Vr::Da, "DA", true, false, true, b' ', 1, 1),
+            (Vr::Ds, "DS", true, false, true, b' ', 1, 1),
+            (Vr::Dt, "DT", true, false, true, b' ', 1, 1),
+            (Vr::Fd, "FD", false, false, true, 0x00, 8, 8),
+            (Vr::Fl, "FL", false, false, true, 0x00, 4, 4),
+            (Vr::Is, "IS", true, false, true, b' ', 1, 1),
+            (Vr::Lo, "LO", true, true, true, b' ', 1, 1),
+            (Vr::Lt, "LT", true, true, true, b' ', 1, 1),
+            (Vr::Ob, "OB", false, false, false, 0x00, 1, 1),
+            (Vr::Od, "OD", false, false, false, 0x00, 8, 8),
+            (Vr::Of, "OF", false, false, false, 0x00, 4, 4),
+            (Vr::Ol, "OL", false, false, false, 0x00, 4, 4),
+            (Vr::Ov, "OV", false, false, false, 0x00, 8, 8),
+            (Vr::Ow, "OW", false, false, false, 0x00, 2, 2),
+            (Vr::Pn, "PN", true, true, true, b' ', 1, 1),
+            (Vr::Sh, "SH", true, true, true, b' ', 1, 1),
+            (Vr::Sl, "SL", false, false, true, 0x00, 4, 4),
+            (Vr::Sq, "SQ", false, false, false, b' ', 0, 0),
+            (Vr::Ss, "SS", false, false, true, 0x00, 2, 2),
+            (Vr::St, "ST", true, true, true, b' ', 1, 1),
+            (Vr::Sv, "SV", false, false, false, 0x00, 8, 8),
+            (Vr::Tm, "TM", true, false, true, b' ', 1, 1),
+            (Vr::Uc, "UC", true, true, false, b' ', 1, 1),
+            (Vr::Ui, "UI", true, false, true, 0x00, 1, 1),
+            (Vr::Ul, "UL", false, false, true, 0x00, 4, 4),
+            (Vr::Un, "UN", false, false, false, 0x00, 1, 1),
+            (Vr::Ur, "UR", true, false, false, b' ', 1, 1),
+            (Vr::Us, "US", false, false, true, 0x00, 2, 2),
+            (Vr::Ut, "UT", true, true, false, b' ', 1, 1),
+            (Vr::Uv, "UV", false, false, false, 0x00, 8, 8),
         ];
         assert_eq!(table.len(), 34, "all standard VRs covered");
-        for (vr, code, is_str, charset, len16, pad, max, unit, swap) in table {
+        for (vr, code, is_str, charset, len16, pad, unit, swap) in table {
             assert_eq!(vr.code(), *code);
             assert_eq!(vr.is_string(), *is_str, "{code} is_string");
             assert_eq!(vr.is_character_encoded(), *charset, "{code} charset");
             assert_eq!(vr.is_16bit_length(), *len16, "{code} len16");
             assert_eq!(vr.padding(), *pad, "{code} pad");
-            assert_eq!(vr.max_value_length(), *max, "{code} max");
             assert_eq!(vr.unit_size(), *unit, "{code} unit");
             assert_eq!(vr.byte_swap_size(), *swap, "{code} swap");
         }

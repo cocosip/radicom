@@ -1949,6 +1949,7 @@ mod tests {
         let json = r#"{"00100010":{"vr":"PN","Value":[{"Alphabetic":"Doe^Jane"}]}}"#;
         let mut ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
         ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        ds.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5.6");
         let bytes = radicom::io::file::DicomFile::from_dataset(ds)
             .to_bytes(&radicom::io::writer::WriteOptions::default())
             .unwrap();

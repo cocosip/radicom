@@ -754,11 +754,13 @@ fn decode_pdata_bytes(body: Bytes) -> Result<PData> {
         let context_id = body[start];
         let header = body[start + 1];
         // PS3.8 §9.3.2: a presentation-context-id is odd and 1..=255.
-        if context_id == 0 || context_id & 1 == 0 || header & 0xFC != 0 {
+        if context_id == 0 || context_id & 1 == 0 {
             return Err(NetworkError::protocol(
-                "PDV has an invalid presentation context or control header",
+                "PDV has an invalid presentation context id",
             ));
         }
+        // PS3.8 §E.2: bits 2-7 of the message control header are reserved and
+        // the receiver must not check them, so only bits 0/1 are read.
         // The PDV value is even-padded on the wire and the pad byte is
         // indistinguishable from real data at this layer, so it is kept.
         // The DIMSE assembler delimits real content by the command group
@@ -1831,6 +1833,23 @@ mod tests {
     }
 
     #[test]
+    fn pdata_decode_ignores_the_reserved_control_bits() {
+        // PS3.8 §E.2: bits 2-7 of the message control header are reserved and
+        // "never checked by the receiver"; a conformant peer may leave them set.
+        let body = Bytes::from_static(&[
+            0x00, 0x00, 0x00, 0x04, // PDV length 4 = id(1) + header(1) + 2 bytes
+            0x03, // context id 3 (odd, valid)
+            0xFF, // bits 0/1 set, bits 2-7 set: must be ignored
+            0xAA, 0xBB,
+        ]);
+        let pdata = decode_pdata_bytes(body).expect("reserved bits are not an error");
+        assert_eq!(pdata.pdvs.len(), 1);
+        assert!(pdata.pdvs[0].is_command, "bit 0 still selects the stream");
+        assert!(pdata.pdvs[0].is_last, "bit 1 still marks the message end");
+        assert_eq!(&pdata.pdvs[0].data[..], &[0xAA, 0xBB]);
+    }
+
+    #[test]
     fn decode_bytes_matches_decode_and_preserves_pdvs() {
         // the zero-copy owned-frame path must decode exactly like the
         // borrowed one (same PDVs, same bytes).
@@ -2525,8 +2544,9 @@ mod tests {
 
         let bad_context = bytes::Bytes::from_static(&[0, 0, 0, 2, 0, 0]);
         assert!(decode_pdata_bytes(bad_context).is_err());
-        let bad_header = bytes::Bytes::from_static(&[0, 0, 0, 2, 1, 4]);
-        assert!(decode_pdata_bytes(bad_header).is_err());
+        // bits 2-7 of the control header are reserved and never checked (§E.2)
+        let reserved_bits = bytes::Bytes::from_static(&[0, 0, 0, 2, 1, 4]);
+        assert!(decode_pdata_bytes(reserved_bits).is_ok());
 
         let mut ac = Associate::new("SCP", "SCU");
         let mut accepted = PresentationContext::new(1, STORAGE_CLASS, Vec::new());

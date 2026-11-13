@@ -151,24 +151,35 @@ impl PresentationLutTable {
         Some(self.entries[index as usize])
     }
 
-    /// Maps an 8-bit input value through the table to an 8-bit output byte,
-    /// rescaling from the descriptor's `bits` output range. Inputs below
-    /// `first_mapped` clamp to the first entry and inputs past the table clamp
-    /// to the last one (PS3.3 C.11.4/C.11.2.1.1, like `LutTable::map_byte`).
+    /// Maps an 8-bit grey sample through the table to an 8-bit output byte.
+    ///
+    /// The sample is first scaled into the table's input domain: the
+    /// descriptor's entry count *is* the number of possible input values
+    /// (PS3.3 C.11.4.1: 256 entries for 8-bit input, 4096 for 12-bit input), and
+    /// the print pipeline only carries 8-bit greys. Indexing a 4096-entry table
+    /// with the raw byte would reach its first 256 entries and print nearly
+    /// black. Samples clamp to the end entries; the P-value is rescaled from the
+    /// descriptor's `bits` (the output precision).
     pub fn map_byte(&self, input: i32) -> u8 {
-        let Some(value) = self.value_at_clamped(input) else {
+        let Some(value) = self.value_at_scaled(input) else {
             return 0;
         };
         let max = ((1u32 << self.bits) - 1) as f64;
         ((value as f64).clamp(0.0, max) * 255.0 / max).round() as u8
     }
 
-    /// The entry for `input`, clamping out-of-range inputs to the end entries.
-    fn value_at_clamped(&self, input: i32) -> Option<i32> {
-        if self.entries.is_empty() {
-            return None;
-        }
-        let index = (input - self.first_mapped).clamp(0, self.entries.len() as i32 - 1);
+    /// The entry for an 8-bit sample, scaled into the table's input domain and
+    /// clamped to its ends.
+    fn value_at_scaled(&self, input: i32) -> Option<i32> {
+        let last = i32::try_from(self.entries.len().checked_sub(1)?).ok()?;
+        let index = if last <= u8::MAX as i32 {
+            // an 8-bit input domain: the sample already is the index
+            input.clamp(0, last)
+        } else {
+            // a wider input domain (12-bit P-values): spread the 8-bit sample
+            // across the whole table so a 4096-entry LUT is fully reachable
+            ((input.clamp(0, u8::MAX as i32) as f64) * f64::from(last) / 255.0).round() as i32
+        };
         Some(self.entries[index as usize])
     }
 }
@@ -528,5 +539,41 @@ mod tests {
             6,
             "below the table clamps to the first entry"
         );
+    }
+
+    #[test]
+    fn a_wide_input_domain_spreads_the_eight_bit_sample_over_the_table() {
+        // 4096 entries, entry i = i (12-bit P-values): the table is sized for a
+        // 12-bit input, so the 8-bit sample 128 must reach entry 2055 instead of
+        // stopping at entry 128.
+        let mut item = Dataset::new();
+        let descriptor = [0x00u8, 0x10, 0x00, 0x00, 0x0C, 0x00]; // US 4096, 0, 12 bits
+        item.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::LUT_DESCRIPTOR,
+            Vr::Us,
+            Arc::new(MemoryBuffer::from(descriptor.to_vec())),
+        )));
+        let mut data = Vec::new();
+        for value in 0..4096u16 {
+            data.extend_from_slice(&(value << 4).to_le_bytes());
+        }
+        item.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::LUT_DATA,
+            Vr::Ow,
+            Arc::new(MemoryBuffer::from(data)),
+        )));
+        let mut film = Dataset::new();
+        film.insert_sequence(Tag::PRESENTATION_LUT_SEQUENCE)
+            .push(item);
+        let table = FilmBox::from_dataset(film)
+            .presentation_lut()
+            .unwrap()
+            .table()
+            .cloned()
+            .unwrap();
+        assert_eq!(table.len(), 4096);
+        assert_eq!(table.map_byte(0), 0);
+        assert_eq!(table.map_byte(128), 128, "entry 2055, not entry 128");
+        assert_eq!(table.map_byte(255), 255);
     }
 }

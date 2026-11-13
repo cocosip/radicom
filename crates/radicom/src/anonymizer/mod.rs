@@ -102,7 +102,15 @@ impl Anonymizer {
     }
 
     /// Anonymizes a dataset in place (§12.5).
+    ///
+    /// With [`AnonOptions::NONE`] no action runs, so nothing is anonymized and
+    /// the de-identification declarations are not written either: a dataset
+    /// that still carries its PHI must never claim `PatientIdentityRemoved=YES`
+    /// (PS3.15 E.1.1).
     pub fn anonymize_in_place(&self, dataset: &mut Dataset) -> Result<(), Error> {
+        if self.options.is_empty() {
+            return Ok(());
+        }
         let mut replaced = lock(&self.replaced);
         self.walk(dataset, &mut replaced)?;
         // PS3.15 E.1.1: a de-identified dataset declares that it has been
@@ -118,7 +126,13 @@ impl Anonymizer {
     }
 
     /// Anonymizes a file in place, replacing the identifying file meta.
+    ///
+    /// Like [`Self::anonymize_in_place`], [`AnonOptions::NONE`] is a no-op for
+    /// the whole file, file meta included.
     pub fn anonymize_file_in_place(&self, file: &mut DicomFile) -> Result<(), Error> {
+        if self.options.is_empty() {
+            return Ok(());
+        }
         self.anonymize_in_place(&mut file.dataset)?;
         // PS3.10 Table 7.1-1 / PS3.15 E.1.1: the file-meta instance UID must
         // equal the (now anonymized) dataset SOP instance UID, whether or not
@@ -207,7 +221,20 @@ impl Anonymizer {
                     self.apply_patient_override(dataset, &tag);
                     continue;
                 }
-                // fragments carry no VR and no value the actions know how to blank
+                // An encapsulated fragment sequence has no VR-shaped value to
+                // blank: D/Z/U/C replace it with an empty sequence of the same
+                // tag and VR, so no fragment bytes (an icon, a private payload)
+                // survive. Skipping it left the payload in place.
+                if matches!(dataset.item(&tag), Some(DicomItem::Fragments(_))) {
+                    if action != Action::Keep {
+                        let vr = dataset.item(&tag).map(|item| item.vr()).unwrap_or(Vr::Ob);
+                        dataset.insert_or_update(DicomItem::Fragments(
+                            crate::model::item::DicomFragmentSequence::new(tag.clone(), vr),
+                        ));
+                    }
+                    self.apply_patient_override(dataset, &tag);
+                    continue;
+                }
                 let Some(DicomItem::Element(element)) = dataset.item(&tag) else {
                     self.apply_patient_override(dataset, &tag);
                     continue;
@@ -379,6 +406,47 @@ mod tests {
     }
 
     #[test]
+    fn the_none_option_neither_anonymizes_nor_claims_deidentification() {
+        let mut ds = dataset();
+        ds.insert_str(Tag::PATIENT_IDENTITY_REMOVED, Vr::Cs, "NO");
+        Anonymizer::with_profile(SecurityProfile::basic(), AnonOptions::NONE)
+            .anonymize_in_place(&mut ds)
+            .unwrap();
+        assert_eq!(
+            ds.try_get_str(Tag::PATIENT_NAME).as_deref(),
+            Some("Doe^John"),
+            "NONE keeps the plaintext"
+        );
+        assert_eq!(
+            ds.try_get_str(Tag::PATIENT_IDENTITY_REMOVED).as_deref(),
+            Some("NO"),
+            "NONE must not claim that the PHI is gone"
+        );
+        assert!(
+            ds.item(&Tag::DEIDENTIFICATION_METHOD).is_none(),
+            "NONE must not write a de-identification method"
+        );
+    }
+
+    #[test]
+    fn the_none_option_leaves_the_file_meta_alone() {
+        let mut file = DicomFile::from_dataset(dataset());
+        file.file_meta
+            .insert_str(Tag::SOURCE_APPLICATION_ENTITY_TITLE, Vr::Ae, "SCU");
+        Anonymizer::with_profile(SecurityProfile::basic(), AnonOptions::NONE)
+            .anonymize_file_in_place(&mut file)
+            .unwrap();
+        assert_eq!(
+            file.file_meta
+                .try_get_str(Tag::SOURCE_APPLICATION_ENTITY_TITLE)
+                .as_deref(),
+            Some("SCU"),
+            "nothing is anonymized, so the file meta stays as it was"
+        );
+        assert!(file.dataset.item(&Tag::PATIENT_IDENTITY_REMOVED).is_none());
+    }
+
+    #[test]
     fn an_owned_uid_is_replaced_and_consistent() {
         let mut ds = dataset();
         ds.insert_str(Tag::STUDY_INSTANCE_UID, Vr::Ui, "1.2.3.4"); // StudyInstanceUID: U
@@ -391,6 +459,32 @@ mod tests {
             "the same source UID maps to the same replacement"
         );
         assert!(!sop.is_empty());
+    }
+
+    #[test]
+    fn a_fragment_sequence_is_blanked_by_a_blanking_action() {
+        // A private fragment tag matched by D must not keep its fragment bytes;
+        // it becomes an empty fragment sequence of the same tag and VR.
+        use crate::model::item::{DicomFragmentSequence, DicomItem};
+        let tag = Tag::new(0x0009, 0x1001);
+        let mut fragments = DicomFragmentSequence::new(tag, Vr::Ob);
+        fragments.push_fragment(std::sync::Arc::new(
+            crate::model::buffer::MemoryBuffer::from(vec![0xAAu8; 8]),
+        ));
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Fragments(fragments));
+        let profile = SecurityProfile::parse("0009,1001;D\n").unwrap();
+        Anonymizer::with_profile(profile, AnonOptions::BASIC_PROFILE)
+            .anonymize_in_place(&mut ds)
+            .unwrap();
+        let item = ds
+            .item(&Tag::new(0x0009, 0x1001))
+            .expect("the element stays");
+        assert!(
+            matches!(item, DicomItem::Fragments(_)),
+            "it is still a fragment sequence"
+        );
+        assert!(item.is_empty_value(), "no fragment payload survives");
     }
 
     #[test]

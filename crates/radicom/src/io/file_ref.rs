@@ -190,7 +190,10 @@ impl TempFileProvider {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(_) => {
-                self.pending.lock().unwrap().push(file.path().to_path_buf());
+                self.pending
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .push(file.path().to_path_buf());
                 Ok(())
             }
         }
@@ -199,7 +202,10 @@ impl TempFileProvider {
     /// Retries every queued deletion, keeping paths that are still locked.
     /// Returns the number of files successfully removed this call.
     pub fn sweep(&self) -> usize {
-        let mut pending = self.pending.lock().unwrap();
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let mut removed = 0;
         pending.retain(|path| match fs::remove_file(path) {
             Ok(()) => {

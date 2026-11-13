@@ -503,7 +503,7 @@ pub fn recalculate_group_lengths(
     create_if_missing: bool,
 ) -> Result<(), Error> {
     let writer = DicomWriter::default();
-    recalculate_level(&writer, ds, syntax, create_if_missing)
+    recalculate_level(&writer, ds, syntax, create_if_missing, None)
 }
 
 fn recalculate_level(
@@ -511,7 +511,13 @@ fn recalculate_level(
     ds: &mut Dataset,
     syntax: &TransferSyntax,
     create_if_missing: bool,
+    inherited: Option<&Charsets>,
 ) -> Result<(), Error> {
+    // PS3.5 §6.1.2.5.3: an item inherits (0008,0005) from its parent when it
+    // carries none. Resolving every level with `None` priced inherited text as
+    // UTF-8, so the enclosing group length differed from the bytes actually
+    // written (and every later offset shifted with it).
+    let charset = Charsets::resolve(ds, inherited);
     let sequences: Vec<Tag> = ds
         .items()
         .filter(|item| matches!(item, DicomItem::Sequence(_)))
@@ -520,13 +526,12 @@ fn recalculate_level(
     for tag in sequences {
         if let Some(seq) = ds.sequence_mut(tag) {
             for item in seq.items_mut() {
-                recalculate_level(writer, item, syntax, create_if_missing)?;
+                recalculate_level(writer, item, syntax, create_if_missing, charset.as_ref())?;
             }
         }
     }
     let mut groups: Vec<u16> = ds.items().map(|item| item.tag().group()).collect();
     groups.dedup(); // items are in ascending tag order
-    let charset = Charsets::resolve(ds, None);
     for group in groups {
         let tag = Tag::new(group, 0x0000);
         if ds.item(&tag).is_none() && !create_if_missing {
@@ -1065,6 +1070,29 @@ mod tests {
         remove_group_lengths(&mut ds, false);
         assert!(ds.items().all(|item| item.tag().element() != 0x0000));
         assert!(!inner_of(&ds).contains(&Tag::new(0x0010, 0x0000)));
+    }
+
+    #[test]
+    fn a_nested_item_inherits_the_charset_for_its_group_length() {
+        // PS3.5 §6.1.2.5.3: the item inherits ISO_IR 100 from the root dataset,
+        // so "Müller" is 6 Latin-1 bytes. Priced as UTF-8 (7, padded to 8) the
+        // group length would be 16 instead of 14.
+        let mut inner = Dataset::new();
+        inner.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Müller");
+        inner.insert_value_with_vr(Tag::new(0x0010, 0x0000), Vr::Ul, 0u32);
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::SPECIFIC_CHARACTER_SET, Vr::Cs, "ISO_IR 100");
+        ds.insert_sequence(Tag::new(0x0008, 0x1140)).push(inner);
+        recalculate_group_lengths(&mut ds, &le(), true).unwrap();
+        let inner = &ds
+            .try_get_sequence(Tag::new(0x0008, 0x1140))
+            .unwrap()
+            .items()[0];
+        let declared: u32 = inner.get(Tag::new(0x0010, 0x0000)).unwrap();
+        assert_eq!(
+            declared, 14,
+            "(0010,0010) is 4 tag + 2 VR + 2 length + 6 Latin-1 bytes"
+        );
     }
 
     #[test]

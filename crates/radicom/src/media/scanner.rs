@@ -282,6 +282,7 @@ fn handle_error(
 pub struct DicomDirectoryBuilder {
     file_set_id: String,
     files: Vec<PathBuf>,
+    error_policy: ScanErrorPolicy,
 }
 
 impl DicomDirectoryBuilder {
@@ -289,7 +290,16 @@ impl DicomDirectoryBuilder {
         DicomDirectoryBuilder {
             file_set_id: file_set_id.into(),
             files: Vec::new(),
+            error_policy: ScanErrorPolicy::default(),
         }
+    }
+
+    /// How a file that cannot be opened while building is treated: `Skip` (the
+    /// default, matching the scanner) leaves it out with a warning, `Stop` fails
+    /// the whole build.
+    pub fn with_error_policy(mut self, policy: ScanErrorPolicy) -> Self {
+        self.error_policy = policy;
+        self
     }
 
     /// A collector callback suitable as the scanner's `on_match`.
@@ -305,7 +315,13 @@ impl DicomDirectoryBuilder {
     where
         E: From<Error>,
     {
-        build_with_icon(self.files, self.file_set_id, &mut file_id, None)
+        build_with_icon(
+            self.files,
+            self.file_set_id,
+            self.error_policy,
+            &mut file_id,
+            None,
+        )
     }
 
     /// Builds the directory, attaching an icon to every record (§12.2).
@@ -317,13 +333,20 @@ impl DicomDirectoryBuilder {
     where
         E: From<Error>,
     {
-        build_with_icon(self.files, self.file_set_id, &mut file_id, Some(generator))
+        build_with_icon(
+            self.files,
+            self.file_set_id,
+            self.error_policy,
+            &mut file_id,
+            Some(generator),
+        )
     }
 }
 
 fn build_with_icon<E>(
     files: Vec<PathBuf>,
     file_set_id: String,
+    error_policy: ScanErrorPolicy,
     file_id: &mut dyn FnMut(&Path) -> PathBuf,
     generator: Option<&dyn IconGenerator>,
 ) -> Result<DicomDirectory, E>
@@ -332,7 +355,16 @@ where
 {
     let mut directory = DicomDirectory::try_new(file_set_id)?;
     for path in files {
-        let file = DicomFile::open(&path)?;
+        let file = match DicomFile::open(&path) {
+            Ok(file) => file,
+            Err(error) if error_policy == ScanErrorPolicy::Skip => {
+                // The caller scanned with Skip, so one unreadable file must not
+                // abort the whole DICOMDIR; it is left out (and logged).
+                tracing::warn!(path = %path.display(), %error, "file left out of the DICOMDIR");
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
         let id = file_id(&path);
         match generator {
             Some(generator) => directory.add_file_with_icon(&file, &id, generator)?,
@@ -752,6 +784,79 @@ mod tests {
             .unwrap();
         // one patient, one study, one series, two images
         assert_eq!(directory.records().len(), 5);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_unreadable_file_follows_the_builders_error_policy() {
+        let dir = temp_dir("build-policy");
+        let mut dataset = crate::model::dataset::Dataset::new();
+        for (tag, vr, value) in [
+            (
+                crate::media::tags::PATIENT_ID,
+                crate::model::vr::Vr::Lo,
+                "P1",
+            ),
+            (
+                crate::media::tags::STUDY_INSTANCE_UID,
+                crate::model::vr::Vr::Ui,
+                "1.2.3",
+            ),
+            (
+                crate::media::tags::SERIES_INSTANCE_UID,
+                crate::model::vr::Vr::Ui,
+                "1.2.3.4",
+            ),
+            (
+                crate::media::tags::SOP_CLASS_UID,
+                crate::model::vr::Vr::Ui,
+                "1.2.840.10008.5.1.4.1.1.2",
+            ),
+            (
+                crate::media::tags::SOP_INSTANCE_UID,
+                crate::model::vr::Vr::Ui,
+                "1.2.3.4.5",
+            ),
+        ] {
+            dataset.insert_str(tag, vr, value);
+        }
+        dataset.set_transfer_syntax(
+            crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
+        DicomFile::from_dataset(dataset)
+            .save(dir.join("good.dcm"))
+            .unwrap();
+        // A file the scanner matches but that cannot be parsed as DICOM.
+        fs::write(dir.join("bad.dcm"), b"not a dicom file").unwrap();
+
+        let build = |policy: ScanErrorPolicy| {
+            let mut builder = DicomDirectoryBuilder::new("MYFS").with_error_policy(policy);
+            {
+                let mut collector = builder.collector();
+                let options = ScanOptions {
+                    glob: Some("*.dcm".into()),
+                    ..Default::default()
+                };
+                scan_directory(&dir, &options, &mut |_| {}, &mut collector).unwrap();
+            }
+            builder.build::<Error>(|path| {
+                let stem = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("IMG");
+                PathBuf::from(stem.to_uppercase())
+            })
+        };
+        let skipped = build(ScanErrorPolicy::Skip).expect("Skip leaves the bad file out");
+        assert_eq!(
+            skipped.records().len(),
+            4,
+            "one patient/study/series/image from the good file only"
+        );
+        assert!(
+            build(ScanErrorPolicy::Stop).is_err(),
+            "Stop fails the whole build on the unreadable file"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 }

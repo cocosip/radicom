@@ -600,11 +600,28 @@ pub fn build_user_information(
     implementation_version_name: &str,
     roles: Vec<RoleSelection>,
 ) -> UserInformation {
+    // PS3.7 §D.3.3.4: exactly one Role Selection item per SOP Class. A caller
+    // that negotiates several presentation contexts for the same class (one per
+    // transfer syntax, say) hands us one entry per context, so they are merged
+    // here with the union of the requested roles instead of emitting duplicates.
+    let mut merged: Vec<RoleSelection> = Vec::with_capacity(roles.len());
+    for role in roles {
+        match merged
+            .iter_mut()
+            .find(|existing| existing.sop_class == role.sop_class)
+        {
+            Some(existing) => {
+                existing.scu_role |= role.scu_role;
+                existing.scp_role |= role.scp_role;
+            }
+            None => merged.push(role),
+        }
+    }
     UserInformation {
         max_pdu_length,
         implementation_class_uid: Some(implementation_class_uid.to_string()),
         implementation_version_name: Some(implementation_version_name.to_string()),
-        role_selections: roles,
+        role_selections: merged,
         ..Default::default()
     }
 }
@@ -1139,6 +1156,34 @@ mod tests {
             Some("RADICOM_0_1")
         );
         assert_eq!(ui.role_selections.len(), 1);
+    }
+
+    #[test]
+    fn user_information_merges_duplicate_role_selections() {
+        // PS3.7 §D.3.3.4: one item per SOP Class. Two contexts of the same class
+        // must not produce two items; the requested roles are merged instead.
+        let roles = vec![
+            RoleSelection {
+                sop_class: "1.2.3".into(),
+                scu_role: true,
+                scp_role: false,
+            },
+            RoleSelection {
+                sop_class: "1.2.3".into(),
+                scu_role: false,
+                scp_role: true,
+            },
+            RoleSelection {
+                sop_class: "4.5.6".into(),
+                scu_role: true,
+                scp_role: false,
+            },
+        ];
+        let ui = build_user_information(16384, "1.2.826.0.1", "RADICOM_0_1", roles);
+        assert_eq!(ui.role_selections.len(), 2, "one item per SOP class");
+        assert!(ui.role_selections[0].scu_role && ui.role_selections[0].scp_role);
+        assert_eq!(ui.role_selections[0].sop_class, "1.2.3");
+        assert_eq!(ui.role_selections[1].sop_class, "4.5.6");
     }
 
     #[test]

@@ -5963,6 +5963,36 @@ async fn raw_associated_stream() -> (
 }
 
 #[tokio::test]
+async fn a_zero_context_association_request_is_aborted() {
+    // PS3.8 §9.3.2 requires at least one Presentation Context item; that is a
+    // protocol violation, so the SCP aborts instead of rejecting.
+    let server = DicomServer::bind(
+        "127.0.0.1:0",
+        Arc::new(VerificationProvider),
+        ServerOptions::default(),
+    )
+    .await
+    .unwrap();
+    let addr = server.local_addr();
+    let handle = tokio::spawn(async move { server.accept_one().await });
+
+    let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut request = Associate::new("CALLED-SCP", "CALLING-SCU");
+    request.presentation_contexts = Vec::new();
+    write_pdu(&mut tcp, &Pdu::AssociateRq(request))
+        .await
+        .unwrap();
+    match read_pdu(&mut tcp).await.unwrap() {
+        Some(Pdu::Abort(_)) => {}
+        other => panic!("expected an abort, got {other:?}"),
+    }
+    assert!(
+        handle.await.unwrap().is_err(),
+        "the violation ends the connection with an error"
+    );
+}
+
+#[tokio::test]
 async fn an_unexpected_pdu_after_association_is_aborted() {
     for anomaly in [
         Pdu::AssociateRq(Associate::new("A", "B")),
@@ -8672,6 +8702,71 @@ async fn execute_c_find_reports_a_malformed_identifier() {
         rx.recv().await.unwrap().unwrap().command.field,
         CommandField::CFindRsp
     ));
+}
+
+#[tokio::test]
+async fn execute_c_store_rejects_a_request_without_a_dataset() {
+    let provider = Arc::new(OkStore);
+    let options = ServerOptions::default();
+    let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Outgoing>>(4);
+    let mut command = store_command("1.2.3.4.5.6");
+    command.no_dataset = true;
+    let job = DispatchJob {
+        context_id: 1,
+        command,
+        body: MessageBody::Memory(bytes::Bytes::new()),
+        syntax,
+        cancel: None,
+        peer: Default::default(),
+    };
+    execute_c_store(job, &provider, &options, &tx)
+        .await
+        .unwrap();
+    let response = rx.recv().await.unwrap().unwrap();
+    assert_eq!(response.command.field, CommandField::CStoreRsp);
+    assert_ne!(
+        response.command.status,
+        Some(crate::dimse::status::SUCCESS),
+        "a request with no Dataset must not report Success"
+    );
+    assert!(
+        response
+            .command
+            .error_comment
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Dataset"),
+        "the failure names the missing Dataset"
+    );
+}
+
+#[tokio::test]
+async fn execute_c_find_rejects_a_request_without_an_identifier() {
+    let provider = Arc::new(ScriptedFind { fail: false });
+    let options = ServerOptions::default();
+    let syntax = syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Outgoing>>(4);
+    let mut command = crate::cfind::CFindRequest::study_query(9).to_command();
+    command.no_dataset = true;
+    let mut job = DispatchJob {
+        context_id: 1,
+        command,
+        body: MessageBody::Memory(bytes::Bytes::new()),
+        syntax,
+        cancel: None,
+        peer: Default::default(),
+    };
+    execute_c_find(&mut job, &provider, &options, &tx)
+        .await
+        .unwrap();
+    let response = rx.recv().await.unwrap().unwrap();
+    assert_eq!(response.command.field, CommandField::CFindRsp);
+    assert_ne!(
+        response.command.status,
+        Some(crate::dimse::status::SUCCESS),
+        "a query without an Identifier must not report Success"
+    );
 }
 
 #[tokio::test]

@@ -316,6 +316,10 @@ impl DicomClient {
                 // a callback error is the caller's business error: the batch
                 // may continue on the same association
                 | NetworkError::Callback(_) => {}
+                // PS3.8 §9.3.8: an association-level protocol violation is ended
+                // with A-ABORT, so the peer learns the association is dead
+                // instead of waiting on a stream this side will not use again.
+                NetworkError::Protocol(_) => self.abort().await,
                 _ => self.forget_association(),
             }
         }
@@ -454,16 +458,26 @@ impl DicomClient {
     }
 
     /// Releases the current association, tolerating a peer that already left.
+    ///
+    /// A release the peer never confirms is not reported as a clean release:
+    /// the association is dropped either way, but the event only says
+    /// `AssociationReleased` when the A-RELEASE-RP actually arrived.
     async fn close_association(&mut self) {
         if let Some(association) = self.association.take() {
             self.emit(ClientEvent::StateChanged {
                 state: ConnectionState::Closing,
             });
-            let _ = association.release().await;
+            match association.release().await {
+                Ok(()) => self.emit(ClientEvent::AssociationReleased),
+                Err(error) => tracing::warn!(
+                    target: "radicom::network",
+                    %error,
+                    "association release was not confirmed",
+                ),
+            }
             self.emit(ClientEvent::StateChanged {
                 state: ConnectionState::Closed,
             });
-            self.emit(ClientEvent::AssociationReleased);
         }
         self.sent_on_association = 0;
         self.last_request = None;
@@ -1972,10 +1986,12 @@ mod tests {
                 ClientEvent::StateChanged {
                     state: ConnectionState::Closing
                 },
+                // the release is announced when the peer confirms it, then the
+                // connection is reported closed
+                ClientEvent::AssociationReleased,
                 ClientEvent::StateChanged {
                     state: ConnectionState::Closed
                 },
-                ClientEvent::AssociationReleased,
             ]
         );
         handle.await.unwrap().unwrap();

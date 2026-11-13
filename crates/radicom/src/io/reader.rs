@@ -653,6 +653,16 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         let defined = (length != 0xFFFF_FFFF).then_some(length);
         let raw = (group, element);
 
+        // A defined-length value may not extend past its enclosing
+        // defined-length item/sequence: the declared length is not permission to
+        // read the parent's bytes. End the level at its boundary (the level
+        // caller then seeks to the declared end) instead of reading across it.
+        if let (Some(length), Mode::Limited { limit }) = (defined, mode) {
+            if value_start + u64::from(length) > level_start + limit {
+                return Ok(Step::End(LevelEnd::Limit));
+            }
+        }
+
         // fo-dicom `IsPrivateSequence`: a private tag the dictionary calls SQ
         // only descends when the value really starts with an item or sequence
         // delimiter; otherwise it is read as UN bytes.
@@ -983,13 +993,13 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         level_start: u64,
     ) -> Result<LevelEnd, Error> {
         let mut previous: Option<(u16, u16)> = None;
-        loop {
+        let end = 'level: loop {
             match self.step(stop, mode, level_start, previous)? {
                 Step::Continue => {}
-                Step::End(end) => return Ok(end),
+                Step::End(end) => break 'level end,
                 Step::Stopped => {
                     self.stopped = true;
-                    return Ok(LevelEnd::Eof);
+                    break 'level LevelEnd::Eof;
                 }
                 Step::Element {
                     raw,
@@ -1046,7 +1056,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                     self.set_byte_order(saved_be);
                     observer.on_end_sequence(&self.here()?)?;
                     if end == LevelEnd::Eof {
-                        return Ok(LevelEnd::Eof);
+                        break 'level LevelEnd::Eof;
                     }
                     previous = Some(raw);
                 }
@@ -1054,7 +1064,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                     let end = self.parse_item(observer, pos, defined)?;
                     // T7: the enclosing SQ may end where an item was expected
                     if matches!(end, LevelEnd::SequenceEnd | LevelEnd::Eof) {
-                        return Ok(end);
+                        break 'level end;
                     }
                     previous = Some(raw);
                 }
@@ -1078,12 +1088,23 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                     self.depth -= 1;
                     observer.on_end_sequence(&self.here()?)?;
                     if end == LevelEnd::Eof {
-                        return Ok(LevelEnd::Eof);
+                        break 'level LevelEnd::Eof;
                     }
                     previous = Some(raw);
                 }
             }
+        };
+        // A defined-length level always ends at its declared end, even when its
+        // body ended early (a header or a value that overruns the item, T6): the
+        // parent must resume there, not inside the item's bytes, which used to
+        // desynchronise every following element.
+        if let Mode::Limited { limit } = mode {
+            let target = level_start.saturating_add(limit);
+            if self.position()? < target {
+                self.source.goto(target).map_err(|e| io_err(e, target))?;
+            }
         }
+        Ok(end)
     }
 
     /// One sequence item body (`FFFE,E000` and its length already read).
@@ -1131,8 +1152,17 @@ fn decode_offset_table(buffer: &SharedBuffer, big_endian: bool) -> Result<Vec<u3
     Ok(entries)
 }
 
+/// The default cap on a deflated dataset body, in bytes. A few hundred bytes of
+/// DEFLATE can expand to gigabytes (a decompression bomb), so the default read
+/// path refuses to inflate past this; callers that legitimately store larger
+/// deflated datasets raise [`crate::io::file::ReadOptions::max_inflated_bytes`].
+pub const DEFAULT_MAX_INFLATED_BYTES: u64 = 1024 * 1024 * 1024;
+
 /// RD-04: inflates a deflated dataset body. The file meta group is never
 /// deflated, so this applies to the dataset bytes only.
+///
+/// The output is capped at [`DEFAULT_MAX_INFLATED_BYTES`]; use
+/// [`inflate_stream_limited`] with an explicit cap to read a larger body.
 ///
 /// PS3.5 A.5: the deflated transfer syntax uses **raw DEFLATE (RFC 1951)** — no
 /// zlib header/trailer. Raw is therefore the default decoder; a zlib-wrapped
@@ -1141,34 +1171,11 @@ fn decode_offset_table(buffer: &SharedBuffer, big_endian: bool) -> Result<Vec<u3
 /// silently mis-decoded. A header we fail to recognise still falls back to zlib
 /// after raw fails (tolerance).
 pub fn inflate(bytes: &[u8]) -> Result<Vec<u8>, Error> {
-    use std::io::Read as _;
-    let zlib_first = looks_like_zlib(bytes);
-    let mut out = Vec::new();
-    if zlib_first
-        && flate2::read::ZlibDecoder::new(bytes)
-            .read_to_end(&mut out)
-            .is_ok()
-    {
-        return Ok(out);
-    }
-    out.clear();
-    let raw = flate2::read::DeflateDecoder::new(bytes).read_to_end(&mut out);
-    if raw.is_ok() {
-        return Ok(out);
-    }
-    if !zlib_first {
-        out.clear();
-        if flate2::read::ZlibDecoder::new(bytes)
-            .read_to_end(&mut out)
-            .is_ok()
-        {
-            return Ok(out);
-        }
-    }
-    Err(Error::Reader(ReaderError::Other(format!(
-        "deflate: {}",
-        raw.unwrap_err()
-    ))))
+    inflate_stream_limited(
+        &mut std::io::Cursor::new(bytes),
+        0,
+        DEFAULT_MAX_INFLATED_BYTES,
+    )
 }
 
 /// True when `bytes` starts with a syntactically valid zlib (RFC 1950) header.
@@ -1391,6 +1398,71 @@ mod tests {
         let mut builder = DatasetBuilder::with_transfer_syntax(syntax.clone());
         DicomReader::default().read(&mut source, &syntax, &mut builder, None)?;
         Ok(builder.into_dataset())
+    }
+
+    /// An explicit-VR element with the length form its VR requires.
+    fn explicit_element(group: u16, element: u16, vr: Vr, value: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&group.to_le_bytes());
+        bytes.extend_from_slice(&element.to_le_bytes());
+        bytes.extend_from_slice(vr.code().as_bytes());
+        if vr.is_16bit_length() {
+            bytes.extend_from_slice(&(value.len() as u16).to_le_bytes());
+        } else {
+            bytes.extend_from_slice(&[0, 0]);
+            bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        }
+        bytes.extend_from_slice(value);
+        bytes
+    }
+
+    /// A defined-length item (`FFFE,E000`) holding `body`.
+    fn defined_item(body: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        bytes.extend_from_slice(&0xE000u16.to_le_bytes());
+        bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(body);
+        bytes
+    }
+
+    #[test]
+    fn a_value_overrunning_its_item_ends_the_item_at_its_declared_end() {
+        // The item declares 12 bytes but its only element claims a 100-byte
+        // value: the following (0020,000D) belongs to the parent dataset and
+        // must still parse instead of being swallowed by the overrun.
+        let mut header = Vec::new();
+        header.extend_from_slice(&0x0010u16.to_le_bytes());
+        header.extend_from_slice(&0x0010u16.to_le_bytes());
+        header.extend_from_slice(b"PN");
+        header.extend_from_slice(&100u16.to_le_bytes());
+        header.extend_from_slice(b"ABCD");
+        let mut bytes = explicit_element(0x0008, 0x1111, Vr::Sq, &defined_item(&header));
+        bytes.extend_from_slice(&explicit_element(0x0020, 0x000D, Vr::Ui, b"1.2.3 "));
+        let ds = read_with(&bytes, DicomReader::default()).expect("the dataset parses");
+        assert_eq!(
+            ds.try_get_str(Tag::STUDY_INSTANCE_UID).as_deref(),
+            Some("1.2.3 "),
+            "the element after the overrunning item is not lost"
+        );
+    }
+
+    #[test]
+    fn a_header_truncated_by_the_item_boundary_keeps_the_next_element() {
+        // Only the tag fits inside the 6-byte item; its VR does not. The item
+        // must end at its declared end, not after the 4 bytes it managed to read.
+        let mut body = Vec::new();
+        body.extend_from_slice(&0x0010u16.to_le_bytes());
+        body.extend_from_slice(&0x0010u16.to_le_bytes());
+        body.extend_from_slice(b"PN");
+        let mut bytes = explicit_element(0x0008, 0x1111, Vr::Sq, &defined_item(&body));
+        bytes.extend_from_slice(&explicit_element(0x0020, 0x000D, Vr::Ui, b"1.2.3 "));
+        let ds = read_with(&bytes, DicomReader::default()).expect("the dataset parses");
+        assert_eq!(
+            ds.try_get_str(Tag::STUDY_INSTANCE_UID).as_deref(),
+            Some("1.2.3 "),
+            "the parent resumes at the item's declared end"
+        );
     }
 
     #[test]

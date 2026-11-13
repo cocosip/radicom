@@ -129,6 +129,12 @@ impl Transcoder {
             (true, true) => self.encode_dataset(&self.decode_to_uncompressed(&source)?)?,
         };
         out.set_transfer_syntax(self.to.clone());
+        // (7FE0,0001)/(7FE0,0002) describe the *original* fragment layout, and
+        // the rewrite always builds a fresh basic offset table, so a stale
+        // extended table would point at the wrong fragments. Both are optional
+        // (PS3.3 C.7.6.3), so drop them instead of writing wrong offsets.
+        out.remove(Tag::EXTENDED_OFFSET_TABLE);
+        out.remove(Tag::EXTENDED_OFFSET_TABLE_LENGTHS);
         let encoded_bytes = PixelDataRef::from_dataset(&out)?.get_frame(0)?.size();
         // (0028,2110) marks the output lossy when the target syntax compresses
         // with loss (PS3.3 C.7.6.4; fo-dicom Transcoder write-lossy bookkeeping).
@@ -199,7 +205,11 @@ impl Transcoder {
     fn read_frames(&self, ds: &Dataset) -> Result<Vec<SharedBuffer>, Error> {
         let pd = PixelDataRef::from_dataset(ds)?;
         let count = pd.number_of_frames();
-        let mut frames = Vec::with_capacity(count as usize);
+        // `NumberOfFrames (0028,0008)` is untrusted metadata: do not reserve
+        // `count` slots up front (a u32::MAX count would ask for tens of GB
+        // before the first frame is even bounds-checked). `get_frame` fails on
+        // the first missing frame, so an absurd count costs one error.
+        let mut frames = Vec::new();
         for i in 0..count {
             frames.push(pd.get_frame(i)?);
         }
@@ -909,6 +919,39 @@ mod tests {
         ds.insert_fragments(PIXEL_DATA, Vr::Ow)
             .push_fragment(Arc::new(MemoryBuffer::from(vec![0xFEu8, 0xFD, 0xFC, 0xFB])));
         ds
+    }
+
+    #[test]
+    fn a_stale_extended_offset_table_is_dropped_when_the_pixels_are_rewritten() {
+        let _guard = crate::pixel::codec::lock_registry();
+        set_codec_registry(Arc::new(MockRegistry {
+            syntaxes: vec![&syntaxes::JPEG_2000_LOSSLESS],
+        }));
+        let mut ds = ow_encapsulated_source();
+        for tag in [
+            Tag::EXTENDED_OFFSET_TABLE,
+            Tag::EXTENDED_OFFSET_TABLE_LENGTHS,
+        ] {
+            ds.insert_or_update(crate::model::item::DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(
+                    tag,
+                    Vr::Ov,
+                    Arc::new(MemoryBuffer::from(vec![0u8; 8])),
+                ),
+            ));
+        }
+        let tr = Transcoder::new(
+            syntaxes::JPEG_2000_LOSSLESS.clone(),
+            syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+            None,
+            None,
+        );
+        let out = tr.transcode_dataset(&ds).unwrap();
+        // the extended tables point at the old fragment layout; the rewrite
+        // builds a fresh basic offset table, so they are dropped, not carried.
+        assert!(!out.contains(&Tag::EXTENDED_OFFSET_TABLE));
+        assert!(!out.contains(&Tag::EXTENDED_OFFSET_TABLE_LENGTHS));
+        assert_eq!(frames_of(&out), vec![vec![1, 2, 3, 4]]);
     }
 
     #[test]

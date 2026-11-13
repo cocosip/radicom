@@ -230,6 +230,12 @@ A fragment sequence's `FFFE,E0DD` item delimiter **must consume its 4-byte lengt
 the `FFFE,E000` item branch does. Breaking out without consuming it desynchronises the stream for every
 remaining element.
 
+Deflated datasets are decompressed with a hard ceiling of `ReadOptions::max_inflated_bytes`
+(`DEFAULT_MAX_INFLATED_BYTES`, 1 GiB): a small deflate stream can expand enormously, so the reader stops
+at a bytes-written budget rather than trusting the compressed size. An item whose `ItemLength` ends in the
+middle of a value ends that item at its declared end (the next item's header is kept), and one whose
+header is cut by the item boundary keeps the following element instead of consuming it.
+
 ---
 
 ## 8. Writer (WR-01..03)
@@ -243,6 +249,8 @@ remaining element.
   `RADICOM <workspace version>` name (`0002,0013`); association user information advertises the same
   version name. The name derives from `CARGO_PKG_VERSION`, and a compile-time check enforces the
   16-byte SH limit.
+- `(0002,0003) MediaStorageSOPInstanceUID` is Type 1 and must equal the dataset's Type 1
+  `(0008,0018)`: a dataset without an SOP Instance UID cannot be written, and no UID is invented for it.
 - ACR-NEMA format is rejected on save.
 
 ---
@@ -316,6 +324,15 @@ Changing it breaks `radicom-codecs`.
   numerically first and fall back to text — never text-only.
 - Output scaling, spatial transforms (scale/rotate/flip/pan) and MPR reconstruction are separate
   operators applied in that order.
+- `DicomGenerator::store_as_dicom` writes native grayscale slices: it forces Explicit VR Little Endian,
+  `MONOCHROME2`, `SamplesPerPixel = 1` and an identity rescale, and drops inherited colour, planar,
+  palette, ICC and lossy-compression attributes so the new series describes its own pixels.
+- An ICC profile `(0028,2000)` is exposed as an ordinary element but is not applied: the renderer does
+  not colour-manage, and no profile is written into a rendered image.
+- The renderer rejects an odd `Columns` for `YBR_FULL_422`/`YBR_PARTIAL_422` (the stored layout is
+  per-pixel-pair groups) instead of guessing a byte layout; DICOM does not forbid odd columns.
+- A transcoded encapsulated dataset drops `(7FE0,0001)`/`(7FE0,0002)`: the rewrite builds a fresh basic
+  offset table, and these extended tables are optional, so stale offsets are removed rather than kept.
 - Export is `RawImage` plus hand-written PNG/BMP encoders; there is no external image dependency.
 - Rendering failures must return an error, never silently produce a blank image.
 
@@ -373,6 +390,12 @@ client/server. One tokio task per association. Locks must not be held across `.a
 - A well-formed but unsupported context set is answered with A-ASSOCIATE-RJ (source user, reason 1);
   a structurally malformed one (bad context ID, empty abstract syntax, no contexts) is answered with
   A-ABORT, because no rejection reason describes it. Both are deliberate.
+- There is exactly one Role Selection item per SOP Class (PS3.7 §D.3.3.4): a caller that negotiates
+  several contexts for one class has its roles merged into a single item (union of the requested roles)
+  before the user information is built. A peer's duplicates are tolerated, since some implementations
+  send them.
+- The message control header of a PDV is read for bits 0/1 only: PS3.8 §E.2 makes bits 2-7 reserved and
+  forbids the receiver from checking them.
 
 ### 11.3 DIMSE
 
@@ -390,6 +413,12 @@ client/server. One tokio task per association. Locks must not be held across `.a
 - Pending C-GET/MOVE responses require all four sub-operation counters; terminal responses may omit
   them. N-ACTION/EVENT-REPORT replies preserve the corresponding Type ID when supplied for a reply.
 - Every outstanding request ID stays registered until a terminal response; Pending never retires it.
+- A C-STORE without a Dataset and a C-FIND without an Identifier are answered with Processing Failure
+  and never reach the provider: PS3.7 D.3.3.1 makes those data sets part of the request, and answering
+  Success for an instance that was never sent (or for a query with no keys) is worse than failing.
+- On an association-level protocol violation the client sends A-ABORT before dropping the association
+  (PS3.8 §9.3.8), and `AssociationReleased` is reported only when the peer actually confirmed the
+  A-RELEASE-RP.
 - `Priority`: Low = 2, Medium = 0, High = 1; the default is Medium.
 
 ### 11.4 Server and client
@@ -462,6 +491,13 @@ client/server. One tokio task per association. Locks must not be held across `.a
   `FFFE,E000` headers. A record containing an embedded sequence (an icon, for instance) makes the scan
   return the wrong item — a PATIENT record would be mistaken for a STUDY.
 - `add_file` deduplicates through Patient → Study → Series → Instance, reusing nodes by UID.
+- `(0004,1130) File-set ID` is Type 2: it must be present, may be empty, and is validated as `CS` with
+  the 16-character PS3.5 limit; a longer value is an error rather than a truncated ID.
+- `DicomDirectoryBuilder` follows `ScanErrorPolicy`: an unreadable file is skipped (with a warning) by
+  default, matching the scanner, and fails the build only under `Stop`. A file that parses but cannot be
+  recorded is always an error.
+- Record offsets are written as 32-bit `UL` values: a directory larger than 4 GiB is reported, never
+  truncated.
 - Referenced File IDs are validated, not copied: each component is 1-8 characters of `A-Z`, `0-9` or `_`
   (PS3.10 §8.2/§8.5) and a File ID has 1-8 components. A caller path such as `img.dcm` is rejected, so
   callers must map names (the scanner uppercases stems).
@@ -501,9 +537,16 @@ client/server. One tokio task per association. Locks must not be held across `.a
 
 - Film Session / Film Box / Image Box / Presentation LUT are dataset-backed models.
 - Layout rendering reuses the render pipeline (BorderDensity film area, EmptyImageDensity image box
-  area, Trim border, per-cell aspect-fit, Polarity REVERSE, the MinDensity/MaxDensity window and the
+  area, Trim box, per-cell aspect-fit, Polarity REVERSE, the MinDensity/MaxDensity window and the
   SmoothingType filter). All of these are Film Box attributes (Table C.13-3) read from the dataset; an
   Image Box SmoothingType overrides the film value (Table C.13-5).
+- `Trim` surrounds **each image** on the film (Table C.13-3), so the border is drawn per image-box cell,
+  not once around the film's outer edge.
+- `MagnificationType` treats `REPLICATE` and `NONE` as nearest-neighbour (no interpolation) and
+  `BILINEAR`/`CUBIC` as bilinear; a cubic kernel is not implemented, and `NONE` must not silently
+  interpolate like `BILINEAR`.
+- Min/MaxDensity exist only on the Film Box (Table C.13-3): Table C.13-5 gives the Image Box no density
+  attributes, so there is no image-box override.
 - Verify every tag against PS3.3 before use: `(2010,0120)` is MinDensity, `(2010,0500)` is
   ReferencedFilmSessionSequence, and `(2010,0510)` is ReferencedImageBoxSequence.
 - The Presentation LUT Descriptor is strict (PS3.3 C.11.4.1): bit depth 10-16 (never 8), first mapped value
@@ -519,7 +562,9 @@ client/server. One tokio task per association. Locks must not be held across `.a
 - Actions: `X` remove, `Z` zero-length, `D` replace with dummy, `U` replace with a new UID, `K` keep,
   `C` clean.
 - UID replacement must stay consistent **within one anonymizer instance**, otherwise references break.
-- Recurse into sequences; an `X` action removes the whole sequence, not just its children.
+- Recurse into sequences; an `X` action removes the whole sequence, not just its children. A
+  blanking action (`D`/`Z`/`U`/`C`) on an encapsulated fragment sequence replaces it with an empty
+  sequence of the same tag and VR, so no fragment payload (an icon, a private blob) survives.
 - The `D` action must respect VR: numeric-string VRs (DS/IS) get a valid number such as `"0"`, never the
   word `ANONYMOUS`.
 - De-identification is declared, not implied (PS3.15 E.1.1): `anonymize_in_place` sets
@@ -569,3 +614,16 @@ Two behaviours are occasionally reported as defects but are deliberate, so they 
 buffer reads are fallible (see §6) and the receive side caps one PDU at 256 KiB (§11.2). The
 defined-length non-private `UN` tolerance and its item-shape probe are specified in §7 ("CP-246
 condition").
+
+Known limitations (recorded so they are not mistaken for conformance):
+
+- The SCP has no *in-message* progress timeout: a peer that sends a command or the first dataset PDUs and
+  then stalls holds the association (and its client slot) until TCP fails or the process exits.
+  `association_timeout` covers the A-ASSOCIATE-RQ and `request_timeout` covers responses to requests the
+  SCP issues, but neither bounds a half-delivered message. Add a per-association progress deadline when
+  an idle-association policy exists (it must not abort quiet but healthy peers).
+- An ICC profile `(0028,2000)` is neither applied when rendering nor written into output images.
+- `YBR_FULL_422`/`YBR_PARTIAL_422` frames with an odd `Columns` are rejected instead of rendered.
+- `(7FE0,0001)`/`(7FE0,0002)` extended offset tables are read as plain values and never generated; a
+  transcoded dataset drops them rather than carrying stale offsets.
+- `CUBIC` magnification falls back to bilinear.

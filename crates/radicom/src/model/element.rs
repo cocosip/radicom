@@ -274,23 +274,28 @@ fn read_host_unit<T: FromHostBytes>(
     // silently produced 0 — this is why Rows/Columns read as 0 on real files.
     let unit = e.vr().unit_size();
     let i = index.unwrap_or(0);
-    let start = i * unit;
     let data = b.data()?;
-    if start + unit > data.len() {
-        return Err(Error::Data(DataError::IndexOutOfRange {
-            tag: (&e.tag).into(),
-            index: i,
-            count: data.len() / unit.max(1),
-        }));
-    }
+    // `index` is caller input, so the stride multiplication must not wrap:
+    // `i * unit` overflows for a huge index and used to panic in debug builds
+    // (or slice out of bounds in release) instead of reporting a range error.
+    let start = i
+        .checked_mul(unit)
+        .filter(|start| start.saturating_add(unit) <= data.len())
+        .ok_or_else(|| {
+            Error::Data(DataError::IndexOutOfRange {
+                tag: (&e.tag).into(),
+                index: i,
+                count: data.len() / unit.max(1),
+            })
+        })?;
     Ok(T::from_host_widened(
         &data[start..start + unit],
         e.vr().is_signed_integer(),
     ))
 }
 
-/// Host-order construction for numeric element reads (see
-/// [`read_host_unit`]): the byte order of a file is resolved at parse time.
+/// Host-order construction for numeric element reads (see `read_host_unit`):
+/// the byte order of a file is resolved at parse time.
 pub trait FromHostBytes: Sized {
     const SIZE: usize;
     fn from_host(bytes: &[u8]) -> Self;
@@ -311,18 +316,36 @@ macro_rules! impl_host {
                 <$t>::from_ne_bytes(arr)
             }
             fn from_host_widened(bytes: &[u8], sign: bool) -> Self {
-                let mut arr = [0u8; std::mem::size_of::<$t>()];
-                let n = bytes.len().min(arr.len());
-                arr[..n].copy_from_slice(&bytes[..n]);
-                // Sign-extend only for a signed source VR whose top bit is set,
-                // so SS -1 read as i32 stays -1 while US 65535 read as i64
-                // stays 65535.
-                if sign && n > 0 && n < arr.len() && (bytes[n - 1] & 0x80) != 0 {
-                    for b in &mut arr[n..] {
-                        *b = 0xFF;
+                let size = std::mem::size_of::<$t>();
+                let n = bytes.len().min(size);
+                // `bytes` is in host order. Right-align them in a 16-byte window
+                // and read it natively, which puts the source value in the low
+                // bits on either host: copying them to the *start* of the
+                // destination array (the old code) was only correct on a
+                // little-endian host.
+                let mut raw = [0u8; 16];
+                let offset = if cfg!(target_endian = "little") {
+                    0
+                } else {
+                    16 - n
+                };
+                raw[offset..offset + n].copy_from_slice(&bytes[..n]);
+                let mut value = u128::from_ne_bytes(raw);
+                // Sign-extend only for a signed source VR whose top byte (last in
+                // host order on little endian, first on big endian) has its high
+                // bit set, so SS -1 read as i32 stays -1 while US 65535 read as
+                // i64 stays 65535.
+                if sign && n > 0 && n < size {
+                    let top = if cfg!(target_endian = "little") {
+                        bytes[n - 1]
+                    } else {
+                        bytes[0]
+                    };
+                    if top & 0x80 != 0 {
+                        value |= (!0u128) << (8 * n as u32);
                     }
                 }
-                <$t>::from_ne_bytes(arr)
+                value as $t
             }
         }
     };
@@ -333,8 +356,67 @@ impl_host!(i32);
 impl_host!(u32);
 impl_host!(i64);
 impl_host!(u64);
-impl_host!(f32);
-impl_host!(f64);
+
+// A float destination reinterprets a same-width float source and converts a
+// different-width one numerically: the integer widening above would reinterpret
+// the mantissa bits (1.5f32 read as 1069547520).
+impl FromHostBytes for f32 {
+    const SIZE: usize = 4;
+    fn from_host(bytes: &[u8]) -> Self {
+        f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+    }
+    fn from_host_widened(bytes: &[u8], sign: bool) -> Self {
+        match bytes.len() {
+            8 => f64::from_host(&bytes[..8]) as f32,
+            4 => f32::from_host(bytes),
+            _ => widen_integer_to_f64(bytes, sign) as f32,
+        }
+    }
+}
+
+impl FromHostBytes for f64 {
+    const SIZE: usize = 8;
+    fn from_host(bytes: &[u8]) -> Self {
+        let mut arr = [0u8; 8];
+        arr.copy_from_slice(&bytes[..8]);
+        f64::from_ne_bytes(arr)
+    }
+    fn from_host_widened(bytes: &[u8], sign: bool) -> Self {
+        if bytes.len() == 8 {
+            f64::from_host(bytes)
+        } else {
+            widen_integer_to_f64(bytes, sign)
+        }
+    }
+}
+
+/// Widens a narrow integer unit (host order) to `f64` numerically, sign-aware.
+fn widen_integer_to_f64(bytes: &[u8], sign: bool) -> f64 {
+    let n = bytes.len().min(8);
+    let mut raw = [0u8; 16];
+    let offset = if cfg!(target_endian = "little") {
+        0
+    } else {
+        16 - n
+    };
+    raw[offset..offset + n].copy_from_slice(&bytes[..n]);
+    let mut value = u128::from_ne_bytes(raw);
+    if sign && n > 0 {
+        let top = if cfg!(target_endian = "little") {
+            bytes[n - 1]
+        } else {
+            bytes[0]
+        };
+        if top & 0x80 != 0 {
+            value |= (!0u128) << (8 * n as u32);
+        }
+    }
+    if sign {
+        (value as i128) as f64
+    } else {
+        value as f64
+    }
+}
 
 macro_rules! impl_from_int {
     ($t:ty) => {
@@ -479,8 +561,16 @@ impl FromElement for Tag {
         let Some(buffer) = e.value().as_buffer() else {
             return Err(type_err(e, "AT"));
         };
-        let packed = read_host_unit::<u32>(e, buffer, index)?;
-        Ok(Tag::new(packed as u16, (packed >> 16) as u16))
+        let raw = read_host_unit::<u32>(e, buffer, index)?;
+        // The reader swaps AT in 2-byte units and the writer swaps them back, so
+        // the in-memory layout is "group unit, then element unit", each native.
+        // Unpacking a single native u32 with `packed as u16`/`packed >> 16`
+        // silently swapped group and element on a big-endian host.
+        let bytes = raw.to_ne_bytes();
+        Ok(Tag::new(
+            u16::from_ne_bytes([bytes[0], bytes[1]]),
+            u16::from_ne_bytes([bytes[2], bytes[3]]),
+        ))
     }
 }
 
@@ -666,12 +756,51 @@ mod tests {
         assert!(us.get::<u32>(Some(1)).is_err(), "index 1 is out of range");
     }
 
+    #[test]
+    fn an_at_value_uses_the_native_two_unit_layout() {
+        // AT is swapped in 2-byte units, so its in-memory bytes are "group unit,
+        // element unit", each in host order. Packing both halves into one native
+        // u32 (and unpacking with `packed as u16`/`packed >> 16`) swapped group
+        // and element on a big-endian host; this asserts the layout directly.
+        let tag = Tag::new(0x0028, 0x0010);
+        let element = tag.clone().into_element(Tag::SOURCE_IMAGE_SEQUENCE, Vr::At);
+        let raw = element.value().as_buffer().unwrap().data().unwrap();
+        assert_eq!(&raw[..2], &tag.group().to_ne_bytes(), "group unit first");
+        assert_eq!(
+            &raw[2..4],
+            &tag.element().to_ne_bytes(),
+            "element unit second"
+        );
+        let back: Tag = element.get::<Tag>(None).unwrap();
+        assert_eq!(back, tag, "AT reads back as the same tag");
+    }
+
     /// An empty element must report an error rather than a bogus zero.
     #[test]
     fn empty_numeric_element_errors() {
         let empty =
             DicomElement::new_bytes(Tag::ROWS, Vr::Us, Arc::new(MemoryBuffer::from(Vec::new())));
         assert!(empty.get::<u16>(None).is_err());
+    }
+
+    #[test]
+    fn an_index_whose_stride_overflows_reports_a_range_error() {
+        // `i * unit` wraps for a huge index; it must be a typed error, not a
+        // debug-build panic or a release-build slice out of bounds.
+        let us = DicomElement::new_bytes(
+            Tag::ROWS,
+            Vr::Us,
+            Arc::new(MemoryBuffer::from(vec![0x2C, 0x01])),
+        );
+        let error = us.get::<u16>(Some(usize::MAX)).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::Data(DataError::IndexOutOfRange { index, count: 1, .. })
+                    if index == usize::MAX
+            ),
+            "expected an IndexOutOfRange error, got {error:?}"
+        );
     }
 
     #[test]
@@ -1238,7 +1367,7 @@ impl IntoElement for Tag {
         DicomElement::new_bytes(
             tag,
             vr,
-            Arc::new(MemoryBuffer::from(pack_tag(self).to_ne_bytes().to_vec())),
+            Arc::new(MemoryBuffer::from(tag_bytes(self).to_vec())),
         )
     }
 }
@@ -1248,17 +1377,19 @@ impl IntoElement for Vec<Tag> {
         Some(Vr::At)
     }
     fn into_element(self, tag: Tag, vr: Vr) -> DicomElement {
-        let bytes = self
-            .into_iter()
-            .flat_map(|t| pack_tag(t).to_ne_bytes())
-            .collect::<Vec<u8>>();
+        let bytes = self.into_iter().flat_map(tag_bytes).collect::<Vec<u8>>();
         DicomElement::new_bytes(tag, vr, Arc::new(MemoryBuffer::from(bytes)))
     }
 }
 
-/// AT packing shared with the reader: group in the low unit, element high.
-fn pack_tag(tag: Tag) -> u32 {
-    (tag.group() as u32) | ((tag.element() as u32) << 16)
+/// AT value bytes in the in-memory representation: group then element, each as a
+/// native-order 16-bit unit. That is what the reader produces on every host
+/// (`byte_swap_size(AT) == 2`) and what the writer swaps back to the wire, so
+/// packing both halves into one native `u32` (which ordered them by host
+/// endianness) was wrong on a big-endian host.
+fn tag_bytes(tag: Tag) -> [u8; 4] {
+    let (group, element) = (tag.group().to_ne_bytes(), tag.element().to_ne_bytes());
+    [group[0], group[1], element[0], element[1]]
 }
 
 impl IntoElement for NaiveDate {

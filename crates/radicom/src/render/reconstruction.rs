@@ -695,8 +695,29 @@ impl DicomGenerator {
             ds.insert_value(Tag::HIGH_BIT, bits - 1);
             ds.insert_value(Tag::PIXEL_REPRESENTATION, if signed { 1u16 } else { 0u16 });
             ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16);
-            if !ds.contains(&Tag::PHOTOMETRIC_INTERPRETATION) {
-                ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
+            ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
+            // The slice is written as a native, single-sample, uncompressed
+            // grayscale image, so nothing the clone inherited may contradict
+            // that: a compressed syntax would make the native frames
+            // unreadable, and colour/palette/planar attributes (with their ICC
+            // profile) describe data this dataset no longer has.
+            ds.set_transfer_syntax(
+                crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+            );
+            for tag in [
+                Tag::PLANAR_CONFIGURATION,
+                Tag::RED_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR,
+                Tag::GREEN_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR,
+                Tag::BLUE_PALETTE_COLOR_LOOKUP_TABLE_DESCRIPTOR,
+                Tag::RED_PALETTE_COLOR_LOOKUP_TABLE_DATA,
+                Tag::GREEN_PALETTE_COLOR_LOOKUP_TABLE_DATA,
+                Tag::BLUE_PALETTE_COLOR_LOOKUP_TABLE_DATA,
+                Tag::PALETTE_COLOR_LOOKUP_TABLE_UID,
+                Tag::ICC_PROFILE,
+                Tag::LOSSY_IMAGE_COMPRESSION,
+                Tag::LOSSY_IMAGE_COMPRESSION_METHOD,
+            ] {
+                ds.remove(&tag);
             }
             // values are physical: drop the source rescale so they are not
             // reinterpreted a second time
@@ -1044,6 +1065,57 @@ mod tests {
             let pixel = PixelDataRef::from_dataset(ds).unwrap();
             assert!(pixel.get_frame(0).is_ok(), "pixel data written");
         }
+    }
+
+    #[test]
+    fn a_generated_slice_drops_inherited_colour_and_compressed_layout() {
+        // The common dataset comes from a source series that may be colour,
+        // compressed or palettised; the generated slice is native MONOCHROME2,
+        // one sample per pixel, so none of that may survive the clone.
+        let slices: Vec<Dataset> = (0..2).map(|z| axial_slice(z as f64, 100)).collect();
+        let volume = VolumeData::from_datasets(&slices).unwrap();
+        let stack = Stack::new(&volume, StackType::Axial, 1.0, 1.0).unwrap();
+        let mut common = slices[0].clone();
+        common.set_transfer_syntax(crate::model::transfer_syntax::syntaxes::JPEG_PROCESS_1.clone());
+        common.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "RGB");
+        common.insert_value(Tag::PLANAR_CONFIGURATION, 1u16);
+        common.insert_str(Tag::PALETTE_COLOR_LOOKUP_TABLE_UID, Vr::Ui, "1.2.3.4");
+        common.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::ICC_PROFILE,
+                Vr::Ob,
+                Arc::new(crate::model::buffer::MemoryBuffer::from(vec![0u8; 4])),
+            ),
+        ));
+        common.insert_str(Tag::LOSSY_IMAGE_COMPRESSION, Vr::Cs, "01");
+
+        let outputs = DicomGenerator::new(common)
+            .store_as_dicom(&stack, "MPR axial")
+            .unwrap();
+        let out = &outputs[0];
+        assert_eq!(
+            out.transfer_syntax().uid(),
+            "1.2.840.10008.1.2.1",
+            "the native frames need an uncompressed syntax"
+        );
+        assert_eq!(
+            out.try_get_str(Tag::PHOTOMETRIC_INTERPRETATION).as_deref(),
+            Some("MONOCHROME2")
+        );
+        assert_eq!(out.get::<u16>(Tag::SAMPLES_PER_PIXEL).unwrap(), 1);
+        for tag in [
+            Tag::PLANAR_CONFIGURATION,
+            Tag::PALETTE_COLOR_LOOKUP_TABLE_UID,
+            Tag::ICC_PROFILE,
+            Tag::LOSSY_IMAGE_COMPRESSION,
+        ] {
+            assert!(!out.contains(&tag), "{tag} must not be inherited");
+        }
+        // and the pixels still read back through the facade
+        assert!(PixelDataRef::from_dataset(out)
+            .unwrap()
+            .get_frame(0)
+            .is_ok());
     }
 
     #[test]

@@ -789,25 +789,6 @@ impl ImageBox {
         self.dataset.try_get_str(tags::MAGNIFICATION_TYPE)
     }
 
-    /// Sets `(2010,0120)` Min Density on this image box (Table C.13-5); it
-    /// overrides the film box value for this cell.
-    pub fn set_min_density(&mut self, value: u16) {
-        self.dataset.insert_value(tags::MIN_DENSITY, value);
-    }
-
-    pub fn min_density(&self) -> Option<u16> {
-        self.dataset.try_get(tags::MIN_DENSITY)
-    }
-
-    /// Sets `(2010,0130)` Max Density on this image box (Table C.13-5).
-    pub fn set_max_density(&mut self, value: u16) {
-        self.dataset.insert_value(tags::MAX_DENSITY, value);
-    }
-
-    pub fn max_density(&self) -> Option<u16> {
-        self.dataset.try_get(tags::MAX_DENSITY)
-    }
-
     /// Sets `(2010,0080)` on this image box, overriding the film box value
     /// (Table C.13-5). See [`FilmBox::set_smoothing_type`] for the values.
     pub fn set_smoothing_type(&mut self, value: impl Into<String>) {

@@ -75,11 +75,11 @@ impl FilmBox {
     /// Renders the film to an 8-bit [`RawImage`] (PRINT-02).
     ///
     /// `FilmOrientation` LANDSCAPE swaps the canvas and the cell grid, the film
-    /// box's `[MinDensity, MaxDensity]` window (or an image box's own values)
-    /// maps the rendered greys, and `SmoothingType` selects the per-cell filter
-    /// (Table C.13-3/C.13-5). `MagnificationType` selects nearest (`REPLICATE`)
-    /// or bilinear scaling, film box first and image box override; it defaults
-    /// to `BILINEAR`.
+    /// box's `[MinDensity, MaxDensity]` window maps the rendered greys, `Trim`
+    /// draws a box around every image on the film, and `SmoothingType` selects
+    /// the per-cell filter (Table C.13-3/C.13-5). `MagnificationType` selects
+    /// nearest (`REPLICATE`, `NONE`) or bilinear scaling, film box first and
+    /// image box override; it defaults to `BILINEAR`.
     /// `BorderDensity` paints the film areas surrounding and between images and
     /// `EmptyImageDensity` paints an image box area that contains no image; both
     /// come from the dataset first (Table C.13-3) and fall back to `empty_density`
@@ -136,14 +136,12 @@ impl FilmBox {
             .and_then(PrintDensity::parse)
             .unwrap_or(empty_density);
         let mut canvas = Canvas::filled(canvas_w, canvas_h, border.background());
-
-        if self.trim() {
-            // Trim box border ≈ 2 mm (fo-dicom ImageBox BORDER = 100*2/25.4 in
-            // 1/100 inch), scaled to the rasterisation, so it is a real band and
-            // not a 1-px hairline.
-            let border_px = ((2.0 * scale.pixels_per_mm).round() as i64).max(1);
-            canvas.draw_border(Color32::new(0, 0, 0), border_px);
-        }
+        // PS3.3 Table C.13-3: `Trim` prints "a trim box ... surrounding each
+        // image on the film", so the border goes around every image box, not
+        // around the film's outer edge. ≈2 mm (fo-dicom ImageBox BORDER =
+        // 100*2/25.4 in 1/100 inch), scaled to the rasterisation so it is a real
+        // band and not a 1-px hairline.
+        let trim_thickness = ((2.0 * scale.pixels_per_mm).round() as i64).max(1);
 
         // Parse/validate once: a malformed shape or truncated LUT fails the render.
         let cells = self.layout(margins);
@@ -182,12 +180,10 @@ impl FilmBox {
             if image_box.polarity() {
                 invert(&mut patch);
             }
-            // Table C.13-5: an image box Min/MaxDensity overrides the film box.
-            apply_density_range(
-                &mut patch,
-                image_box.min_density().or_else(|| self.min_density()),
-                image_box.max_density().or_else(|| self.max_density()),
-            );
+            // Table C.13-3: Min/MaxDensity are *film box* attributes; they map the
+            // rendered greys of every image. (The old image-box override used
+            // attributes that Table C.13-5 does not define.)
+            apply_density_range(&mut patch, self.min_density(), self.max_density());
             // Table C.13-5: an image box SmoothingType overrides the film box one.
             let smoothing = image_box.smoothing_type().or_else(|| self.smoothing_type());
             apply_smoothing(&mut patch, smoothing.as_deref());
@@ -203,6 +199,14 @@ impl FilmBox {
                 Some(magnification.as_str()),
                 image_box.requested_image_size(),
             );
+            if self.trim() {
+                canvas.draw_cell_border(
+                    cell,
+                    Color32::new(0, 0, 0),
+                    trim_thickness,
+                    scale.pixels_per_mm,
+                );
+            }
         }
 
         Ok(canvas.into_raw_image())
@@ -381,11 +385,6 @@ impl Canvas {
         self.bytes[i + 3] = 0xFF;
     }
 
-    fn draw_border(&mut self, color: Color32, thickness: i64) {
-        let (w, h) = (self.width as i64, self.height as i64);
-        self.draw_rect_border(0, 0, w - 1, h - 1, color, thickness);
-    }
-
     /// Fills `cell` with `color` (the empty-image density of the cell area).
     fn fill_cell(&mut self, cell: &LayoutCell, color: Color32, px_per_mm: f64) {
         let x0 = (cell.x * px_per_mm).round() as i64;
@@ -397,6 +396,25 @@ impl Canvas {
                 self.set(x, y, color);
             }
         }
+    }
+
+    /// Draws a `thickness`-pixel border on the inside edge of `cell` (the Trim
+    /// box, PS3.3 Table C.13-3: "surrounding each image on the film").
+    fn draw_cell_border(
+        &mut self,
+        cell: &LayoutCell,
+        color: Color32,
+        thickness: i64,
+        px_per_mm: f64,
+    ) {
+        let x0 = (cell.x * px_per_mm).round() as i64;
+        let y0 = (cell.y * px_per_mm).round() as i64;
+        let x1 = x0 + (cell.width * px_per_mm).round() as i64 - 1;
+        let y1 = y0 + (cell.height * px_per_mm).round() as i64 - 1;
+        if x1 < x0 || y1 < y0 {
+            return;
+        }
+        self.draw_rect_border(x0, y0, x1, y1, color, thickness);
     }
 
     /// Draws a `thickness`-pixel frame on the rectangle's inside edge; pixels
@@ -455,8 +473,15 @@ impl Canvas {
 
         // Resample the BGRA patch directly into one full-image buffer, then copy
         // its rows into the canvas — no RGB round trip and no per-pixel set.
-        let rescaled = if magnification.is_some_and(|value| value.eq_ignore_ascii_case("REPLICATE"))
-        {
+        //
+        // PS3.3 Table C.13-3 defines REPLICATE, BILINEAR, CUBIC and NONE as the
+        // interpolation terms. I treat REPLICATE and NONE as "no interpolation"
+        // (pixels duplicated) and BILINEAR/CUBIC as bilinear: CUBIC would need a
+        // cubic kernel, and NONE must not silently interpolate like BILINEAR.
+        let nearest = magnification.is_some_and(|value| {
+            value.eq_ignore_ascii_case("REPLICATE") || value.eq_ignore_ascii_case("NONE")
+        });
+        let rescaled = if nearest {
             nearest_bgra32(
                 patch.as_bytes(),
                 patch.width() as usize,
@@ -836,32 +861,38 @@ mod tests {
     }
 
     #[test]
-    fn image_box_density_overrides_the_film_box() {
-        // Table C.13-5: the image box's Min/MaxDensity win for its cell. The
-        // film keeps the identity window (no film densities), so the mid-grey
-        // stays 128 unless the box's 2.5-OD window is applied: density 1.245
-        // maps to 96 (a dark pixel would print at the max density, white at the
-        // min density).
-        let values = [128u8; 16];
-        let plain = film_with_patch("", &values)
-            .render_to_image(
+    fn none_magnification_does_not_interpolate() {
+        // PS3.3 Table C.13-3 lists NONE as its own term. It must not behave like
+        // BILINEAR (the old code treated every non-REPLICATE value as bilinear).
+        let values = [
+            0u8, 255, 0, 255, 255, 0, 255, 0, 0, 255, 0, 255, 255, 0, 255, 0,
+        ];
+        let render = |film: FilmBox| {
+            film.render_to_image(
                 10.0,
                 RenderScale { pixels_per_mm: 1.0 },
                 PrintDensity::Black,
             )
-            .unwrap();
-        assert_eq!(grey_at(&plain, 105, 148), 128);
-        let boxed = with_box_density(film_with_patch("", &values), 0, 250)
-            .render_to_image(
-                10.0,
-                RenderScale { pixels_per_mm: 1.0 },
-                PrintDensity::Black,
-            )
-            .unwrap();
+            .unwrap()
+        };
+        let mut none_film = film_with_patch("", &values);
+        none_film.set_magnification_type("NONE");
+        let none = render(none_film);
+        let mut bilinear_film = film_with_patch("", &values);
+        bilinear_film.set_magnification_type("BILINEAR");
+        let bilinear = render(bilinear_film);
+        let mut replicate_film = film_with_patch("", &values);
+        replicate_film.set_magnification_type("REPLICATE");
+        let replicate = render(replicate_film);
+        assert_ne!(
+            none.as_bytes(),
+            bilinear.as_bytes(),
+            "NONE must not interpolate like BILINEAR"
+        );
         assert_eq!(
-            grey_at(&boxed, 105, 148),
-            96,
-            "the image box density window darkens the mid-grey patch"
+            none.as_bytes(),
+            replicate.as_bytes(),
+            "NONE duplicates pixels like REPLICATE"
         );
     }
 
@@ -873,20 +904,6 @@ mod tests {
                 .sequence_mut(Tag::new(0x2010, 0x0510))
                 .expect("film has an image box sequence");
             sequence.items_mut()[0].insert_str(tag, vr, value);
-        }
-        FilmBox::from_dataset(dataset)
-    }
-
-    /// Sets Min/MaxDensity on the film's first referenced image box item.
-    fn with_box_density(film: FilmBox, min: u16, max: u16) -> FilmBox {
-        let mut dataset = film.into_dataset();
-        {
-            let sequence = dataset
-                .sequence_mut(Tag::new(0x2010, 0x0510))
-                .expect("film has an image box sequence");
-            let item = &mut sequence.items_mut()[0];
-            item.insert_value(Tag::new(0x2010, 0x0120), min);
-            item.insert_value(Tag::new(0x2010, 0x0130), max);
         }
         FilmBox::from_dataset(dataset)
     }
@@ -1141,33 +1158,41 @@ mod tests {
     }
 
     #[test]
-    fn trim_draws_a_border() {
+    fn trim_draws_a_border_around_each_image() {
         let mut film = film_with_one_box("", 128);
         film.set_trim(true);
         // 2 px/mm → a 2 mm trim border is 4 px wide (fo-dicom BORDER 100*2/25.4).
+        let scale = 2.0;
         let image = film
             .render_to_image(
                 10.0,
-                RenderScale { pixels_per_mm: 2.0 },
+                RenderScale {
+                    pixels_per_mm: scale,
+                },
                 PrintDensity::White,
             )
             .unwrap();
+        let cell = film
+            .layout(10.0)
+            .into_iter()
+            .next()
+            .expect("one image cell");
+        let x0 = (cell.x * scale).round() as u32;
+        let y0 = (cell.y * scale).round() as u32;
+        let x1 = x0 + (cell.width * scale).round() as u32 - 1;
+        let y1 = y0 + (cell.height * scale).round() as u32 - 1;
+        // PS3.3 Table C.13-3: the trim box surrounds each image, so the cell's
+        // inside edge is black and the film's own border stays background.
         for i in 0..4 {
-            assert_eq!(
-                grey_at(&image, 100, i),
-                0,
-                "top border is 4 px thick (row {i})"
-            );
-            assert_eq!(
-                grey_at(&image, i, 100),
-                0,
-                "left border is 4 px thick (column {i})"
-            );
+            assert_eq!(grey_at(&image, x0 + i, y0 + 2), 0, "left cell border");
+            assert_eq!(grey_at(&image, x0 + 2, y0 + i), 0, "top cell border");
+            assert_eq!(grey_at(&image, x1 - i, y1 - 2), 0, "right cell border");
+            assert_eq!(grey_at(&image, x1 - 2, y1 - i), 0, "bottom cell border");
         }
         assert_eq!(
-            grey_at(&image, 100, 4),
+            grey_at(&image, 2, 2),
             255,
-            "past the 4 px border is background (not a 1 px hairline)"
+            "the film edge is not a trim border"
         );
         assert_eq!(
             grey_at(&image, 140, 148),
@@ -1581,7 +1606,92 @@ mod tests {
     }
 
     #[test]
-    fn trim_draws_a_border_and_tiny_canvases_do_not_panic() {
+    fn a_twelve_bit_image_maps_through_a_4096_entry_presentation_lut() {
+        // Table C.13-5 admits Bits Stored 12, and C.11.4.1 sizes the table for
+        // the input domain (4096 entries for 12-bit input). Mid grey must stay
+        // mid grey; indexing the table with the raw 8-bit sample would land on
+        // entry 128 and print nearly black.
+        let mut image = Dataset::new();
+        image.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16);
+        image.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
+        image.insert_value(Tag::ROWS, 4u16);
+        image.insert_value(Tag::COLUMNS, 4u16);
+        image.insert_value(Tag::BITS_ALLOCATED, 16u16);
+        image.insert_value(Tag::BITS_STORED, 12u16);
+        image.insert_value(Tag::HIGH_BIT, 11u16);
+        image.insert_value(Tag::PIXEL_REPRESENTATION, 0u16);
+        image.insert_str(Tag::WINDOW_CENTER, Vr::Ds, "2047");
+        image.insert_str(Tag::WINDOW_WIDTH, Vr::Ds, "4096");
+        let mut pixels = Vec::new();
+        for _ in 0..16 {
+            pixels.extend_from_slice(&2055u16.to_le_bytes());
+        }
+        image.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::PIXEL_DATA,
+                Vr::Ow,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(pixels)),
+            ),
+        ));
+        image.set_transfer_syntax(
+            crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
+
+        let mut lut = Dataset::new();
+        let descriptor = [0x00u8, 0x10, 0x00, 0x00, 0x0C, 0x00]; // US 4096, 0, 12 bits
+        lut.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::LUT_DESCRIPTOR,
+                Vr::Us,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(
+                    descriptor.to_vec(),
+                )),
+            ),
+        ));
+        let mut data = Vec::new();
+        for value in 0..4096u16 {
+            data.extend_from_slice(&(value << 4).to_le_bytes());
+        }
+        lut.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                Tag::LUT_DATA,
+                Vr::Ow,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(data)),
+            ),
+        ));
+
+        let mut boxed = Dataset::new();
+        boxed.insert_value(Tag::new(0x2020, 0x0010), 1u16);
+        boxed
+            .insert_sequence(Tag::BASIC_GRAYSCALE_IMAGE_SEQUENCE)
+            .push(image);
+        let mut film = Dataset::new();
+        film.insert_str(Tag::new(0x2010, 0x0010), Vr::Cs, "STANDARD\\1,1");
+        film.insert_str(Tag::new(0x2010, 0x0050), Vr::Cs, "A4");
+        film.insert_sequence(Tag::new(0x2010, 0x0510)).push(boxed);
+        film.insert_sequence(Tag::PRESENTATION_LUT_SEQUENCE)
+            .push(lut);
+
+        let rendered = FilmBox::from_dataset(film)
+            .render_to_image(0.0, RenderScale { pixels_per_mm: 0.2 }, PrintDensity::White)
+            .unwrap();
+        let greys: Vec<u8> = rendered
+            .as_bytes()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|pixel| pixel[0])
+            .filter(|grey| *grey != 255)
+            .collect();
+        assert!(greys.contains(&128), "mid grey survives the 4096-entry LUT");
+        assert!(
+            !greys.contains(&8),
+            "the table is not indexed with the raw 8-bit sample"
+        );
+    }
+
+    #[test]
+    fn trim_on_a_tiny_canvas_does_not_panic() {
         let mut film = film_with_one_box("", 255);
         film.set_trim(true);
         let image = film
@@ -1593,10 +1703,14 @@ mod tests {
                 PrintDensity::Black,
             )
             .unwrap();
-        assert_eq!(&image.as_bytes()[0..3], &[0, 0, 0], "border is black");
+        assert!(
+            image.as_bytes().len() >= 4,
+            "the tiny canvas still renders a pixel"
+        );
 
         let mut canvas = Canvas::filled(2, 2, Color32::new(9, 9, 9));
-        canvas.draw_border(Color32::new(1, 2, 3), 5);
+        // a border thicker than the canvas is clipped, not a panic
+        canvas.draw_rect_border(0, 0, 1, 1, Color32::new(1, 2, 3), 5);
         assert_eq!(canvas.into_raw_image().as_bytes().len(), 16);
     }
 

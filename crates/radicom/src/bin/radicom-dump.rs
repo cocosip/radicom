@@ -25,24 +25,42 @@ fn run(args: impl IntoIterator<Item = String>) -> i32 {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--max-value" => {
-                if let Some(v) = args.get(i + 1).and_then(|s| s.parse().ok()) {
+            "--max-value" => match args.get(i + 1).and_then(|s| s.parse().ok()) {
+                Some(v) => {
                     options.max_value_chars = v;
                     i += 1;
                 }
-            }
-            "--max-binary" => {
-                if let Some(v) = args.get(i + 1).and_then(|s| s.parse().ok()) {
+                None => {
+                    eprintln!("radicom-dump: --max-value needs a number");
+                    return 2;
+                }
+            },
+            "--max-binary" => match args.get(i + 1).and_then(|s| s.parse().ok()) {
+                Some(v) => {
                     options.max_binary_bytes = v;
                     i += 1;
                 }
-            }
+                None => {
+                    eprintln!("radicom-dump: --max-binary needs a number");
+                    return 2;
+                }
+            },
             "--no-private" => options.show_private = false,
             "-h" | "--help" => {
                 print_usage();
                 return 0;
             }
-            other => path = Some(other.to_string()),
+            other if other.starts_with('-') => {
+                eprintln!("radicom-dump: unknown option {other}");
+                print_usage();
+                return 2;
+            }
+            other => {
+                if path.replace(other.to_string()).is_some() {
+                    eprintln!("radicom-dump: only one file path is accepted");
+                    return 2;
+                }
+            }
         }
         i += 1;
     }
@@ -163,16 +181,23 @@ mod tests {
     }
 
     #[test]
-    fn invalid_option_values_are_ignored() {
-        let path = sample_file("bad-options");
-        let code = run(vec![
-            "--max-value".to_string(),
-            "not-a-number".to_string(),
-            "--max-binary".to_string(),
-            "also-bad".to_string(),
-            path.to_string_lossy().into_owned(),
-        ]);
-        assert_eq!(code, 0);
-        let _ = std::fs::remove_file(path);
+    fn invalid_or_unknown_options_exit_with_2() {
+        // A typo must not be parsed as a file path or silently ignored.
+        assert_eq!(
+            run(args(&["--max-value", "not-a-number", "file.dcm"])),
+            2,
+            "a non-numeric --max-value is rejected"
+        );
+        assert_eq!(
+            run(args(&["--max-binary"])),
+            2,
+            "a missing --max-binary value is rejected"
+        );
+        assert_eq!(run(args(&["--bogus"])), 2, "an unknown option is rejected");
+        assert_eq!(
+            run(args(&["one.dcm", "two.dcm"])),
+            2,
+            "a second path is rejected"
+        );
     }
 }

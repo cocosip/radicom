@@ -294,6 +294,20 @@ where
     // this SCP also acts as a Storage SCU during C-GET (reverse C-STORE), so it
     // grants the roles proposed for the classes it supports (review #16)
     policy.accept_roles = true;
+    // PS3.8 §9.3.2: an A-ASSOCIATE-RQ carries one or more Presentation Context
+    // items, so a request with none is a protocol violation rather than a
+    // rejection: there is nothing to negotiate and the association is aborted
+    // (docs/architecture.md §11).
+    if request.presentation_contexts.is_empty() {
+        let abort = crate::pdu::Abort {
+            source: AbortSource::User,
+            reason: 0,
+        };
+        write_pdu(&mut stream, &Pdu::Abort(abort)).await?;
+        return Err(NetworkError::PeerViolation(
+            "A-ASSOCIATE-RQ carries no presentation context",
+        ));
+    }
     let mut negotiated = policy.negotiate(&request.presentation_contexts);
     policy.negotiate_roles(&mut negotiated, &request.user_information.role_selections);
     // reject when nothing was accepted (PS3.8 Table 9-21, source 1, reason 1:
@@ -2175,6 +2189,19 @@ pub async fn execute_c_store<P: ServiceProvider>(
         cancel: _,
         peer,
     } = job;
+    // PS3.7 D.3.3.1.2: a C-STORE request carries the instance in its Dataset.
+    // Without one the request must fail, not reach the provider as an empty
+    // instance that it can only answer with Success.
+    if command.no_dataset {
+        let outgoing = failure_outgoing(
+            context_id,
+            &command,
+            "C-STORE request has no Dataset",
+            &syntax,
+        );
+        let _ = tx.send(Ok(outgoing)).await;
+        return Ok(());
+    }
     // the spool is synchronous file IO: keep it off the runtime thread
     let sink = options.store_sink.clone();
     let spool_syntax = syntax.clone();
@@ -2256,6 +2283,19 @@ pub async fn execute_c_find<P: ServiceProvider>(
     let context_id = job.context_id;
     let command = job.command.clone();
     let syntax = job.syntax.clone();
+    // PS3.7 D.3.3.1.1: a C-FIND request carries its matching keys in the
+    // Identifier. Without one there is nothing to match, so fail instead of
+    // running the query with an empty Identifier.
+    if command.no_dataset {
+        let outgoing = failure_outgoing(
+            context_id,
+            &command,
+            "C-FIND request has no Identifier",
+            &syntax,
+        );
+        let _ = tx.send(Ok(outgoing)).await;
+        return Ok(());
+    }
     let identifier = match decode_body_offloaded(
         job.body.clone(),
         syntax.clone(),

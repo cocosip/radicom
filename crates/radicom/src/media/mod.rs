@@ -293,20 +293,25 @@ fn build_children_map(records: &[DirectoryRecord]) -> HashMap<usize, Vec<usize>>
 impl DicomDirectory {
     /// Creates an empty directory with `file_set_id` (§12.2 step 3).
     ///
+    /// The File-set ID is optional (PS3.3 F.3.2: Type 2), so an empty string is
+    /// legal.
+    ///
     /// # Panics
     ///
-    /// Panics if `file_set_id` is empty. Use [`Self::try_new`] to handle an
-    /// invalid or user/file-derived identifier without panicking.
+    /// Panics if `file_set_id` is longer than 16 characters or holds characters
+    /// outside `[A-Z0-9_ ]` (VR CS). Use [`Self::try_new`] to handle a
+    /// user/file-derived identifier without panicking.
     pub fn new(file_set_id: impl Into<String>) -> Self {
-        Self::try_new(file_set_id).expect("DICOMDIR FileSetID must not be empty")
+        Self::try_new(file_set_id).expect("DICOMDIR FileSetID must be a valid CS value")
     }
 
     /// Creates an empty directory, returning an error for an invalid FileSetID.
     pub fn try_new(file_set_id: impl Into<String>) -> Result<Self, Error> {
         let file_set_id = file_set_id.into();
-        if file_set_id.is_empty() {
-            return Err(record_error("DICOMDIR FileSetID must not be empty"));
-        }
+        // PS3.3 F.3.2: File-set ID is Type 2 (an empty value is conformant), VR
+        // CS, and at most 16 characters. The CS validator enforces both.
+        crate::validation::validate_string(Vr::Cs, &file_set_id)
+            .map_err(|reason| record_error(format!("DICOMDIR FileSetID is invalid: {reason}")))?;
         let mut dataset = Dataset::new();
         dataset.insert_str(tags::FILE_SET_ID, Vr::Cs, file_set_id);
         dataset.insert_value(tags::FILE_SET_CONSISTENCY_FLAG, 0u16);
@@ -427,14 +432,17 @@ impl DicomDirectory {
         }
     }
 
-    /// Validates the record tree (§12.2): a non-empty FileSetID, every
-    /// parent/root index in range, roots without a parent, no cycles, and no
-    /// record unreachable from a root. A DICOMDIR parsed from untrusted bytes
-    /// can violate any of these.
+    /// Validates the record tree (§12.2): a valid FileSetID (it may be empty —
+    /// Type 2), every parent/root index in range, roots without a parent, no
+    /// cycles, and no record unreachable from a root. A DICOMDIR parsed from
+    /// untrusted bytes can violate any of these.
     pub fn validate(&self) -> Result<(), Error> {
-        if self.file_set_id().is_none_or(|id| id.trim().is_empty()) {
-            return Err(record_error("DICOMDIR FileSetID must not be empty"));
-        }
+        let Some(id) = self.file_set_id() else {
+            return Err(record_error("DICOMDIR has no FileSetID (0004,1130)"));
+        };
+        // Type 2: the attribute must be present, but the value may be empty.
+        crate::validation::validate_string(Vr::Cs, &id)
+            .map_err(|reason| record_error(format!("DICOMDIR FileSetID is invalid: {reason}")))?;
         let count = self.records.len();
         for (index, record) in self.records.iter().enumerate() {
             if let Some(parent) = record.parent {
@@ -844,7 +852,7 @@ impl DicomDirectory {
         };
         let mut positions = Vec::with_capacity(self.records.len());
         for record in &self.records {
-            positions.push(cursor as u32);
+            positions.push(record_offset(cursor)?);
             cursor += 8 + writer.dataset_length(&record.dataset, &syntax)? + item_delimiter;
         }
         Ok(positions)
@@ -1075,6 +1083,18 @@ fn record_error(message: impl Into<String>) -> Error {
     Error::File(FileError::Other(message.into()))
 }
 
+/// A record offset is stored in a UL attribute (`OffsetNext`/`OffsetPrevious`,
+/// PS3.3 F.4), so a file-set over 4 GiB cannot be described. Failing is the only
+/// correct answer: truncating the offset silently pointed records into the middle
+/// of the file.
+fn record_offset(cursor: u64) -> Result<u32, Error> {
+    u32::try_from(cursor).map_err(|_| {
+        record_error(format!(
+            "DICOMDIR record offset {cursor} does not fit the 32-bit UL range"
+        ))
+    })
+}
+
 /// Rebuilds the hierarchy from the record offsets (§12.2).
 ///
 /// Offsets are byte positions inside the file, so the tree is stitched from
@@ -1289,9 +1309,22 @@ mod tests {
     }
 
     #[test]
-    fn empty_file_set_id_is_rejected() {
-        let result = std::panic::catch_unwind(|| DicomDirectory::new(""));
-        assert!(result.is_err(), "an empty FileSetID must be rejected");
+    fn an_empty_file_set_id_is_legal_but_an_invalid_one_is_not() {
+        // PS3.3 F.3.2: File-set ID is Type 2, so an empty value is conformant...
+        let empty = DicomDirectory::new("");
+        assert_eq!(empty.file_set_id().as_deref(), Some(""));
+        assert!(empty.validate().is_ok(), "an empty File-set ID validates");
+        // ... while the CS rules (16 characters, [A-Z0-9_ ]) still apply.
+        assert!(DicomDirectory::try_new("SEVENTEEN_CHARS_X").is_err());
+        assert!(DicomDirectory::try_new("lower case").is_err());
+        assert!(DicomDirectory::try_new("A_VALID_ID").is_ok());
+    }
+
+    #[test]
+    fn a_record_offset_beyond_the_ul_range_is_an_error_not_a_truncation() {
+        assert_eq!(record_offset(0).unwrap(), 0);
+        assert_eq!(record_offset(u64::from(u32::MAX)).unwrap(), u32::MAX);
+        assert!(record_offset(u64::from(u32::MAX) + 1).is_err());
     }
 
     #[test]

@@ -10,7 +10,6 @@ use crate::model::dataset::Dataset;
 use crate::model::endian::Endian;
 use crate::model::tag::Tag;
 use crate::model::transfer_syntax::{syntaxes, TransferSyntax};
-use crate::model::uid::Uid;
 use crate::model::vr::Vr;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -94,6 +93,11 @@ pub struct ReadOptions {
     /// is spooled to a temporary file and parsed with the file's lazy value
     /// windows, so the whole instance is never held in RAM (M2, default 8 MiB).
     pub stream_spool_threshold: u64,
+    /// Hard cap on the inflated size of a deflated dataset body (default 1 GiB,
+    /// [`crate::io::reader::DEFAULT_MAX_INFLATED_BYTES`]). A small DEFLATE body
+    /// can expand without bound, so the cap is a bomb guard; raise it for an
+    /// archive that legitimately stores larger deflated instances.
+    pub max_inflated_bytes: u64,
 }
 
 impl Default for ReadOptions {
@@ -103,6 +107,7 @@ impl Default for ReadOptions {
             large_object_size: 64 * 1024,
             fallback_encoding: None,
             stream_spool_threshold: 8 * 1024 * 1024,
+            max_inflated_bytes: crate::io::reader::DEFAULT_MAX_INFLATED_BYTES,
         }
     }
 }
@@ -249,7 +254,11 @@ impl DicomFile {
             // Stream the inflate straight from the file: the compressed body is
             // never held in memory, so the peak is one full (inflated) copy plus
             // the codec window rather than compressed + inflated.
-            let plain = crate::io::reader::inflate_stream(&mut file, dataset_offset)?;
+            let plain = crate::io::reader::inflate_stream_limited(
+                &mut file,
+                dataset_offset,
+                options.max_inflated_bytes,
+            )?;
             parse_slice(&plain, &syntax, options)?
         } else {
             file.seek(SeekFrom::Start(dataset_offset))
@@ -650,13 +659,17 @@ impl DicomFile {
             (Some(instance), None) => {
                 meta.insert_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID, Vr::Ui, instance);
             }
+            // A Media Storage Directory file has no (0008,0018) of its own: its
+            // identity is the meta group's (0002,0003), which is kept as is.
             (None, Some(_)) => {}
+            // PS3.10 Table 7.1-1: MediaStorageSOPInstanceUID is Type 1, and for
+            // an ordinary instance it must equal the dataset's (0008,0018). With
+            // neither present there is nothing to identify, so no UID is invented
+            // (the old fallback generated one that matched nothing in the data).
             (None, None) => {
-                meta.insert_str(
-                    Tag::MEDIA_STORAGE_SOP_INSTANCE_UID,
-                    Vr::Ui,
-                    Uid::generate_value(),
-                );
+                return Err(Error::File(FileError::Other(
+                    "dataset has no SOPInstanceUID; cannot build file meta information".into(),
+                )));
             }
         }
         // the file meta group is always Explicit VR LE; drop the stale length and
@@ -691,7 +704,11 @@ fn parse_dataset_with(
     options: &ReadOptions,
 ) -> Result<(Dataset, crate::io::reader::ReadOutcome), Error> {
     if syntax.is_deflate() {
-        let plain = crate::io::reader::inflate(bytes)?;
+        let plain = crate::io::reader::inflate_stream_limited(
+            &mut std::io::Cursor::new(bytes),
+            0,
+            options.max_inflated_bytes,
+        )?;
         parse_slice(&plain, syntax, options)
     } else {
         parse_slice(bytes, syntax, options)
@@ -935,6 +952,20 @@ fn split_meta(raw: &[u8]) -> Result<(Option<&[u8]>, &[u8]), Error> {
     }
     if pos == 0 {
         return Ok((None, raw));
+    }
+    // A partial trailing group-0002 header must not be handed to the dataset
+    // parser as if it were the dataset start: `scan_meta` keeps asking for more
+    // bytes there and the streaming open path reports a truncated meta group, so
+    // the in-memory split reports the same error instead of accepting the file.
+    let remaining = &raw[pos..];
+    if !remaining.is_empty()
+        && remaining.len() < 8
+        && remaining.len() >= 2
+        && u16::from_le_bytes([remaining[0], remaining[1]]) == 0x0002
+    {
+        return Err(Error::File(FileError::InvalidFormat(
+            "meta group is truncated".into(),
+        )));
     }
     Ok((Some(&raw[..pos]), &raw[pos..]))
 }
@@ -1364,6 +1395,28 @@ mod tests {
     }
 
     #[test]
+    fn saving_a_dataset_without_a_sop_instance_uid_is_an_error() {
+        // PS3.10 Table 7.1-1: (0002,0003) is Type 1 and must equal (0008,0018),
+        // so a dataset without an instance UID cannot become a file. The old
+        // fallback invented a random UID that matched nothing in the dataset.
+        let mut file = sample_file();
+        file.dataset.remove(&Tag::SOP_INSTANCE_UID);
+        let error = file.to_bytes(&WriteOptions::default()).unwrap_err();
+        assert!(
+            error.to_string().contains("SOPInstanceUID"),
+            "the error names the missing attribute: {error}"
+        );
+        // A Media Storage Directory carries no (0008,0018): its identity is the
+        // meta group's own (0002,0003), so such a file still saves.
+        let mut directory_like = DicomFile::from_dataset(sample_file().dataset);
+        directory_like.dataset.remove(&Tag::SOP_INSTANCE_UID);
+        directory_like
+            .file_meta
+            .insert_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID, Vr::Ui, "9.9.9.9");
+        assert!(directory_like.to_bytes(&WriteOptions::default()).is_ok());
+    }
+
+    #[test]
     fn saved_files_carry_file_meta_information_version() {
         // PS3.10 Table 7.1-1: (0002,0001) is Type 1 and must be 00\01.
         let bytes = sample_file().to_bytes(&WriteOptions::default()).unwrap();
@@ -1671,6 +1724,7 @@ mod tests {
         dataset.insert_value(Tag::ROWS, 512u16); // Rows (US)
         dataset.insert_value(Tag::COLUMNS, 256u16); // Columns (US)
         dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.2");
+        dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5.6");
         dataset.set_transfer_syntax(syntaxes::EXPLICIT_VR_BIG_ENDIAN.clone());
         let bytes = DicomFile::from_dataset(dataset)
             .to_bytes(&WriteOptions::default())
@@ -1978,6 +2032,90 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
     #[test]
+    fn a_deflated_body_over_the_inflated_cap_is_rejected() {
+        // A tiny DEFLATE body can expand without bound, so both read paths cap
+        // the inflated size; the same bytes still open under the default cap.
+        let mut file = sample_file();
+        file.dataset
+            .insert_or_update(crate::model::item::DicomItem::Element(
+                crate::model::element::DicomElement::new_bytes(
+                    Tag::PIXEL_DATA,
+                    Vr::Ob,
+                    std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![
+                        0x88u8;
+                        4096
+                    ])),
+                ),
+            ));
+        file.dataset
+            .set_transfer_syntax(syntaxes::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        let bytes = file.to_bytes(&WriteOptions::default()).unwrap();
+        let capped = ReadOptions {
+            max_inflated_bytes: 512,
+            ..ReadOptions::default()
+        };
+
+        let error = DicomFile::from_bytes(&bytes, &capped).unwrap_err();
+        assert!(
+            error.to_string().contains("maximum inflated"),
+            "from_bytes rejects the bomb: {error}"
+        );
+        assert!(
+            DicomFile::from_bytes(&bytes, &ReadOptions::default()).is_ok(),
+            "the default 1 GiB cap still reads the same file"
+        );
+
+        let path = std::env::temp_dir().join(format!(
+            "radicom-inflate-cap-{}-{}.dcm",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, &bytes).unwrap();
+        let error = DicomFile::open_with_options(&path, &capped).unwrap_err();
+        assert!(
+            error.to_string().contains("maximum inflated"),
+            "the streaming open path applies the same cap: {error}"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_partial_meta_header_errors_from_bytes_like_it_does_from_open() {
+        // One complete meta element, then 4 bytes of the next group-0002 tag.
+        // Both read paths must call the file truncated; the in-memory split used
+        // to hand those 4 bytes to the dataset parser as an empty dataset.
+        let mut bytes = vec![0u8; 128];
+        bytes.extend_from_slice(b"DICM");
+        let mut meta = Vec::new();
+        meta.extend_from_slice(&0x0002u16.to_le_bytes());
+        meta.extend_from_slice(&0x0010u16.to_le_bytes());
+        meta.extend_from_slice(b"UI");
+        meta.extend_from_slice(&20u16.to_le_bytes());
+        meta.extend_from_slice(b"1.2.840.10008.1.2.1\0");
+        bytes.extend_from_slice(&meta);
+        bytes.extend_from_slice(&[0x02, 0x00, 0x00, 0x00]);
+
+        assert!(
+            DicomFile::from_bytes(&bytes, &ReadOptions::default()).is_err(),
+            "from_bytes reports the truncated meta group"
+        );
+        let path = std::env::temp_dir().join(format!(
+            "radicom-partial-meta-{}-{}.dcm",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(DicomFile::open(&path).is_err(), "open agrees");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn deflated_file_rewrite_is_stable() {
         let mut file = sample_file();
         file.dataset
@@ -2017,6 +2155,7 @@ mod tests {
         ));
         ds.insert_str(Tag::PATIENT_ID, Vr::Lo, "PID-1");
         ds.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.2");
+        ds.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3.4.5.6");
         let file = DicomFile::from_dataset(ds);
         let path = temp_file("large");
         file.save(&path).unwrap();

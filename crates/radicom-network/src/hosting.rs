@@ -145,7 +145,10 @@ impl<P: ServiceProvider + 'static> HostedDicomServer<P> {
 
     /// The bound address, or `None` when not started.
     pub fn local_addr(&self) -> Option<SocketAddr> {
-        self.state.lock().expect("state lock").addr
+        self.state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .addr
     }
 
     /// Binds and starts serving. Idempotent: calling it while already running is
@@ -179,16 +182,24 @@ impl<P: ServiceProvider + 'static> HostedDicomServer<P> {
         let error_slot = self.last_error.clone();
         let task = tokio::spawn(async move {
             if let Err(e) = server.run_until(receiver).await {
-                *error_slot.lock().expect("error lock") = Some(e.to_string());
+                *error_slot
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner()) = Some(e.to_string());
             }
         });
 
-        let mut state = self.state.lock().expect("state lock");
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         state.addr = Some(addr);
         state.task = Some(task);
         state.shutdown = Some(shutdown);
         state.connected_clients = Some(connected_clients);
-        *self.last_error.lock().expect("error lock") = None;
+        *self
+            .last_error
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = None;
         self.listening.store(true, Ordering::SeqCst);
         Ok(())
     }
@@ -198,7 +209,10 @@ impl<P: ServiceProvider + 'static> HostedDicomServer<P> {
     /// complete their association, so an in-flight operation is not aborted.
     pub async fn stop(&self) -> Result<()> {
         let (task, shutdown) = {
-            let mut state = self.state.lock().expect("state lock");
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             state.addr = None;
             (state.task.take(), state.shutdown.take())
         };
@@ -216,7 +230,7 @@ impl<P: ServiceProvider + 'static> HostedDicomServer<P> {
     pub fn connected_clients(&self) -> usize {
         self.state
             .lock()
-            .expect("state lock")
+            .unwrap_or_else(|poison| poison.into_inner())
             .connected_clients
             .as_ref()
             .map(ConnectedClients::count)
@@ -227,7 +241,11 @@ impl<P: ServiceProvider + 'static> HostedDicomServer<P> {
     pub fn health(&self) -> ServerHealth {
         ServerHealth {
             listening: self.listening.load(Ordering::SeqCst),
-            last_error: self.last_error.lock().expect("error lock").clone(),
+            last_error: self
+                .last_error
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .clone(),
         }
     }
 }
