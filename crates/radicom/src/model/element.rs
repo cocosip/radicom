@@ -259,10 +259,11 @@ fn select(e: &DicomElement, index: Option<usize>) -> Result<String, Error> {
     }
 }
 
-/// Reads the `index`-th `unit_size` group of a binary value as a
-/// little-endian integer/float (spec: byte order is fixed at parse time via
-/// EndianBuffer wrapping; in-memory values are native LE).
-fn read_le_unit<T: FromLeBytes>(
+/// Reads the `index`-th `unit_size` group of a binary value as a host-order
+/// integer/float. The reader wraps a value whose file byte order differs from
+/// the host in an `EndianBuffer`, so `data()` always yields host order
+/// (docs §6: in-memory values are native).
+fn read_host_unit<T: FromHostBytes>(
     e: &DicomElement,
     b: &SharedBuffer,
     index: Option<usize>,
@@ -282,33 +283,34 @@ fn read_le_unit<T: FromLeBytes>(
             count: data.len() / unit.max(1),
         }));
     }
-    Ok(T::from_le_widened(
+    Ok(T::from_host_widened(
         &data[start..start + unit],
         e.vr().is_signed_integer(),
     ))
 }
 
-/// Little-endian construction for numeric element reads.
-pub trait FromLeBytes: Sized {
+/// Host-order construction for numeric element reads (see
+/// [`read_host_unit`]): the byte order of a file is resolved at parse time.
+pub trait FromHostBytes: Sized {
     const SIZE: usize;
-    fn from_le(bytes: &[u8]) -> Self;
+    fn from_host(bytes: &[u8]) -> Self;
     /// Interpret `bytes` (the VR's natural unit) as this type, zero- or
     /// sign-extending to the destination width. `sign` is the *source VR's*
     /// signedness: an unsigned VR (US/UL/UV) is always zero-extended, even when
     /// the destination Rust type is signed (CM-02).
-    fn from_le_widened(bytes: &[u8], sign: bool) -> Self;
+    fn from_host_widened(bytes: &[u8], sign: bool) -> Self;
 }
 
-macro_rules! impl_le {
+macro_rules! impl_host {
     ($t:ty) => {
-        impl FromLeBytes for $t {
+        impl FromHostBytes for $t {
             const SIZE: usize = std::mem::size_of::<$t>();
-            fn from_le(bytes: &[u8]) -> Self {
+            fn from_host(bytes: &[u8]) -> Self {
                 let mut arr = [0u8; std::mem::size_of::<$t>()];
                 arr.copy_from_slice(&bytes[..std::mem::size_of::<$t>()]);
-                <$t>::from_le_bytes(arr)
+                <$t>::from_ne_bytes(arr)
             }
-            fn from_le_widened(bytes: &[u8], sign: bool) -> Self {
+            fn from_host_widened(bytes: &[u8], sign: bool) -> Self {
                 let mut arr = [0u8; std::mem::size_of::<$t>()];
                 let n = bytes.len().min(arr.len());
                 arr[..n].copy_from_slice(&bytes[..n]);
@@ -320,19 +322,19 @@ macro_rules! impl_le {
                         *b = 0xFF;
                     }
                 }
-                <$t>::from_le_bytes(arr)
+                <$t>::from_ne_bytes(arr)
             }
         }
     };
 }
-impl_le!(i16);
-impl_le!(u16);
-impl_le!(i32);
-impl_le!(u32);
-impl_le!(i64);
-impl_le!(u64);
-impl_le!(f32);
-impl_le!(f64);
+impl_host!(i16);
+impl_host!(u16);
+impl_host!(i32);
+impl_host!(u32);
+impl_host!(i64);
+impl_host!(u64);
+impl_host!(f32);
+impl_host!(f64);
 
 macro_rules! impl_from_int {
     ($t:ty) => {
@@ -340,10 +342,10 @@ macro_rules! impl_from_int {
             fn from_element(e: &DicomElement, index: Option<usize>) -> Result<Self, Error> {
                 // A byte-backed *string* VR (IS/DS/...) is text, not a binary
                 // unit stream: decode it and go through the text parse branch
-                // (CM-A-02). Only binary VRs take the little-endian fast path.
+                // (CM-A-02). Only binary VRs take the host-order fast path.
                 if !e.vr().is_string() {
                     if let ElementValue::Bytes(b) = e.value() {
-                        return read_le_unit::<$t>(e, b, index);
+                        return read_host_unit::<$t>(e, b, index);
                     }
                 }
                 let s = select(e, index)?;
@@ -394,15 +396,15 @@ impl FromElement for f64 {
                 // Integer VRs must be widened numerically, not reinterpreted as
                 // an f64 bit pattern.
                 return match e.vr() {
-                    Vr::Fl => read_le_unit::<f32>(e, b, index).map(f64::from),
-                    Vr::Fd => read_le_unit::<f64>(e, b, index),
-                    Vr::Us => read_le_unit::<u16>(e, b, index).map(f64::from),
-                    Vr::Ss => read_le_unit::<i16>(e, b, index).map(f64::from),
-                    Vr::Ul => read_le_unit::<u32>(e, b, index).map(f64::from),
-                    Vr::Sl => read_le_unit::<i32>(e, b, index).map(f64::from),
-                    Vr::Uv => read_le_unit::<u64>(e, b, index).map(|v| v as f64),
-                    Vr::Sv => read_le_unit::<i64>(e, b, index).map(|v| v as f64),
-                    _ => read_le_unit::<f64>(e, b, index),
+                    Vr::Fl => read_host_unit::<f32>(e, b, index).map(f64::from),
+                    Vr::Fd => read_host_unit::<f64>(e, b, index),
+                    Vr::Us => read_host_unit::<u16>(e, b, index).map(f64::from),
+                    Vr::Ss => read_host_unit::<i16>(e, b, index).map(f64::from),
+                    Vr::Ul => read_host_unit::<u32>(e, b, index).map(f64::from),
+                    Vr::Sl => read_host_unit::<i32>(e, b, index).map(f64::from),
+                    Vr::Uv => read_host_unit::<u64>(e, b, index).map(|v| v as f64),
+                    Vr::Sv => read_host_unit::<i64>(e, b, index).map(|v| v as f64),
+                    _ => read_host_unit::<f64>(e, b, index),
                 };
             }
         }
@@ -469,7 +471,7 @@ impl FromElement for DtPoint {
 
 impl FromElement for Tag {
     /// AT value: two 16-bit units per value, group first (M4). In-memory
-    /// values are native little-endian like every other numeric VR.
+    /// values are native like every other numeric VR.
     fn from_element(e: &DicomElement, index: Option<usize>) -> Result<Self, Error> {
         if e.vr() != Vr::At {
             return Err(type_err(e, "AT"));
@@ -477,7 +479,7 @@ impl FromElement for Tag {
         let Some(buffer) = e.value().as_buffer() else {
             return Err(type_err(e, "AT"));
         };
-        let packed = read_le_unit::<u32>(e, buffer, index)?;
+        let packed = read_host_unit::<u32>(e, buffer, index)?;
         Ok(Tag::new(packed as u16, (packed >> 16) as u16))
     }
 }
@@ -862,43 +864,43 @@ mod tests {
             DicomElement::new_bytes(t.clone(), vr, Arc::new(MemoryBuffer::from(bytes)))
         };
         assert_eq!(
-            mk(Vr::Fl, 1.5f32.to_le_bytes().to_vec())
+            mk(Vr::Fl, 1.5f32.to_ne_bytes().to_vec())
                 .first::<f32>()
                 .unwrap(),
             1.5
         );
         assert_eq!(
-            mk(Vr::Fd, 2.5f64.to_le_bytes().to_vec())
+            mk(Vr::Fd, 2.5f64.to_ne_bytes().to_vec())
                 .first::<f32>()
                 .unwrap(),
             2.5
         );
         assert_eq!(
-            mk(Vr::Ul, 7u32.to_le_bytes().to_vec())
+            mk(Vr::Ul, 7u32.to_ne_bytes().to_vec())
                 .first::<f32>()
                 .unwrap(),
             7.0
         );
         assert_eq!(
-            mk(Vr::Sl, (-7i32).to_le_bytes().to_vec())
+            mk(Vr::Sl, (-7i32).to_ne_bytes().to_vec())
                 .first::<f32>()
                 .unwrap(),
             -7.0
         );
         assert_eq!(
-            mk(Vr::Uv, 7u64.to_le_bytes().to_vec())
+            mk(Vr::Uv, 7u64.to_ne_bytes().to_vec())
                 .first::<f32>()
                 .unwrap(),
             7.0
         );
         assert_eq!(
-            mk(Vr::Sv, 7i64.to_le_bytes().to_vec())
+            mk(Vr::Sv, 7i64.to_ne_bytes().to_vec())
                 .first::<f32>()
                 .unwrap(),
             7.0
         );
         assert_eq!(
-            mk(Vr::Us, 7u16.to_le_bytes().to_vec())
+            mk(Vr::Us, 7u16.to_ne_bytes().to_vec())
                 .first::<f32>()
                 .unwrap(),
             7.0
@@ -1061,7 +1063,7 @@ macro_rules! impl_into_int_string {
                         DicomElement::new_bytes(
                             tag,
                             vr,
-                            Arc::new(MemoryBuffer::from(v.to_le_bytes().to_vec())),
+                            Arc::new(MemoryBuffer::from(v.to_ne_bytes().to_vec())),
                         )
                     }
                     Vr::Sl | Vr::Ul => {
@@ -1069,7 +1071,7 @@ macro_rules! impl_into_int_string {
                         DicomElement::new_bytes(
                             tag,
                             vr,
-                            Arc::new(MemoryBuffer::from(v.to_le_bytes().to_vec())),
+                            Arc::new(MemoryBuffer::from(v.to_ne_bytes().to_vec())),
                         )
                     }
                     Vr::Sv | Vr::Uv => {
@@ -1077,7 +1079,7 @@ macro_rules! impl_into_int_string {
                         DicomElement::new_bytes(
                             tag,
                             vr,
-                            Arc::new(MemoryBuffer::from(v.to_le_bytes().to_vec())),
+                            Arc::new(MemoryBuffer::from(v.to_ne_bytes().to_vec())),
                         )
                     }
                     _ => DicomElement::new_str(tag, vr, self.to_string()),
@@ -1108,7 +1110,7 @@ macro_rules! impl_into_float {
                         DicomElement::new_bytes(
                             tag,
                             vr,
-                            Arc::new(MemoryBuffer::from(v.to_le_bytes().to_vec())),
+                            Arc::new(MemoryBuffer::from(v.to_ne_bytes().to_vec())),
                         )
                     }
                     Vr::Fd => {
@@ -1116,7 +1118,7 @@ macro_rules! impl_into_float {
                         DicomElement::new_bytes(
                             tag,
                             vr,
-                            Arc::new(MemoryBuffer::from(v.to_le_bytes().to_vec())),
+                            Arc::new(MemoryBuffer::from(v.to_ne_bytes().to_vec())),
                         )
                     }
                     _ => DicomElement::new_str(
@@ -1150,20 +1152,20 @@ macro_rules! impl_into_int_vec {
                         tag,
                         vr,
                         self.iter()
-                            .map(|v| (*v as i64 as i16).to_le_bytes())
+                            .map(|v| (*v as i64 as i16).to_ne_bytes())
                             .collect(),
                     ),
                     Vr::Sl | Vr::Ul => bytes(
                         tag,
                         vr,
                         self.iter()
-                            .map(|v| (*v as i64 as i32).to_le_bytes())
+                            .map(|v| (*v as i64 as i32).to_ne_bytes())
                             .collect(),
                     ),
                     Vr::Sv | Vr::Uv => bytes(
                         tag,
                         vr,
-                        self.iter().map(|v| (*v as i64).to_le_bytes()).collect(),
+                        self.iter().map(|v| (*v as i64).to_ne_bytes()).collect(),
                     ),
                     _ => DicomElement::new_str(
                         tag,
@@ -1199,7 +1201,7 @@ macro_rules! impl_into_float_vec {
                         vr,
                         Arc::new(MemoryBuffer::from(
                             self.iter()
-                                .flat_map(|v| (*v as f32).to_le_bytes())
+                                .flat_map(|v| (*v as f32).to_ne_bytes())
                                 .collect::<Vec<u8>>(),
                         )),
                     ),
@@ -1208,7 +1210,7 @@ macro_rules! impl_into_float_vec {
                         vr,
                         Arc::new(MemoryBuffer::from(
                             self.iter()
-                                .flat_map(|v| (*v as f64).to_le_bytes())
+                                .flat_map(|v| (*v as f64).to_ne_bytes())
                                 .collect::<Vec<u8>>(),
                         )),
                     ),
@@ -1236,7 +1238,7 @@ impl IntoElement for Tag {
         DicomElement::new_bytes(
             tag,
             vr,
-            Arc::new(MemoryBuffer::from(pack_tag(self).to_le_bytes().to_vec())),
+            Arc::new(MemoryBuffer::from(pack_tag(self).to_ne_bytes().to_vec())),
         )
     }
 }
@@ -1248,7 +1250,7 @@ impl IntoElement for Vec<Tag> {
     fn into_element(self, tag: Tag, vr: Vr) -> DicomElement {
         let bytes = self
             .into_iter()
-            .flat_map(|t| pack_tag(t).to_le_bytes())
+            .flat_map(|t| pack_tag(t).to_ne_bytes())
             .collect::<Vec<u8>>();
         DicomElement::new_bytes(tag, vr, Arc::new(MemoryBuffer::from(bytes)))
     }
@@ -1513,9 +1515,12 @@ mod cm_regression {
         );
         assert_eq!(non_utf8_multi.count(), 3);
 
-        // FromLeBytes::from_le reads a native-width little-endian unit.
-        assert_eq!(<u16 as FromLeBytes>::from_le(&[0x34, 0x12]), 0x1234u16);
-        assert_eq!(<u32 as FromLeBytes>::from_le(&[1, 0, 0, 0]), 1u32);
+        // FromHostBytes::from_host reads a native-width host-order unit.
+        assert_eq!(
+            <u16 as FromHostBytes>::from_host(&0x1234u16.to_ne_bytes()),
+            0x1234u16
+        );
+        assert_eq!(<u32 as FromHostBytes>::from_host(&1u32.to_ne_bytes()), 1u32);
 
         // a numeric VR holding text falls through to the text parse branch.
         let numeric_text = DicomElement {

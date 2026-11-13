@@ -1967,7 +1967,7 @@ mod tests {
             value.push(b' '); // CS values are padded to even length
         }
         let mut needle = vec![0x04, 0x00, 0x30, 0x14, b'C', b'S'];
-        needle.extend_from_slice(&(value.len() as u16).to_le_bytes());
+        needle.extend_from_slice(&(value.len() as u16).to_ne_bytes());
         needle.extend_from_slice(&value);
 
         let mut positions = Vec::new();

@@ -523,8 +523,10 @@ client/server. One tokio task per association. Locks must not be held across `.a
 - The `D` action must respect VR: numeric-string VRs (DS/IS) get a valid number such as `"0"`, never the
   word `ANONYMOUS`.
 - De-identification is declared, not implied (PS3.15 E.1.1): `anonymize_in_place` sets
-  PatientIdentityRemoved `(0012,0062)` = `YES` and DeidentificationMethod `(0012,0063)`, and
-  `anonymize_file_in_place` syncs MediaStorageSOPInstanceUID with the anonymized dataset.
+  PatientIdentityRemoved `(0012,0062)` = `YES` and DeidentificationMethod `(0012,0063)`.
+  `anonymize_file_in_place` syncs MediaStorageSOPInstanceUID with the anonymized dataset and drops the
+  identifying file-meta entries (source/sending/receiving AE titles, private information), which the writer
+  replaces with radicom's own implementation description on save.
 
 ---
 

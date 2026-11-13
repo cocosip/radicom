@@ -108,7 +108,7 @@ fn build_icon(dataset: &Dataset, requested_frame: Option<u32>) -> Result<Option<
         raw.as_chunks::<2>()
             .0
             .iter()
-            .map(|c| normalise(u16::from_le_bytes([c[0], c[1]])))
+            .map(|c| normalise(u16::from_ne_bytes([c[0], c[1]])))
             .collect()
     };
     let expected = (width as usize) * (height as usize);
@@ -255,7 +255,7 @@ mod tests {
                     if bits == 8 {
                         bytes.push(v as u8);
                     } else {
-                        bytes.extend_from_slice(&v.to_le_bytes());
+                        bytes.extend_from_slice(&v.to_ne_bytes());
                     }
                 }
             }

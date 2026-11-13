@@ -117,7 +117,7 @@ impl Anonymizer {
         Ok(())
     }
 
-    /// Anonymizes a file in place, syncing the media-storage SOP instance UID.
+    /// Anonymizes a file in place, replacing the identifying file meta.
     pub fn anonymize_file_in_place(&self, file: &mut DicomFile) -> Result<(), Error> {
         self.anonymize_in_place(&mut file.dataset)?;
         // PS3.10 Table 7.1-1 / PS3.15 E.1.1: the file-meta instance UID must
@@ -126,6 +126,19 @@ impl Anonymizer {
         if let Some(sop_instance) = file.dataset.try_get_str(SOP_INSTANCE_UID) {
             file.file_meta
                 .insert_str(MEDIA_STORAGE_SOP_INSTANCE_UID, Vr::Ui, sop_instance);
+        }
+        // PS3.15 E.1.1 item 7: the File Meta Information can identify the source
+        // (AE titles, private information), so those entries are replaced by the
+        // de-identifier's own description; the writer forces the implementation
+        // fields and the media-storage UIDs on save.
+        for tag in [
+            Tag::SOURCE_APPLICATION_ENTITY_TITLE,
+            Tag::SENDING_APPLICATION_ENTITY_TITLE,
+            Tag::RECEIVING_APPLICATION_ENTITY_TITLE,
+            Tag::PRIVATE_INFORMATION_CREATOR_UID,
+            Tag::PRIVATE_INFORMATION,
+        ] {
+            file.file_meta.remove(&tag);
         }
         Ok(())
     }
@@ -828,6 +841,38 @@ mod tests {
         assert_eq!(
             file.dataset.try_get_str(Tag::PATIENT_NAME).as_deref(),
             Some("")
+        );
+    }
+
+    #[test]
+    fn anonymizing_a_file_replaces_the_identifying_meta_and_declares_the_method() {
+        let mut file = crate::io::file::DicomFile::from_dataset(dataset());
+        file.file_meta
+            .insert_str(Tag::SOURCE_APPLICATION_ENTITY_TITLE, Vr::Ae, "SECRET_AE");
+        file.file_meta
+            .insert_str(Tag::IMPLEMENTATION_VERSION_NAME, Vr::Sh, "VENDOR_1");
+        file.file_meta
+            .insert_value(Tag::PRIVATE_INFORMATION, vec![1u8, 2, 3, 4]);
+        Anonymizer::basic()
+            .anonymize_file_in_place(&mut file)
+            .unwrap();
+        // PS3.15 E.1.1 item 7: the source AE title and private info are gone.
+        assert!(!file
+            .file_meta
+            .contains(&Tag::SOURCE_APPLICATION_ENTITY_TITLE));
+        assert!(!file.file_meta.contains(&Tag::PRIVATE_INFORMATION));
+        // PS3.15 E.1.1 item 6: the dataset declares the de-identification.
+        assert_eq!(
+            file.dataset
+                .try_get_str(Tag::PATIENT_IDENTITY_REMOVED)
+                .as_deref(),
+            Some("YES")
+        );
+        assert!(
+            file.dataset
+                .try_get_str(Tag::DEIDENTIFICATION_METHOD)
+                .is_some(),
+            "the method describes the profile that ran"
         );
     }
 

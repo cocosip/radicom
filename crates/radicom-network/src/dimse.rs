@@ -334,8 +334,10 @@ impl Command {
         if let Some(tags) = &self.attribute_identifier_list {
             let mut bytes = Vec::with_capacity(tags.len() * 4);
             for tag in tags {
-                bytes.extend_from_slice(&tag.group().to_le_bytes());
-                bytes.extend_from_slice(&tag.element().to_le_bytes());
+                // The dataset buffer is host order in memory (docs §6); the writer
+                // encodes the wire order for the transfer syntax.
+                bytes.extend_from_slice(&tag.group().to_ne_bytes());
+                bytes.extend_from_slice(&tag.element().to_ne_bytes());
             }
             ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
                 tag::ATTRIBUTE_IDENTIFIER_LIST,
@@ -405,8 +407,8 @@ impl Command {
                 .iter()
                 .map(|chunk| {
                     Tag::new(
-                        u16::from_le_bytes([chunk[0], chunk[1]]),
-                        u16::from_le_bytes([chunk[2], chunk[3]]),
+                        u16::from_ne_bytes([chunk[0], chunk[1]]),
+                        u16::from_ne_bytes([chunk[2], chunk[3]]),
                     )
                 })
                 .collect();
@@ -504,7 +506,8 @@ fn insert_us(ds: &mut Dataset, tag: Tag, value: u16) -> &mut Dataset {
     ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
         tag,
         Vr::Us,
-        Arc::new(MemoryBuffer::from(value.to_le_bytes().to_vec())),
+        // host order in memory (docs §6), not the wire order
+        Arc::new(MemoryBuffer::from(value.to_ne_bytes().to_vec())),
     )))
 }
 

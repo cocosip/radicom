@@ -903,8 +903,8 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                         self.source
                             .skip(length as u64)
                             .map_err(|e| io_err(e, pos + 4))?;
+                        debug_assert_eq!(self.position()?, pos + 8 + length as u64);
                     }
-                    debug_assert_eq!(self.position()?, pos + 8 + length as u64);
                     break;
                 }
                 _ => {
@@ -1607,6 +1607,30 @@ mod tests {
             ..DicomReader::default()
         };
         assert!(read_with(&bytes, options).is_ok());
+    }
+
+    #[test]
+    fn a_delimiter_with_an_undefined_length_does_not_panic_or_desync() {
+        // A sequence delimiter whose length field is 0xFFFFFFFF (written by a
+        // broken encoder) must end the fragment sequence: the tag and length are
+        // consumed, the bogus value is not a 4 GiB skip, and a following element
+        // still parses.
+        let mut bytes = vec![
+            0xE0, 0x7F, 0x10, 0x00, b'O', b'B', 0, 0, 0xFF, 0xFF, 0xFF, 0xFF,
+        ];
+        // empty basic offset table, then one fragment
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 0, 0, 0, 0]);
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 0x02, 0x00, 0x00, 0x00, 0xAB, 0xCD]);
+        bytes.extend_from_slice(&[0xFE, 0xFF, 0xDD, 0xE0, 0xFF, 0xFF, 0xFF, 0xFF]);
+        // (0010,0010) PN "AB" after the malformed delimiter
+        bytes.extend_from_slice(&[0x10, 0x00, 0x10, 0x00, b'P', b'N', 0x02, 0x00, b'A', b'B']);
+        let ds = read_with(&bytes, DicomReader::default()).unwrap();
+        assert_eq!(ds.value_count(Tag::PIXEL_DATA).unwrap(), 1);
+        assert_eq!(
+            ds.get_str(Tag::PATIENT_NAME).unwrap().trim(),
+            "AB",
+            "the dataset stays aligned after the delimiter"
+        );
     }
 
     #[test]

@@ -172,27 +172,27 @@ fn raw_units_text(raw: &radicom::model::buffer::SharedBuffer, vr: Vr) -> Result<
             break;
         }
         let text = match vr {
-            Vr::Us => u16::from_le_bytes([chunk[0], chunk[1]]).to_string(),
-            Vr::Ss => i16::from_le_bytes([chunk[0], chunk[1]]).to_string(),
-            Vr::Ul => u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).to_string(),
-            Vr::Sl => i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).to_string(),
-            Vr::Sv if unit == 8 => i64::from_le_bytes([
+            Vr::Us => u16::from_ne_bytes([chunk[0], chunk[1]]).to_string(),
+            Vr::Ss => i16::from_ne_bytes([chunk[0], chunk[1]]).to_string(),
+            Vr::Ul => u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).to_string(),
+            Vr::Sl => i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).to_string(),
+            Vr::Sv if unit == 8 => i64::from_ne_bytes([
                 chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
             ])
             .to_string(),
-            Vr::Uv if unit == 8 => u64::from_le_bytes([
+            Vr::Uv if unit == 8 => u64::from_ne_bytes([
                 chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
             ])
             .to_string(),
-            Vr::Fl => f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).to_string(),
-            Vr::Fd => f64::from_le_bytes([
+            Vr::Fl => f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).to_string(),
+            Vr::Fd => f64::from_ne_bytes([
                 chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
             ])
             .to_string(),
             Vr::At if unit == 4 => format!(
                 "{:04X}{:04X}",
-                u16::from_le_bytes([chunk[0], chunk[1]]),
-                u16::from_le_bytes([chunk[2], chunk[3]])
+                u16::from_ne_bytes([chunk[0], chunk[1]]),
+                u16::from_ne_bytes([chunk[2], chunk[3]])
             ),
             _ => String::from_utf8_lossy(chunk).into_owned(),
         };
@@ -523,7 +523,7 @@ mod tests {
             Tag::ROWS,
             Vr::Us,
             Arc::new(radicom::model::buffer::MemoryBuffer::from(
-                512u16.to_le_bytes().to_vec(),
+                512u16.to_ne_bytes().to_vec(),
             )),
         )));
         let xml = dataset_to_xml(&ds).unwrap();
@@ -691,37 +691,37 @@ mod tests {
             (
                 Tag::new(0x0011, 0x0001),
                 Vr::Ss,
-                (-2i16).to_le_bytes().to_vec(),
+                (-2i16).to_ne_bytes().to_vec(),
                 "-2",
             ),
             (
                 Tag::new(0x0011, 0x0002),
                 Vr::Sl,
-                (-70000i32).to_le_bytes().to_vec(),
+                (-70000i32).to_ne_bytes().to_vec(),
                 "-70000",
             ),
             (
                 Tag::new(0x0011, 0x0003),
                 Vr::Sv,
-                (-5i64).to_le_bytes().to_vec(),
+                (-5i64).to_ne_bytes().to_vec(),
                 "-5",
             ),
             (
                 Tag::new(0x0011, 0x0004),
                 Vr::Uv,
-                (9u64).to_le_bytes().to_vec(),
+                (9u64).to_ne_bytes().to_vec(),
                 "9",
             ),
             (
                 Tag::new(0x0011, 0x0005),
                 Vr::Fl,
-                (1.5f32).to_le_bytes().to_vec(),
+                (1.5f32).to_ne_bytes().to_vec(),
                 "1.5",
             ),
             (
                 Tag::new(0x0011, 0x0006),
                 Vr::Fd,
-                (2.25f64).to_le_bytes().to_vec(),
+                (2.25f64).to_ne_bytes().to_vec(),
                 "2.25",
             ),
             (
@@ -729,8 +729,8 @@ mod tests {
                 Vr::At,
                 {
                     let mut b = Vec::new();
-                    b.extend_from_slice(&0x0010u16.to_le_bytes());
-                    b.extend_from_slice(&0x0010u16.to_le_bytes());
+                    b.extend_from_slice(&0x0010u16.to_ne_bytes());
+                    b.extend_from_slice(&0x0010u16.to_ne_bytes());
                     b
                 },
                 "00100010",
