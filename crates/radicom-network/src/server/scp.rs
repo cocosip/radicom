@@ -2130,7 +2130,24 @@ pub fn failure_outgoing(
     comment: &str,
     syntax: &Arc<radicom::model::transfer_syntax::TransferSyntax>,
 ) -> Outgoing {
-    let mut command = Command::response(request, crate::dimse::status::PROCESSING_FAILURE)
+    failure_outgoing_status(
+        context_id,
+        request,
+        crate::dimse::status::PROCESSING_FAILURE,
+        comment,
+        syntax,
+    )
+}
+
+/// A failure answer for `request` with an explicit DIMSE status.
+pub fn failure_outgoing_status(
+    context_id: u8,
+    request: &Command,
+    status: u16,
+    comment: &str,
+    syntax: &Arc<radicom::model::transfer_syntax::TransferSyntax>,
+) -> Outgoing {
+    let mut command = Command::response(request, status)
         .unwrap_or_else(|| Command::request(request.field, request.message_id));
     command.error_comment = Some(crate::dimse::truncate_lo(comment));
     Outgoing {
@@ -2247,7 +2264,8 @@ pub async fn execute_c_store<P: ServiceProvider>(
         Ok(Ok(instance)) => instance,
         Ok(Err(error)) => {
             let comment = error.to_string();
-            let outgoing = failure_outgoing(context_id, &command, &comment, &syntax);
+            let status = crate::store::store_failure_status(&error);
+            let outgoing = failure_outgoing_status(context_id, &command, status, &comment, &syntax);
             let _ = tx.send(Ok(outgoing)).await;
             return Ok(());
         }

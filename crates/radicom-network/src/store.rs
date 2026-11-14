@@ -499,25 +499,38 @@ pub fn c_store_request_from_message(
     })
 }
 
-/// Maps a provider failure onto a C-STORE response (§11.4).
+/// Maps a store-path failure onto the C-STORE status code (PS3.4 Table B.2-1).
 ///
-/// The connection survives: a rejected instance becomes a failure status with
-/// a truncated comment, never a disconnect.
-pub fn failure_response(request: &CStoreRequest, error: &NetworkError) -> CStoreResponse {
-    let code = match error {
+/// `UNABLE_TO_PROCESS` (0xC000) is a dataset the SCP cannot decode; a resource
+/// shortfall (I/O failure or the receive-side size ceiling) is `0xA700`, kept
+/// distinct from a plain `PROCESSING_FAILURE` (0x0110).
+pub fn store_failure_status(error: &NetworkError) -> u16 {
+    match error {
         // the provider cannot store this SOP class at all: "Refused: SOP class
         // not supported" (PS3.4 Table B.2-1), not a dataset/command mismatch
         // (NET-18)
         NetworkError::SopClassNotSupported { .. } => status::SOP_CLASS_NOT_SUPPORTED,
         // a decode failure is "cannot understand this dataset", not a resource
-        // shortfall: 0xC000 says so where 0xA700 would mislead (PS3.4 Table B.2-1)
+        // shortfall: 0xC000 says so where 0xA700 would mislead
         NetworkError::Io(io_error) if io_error.kind() == std::io::ErrorKind::InvalidData => {
             status::UNABLE_TO_PROCESS
         }
         NetworkError::Io(_) => status::STORAGE_FAILURE,
+        // the receive-side size ceiling is a resource shortfall, not a decode
+        // error: answer 0xA700 rather than 0x0110.
+        NetworkError::Protocol(message) if message.contains("maximum size") => {
+            status::OUT_OF_RESOURCES
+        }
         _ => status::PROCESSING_FAILURE,
-    };
-    CStoreResponse::failure(request, code, error.to_string())
+    }
+}
+
+/// Maps a provider failure onto a C-STORE response (§11.4).
+///
+/// The connection survives: a rejected instance becomes a failure status with
+/// a truncated comment, never a disconnect.
+pub fn failure_response(request: &CStoreRequest, error: &NetworkError) -> CStoreResponse {
+    CStoreResponse::failure(request, store_failure_status(error), error.to_string())
 }
 
 #[cfg(test)]
@@ -1014,6 +1027,21 @@ mod tests {
             other => panic!("expected a size-limit error, got {other:?}"),
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn store_failure_status_maps_decode_and_resource() {
+        use crate::dimse::status;
+        let decode = NetworkError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "bad"));
+        assert_eq!(store_failure_status(&decode), status::UNABLE_TO_PROCESS);
+        let resource = NetworkError::Io(std::io::Error::other("disk full"));
+        assert_eq!(store_failure_status(&resource), status::STORAGE_FAILURE);
+        let capped = NetworkError::protocol("DIMSE dataset exceeds the maximum size");
+        assert_eq!(store_failure_status(&capped), status::OUT_OF_RESOURCES);
+        assert_eq!(
+            store_failure_status(&NetworkError::protocol("other")),
+            status::PROCESSING_FAILURE
+        );
     }
 
     #[test]

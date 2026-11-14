@@ -69,6 +69,19 @@
   LUT domain, and a transcoded dataset drops stale extended offset tables.
 - Networking: a protocol violation sends A-ABORT before the association is dropped, `AssociationReleased` is
   reported only after A-RELEASE-RP, and an unconfirmed release is logged instead of reported as success.
+- DT time-zone offsets are written as conformant `&ZZXX` and parsed with the separator, so a typed `DtPoint`
+  round-trips through `Dataset::validate()`; a value cut by a defined-length item boundary (a truncated
+  long-form header) is clamped back to the item end.
+- OF/OV/OL values read numerically, and a float or integer written to a FL/FD/OF/OD attribute is encoded as
+  that binary VR instead of `IS`/`DS` text; `Dataset::try_get_str_ref` returns byte-backed string values.
+- A C-STORE whose dataset cannot be decoded answers `0xC000` (Unable to process) and a resource/size
+  shortfall answers `0xA700`, both distinct from `0x0110`; an N-ACTION/N-EVENT-REPORT failure reply keeps the
+  supplied Action/Event Type ID (PS3.7).
+- `PixelData` counts frames correctly after `clear()`/`ensure_pixel_element`, which now create a fragment
+  sequence for encapsulated data; an embedded overlay rejects a bit position inside the stored sample
+  (including bit 0); `StructuredReport::validate` accepts an empty Type-2 Series Number.
+- JSON and MPR read and write in-memory values in host byte order (the earlier host-order fix had missed those
+  two modules).
 
 ## [0.2.0] - 2026-11-09
 

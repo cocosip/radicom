@@ -217,9 +217,11 @@ impl OverlayData {
         let high_bit = ds.get_or(crate::pixel::HIGH_BIT, bits_stored.saturating_sub(1));
         // fo-dicom DicomOverlayData.Load (#110): the bit position lies inside
         // the stored pixel bits, so it is real pixel data, not an overlay.
-        // The test is expressed against HighBit, not BitsStored, so it is
-        // correct for high-aligned depth metadata too.
-        if bit_position <= high_bit && bit_position > high_bit.saturating_sub(bits_stored) {
+        // Stored bits are [HighBit - BitsStored + 1, HighBit]; signed maths so a
+        // low-aligned sample (HighBit == BitsStored - 1) rejects bit 0, which
+        // `saturating_sub` wrongly let through.
+        let stored_low = high_bit as i32 - bits_stored as i32 + 1;
+        if bit_position <= high_bit && bit_position as i32 >= stored_low {
             return Err(Error::Imaging(ImagingError(format!(
                 "overlay bit position {bit_position} lies inside the stored pixel bits"
             ))));
@@ -654,6 +656,26 @@ mod tests {
         assert!(
             overlays[0].load(&ds).is_err(),
             "#110 rule: not an overlay bit"
+        );
+    }
+
+    #[test]
+    fn bit_position_zero_inside_a_full_width_sample_is_rejected() {
+        // BitsStored 8 / HighBit 7: bit 0 is real pixel data. The old
+        // `saturating_sub` lower bound accepted position 0; it must be rejected.
+        let mut ds = base(8, 4, 1);
+        add_overlay_shape(&mut ds, 0x6000, 4, 1, 0);
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                PIXEL_DATA,
+                Vr::Ob,
+                Arc::new(MemoryBuffer::from(vec![0u8; 4])),
+            ),
+        ));
+        let overlays = OverlayData::from_dataset(&ds);
+        assert!(
+            overlays[0].load(&ds).is_err(),
+            "#110: bit 0 of a full-width stored sample is real pixel data"
         );
     }
 

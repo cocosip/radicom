@@ -480,11 +480,17 @@ impl FromElement for f64 {
                 return match e.vr() {
                     Vr::Fl => read_host_unit::<f32>(e, b, index).map(f64::from),
                     Vr::Fd => read_host_unit::<f64>(e, b, index),
+                    // OF is a 32-bit float array; without this arm the catch-all
+                    // read the f32 bit pattern as a widened integer.
+                    Vr::Of => read_host_unit::<f32>(e, b, index).map(f64::from),
                     Vr::Us => read_host_unit::<u16>(e, b, index).map(f64::from),
                     Vr::Ss => read_host_unit::<i16>(e, b, index).map(f64::from),
                     Vr::Ul => read_host_unit::<u32>(e, b, index).map(f64::from),
                     Vr::Sl => read_host_unit::<i32>(e, b, index).map(f64::from),
-                    Vr::Uv => read_host_unit::<u64>(e, b, index).map(|v| v as f64),
+                    // OL is 32-bit unsigned; OV/UV are 64-bit unsigned. Widen
+                    // numerically instead of reinterpreting the bits as f64.
+                    Vr::Ol => read_host_unit::<u32>(e, b, index).map(f64::from),
+                    Vr::Uv | Vr::Ov => read_host_unit::<u64>(e, b, index).map(|v| v as f64),
                     Vr::Sv => read_host_unit::<i64>(e, b, index).map(|v| v as f64),
                     _ => read_host_unit::<f64>(e, b, index),
                 };
@@ -1211,6 +1217,18 @@ macro_rules! impl_into_int_string {
                             Arc::new(MemoryBuffer::from(v.to_ne_bytes().to_vec())),
                         )
                     }
+                    // An integer written to a float attribute (dictionary VR
+                    // FL/FD) is encoded as that binary float, never as IS text.
+                    Vr::Fl => DicomElement::new_bytes(
+                        tag,
+                        vr,
+                        Arc::new(MemoryBuffer::from((self as f32).to_ne_bytes().to_vec())),
+                    ),
+                    Vr::Fd => DicomElement::new_bytes(
+                        tag,
+                        vr,
+                        Arc::new(MemoryBuffer::from((self as f64).to_ne_bytes().to_vec())),
+                    ),
                     _ => DicomElement::new_str(tag, vr, self.to_string()),
                 }
             }
@@ -1243,6 +1261,22 @@ macro_rules! impl_into_float {
                         )
                     }
                     Vr::Fd => {
+                        let v = self as f64;
+                        DicomElement::new_bytes(
+                            tag,
+                            vr,
+                            Arc::new(MemoryBuffer::from(v.to_ne_bytes().to_vec())),
+                        )
+                    }
+                    Vr::Of => {
+                        let v = self as f32;
+                        DicomElement::new_bytes(
+                            tag,
+                            vr,
+                            Arc::new(MemoryBuffer::from(v.to_ne_bytes().to_vec())),
+                        )
+                    }
+                    Vr::Od => {
                         let v = self as f64;
                         DicomElement::new_bytes(
                             tag,
@@ -1755,5 +1789,36 @@ mod cm_regression {
         let one = ElementValue::Str("1".into());
         let binary = ElementValue::Bytes(Arc::new(MemoryBuffer::from(vec![1u8, 0])));
         assert!(!values_equal(Vr::Us, &one, &binary));
+    }
+}
+
+#[cfg(test)]
+mod review_fix_tests {
+    use super::*;
+    use crate::model::dataset::Dataset;
+
+    /// REGRESSION: OF (Other Float, a 32-bit float array) was read through the
+    /// `f64` catch-all as a widened integer bit pattern, and a float written to
+    /// an OF/OD attribute silently became DS text. Both are now numeric.
+    #[test]
+    fn of_reads_as_float_and_float_vr_resolution() {
+        let of = DicomElement::new_bytes(
+            Tag::FLOAT_PIXEL_DATA,
+            Vr::Of,
+            Arc::new(MemoryBuffer::from(1.5f32.to_ne_bytes().to_vec())),
+        );
+        assert_eq!(of.first::<f32>().unwrap(), 1.5);
+        assert_eq!(of.first::<f64>().unwrap(), 1.5);
+
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::FLOAT_PIXEL_DATA, 1.5f64);
+        let el = ds.get_element(Tag::FLOAT_PIXEL_DATA).unwrap();
+        assert_eq!(el.vr(), Vr::Of, "float into OF must stay binary OF");
+        assert_eq!(el.first::<f32>().unwrap(), 1.5);
+
+        ds.insert_value(Tag::B1RMS, 45i32);
+        let el = ds.get_element(Tag::B1RMS).unwrap();
+        assert_eq!(el.vr(), Vr::Fl, "integer into FL must stay binary FL");
+        assert_eq!(el.first::<f32>().unwrap(), 45.0);
     }
 }

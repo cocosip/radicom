@@ -387,8 +387,10 @@ impl Slice {
             .collect()
     }
 
-    /// Renders the raw sample values as little-endian bytes of `bytes_per_pixel`
-    /// width (fo-dicom `RenderRawData`): 1 byte truncates, 2 bytes little-endian.
+    /// Renders the raw sample values as **host-order** bytes of
+    /// `bytes_per_pixel` width (fo-dicom `RenderRawData`): 1 byte truncates,
+    /// 2 bytes host order. In-memory pixel buffers are host order (§9.1), so
+    /// `store_as_dicom` can pass these straight to `PixelData::add_frame`.
     /// Signed samples are written two's-complement (review #7).
     pub fn render_raw_data(&self, bytes_per_pixel: u8, signed: bool) -> Vec<u8> {
         match bytes_per_pixel {
@@ -401,9 +403,9 @@ impl Slice {
                 let mut out = Vec::with_capacity(self.output.len() * 2);
                 for &v in &self.output {
                     if signed {
-                        out.extend_from_slice(&((v.round() as i64) as i16).to_le_bytes());
+                        out.extend_from_slice(&((v.round() as i64) as i16).to_ne_bytes());
                     } else {
-                        out.extend_from_slice(&((v.round() as i64) as u16).to_le_bytes());
+                        out.extend_from_slice(&((v.round() as i64) as u16).to_ne_bytes());
                     }
                 }
                 out
@@ -444,7 +446,7 @@ fn read_grayscale(dataset: &Dataset, frame: u32) -> Result<Vec<f64>, Error> {
             .0
             .iter()
             .take(slots)
-            .map(|c| normalise_sample(u16::from_le_bytes([c[0], c[1]]), &depth))
+            .map(|c| normalise_sample(u16::from_ne_bytes([c[0], c[1]]), &depth))
             .collect(),
         _ => return Err(invalid("MPR supports 8- or 16-bit native MONOCHROME data")),
     };
@@ -765,7 +767,7 @@ mod tests {
         ds.insert_value(Tag::INSTANCE_NUMBER, 1i32);
         let mut bytes = Vec::new();
         for _ in 0..16 {
-            bytes.extend_from_slice(&fill.to_le_bytes());
+            bytes.extend_from_slice(&fill.to_ne_bytes());
         }
         ds.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
@@ -827,7 +829,7 @@ mod tests {
         let mut bytes = Vec::new();
         for fill in fills {
             for _ in 0..16 {
-                bytes.extend_from_slice(&fill.to_le_bytes());
+                bytes.extend_from_slice(&fill.to_ne_bytes());
             }
         }
         ds.insert_or_update(crate::model::item::DicomItem::Element(

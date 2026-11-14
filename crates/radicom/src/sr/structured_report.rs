@@ -272,9 +272,21 @@ impl StructuredReport {
             (Tag::STUDY_INSTANCE_UID, Vr::Ui),
             (Tag::SERIES_INSTANCE_UID, Vr::Ui),
             (Tag::MODALITY, Vr::Cs),
-            (Tag::SERIES_NUMBER, Vr::Is),
         ] {
             required_text(dataset, tag, vr)?;
+        }
+        // SeriesNumber (0020,0011) is Type 2: it must be present but may be
+        // zero-length, so check presence + VR + grammar without requiring a
+        // non-empty value.
+        {
+            let element = dataset.get_element(Tag::SERIES_NUMBER)?;
+            if element.vr() != Vr::Is {
+                return Err(invalid("incorrect VR for Type 2 SeriesNumber".into()));
+            }
+            let value = dataset.get_str(Tag::SERIES_NUMBER)?;
+            let decoded =
+                crate::model::element::DicomElement::new_str(Tag::SERIES_NUMBER, Vr::Is, value);
+            crate::validation::validate_element(&decoded)?;
         }
         if dataset.try_get_str(Tag::MODALITY).as_deref() != Some("SR") {
             return Err(invalid("SR Modality must be SR".into()));
@@ -667,6 +679,23 @@ mod tests {
         assert!(report.validate().is_err(), "PARTIAL cannot be VERIFIED");
         report.set_completion_flag("COMPLETE");
         assert!(report.validate().is_err(), "VERIFIED needs an observer");
+    }
+
+    #[test]
+    fn an_empty_type_two_series_number_is_valid() {
+        let mut report = report_with(container());
+        // Type 2: present but may be zero-length.
+        report
+            .file
+            .dataset
+            .insert_str(Tag::SERIES_NUMBER, Vr::Is, "");
+        report.validate().unwrap();
+        // ...but absent is still an error.
+        report.file.dataset.remove(&Tag::SERIES_NUMBER);
+        assert!(
+            report.validate().is_err(),
+            "SeriesNumber is Type 2 and must be present"
+        );
     }
 
     #[test]

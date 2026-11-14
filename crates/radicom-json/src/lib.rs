@@ -457,8 +457,8 @@ fn raw_value_array(
             .0
             .iter()
             .map(|chunk| {
-                let group = u16::from_le_bytes([chunk[0], chunk[1]]);
-                let element = u16::from_le_bytes([chunk[2], chunk[3]]);
+                let group = u16::from_ne_bytes([chunk[0], chunk[1]]);
+                let element = u16::from_ne_bytes([chunk[2], chunk[3]]);
                 Value::String(format!("{group:04X}{element:04X}"))
             })
             .collect(),
@@ -512,37 +512,37 @@ fn binary_number(chunk: &[u8], vr: Vr) -> Option<Value> {
     let value = match vr {
         Vr::Us if chunk.len() >= 2 => {
             return Some(Value::Number(
-                u16::from_le_bytes([chunk[0], chunk[1]]).into(),
+                u16::from_ne_bytes([chunk[0], chunk[1]]).into(),
             ))
         }
         Vr::Ss if chunk.len() >= 2 => {
             return Some(Value::Number(
-                i16::from_le_bytes([chunk[0], chunk[1]]).into(),
+                i16::from_ne_bytes([chunk[0], chunk[1]]).into(),
             ))
         }
         Vr::Ul if chunk.len() >= 4 => {
             return Some(Value::Number(
-                u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).into(),
+                u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).into(),
             ))
         }
         Vr::Sl if chunk.len() >= 4 => {
             return Some(Value::Number(
-                i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).into(),
+                i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).into(),
             ))
         }
         // 64-bit integers stay exact (no f64 hop) (review #12)
         Vr::Sv if chunk.len() >= 8 => {
             let mut bytes = [0u8; 8];
             bytes.copy_from_slice(&chunk[..8]);
-            return Some(Value::Number(i64::from_le_bytes(bytes).into()));
+            return Some(Value::Number(i64::from_ne_bytes(bytes).into()));
         }
         Vr::Uv if chunk.len() >= 8 => {
             let mut bytes = [0u8; 8];
             bytes.copy_from_slice(&chunk[..8]);
-            return Some(Value::Number(u64::from_le_bytes(bytes).into()));
+            return Some(Value::Number(u64::from_ne_bytes(bytes).into()));
         }
         Vr::Fl if chunk.len() >= 4 => {
-            let f = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            let f = f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             // Preserve the f32 shortest decimal form: fo-dicom writes 0.1f32 as
             // "0.1", not the f64 expansion "0.10000000149011612". Re-parsing the
             // Display text keeps serde_json to a Number while emitting the short
@@ -570,7 +570,7 @@ fn binary_number(chunk: &[u8], vr: Vr) -> Option<Value> {
                 )
             });
         }
-        Vr::Fd if chunk.len() >= 8 => f64::from_le_bytes([
+        Vr::Fd if chunk.len() >= 8 => f64::from_ne_bytes([
             chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
         ]),
         _ => return None,
@@ -982,8 +982,8 @@ fn text_element(tag: Tag, vr: Vr, text: String) -> Result<DicomElement> {
                 tag: tag.to_json_string(),
                 reason: format!("AT value \"{part}\" is not a tag"),
             })?;
-            bytes.extend_from_slice(&parsed.group().to_le_bytes());
-            bytes.extend_from_slice(&parsed.element().to_le_bytes());
+            bytes.extend_from_slice(&parsed.group().to_ne_bytes());
+            bytes.extend_from_slice(&parsed.element().to_ne_bytes());
         }
         return Ok(DicomElement::new_bytes(
             tag,
@@ -1031,49 +1031,49 @@ fn encode_numeric_or_text(vr: Vr, text: &str, tag: &Tag) -> Result<Vec<u8>> {
                 &part
                     .parse::<u16>()
                     .map_err(|_| malformed("US"))?
-                    .to_le_bytes(),
+                    .to_ne_bytes(),
             ),
             Vr::Ss => bytes.extend_from_slice(
                 &part
                     .parse::<i16>()
                     .map_err(|_| malformed("SS"))?
-                    .to_le_bytes(),
+                    .to_ne_bytes(),
             ),
             Vr::Ul => bytes.extend_from_slice(
                 &part
                     .parse::<u32>()
                     .map_err(|_| malformed("UL"))?
-                    .to_le_bytes(),
+                    .to_ne_bytes(),
             ),
             Vr::Sl => bytes.extend_from_slice(
                 &part
                     .parse::<i32>()
                     .map_err(|_| malformed("SL"))?
-                    .to_le_bytes(),
+                    .to_ne_bytes(),
             ),
             Vr::Sv => bytes.extend_from_slice(
                 &part
                     .parse::<i64>()
                     .map_err(|_| malformed("SV"))?
-                    .to_le_bytes(),
+                    .to_ne_bytes(),
             ),
             Vr::Uv => bytes.extend_from_slice(
                 &part
                     .parse::<u64>()
                     .map_err(|_| malformed("UV"))?
-                    .to_le_bytes(),
+                    .to_ne_bytes(),
             ),
             Vr::Fl => bytes.extend_from_slice(
                 &part
                     .parse::<f32>()
                     .map_err(|_| malformed("FL"))?
-                    .to_le_bytes(),
+                    .to_ne_bytes(),
             ),
             Vr::Fd => bytes.extend_from_slice(
                 &part
                     .parse::<f64>()
                     .map_err(|_| malformed("FD"))?
-                    .to_le_bytes(),
+                    .to_ne_bytes(),
             ),
             // PN keeps its UTF-8 text; the charset layer encodes for the wire
             _ => bytes.extend_from_slice(part.as_bytes()),
@@ -1169,10 +1169,10 @@ mod tests {
     fn fl_serializes_with_the_f32_shortest_decimal() {
         // fo-dicom writes a FL by its f32 shortest text; a f64 expansion would
         // yield "0.10000000149011612" for 0.1f32.
-        let v = binary_number(&0.1f32.to_le_bytes(), Vr::Fl).unwrap();
+        let v = binary_number(&0.1f32.to_ne_bytes(), Vr::Fl).unwrap();
         assert_eq!(serde_json::to_string(&v).unwrap(), "0.1");
         // FD keeps full f64 precision.
-        let v = binary_number(&(0.1f64).to_le_bytes(), Vr::Fd).unwrap();
+        let v = binary_number(&(0.1f64).to_ne_bytes(), Vr::Fd).unwrap();
         assert_eq!(serde_json::to_string(&v).unwrap(), "0.1");
     }
 
@@ -1214,9 +1214,9 @@ mod tests {
             let mut bytes = Vec::new();
             for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
                 if vr == Vr::Fl {
-                    bytes.extend_from_slice(&(value as f32).to_le_bytes());
+                    bytes.extend_from_slice(&(value as f32).to_ne_bytes());
                 } else {
-                    bytes.extend_from_slice(&value.to_le_bytes());
+                    bytes.extend_from_slice(&value.to_ne_bytes());
                 }
             }
             let mut ds = Dataset::new();
@@ -1403,7 +1403,7 @@ mod tests {
         ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
             Tag::ROWS,
             Vr::Us,
-            Arc::new(MemoryBuffer::from(512u16.to_le_bytes().to_vec())),
+            Arc::new(MemoryBuffer::from(512u16.to_ne_bytes().to_vec())),
         )));
         let json = dataset_to_json(&ds, &JsonOptions::default()).unwrap();
         let value: Value = serde_json::from_str(&json).unwrap();
@@ -1420,7 +1420,7 @@ mod tests {
                 .data()
                 .unwrap()
                 .as_ref(),
-            512u16.to_le_bytes(),
+            512u16.to_ne_bytes(),
             "a US element stays byte-backed after a round-trip"
         );
         assert_eq!(
@@ -2256,11 +2256,11 @@ mod tests {
     #[test]
     fn binary_number_covers_float_and_unknown_vrs() {
         assert_eq!(
-            binary_number(&1.0f32.to_le_bytes(), Vr::Fl),
+            binary_number(&1.0f32.to_ne_bytes(), Vr::Fl),
             Some(serde_json::json!(1.0))
         );
         assert_eq!(
-            binary_number(&1.5f64.to_le_bytes(), Vr::Fd),
+            binary_number(&1.5f64.to_ne_bytes(), Vr::Fd),
             Some(serde_json::json!(1.5))
         );
         assert_eq!(binary_number(&[1, 2], Vr::Un), None);

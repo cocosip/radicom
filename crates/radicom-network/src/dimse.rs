@@ -275,6 +275,14 @@ impl Command {
                 .then(|| request.requested_sop_instance_uid.clone())
                 .flatten()
         });
+        // PS3.7: an N-ACTION / N-EVENT-REPORT reply carries the Action Type ID /
+        // Event Type ID the request supplied, even on a failure reply.
+        if request.field == CommandField::NEventReportRq {
+            out.event_type_id = request.event_type_id;
+        }
+        if request.field == CommandField::NActionRq {
+            out.action_type_id = request.action_type_id;
+        }
         out.no_dataset = true;
         Some(out)
     }
@@ -1463,6 +1471,19 @@ mod tests {
         assert_eq!(back.requested_sop_instance_uid.as_deref(), Some("1.2.3"));
         assert_eq!(back.event_type_id, Some(2));
         assert_eq!(back.action_type_id, Some(1));
+    }
+
+    #[test]
+    fn a_response_keeps_the_action_and_event_type_id_on_failure() {
+        let mut event = Command::request(CommandField::NEventReportRq, 1);
+        event.event_type_id = Some(2);
+        let resp = Command::response(&event, status::PROCESSING_FAILURE).unwrap();
+        assert_eq!(resp.event_type_id, Some(2));
+
+        let mut action = Command::request(CommandField::NActionRq, 1);
+        action.action_type_id = Some(7);
+        let resp = Command::response(&action, status::PROCESSING_FAILURE).unwrap();
+        assert_eq!(resp.action_type_id, Some(7));
     }
 
     #[test]

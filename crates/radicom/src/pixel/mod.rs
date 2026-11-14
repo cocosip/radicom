@@ -466,10 +466,20 @@ macro_rules! pixel_read_methods {
         /// `(0028,0008)` (which reads as 1 when the tag is absent) is trusted.
         #[allow(dead_code)] // used by PixelData::add_frame; unused in the read-only view
         fn stored_frame_count(&self) -> u32 {
-            if self.dataset.contains(&PIXEL_DATA) {
-                self.number_of_frames()
-            } else {
-                0
+            match self.dataset.item(&PIXEL_DATA) {
+                // A present-but-empty element (e.g. after `clear`) holds no
+                // frames; `number_of_frames` would otherwise default to 1 and
+                // shift every subsequent `add_frame` index by one.
+                Some(DicomItem::Element(e))
+                    if e.value()
+                        .as_buffer()
+                        .is_some_and(|buffer| buffer.size() == 0) =>
+                {
+                    0
+                }
+                Some(DicomItem::Fragments(f)) if trimmed_fragments(f).is_empty() => 0,
+                Some(_) => self.number_of_frames(),
+                None => 0,
             }
         }
 
@@ -921,7 +931,14 @@ pub fn ensure_pixel_element(ds: &mut Dataset, kind: PixelDataKind) -> Result<(),
         return Ok(());
     }
     match kind {
-        PixelDataKind::Encapsulated | PixelDataKind::OtherByte => {
+        PixelDataKind::Encapsulated => {
+            // Encapsulated Pixel Data is a fragment sequence, never a native
+            // byte element (PS3.5 §8.2 / PS3.3 C.7.6.3.1.1). Starting it as an
+            // `OB` element made `from_dataset` resolve the kind back to
+            // OtherByte and write native bytes into an encapsulated dataset.
+            ds.insert_fragments(PIXEL_DATA, Vr::Ob);
+        }
+        PixelDataKind::OtherByte => {
             ds.insert_or_update(DicomItem::Element(
                 crate::model::element::DicomElement::new_bytes(
                     PIXEL_DATA,
@@ -2019,6 +2036,14 @@ mod tests {
     }
 
     fn guarantee_input_kind(ds: &Dataset, kind: PixelDataKind) {
+        if kind == PixelDataKind::Encapsulated {
+            // encapsulated pixel data is a fragment sequence, not an element
+            assert!(matches!(
+                ds.item(&PIXEL_DATA),
+                Some(crate::model::item::DicomItem::Fragments(_))
+            ));
+            return;
+        }
         let element = ds.get_element(PIXEL_DATA).unwrap();
         let expected = if kind == PixelDataKind::OtherWord {
             Vr::Ow
@@ -2197,5 +2222,47 @@ mod tests {
                 .size(),
             2
         );
+    }
+}
+
+#[cfg(test)]
+mod review_fix_tests {
+    use super::*;
+
+    /// REGRESSION: after `clear()` the pixel element is present but empty;
+    /// `stored_frame_count` must report 0 frames, so the first `add_frame`
+    /// lands at index 0 and NumberOfFrames is not bumped to "2" for one frame.
+    #[test]
+    fn add_frame_after_clear_keeps_frame_count() {
+        let mut ds = Dataset::new();
+        ds.set_transfer_syntax(
+            crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
+        ds.insert_value(Tag::ROWS, 1u16);
+        ds.insert_value(Tag::COLUMNS, 1u16);
+        ds.insert_value(Tag::BITS_ALLOCATED, 8u16);
+        ds.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16);
+        ds.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
+        {
+            let mut pd = PixelData::create_new(&mut ds).unwrap();
+            pd.clear();
+            assert_eq!(pd.add_frame([7u8; 1]).unwrap(), 0, "first frame is index 0");
+        }
+        assert!(
+            ds.try_get_str(Tag::NUMBER_OF_FRAMES).is_none(),
+            "one stored frame must not report NumberOfFrames=2"
+        );
+    }
+
+    /// REGRESSION: `ensure_pixel_element` for Encapsulated must create a fragment
+    /// sequence, not a native byte element.
+    #[test]
+    fn ensure_pixel_element_encapsulated_is_fragments() {
+        let mut ds = Dataset::new();
+        super::ensure_pixel_element(&mut ds, PixelDataKind::Encapsulated).unwrap();
+        assert!(matches!(
+            ds.item(&PIXEL_DATA),
+            Some(crate::model::item::DicomItem::Fragments(_))
+        ));
     }
 }

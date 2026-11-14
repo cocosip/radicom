@@ -658,7 +658,16 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         // read the parent's bytes. End the level at its boundary (the level
         // caller then seeks to the declared end) instead of reading across it.
         if let (Some(length), Mode::Limited { limit }) = (defined, mode) {
-            if value_start + u64::from(length) > level_start + limit {
+            let target = level_start + limit;
+            if value_start + u64::from(length) > target {
+                // A truncated long-form explicit-VR header (OB/OW/SQ/UN/… needs
+                // 8 bytes after the tag, not 4) was read past the item end, so
+                // `value_start` is already beyond the declared bound. The item
+                // end is authoritative: resume the parent there instead of
+                // inside the item, or the following element/item desynchronises.
+                if value_start > target {
+                    self.source.goto(target).map_err(|e| io_err(e, target))?;
+                }
                 return Ok(Step::End(LevelEnd::Limit));
             }
         }
@@ -1095,9 +1104,10 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
             }
         };
         // A defined-length level always ends at its declared end, even when its
-        // body ended early (a header or a value that overruns the item, T6): the
-        // parent must resume there, not inside the item's bytes, which used to
-        // desynchronise every following element.
+        // body ended early (a value that overruns the item, T6): the parent must
+        // resume there, not inside the item's bytes. (A truncated long-form
+        // header that read *past* the end is clamped back to it at the overrun
+        // guard above, so this forward seek only has to handle short bodies.)
         if let Mode::Limited { limit } = mode {
             let target = level_start.saturating_add(limit);
             if self.position()? < target {

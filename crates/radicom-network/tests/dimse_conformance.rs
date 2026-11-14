@@ -146,7 +146,14 @@ fn n_action_and_event_replies_echo_the_type_only_for_their_service() {
             assert_eq!(command.action_type_id, None);
         }
         let failure = NServiceResponse::failure(&request, status::PROCESSING_FAILURE).to_command();
-        assert_eq!(failure.action_type_id, None);
-        assert_eq!(failure.event_type_id, None);
+        // PS3.7 / §11.3: a failure reply still carries the Type ID its own
+        // service supplied, and never the other service's.
+        if field == CommandField::NActionRq {
+            assert_eq!(failure.action_type_id, Some(7));
+            assert_eq!(failure.event_type_id, None);
+        } else {
+            assert_eq!(failure.event_type_id, Some(3));
+            assert_eq!(failure.action_type_id, None);
+        }
     }
 }

@@ -4,7 +4,8 @@
 //! Accepted input shapes mirror fo-dicom's format arrays:
 //! - DA: `YYYY`, `YYYYMM`, `YYYYMMDD`, `YYYY.MM.DD`, `YYYY/MM/DD`
 //! - DT: `YYYY[MM[DD[HH[MM[SS[.F{1,6}]]]]]]` plus optional UTC offset
-//!   (`±HHMM`, `±HH:MM`, `±HH`), dotted/slashed date variants
+//!   (`&ZZXX`, and on input the tolerant `±HHMM`, `±HH:MM`, `±HH`),
+//!   dotted/slashed date variants
 //! - TM: `HH[MM[SS[.F{1,6}]]]` with `.`, `:` or none as fraction separator
 //!
 //! Ranges (`min-max`, at most two segments) parse into [`Range`].
@@ -251,6 +252,9 @@ pub fn parse_dt(s: &str) -> Result<Range<DtPoint>, Error> {
             }
             _ => (s, None),
         };
+        // PS3.5 §6.2 spells the offset `&ZZXX`; drop the separator so the date
+        // and time digits parse. The bare `±HHMM` form (no `&`) still works.
+        let body = body.strip_suffix('&').unwrap_or(body);
         // dotted/slashed date forms never carry a time part
         let date_only = body.contains('/') || (body.len() > 4 && body.as_bytes()[4] == b'.');
         let (date, hour_s, frac_s) = if date_only {
@@ -390,7 +394,12 @@ pub fn format_tm(t: NaiveTime) -> String {
     s
 }
 
-/// Formats DT canonically: `YYYYMMDDHHMMSS[.F…][±HHMM]`.
+/// Formats DT canonically: `YYYYMMDDHHMMSS[.F…][&ZZXX]`.
+///
+/// PS3.5 §6.2 spells the UTC offset as `&ZZXX` (ampersand before the sign); the
+/// formatter emits that conformant form, which is also what the strict
+/// validator (`validation::validate_dt_component`) accepts. `parse_dt` still
+/// tolerates the ACR-NEMA bare `±HHMM` on input.
 pub fn format_dt(p: DtPoint) -> String {
     let d = p.naive.date();
     let mut s = format!("{}{}", d.format("%Y%m%d"), format_tm(p.naive.time()));
@@ -398,6 +407,7 @@ pub fn format_dt(p: DtPoint) -> String {
         let total = o.local_minus_utc();
         let sign = if total < 0 { '-' } else { '+' };
         let abs = total.abs();
+        s.push('&');
         s.push(sign);
         s.push_str(&format!("{:02}{:02}", abs / 3600, (abs % 3600) / 60));
     }
@@ -491,18 +501,23 @@ mod tests {
             with_off.offset.map(|o| o.local_minus_utc()),
             Some(5 * 3600 + 30 * 60)
         );
-        assert_eq!(format_dt(with_off), "20240305103015+0530");
+        assert_eq!(format_dt(with_off), "20240305103015&+0530");
+        // the canonical output must itself pass the strict DT validator
+        assert!(
+            crate::validation::validate_single(crate::model::vr::Vr::Dt, &format_dt(with_off))
+                .is_ok()
+        );
 
         let colon_off = parse_dt("20240305103015-08:00").unwrap().min;
         assert_eq!(
             colon_off.offset.map(|o| o.local_minus_utc()),
             Some(-8 * 3600)
         );
-        assert_eq!(format_dt(colon_off), "20240305103015-0800");
+        assert_eq!(format_dt(colon_off), "20240305103015&-0800");
 
         let frac = parse_dt("20240305103015.123456+0100").unwrap().min;
         assert_eq!(frac.naive.nanosecond(), 123_456_000);
-        assert_eq!(format_dt(frac), "20240305103015.123456+0100");
+        assert_eq!(format_dt(frac), "20240305103015.123456&+0100");
 
         assert_eq!(
             format_dt(parse_dt("202403051030").unwrap().min),

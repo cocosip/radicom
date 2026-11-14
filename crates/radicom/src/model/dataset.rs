@@ -217,6 +217,13 @@ impl Dataset {
         match self.items.get(&tag) {
             Some(DicomItem::Element(element)) => match element.value() {
                 crate::model::element::ElementValue::Str(text) => Some(text.as_str()),
+                // A string VR stored byte-backed is still text (CM-08); return
+                // its borrowed UTF-8 view when the buffer is contiguous.
+                crate::model::element::ElementValue::Bytes(buffer) if element.vr().is_string() => {
+                    buffer
+                        .as_slice()
+                        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                }
                 _ => None,
             },
             _ => None,
@@ -803,8 +810,8 @@ impl Dataset {
 fn numeric_hint_fits(hint: Vr, dict_vr: Vr) -> bool {
     use Vr::*;
     match hint {
-        Is => matches!(dict_vr, Is | Us | Ss | Ul | Sl | Uv | Sv),
-        Ds => matches!(dict_vr, Ds | Fl | Fd),
+        Is => matches!(dict_vr, Is | Us | Ss | Ul | Sl | Uv | Sv | Fl | Fd),
+        Ds => matches!(dict_vr, Ds | Fl | Fd | Of | Od),
         _ => false,
     }
 }
@@ -2533,5 +2540,31 @@ mod coverage_tests {
         assert_ne!(first, second);
         assert_eq!(first.element(), 0x1001);
         assert_eq!(second.element(), 0x1101);
+    }
+}
+
+#[cfg(test)]
+mod review_fix_tests {
+    use super::Dataset;
+    use crate::model::buffer::MemoryBuffer;
+    use crate::model::element::DicomElement;
+    use crate::model::item::DicomItem;
+    use crate::model::tag::Tag;
+    use crate::model::vr::Vr;
+    use std::sync::Arc;
+
+    /// REGRESSION: a string VR stored byte-backed (CM-08) must not read as an
+    /// absent attribute through `try_get_str_ref`.
+    #[test]
+    fn try_get_str_ref_reads_byte_backed_string() {
+        let mut ds = Dataset::new();
+        let tag = Tag::new(0x0008, 0x0008);
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            tag.clone(),
+            Vr::Cs,
+            Arc::new(MemoryBuffer::from(b"ORIGINAL".to_vec())),
+        )));
+        assert_eq!(ds.try_get_str_ref(&tag), Some("ORIGINAL"));
+        assert_eq!(ds.try_get_str(&tag).as_deref(), Some("ORIGINAL"));
     }
 }

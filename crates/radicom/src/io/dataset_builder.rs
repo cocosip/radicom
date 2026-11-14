@@ -1383,3 +1383,78 @@ mod coverage_tests {
             .unwrap();
     }
 }
+
+#[cfg(test)]
+mod review_fix_tests {
+    use crate::model::tag::Tag;
+    use crate::model::transfer_syntax::syntaxes;
+
+    use super::parse_dataset_bytes;
+
+    fn le16(v: u16) -> [u8; 2] {
+        v.to_le_bytes()
+    }
+    fn le32(v: u32) -> [u8; 4] {
+        v.to_le_bytes()
+    }
+
+    // A single-item body: tag (7FE0,0010) + "OB" + reserved. With `length`
+    // Some(0) it is a well-formed empty OB; with None its long-form header is
+    // cut by the item boundary.
+    fn item1(length: Option<u32>) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&le16(0x7FE0));
+        v.extend_from_slice(&le16(0x0010));
+        v.extend_from_slice(b"OB");
+        v.extend_from_slice(&[0, 0]);
+        if let Some(n) = length {
+            v.extend_from_slice(&le32(n));
+        }
+        v
+    }
+
+    // (0008,1110) SQ { item1, item2 } where item2 carries (0028,0010) US 512.
+    fn wrap(first: &[u8]) -> Vec<u8> {
+        let mut item2 = Vec::new();
+        item2.extend_from_slice(&le16(0x0028));
+        item2.extend_from_slice(&le16(0x0010));
+        item2.extend_from_slice(b"US");
+        item2.extend_from_slice(&le16(2));
+        item2.extend_from_slice(&le16(512));
+
+        let mut b = Vec::new();
+        let seq_body = 8 + first.len() + 8 + item2.len();
+        b.extend_from_slice(&le16(0x0008));
+        b.extend_from_slice(&le16(0x1110));
+        b.extend_from_slice(b"SQ");
+        b.extend_from_slice(&[0, 0]);
+        b.extend_from_slice(&le32(seq_body as u32));
+        b.extend_from_slice(&le16(0xFFFE));
+        b.extend_from_slice(&le16(0xE000));
+        b.extend_from_slice(&le32(first.len() as u32));
+        b.extend_from_slice(first);
+        b.extend_from_slice(&le16(0xFFFE));
+        b.extend_from_slice(&le16(0xE000));
+        b.extend_from_slice(&le32(item2.len() as u32));
+        b.extend_from_slice(&item2);
+        b
+    }
+
+    /// REGRESSION: a long-form explicit-VR header (needs 8 bytes after the tag)
+    /// cut by a defined-length item boundary used to overrun the item and drop
+    /// the following item. The declared item end is authoritative.
+    #[test]
+    fn a_truncated_long_form_header_at_item_boundary_keeps_the_next_item() {
+        for (label, first) in [("well-formed", item1(Some(0))), ("truncated", item1(None))] {
+            let ds =
+                parse_dataset_bytes(&wrap(&first), &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+            let seq = ds.get_sequence(Tag::new(0x0008, 0x1110)).unwrap();
+            assert_eq!(seq.items().len(), 2, "{label}: both items must survive");
+            assert_eq!(
+                seq.items()[1].try_get::<u16>(Tag::new(0x0028, 0x0010)),
+                Some(512),
+                "{label}: the item after the truncated header must be readable"
+            );
+        }
+    }
+}

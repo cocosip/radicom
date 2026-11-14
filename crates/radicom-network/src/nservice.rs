@@ -165,12 +165,10 @@ impl NServiceResponse {
             // PS3.7 §10.1: responses always name the instance as Affected
             affected_sop_class_uid: request.sop_class_uid.clone(),
             affected_sop_instance_uid: request.sop_instance_uid.clone(),
-            event_type_id: (request.field == CommandField::NEventReportRq
-                && status == crate::dimse::status::SUCCESS)
+            event_type_id: (request.field == CommandField::NEventReportRq)
                 .then_some(request.event_type_id)
                 .flatten(),
-            action_type_id: (request.field == CommandField::NActionRq
-                && status == crate::dimse::status::SUCCESS)
+            action_type_id: (request.field == CommandField::NActionRq)
                 .then_some(request.action_type_id)
                 .flatten(),
             status,
@@ -424,6 +422,27 @@ mod tests {
         let response = NServiceResponse::failure(&request, status::PROCESSING_FAILURE);
         assert_eq!(response.status, status::PROCESSING_FAILURE);
         assert!(response.dataset.is_none());
+    }
+
+    #[test]
+    fn a_failure_response_preserves_the_action_and_event_type_id() {
+        let mut req = NServiceRequest::new(CommandField::NEventReportRq, 5);
+        req.event_type_id = Some(2);
+        let resp = NServiceResponse::failure(&req, status::PROCESSING_FAILURE);
+        assert_eq!(
+            resp.event_type_id,
+            Some(2),
+            "a failure reply keeps the Event Type ID"
+        );
+
+        let mut req = NServiceRequest::new(CommandField::NActionRq, 6);
+        req.action_type_id = Some(9);
+        let resp = NServiceResponse::failure(&req, status::PROCESSING_FAILURE);
+        assert_eq!(
+            resp.action_type_id,
+            Some(9),
+            "a failure reply keeps the Action Type ID"
+        );
     }
 
     #[test]
