@@ -17,7 +17,7 @@ Compressed transfer syntaxes are supported through the companion **[radicom-code
 | **`radicom`** | Core library: data model, file I/O, pixel data, rendering, printing, media (DICOMDIR), SR, anonymization, XML/JSON helpers, codec interfaces |
 | **`radicom-network`** | Async (tokio) DICOM networking: PDU codec, association negotiation, DIMSE C-/N-services, SCU client, SCP server, TLS |
 | **`radicom-json`** | DICOM JSON Model (PS3.18) and Native XML serialization |
-| **`radicom-dict`** | Generated tag / UID / private dictionary tables (from the pinned fo-dicom dictionary XML) |
+| **`radicom-dict`** | Generated UID constants and public/private dictionary tables (no DICOM tags: those are inherent constants on `radicom`'s `Tag`) |
 
 The codec implementations are a separate companion workspace, not a member of this one: see
 [Image Codecs](#image-codecs).
@@ -32,7 +32,7 @@ The codec implementations are a separate companion workspace, not a member of th
 - **Fragment Sequences** — Read and write encapsulated pixel data with offset tables; encapsulated output is `OB` by default (`PixelDataVrMode::Compatible` reproduces fo-dicom 5.x's legacy `OW`); compressed syntaxes are supplied by `radicom-codecs`
 - **Dataset Operations** — Rich typed access (`get` / `try_get` / `get_or` / `get_str`), masked-tag matching, walkers, copy
 - **DICOMDIR Media** — Create, read, stitch and save media directories, with optional generated icons
-- **File Scanning** — Cancellable metadata-only directory scanning with bounded concurrency
+- **File Scanning** — Cancellable metadata-only directory scanning with progress and file events
 - **JSON / XML Serialization** — DICOM JSON Model (PS3.18) and Native XML export
 - **Anonymization** — PS3.15 de-identification profiles (basic + configurable), date shifting, UID remapping, recursive sequence handling
 - **Structured Reports** — Typed content items, hierarchical structure, code items, measured values, referenced SOP instances
@@ -262,7 +262,8 @@ while `Transcoder::with_strict_dicom_vr(bool)` is the go-dicom-style alias that 
 
 ### Rendering to an Image
 
-Requires the `render` feature. `RawImage` exposes `width()`, `height()`, `pixel(x, y)` and can be written to PNG/BMP.
+Requires the `render` feature. `RawImage` exposes `width()`, `height()`, `pixels()` (BGRA32 as `u32`) and
+`as_bytes()`, and can be written to PNG/BMP.
 
 ```rust
 use radicom::io::file::DicomFile;
@@ -734,9 +735,9 @@ Corpus and interop tests:
 # Round-trip a corpus of real DICOM files (tests-data/)
 cargo test -p radicom --test corpus --all-features
 
-# External peer interop (skipped unless RADICOM_PEER is set)
+# External peer interop (ignored unless RADICOM_PEER is set)
 $env:RADICOM_PEER = "127.0.0.1:11112"
-cargo test -p radicom-network --test interop --all-features
+cargo test -p radicom-network --test interop --all-features -- --ignored
 ```
 
 See [docs/development-guide.md](docs/development-guide.md) for the full test strategy, data inventory and tolerance corpus.
@@ -761,7 +762,8 @@ cargo llvm-cov --workspace --all-features
 
 ## Regenerating the Dictionaries
 
-Tag, UID and private dictionary tables are generated from the pinned fo-dicom dictionary XML under `crates/radicom-dict/dictionaries/`:
+Tag, UID and private dictionary tables are generated from the pinned fo-dicom dictionary data under
+`crates/radicom-dict/dictionaries/` (two gzipped XML files plus `uids.tsv`):
 
 ```bash
 cargo run --package xtask -- gen-dict
@@ -771,7 +773,9 @@ cargo run --package xtask -- gen-dict
 `.cargo/config.toml`, so nothing relies on a local alias. Keep machine-specific cargo settings in your own
 untracked `.cargo/` directory.
 
-To move to a newer dictionary baseline, replace both XML files, run the generator, and commit the XML plus all regenerated outputs together.
+To move to a newer dictionary baseline, replace the dictionary inputs (`DICOMDictionary.xml.gz`,
+`PrivateDictionary.xml.gz`, `uids.tsv`), run the generator, and commit the inputs plus all regenerated
+outputs together.
 
 ## Relationship to fo-dicom
 
@@ -799,7 +803,7 @@ Third-party data: the DICOM dictionary XML files reused from fo-dicom (and the t
 
 | Trigger | What runs |
 |---|---|
-| push / PR to `master` or `main` | `ci.yml`: clippy and tests with default **and** all features, docs and publishable-metadata checks on Linux + Windows, plus an MSRV (1.89) check. **No publishing.** |
+| push / PR to `master` or `main` | `ci.yml`: clippy and tests with default **and** all features, docs and the dictionary check on Linux + Windows; the package-metadata, production-coverage (90% floor) and MSRV (1.89) jobs run on Ubuntu. **No publishing.** |
 | push of a `v*` tag | `release.yml`: the tag must equal every publishable crate's version; the release gates run on Ubuntu (`fmt --check`, clippy, tests, docs, gen-dict, 90% production coverage, package metadata, MSRV); then `radicom-dict` → `radicom` → `radicom-json` → `radicom-network` are published to crates.io in that order, and finally a GitHub release is created whose notes list the commits since the previous tag |
 
 `dev` is intentionally not wired to CI. Publishing requires a `CARGO_REGISTRY_TOKEN` repository secret (a

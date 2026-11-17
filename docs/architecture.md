@@ -11,7 +11,7 @@
 | `radicom` | Core library: data model, file IO, pixel, render, print, media, SR, anonymization, codec **interfaces** |
 | `radicom-network` | tokio-based network layer: PDU, association, DIMSE C-/N-services, SCU/SCP, TLS |
 | `radicom-json` | DICOM JSON (PS3.18) and Native XML |
-| `radicom-dict` | Generated tag/UID/private dictionary tables from the pinned fo-dicom dictionary XML |
+| `radicom-dict` | Generated UID and public/private dictionary tables from the pinned fo-dicom dictionary data; the DICOM tag constants are generated onto `radicom`'s `Tag` |
 
 Dependencies flow one way: `radicom` depends on none of the other three; `radicom-network` and
 `radicom-json` depend on `radicom`; `radicom-dict` is used only by `radicom`. Lower layers must never
@@ -76,7 +76,7 @@ the dictionary's creator cache.
 ### 1.4 Masked tags (TAG-05)
 
 `MaskedTag { card: u32, mask: u32 }`. `parse("(60xx,4000)")` maps each hex nibble to `0xF` in the mask
-and each `x` to `0x0`; `is_match(tag)` is `(tag.to_u32() & mask) == card`; display re-derives the `x`
+and each `x` to `0x0`; `matches(group, element)` is `(tag & mask) == card`; display re-derives the `x`
 positions from the mask. Consumers: repeating overlay groups, anonymizer wildcard rules, masked
 dictionary entries.
 
@@ -295,6 +295,9 @@ Changing it breaks `radicom-codecs`.
   and the renderer uses padded planes.
 - In-memory pixel/element buffers are **host byte order**: reads use `from_ne_bytes` and writes
   `to_ne_bytes`; only `EndianBuffer::data()` swaps for a big-endian file.
+- A native multi-frame value is a composite that gains one part per appended frame (the value-level pad
+  is not a part, matching fo-dicom `DicomPixelData.AddFrame`), so storing `n` frames copies O(n) bytes
+  instead of re-copying the whole value per frame.
 
 ### 9.2 Photometric interpretation and LUTs
 
@@ -319,6 +322,8 @@ Changing it breaks `radicom-codecs`.
   per-frame functional-group window `(0028,9132)`, then Smallest/Largest Image Pixel Value, then a
   decoded-frame min/max. `from_histogram` and `from_bit_range` are explicit factories, not part of the
   dataset chain.
+- `GrayscaleRenderOptions::use_voi_lut` gates *applying* the parsed table (fo-dicom `UseVOILUT`):
+  clearing it renders through the window function without discarding `voi_lut`.
 - Stored values must be normalised to the low `bits_stored` bits (drop high-bit padding) **before**
   windowing. Every raw-pixel reader — grayscale, RGB, YBR, palette, MPR, icon — must do this; skipping it
   is how 12-bit-in-16 data renders wrong.
@@ -587,8 +592,8 @@ client/server. One tokio task per association. Locks must not be held across `.a
 
 ## 13. Error Model
 
-- Every public API returns `Result<T, Error>`; `Error` is an enum (`Data`, `Reader`, `File`, `Codec`,
-  `Validation`, `Imaging`, `Network`).
+- Every public API returns `Result<T, Error>`; `radicom::Error` is an enum (`Data`, `Validation`, `File`,
+  `Reader`, `Writer`, `Codec`, `Imaging`, `Io`), and the network crate reports its own `NetworkError`.
 - **Never panic** on any input, including peer-controlled network data. For buffer reads this is
   structurally enforced: `ByteBuffer::data()` and `get_byte_range()` return `io::Result`, so a failed read
   of a deferred value is a typed error rather than a panic.

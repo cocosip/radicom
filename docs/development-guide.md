@@ -162,7 +162,8 @@ different code path.
 Production-line coverage has a **90% floor**. `cargo run --package xtask -- coverage` runs
 `cargo llvm-cov` and keeps only production lines: test/bench/example targets, `xtask`, inline
 `#[cfg(test)]` modules and source files starting with `#![cfg(test)]` are excluded. External test
-modules must carry that file-level marker. CI runs the same command and publishes the measured numbers.
+modules must carry that file-level marker. CI runs the same command and fails the job below the floor,
+printing the measured number in the log.
 
 The floor is a floor, not a target (the suite measures in the mid-90s on Windows). It cannot be tighter
 than the platform split allows: `#[cfg(windows)]`/`#[cfg(unix)]` production lines only execute on one
@@ -244,7 +245,7 @@ $env:RADICOM_PEER    = "127.0.0.1:11112"
 $env:RADICOM_CALLING = "RADICOM"
 $env:RADICOM_CALLED  = "DCM4CHE"
 $env:RADICOM_STORE_FILE = "tests-data\explicit-le\GH487.dcm"   # optional C-STORE
-cargo test -p radicom-network --test interop -- --nocapture
+cargo test -p radicom-network --test interop -- --ignored --nocapture
 ```
 
 ### 4.4 Acceptance Criteria
@@ -262,16 +263,18 @@ cargo test -p radicom-network --test interop -- --nocapture
 
 ## 5. Code Generation and Maintenance
 
-Tag, UID and private dictionary tables are generated from the pinned fo-dicom dictionary XML under
-`crates/radicom-dict/dictionaries/`; never edit generated files manually.
+Tag, UID and private dictionary tables are generated from the pinned fo-dicom dictionary data under
+`crates/radicom-dict/dictionaries/` (two gzipped XML files plus `uids.tsv`); never edit generated files
+manually.
 
 ```bash
 cargo run --package xtask -- gen-dict          # regenerate
 cargo run --package xtask -- gen-dict --check  # verify (CI gate)
 ```
 
-To move to a newer dictionary baseline, replace both XML files, run the generator, and commit the XML plus
-all regenerated outputs together. `cargo run --package xtask -- regen-goldens` rebuilds the golden
+To move to a newer dictionary baseline, replace the dictionary inputs (`DICOMDictionary.xml.gz`,
+`PrivateDictionary.xml.gz`, `uids.tsv`), run the generator, and commit the inputs plus all regenerated
+outputs together. `cargo run --package xtask -- regen-goldens` rebuilds the golden
 baselines and is run only after reviewing an intentional change. The repository ships no
 `.cargo/config.toml`, so nothing relies on a local alias; keep machine-specific cargo settings in your own
 untracked `.cargo/` directory.

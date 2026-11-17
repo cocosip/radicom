@@ -2,7 +2,7 @@
 
 A **minimal** DICOM sample set for parse and round-trip baselines
 (`crates/radicom/tests/corpus.rs`). It mirrors the categories in
-`docs/09-testing.md` §3 without pulling in fo-dicom's full test tree.
+`docs/development-guide.md` §3 without pulling in fo-dicom's full test tree.
 
 ## Provenance
 
@@ -20,7 +20,7 @@ license. Files are used here only as inert test fixtures.
 
 ## Contents
 
-| Local path | Original name | Category (docs/09-testing.md §3) |
+| Local path | Original name | Category (docs/development-guide.md §3) |
 |---|---|---|
 | `explicit-le/GH220.dcm` | `GH220.dcm` | syntax matrix — explicit VR LE |
 | `explicit-le/GH487.dcm` | `GH487.dcm` | syntax matrix — explicit VR LE |
@@ -68,7 +68,14 @@ license. Files are used here only as inert test fixtures.
 | `dicomdir.dump.txt` | `media/DICOMDIR` | dataset dump (includes record offsets) |
 | `GH178.json` | `explicit-le/GH178.dcm` | DICOM JSON |
 | `associate_rq.hex` | — (synthetic) | A-ASSOCIATE-RQ PDU bytes |
+| `associate_ac.hex` | — (synthetic) | A-ASSOCIATE-AC PDU bytes |
+| `associate_rj.hex` | — (synthetic) | A-ASSOCIATE-RJ PDU bytes |
+| `release_rq.hex` | — (synthetic) | A-RELEASE-RQ PDU bytes |
+| `associate_rq_user_info.hex` | — (synthetic) | A-ASSOCIATE-RQ with user information |
 | `pdata_cecho.hex` | — (synthetic) | P-DATA-TF carrying a C-ECHO-RQ command PDV |
+| `cmd_n_get_rq.hex` | — (synthetic) | N-GET-RQ command set |
+| `cmd_cget_reverse_store_rq.hex` | — (synthetic) | reverse C-STORE-RQ command set |
+| `cmd_cfind_pending_rsp.hex` | — (synthetic) | Pending C-FIND-RSP command set |
 
 `crates/radicom/tests/goldens.rs`, `crates/radicom-json/tests/goldens.rs` and
 `crates/radicom-network/tests/goldens.rs` fail when a golden drifts; regenerate

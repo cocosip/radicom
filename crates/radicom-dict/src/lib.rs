@@ -1,14 +1,15 @@
 //! radicom-dict — generated DICOM dictionary tables.
 //!
-//! Tag constants (~5347), UID constants (~1928) and dictionary lookup
-//! tables, generated from the fo-dicom dictionary data (MS-PL, version
-//! 2026b) by `cargo xtask gen-dict`. Inputs live in `dictionaries/` with
-//! attribution; outputs in `src/generated/` are committed.
+//! UID constants (~1928) and public/private dictionary lookup tables,
+//! generated from the fo-dicom dictionary data (MS-PL, version 2026b). The
+//! DICOM tag constants are generated onto `radicom`'s `Tag` instead. Inputs
+//! live in `dictionaries/` with attribution; outputs in `src/generated/` are
+//! committed.
 
 pub mod generated;
 
 /// The bundled dictionary data version, generated from the XML root `version`
-/// by `cargo xtask gen-dict`.
+/// by `cargo run --package xtask -- gen-dict`.
 pub use generated::dict::DICTIONARY_VERSION;
 
 #[cfg(test)]
