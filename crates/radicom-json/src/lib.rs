@@ -387,8 +387,13 @@ fn element_values(element: &DicomElement, vr: Vr, options: &JsonOptions) -> Resu
             .collect()),
         Vr::At => Ok(text
             .split('\\')
-            .filter(|part| !part.is_empty())
-            .map(|part| Value::String(part.trim().to_ascii_uppercase()))
+            .map(|part| {
+                if part.is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(part.trim().to_ascii_uppercase())
+                }
+            })
             .collect()),
         // A zero-length component is `null`, not `""` (§12.1, PS3.18 Annex F),
         // for the numeric VRs too — dropping it would silently change the VM.

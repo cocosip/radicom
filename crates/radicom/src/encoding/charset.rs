@@ -93,9 +93,6 @@ pub fn register_charset(term: &str, encoding_name: &str) -> Result<(), Error> {
             message: format!("unknown encoding \"{encoding_name}\""),
         })
     })?;
-    // leak the name once: registry values must be 'static
-    let leaked: &'static str = Box::leak(encoding_name.to_string().into_boxed_str());
-    let enc = Encoding::for_label(leaked.as_bytes()).unwrap_or(enc);
     REGISTRY
         .write()
         .expect("registry lock")

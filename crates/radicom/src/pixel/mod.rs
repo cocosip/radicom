@@ -727,58 +727,112 @@ impl<'a> PixelData<'a> {
                     PixelDataKind::OtherWord => Vr::Ow,
                     _ => Vr::Ob,
                 };
-                let mut combined = match self.dataset.item(&PIXEL_DATA) {
-                    Some(DicomItem::Element(e)) => match e.value().as_buffer() {
-                        Some(b) => b.data()?.to_vec(),
-                        None => Vec::new(),
-                    },
-                    _ => Vec::new(),
-                };
-                if self.bits_allocated()? == 1 {
-                    // PS3.5 §8.1.1 Note 2: 1-bit native frames are bit-continuous,
-                    // so frame `index` starts at bit `index * rows * cols` and may
-                    // share a byte with the previous/next frame. Keep the bytes
-                    // already written (including a shared first byte), extend the
-                    // value, then OR this frame's bits into place.
-                    let frame_bits = (self.width() as usize)
-                        * (self.height() as usize)
-                        * (self.samples_per_pixel() as usize);
-                    let start_bit = index as usize * frame_bits;
-                    let end_byte = (start_bit + frame_bits).div_ceil(8);
-                    combined.truncate(end_byte.min(combined.len()));
-                    combined.resize(end_byte, 0);
-                    let src = data.as_ref();
-                    for bit_index in 0..frame_bits {
-                        let bit =
-                            (src.get(bit_index / 8).copied().unwrap_or(0) >> (bit_index % 8)) & 1;
-                        if bit == 1 {
-                            let position = start_bit + bit_index;
-                            combined[position / 8] |= 1u8 << (position % 8);
-                        }
-                    }
+                let bytes = data.as_ref();
+                if self.bits_allocated()? != 1 && bytes.len().is_multiple_of(2) {
+                    let buffer: SharedBuffer = Arc::new(MemoryBuffer::from(bytes.to_vec()));
+                    self.append_native_parts(buffer, index, vr)?;
                 } else {
-                    // `index * frame_size` data bytes are stored, plus at most
-                    // one trailing pad from the previous append; drop that pad
-                    // so the new frame starts on a frame boundary (review #4).
-                    let natural = if index == 0 {
-                        0
-                    } else {
-                        (index as usize).saturating_mul(self.uncompressed_frame_size()? as usize)
+                    let mut combined = match self.dataset.item(&PIXEL_DATA) {
+                        Some(DicomItem::Element(e)) => match e.value().as_buffer() {
+                            Some(b) => b.data()?.to_vec(),
+                            None => Vec::new(),
+                        },
+                        _ => Vec::new(),
                     };
-                    combined.truncate(natural.min(combined.len()));
-                    combined.extend_from_slice(data.as_ref());
+                    if self.bits_allocated()? == 1 {
+                        // PS3.5 §8.1.1 Note 2: 1-bit native frames are bit-continuous,
+                        // so frame `index` starts at bit `index * rows * cols` and may
+                        // share a byte with the previous/next frame. Keep the bytes
+                        // already written (including a shared first byte), extend the
+                        // value, then OR this frame's bits into place.
+                        let frame_bits = (self.width() as usize)
+                            * (self.height() as usize)
+                            * (self.samples_per_pixel() as usize);
+                        let start_bit = index as usize * frame_bits;
+                        let end_byte = (start_bit + frame_bits).div_ceil(8);
+                        combined.truncate(end_byte.min(combined.len()));
+                        combined.resize(end_byte, 0);
+                        let src = data.as_ref();
+                        for bit_index in 0..frame_bits {
+                            let bit = (src.get(bit_index / 8).copied().unwrap_or(0)
+                                >> (bit_index % 8))
+                                & 1;
+                            if bit == 1 {
+                                let position = start_bit + bit_index;
+                                combined[position / 8] |= 1u8 << (position % 8);
+                            }
+                        }
+                    } else {
+                        // `index * frame_size` data bytes are stored, plus at most
+                        // one trailing pad from the previous append; drop that pad
+                        // so the new frame starts on a frame boundary (review #4).
+                        let natural = if index == 0 {
+                            0
+                        } else {
+                            (index as u64).saturating_mul(self.uncompressed_frame_size()?) as usize
+                        };
+                        combined.truncate(natural.min(combined.len()));
+                        combined.extend_from_slice(bytes);
+                    }
+                    if combined.len() % 2 == 1 {
+                        combined.push(0);
+                    }
+                    let buffer: SharedBuffer = Arc::new(MemoryBuffer::from(combined));
+                    self.dataset.insert_or_update(DicomItem::Element(
+                        crate::model::element::DicomElement::new_bytes(PIXEL_DATA, vr, buffer),
+                    ));
                 }
-                if combined.len() % 2 == 1 {
-                    combined.push(0);
-                }
-                let buffer: SharedBuffer = Arc::new(MemoryBuffer::from(combined));
-                self.dataset.insert_or_update(DicomItem::Element(
-                    crate::model::element::DicomElement::new_bytes(PIXEL_DATA, vr, buffer),
-                ));
                 self.bump_frame_count(index + 1);
                 Ok(index)
             }
         }
+    }
+
+    /// Appends one evenly sized native frame as another part of the value.
+    ///
+    /// fo-dicom's `OtherBytePixelData`/`OtherWordPixelData.AddFrame` append to the
+    /// element's composite and keep at most one trailing pad byte, so storing `n`
+    /// frames costs O(n) bytes instead of re-copying the value on every append.
+    fn append_native_parts(
+        &mut self,
+        frame: SharedBuffer,
+        index: u32,
+        vr: Vr,
+    ) -> Result<(), Error> {
+        // `index * frame_size` data bytes are stored, plus at most one trailing
+        // pad from the previous append; that pad is not part of the frames.
+        let natural = if index == 0 {
+            0
+        } else {
+            (index as u64).saturating_mul(self.uncompressed_frame_size()?)
+        };
+        let mut parts: Vec<SharedBuffer> = Vec::with_capacity(2);
+        let mut total = 0u64;
+        if let Some(old) = match self.dataset.item(&PIXEL_DATA) {
+            Some(DicomItem::Element(e)) => e.value().as_buffer().cloned(),
+            _ => None,
+        } {
+            let keep = old.size().min(natural);
+            total += keep;
+            if keep == old.size() {
+                parts.push(old);
+            } else if keep > 0 {
+                parts.push(Arc::new(RangeBuffer::new(old, 0, keep)));
+            }
+        }
+        total += frame.size();
+        parts.push(frame);
+        if total % 2 == 1 {
+            parts.push(Arc::new(MemoryBuffer::from(vec![0u8])));
+        }
+        self.dataset.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                PIXEL_DATA,
+                vr,
+                Arc::new(CompositeBuffer::new(parts)),
+            ),
+        ));
+        Ok(())
     }
 
     /// Appends an owned frame buffer, taking it over without copying when the
@@ -800,20 +854,22 @@ impl<'a> PixelData<'a> {
                 Ok(index)
             }
             _ => {
+                let vr = match self.kind {
+                    PixelDataKind::OtherWord => Vr::Ow,
+                    _ => Vr::Ob,
+                };
                 if self.dataset.item(&PIXEL_DATA).is_none() {
-                    let vr = match self.kind {
-                        PixelDataKind::OtherWord => Vr::Ow,
-                        _ => Vr::Ob,
-                    };
                     self.dataset.insert_or_update(DicomItem::Element(
                         crate::model::element::DicomElement::new_bytes(PIXEL_DATA, vr, frame),
                     ));
-                    self.bump_frame_count(index + 1);
-                    Ok(index)
+                } else if self.bits_allocated()? != 1 {
+                    self.append_native_parts(frame, index, vr)?;
                 } else {
-                    // an existing native element has to be extended by copying
-                    self.add_frame(frame.data()?)
+                    // 1-bit native frames are bit-continuous
+                    return self.add_frame(frame.data()?);
                 }
+                self.bump_frame_count(index + 1);
+                Ok(index)
             }
         }
     }

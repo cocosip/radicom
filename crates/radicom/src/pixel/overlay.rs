@@ -320,7 +320,23 @@ pub fn extract_overlays(ds: &mut Dataset) -> Result<usize, Error> {
         let frame_bits = overlay.rows as usize * overlay.columns as usize;
         let count = overlay.number_of_frames;
         let first = overlay.frame_origin.max(1) as u32 - 1;
-        let mut packed = vec![0; (frame_bits * count as usize).div_ceil(8)];
+        // Every overlay bit is carved out of one pixel sample, so the packed value
+        // can never be longer than the pixel data. Checking that before allocating
+        // turns a peer-declared 65535x65535x65535 overlay into an error instead of
+        // a doomed multi-terabyte allocation (fo-dicom rejects an overlay longer
+        // than its data the same way).
+        let packed_bytes = (frame_bits as u64 * count as u64).div_ceil(8);
+        let pixel_bytes = match ds.item(&crate::pixel::PIXEL_DATA) {
+            Some(DicomItem::Element(e)) => e.value().as_buffer().map_or(0, |b| b.size()),
+            _ => 0,
+        };
+        if packed_bytes > pixel_bytes {
+            return Err(Error::Imaging(ImagingError(format!(
+                "overlay {:04X} declares {packed_bytes} bytes of bits but the pixel data holds {pixel_bytes}",
+                overlay.group
+            ))));
+        }
+        let mut packed = vec![0; packed_bytes as usize];
         for relative in 0..count {
             let data = OverlayData::extract_embedded_frame(ds, overlay.group, first + relative)?;
             let bytes = data.data()?;
@@ -399,6 +415,25 @@ mod tests {
             &[2]
         );
         assert!(overlay.load_frame(&ds, 40001).is_err());
+    }
+
+    #[test]
+    fn an_overlay_larger_than_the_pixel_data_is_rejected_before_allocating() {
+        // A peer-declared 65535 x 65535 x 65535 overlay would be a multi-terabyte
+        // allocation; every overlay bit is carved out of one pixel sample, so a
+        // value longer than the pixel data can never be valid.
+        let mut ds = base(8, 1, 1);
+        ds.insert_or_update(DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                PIXEL_DATA,
+                Vr::Ob,
+                Arc::new(MemoryBuffer::from(vec![0u8])),
+            ),
+        ));
+        add_overlay_shape(&mut ds, 0x6000, 65535, 65535, 7);
+        ds.insert_str(Tag::new(0x6000, 0x0015), Vr::Is, "65535");
+        let error = extract_overlays(&mut ds).expect_err("declared overlay exceeds the pixel data");
+        assert!(error.to_string().contains("declares"), "{error}");
     }
 
     #[test]

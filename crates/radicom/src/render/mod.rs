@@ -281,7 +281,8 @@ pub struct GrayscaleRenderOptions {
     pub window_center: f64,
     pub window_width: f64,
     pub invert: bool,
-    /// True when `(0028,3010)` VOI LUT Sequence is present.
+    /// Gates the VOI LUT stage (fo-dicom `UseVOILUT`): clearing it renders
+    /// through the window function without discarding the parsed table.
     pub use_voi_lut: bool,
     /// Parsed first VOI LUT item, applied in place of the window function when
     /// `use_voi_lut` is set (PS3.3 C.11.2.1.1). Shared behind `Arc` so a
@@ -343,7 +344,7 @@ impl GrayscaleRenderOptions {
         } else if let Some(pair) = window_from_window_level(dataset) {
             // 1. top-level WindowCenter/WindowWidth
             pair
-        } else if let Ok(pair) = Self::from_functional_window_level(dataset, frame) {
+        } else if let Some(pair) = window_from_functional(&functional) {
             // 2. per-frame functional-group window (fo-dicom order: before the
             //    Smallest/LargestImagePixelValue fallback, docs §10)
             pair
@@ -590,27 +591,17 @@ impl GrayscaleRenderOptions {
         dataset: &Dataset,
         frame: u32,
     ) -> Result<(f64, f64), Error> {
-        let fg = geometry::functional_group_values(dataset, frame);
-        match (
-            first_number(&fg, Tag::WINDOW_CENTER),
-            first_number(&fg, Tag::WINDOW_WIDTH),
-        ) {
-            (Some(center), Some(width)) => Ok((center, width)),
-            _ => Err(unsupported("no functional-group window for this frame")),
-        }
+        window_from_functional(&geometry::functional_group_values(dataset, frame))
+            .ok_or_else(|| unsupported("no functional-group window for this frame"))
     }
 
     /// Applies the rescale/modality-LUT and inversion rules shared by the
     /// dataset-driven factories (docs §4).
     fn apply_dataset_modality_and_invert(&mut self, dataset: &Dataset) {
-        self.rescale_slope = dataset
-            .try_get::<String>(Tag::RESCALE_SLOPE)
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(1.0);
-        self.rescale_intercept = dataset
-            .try_get::<String>(Tag::RESCALE_INTERCEPT)
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(0.0);
+        // Numeric-first like the rest of the factory chain (docs §10): a rescale
+        // stored in a binary attribute must not be read as lossy text.
+        self.rescale_slope = first_number(dataset, Tag::RESCALE_SLOPE).unwrap_or(1.0);
+        self.rescale_intercept = first_number(dataset, Tag::RESCALE_INTERCEPT).unwrap_or(0.0);
         self.modality_lut = parse_modality_lut(dataset);
         if self.modality_lut.is_some() {
             self.rescale_slope = 1.0;
@@ -654,8 +645,10 @@ impl GrayscaleRenderOptions {
     /// The final byte truncates, matching fo-dicom's `PrecalculatedLUT`, which
     /// stores `(int)_lut[i]` rather than rounding.
     pub fn map_rescaled(&self, value: f64) -> u8 {
-        // A present VOI LUT Sequence overrides the window function (docs §4).
-        if let Some(lut) = &self.voi_lut {
+        // A present VOI LUT Sequence overrides the window function (docs §4);
+        // `use_voi_lut` is the switch that turns that stage off, like fo-dicom's
+        // `UseVOILUT` property.
+        if let Some(lut) = self.voi_lut.as_ref().filter(|_| self.use_voi_lut) {
             let mut out = lut.map(value) as f64;
             if self.invert {
                 out = 255.0 - out;
@@ -712,6 +705,18 @@ impl GrayscaleRenderOptions {
 /// descriptor/data pair is read from the set itself.
 fn functional_voi_lut(groups: &Dataset) -> Option<Arc<VoiLut>> {
     parse_voi_lut(groups).or_else(|| VoiLut::from_item(groups).map(Arc::new))
+}
+
+/// Window center/width read from an already-flattened functional-group set
+/// (`(0028,9132)` FrameVOILUTSequence item or a direct window element).
+fn window_from_functional(groups: &Dataset) -> Option<(f64, f64)> {
+    match (
+        first_number(groups, Tag::WINDOW_CENTER),
+        first_number(groups, Tag::WINDOW_WIDTH),
+    ) {
+        (Some(center), Some(width)) => Some((center, width)),
+        _ => None,
+    }
 }
 
 /// Parses the first `(0028,3010)` VOI LUT item into a shared table, if usable.
@@ -2562,6 +2567,19 @@ mod tests {
         let b = image.as_bytes();
         assert_eq!(b[0], 0, "pixel 0 through the LUT");
         assert_eq!(b[4], 200, "pixel 1 through the LUT");
+    }
+
+    #[test]
+    fn clearing_use_voi_lut_renders_through_the_window() {
+        let mut ds = gray_image(2, 1, 8, &[10, 11], None, None);
+        put_voi_lut(&mut ds, 10, &[0, 200]);
+        let mut o = GrayscaleRenderOptions::from_dataset(&ds).unwrap();
+        assert_eq!(o.map(11.0), 200, "the parsed LUT is applied while enabled");
+        // fo-dicom `UseVOILUT` is the switch for the LUT stage: clearing it falls
+        // back to the window function without discarding the table.
+        o.use_voi_lut = false;
+        assert_eq!(o.map(11.0), 255, "the window function takes over");
+        assert!(o.voi_lut.is_some(), "the table itself is kept");
     }
 
     #[test]

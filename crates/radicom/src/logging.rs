@@ -1,15 +1,15 @@
-//! Logging facade (INF-03; docs/architecture.md §12).
+//! Logging facade.
 //!
 //! A thin `tracing` facade so the whole library logs through one dependency with
 //! consistent, categorized targets. Subscribers filter by target
-//! (e.g. `radicom::io=debug`). Also exposes dataset dump-to-log helpers that sit
-//! on top of the INF-04 formatter.
+//! (e.g. `radicom::io=debug`). Also exposes dataset dump-to-log helpers on top
+//! of the [`crate::dump`] formatter.
 
 use crate::dump::{dump_dataset, dump_file, DumpOptions};
 use crate::io::file::DicomFile;
 use crate::model::dataset::Dataset;
 
-/// Categorized log targets (§7). Use these in `tracing` macros via `target:`.
+/// Categorized log targets. Use these in `tracing` macros via `target:`.
 pub mod targets {
     pub const NETWORK: &str = "radicom::network";
     pub const CODEC: &str = "radicom::codec";

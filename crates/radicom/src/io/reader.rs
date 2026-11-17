@@ -765,9 +765,11 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
             && length as u64 >= self.options.large_object_size
         {
             if self.source.require(length as u64).is_err() {
+                // fo-dicom's Skip seeks past the end and lets the next read
+                // discover the truncation; keep the readable prefix when partial
+                // parses are allowed, and end the level here either way.
                 if self.options.partial_on_eof {
                     self.suspended = true;
-                    return Ok(Step::End(LevelEnd::Eof));
                 }
                 return Ok(Step::End(LevelEnd::Eof));
             }

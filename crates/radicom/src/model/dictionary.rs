@@ -203,6 +203,17 @@ pub struct Dictionary {
     keyword_creator: HashMap<&'static str, (u16, u16, Arc<PrivateCreator>)>,
 }
 
+/// The block-independent key of a private data element: `(gggg,10xx)` for a
+/// block-addressed `(gggg,bbxx)` or a dictionary-style `(gggg,00xx)` reference
+/// (PS3.5 §7.8.1). `None` for the group length and for the invalid ranges.
+fn canonical_private_key(tag: &Tag) -> Option<u32> {
+    let element = tag.element();
+    if !(element >= 0x1000 || (0x0001..=0x00FF).contains(&element)) {
+        return None;
+    }
+    Some((tag.group() as u32) << 16 | u32::from((element & 0x00FF) | 0x1000))
+}
+
 impl Dictionary {
     /// Builds a dictionary from the generated radicom-dict tables (DICT-01).
     pub fn with_generated() -> Result<Self, Error> {
@@ -267,8 +278,20 @@ impl Dictionary {
                 if let Some(e) = sub.exact.get(&tag.to_u32()) {
                     return e.clone();
                 }
+                // A row masked to the low byte applies to every block, so it wins
+                // over the canonical guess (fo-dicom tries the exact tag, then the
+                // masked patterns).
                 if let Some(e) = sub.masked.find(tag) {
                     return e;
+                }
+                // A row defined only at its canonical block 0x10 (the private
+                // dictionary's fixed-offset rows) still answers blocks 0x11..0xFF
+                // and dictionary-style `(gggg,00xx)` lookups: the block byte of
+                // `(gggg,bbxx)` is addressing, not identity.
+                if let Some(canonical) = canonical_private_key(tag) {
+                    if let Some(e) = sub.exact.get(&canonical) {
+                        return e.clone();
+                    }
                 }
             }
             drop(subs);
@@ -644,6 +667,36 @@ mod tests {
         assert_eq!(entry.keyword, raw.keyword, "private exact hit");
         assert_eq!(entry.name, raw.name);
         assert_eq!(entry.creator.as_ref().map(|c| c.as_str()), Some(creator));
+    }
+
+    #[test]
+    fn a_fixed_offset_private_row_answers_other_blocks_and_dictionary_style_tags() {
+        let dict = Dictionary::with_generated().unwrap();
+        // A row with a fixed element (mask 0xFFFF) is stored at its canonical
+        // block 0x10. The block byte of `(gggg,bbxx)` is addressing, not
+        // identity, so the same row answers another block and a dictionary-style
+        // `(gggg,00xx)` reference (which is how a writer names the element before
+        // a creator block is claimed).
+        let row = radicom_dict::generated::dict::PRIVATE_DICTIONARY
+            .iter()
+            .find(|row| row.element_mask == 0xFFFF && row.element & 0x00FF != 0)
+            .expect("the private dictionary has fixed-offset rows");
+        let creator = dict.intern_creator(row.creator);
+        let block = row.element >> 8;
+        let other_block = if block == 0x11 { 0x12 } else { 0x11 } << 8 | (row.element & 0x00FF);
+        // (an offset of 0x00 has no dictionary-style form: that element number is
+        // the group length, so the row above has a non-zero offset)
+        for tag in [
+            Tag::private(row.group, row.element, creator.clone()),
+            Tag::private(row.group, other_block, creator.clone()),
+            Tag::private(row.group, row.element & 0x00FF, creator.clone()),
+        ] {
+            assert_eq!(
+                dict.entry(&tag).keyword,
+                row.keyword,
+                "{tag:?} resolves the fixed-offset row"
+            );
+        }
     }
 
     #[test]

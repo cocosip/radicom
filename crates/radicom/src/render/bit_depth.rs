@@ -6,9 +6,9 @@
 pub struct BitDepth {
     /// Bits occupied per sample in storage (`(0028,0100)`).
     pub allocated: u16,
-    /// Significant bits (`(0028,0102)`); 0 means "unspecified".
+    /// Significant bits (`(0028,0101)`); 0 means "unspecified".
     pub stored: u16,
-    /// Position of the most significant stored bit (`(0028,0103)`).
+    /// Position of the most significant stored bit (`(0028,0102)`).
     pub high_bit: u16,
     /// `true` when Pixel Representation (`(0028,0103)` … signed) is 1.
     pub signed: bool,

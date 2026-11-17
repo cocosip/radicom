@@ -527,7 +527,7 @@ impl Dataset {
             .clear();
     }
 
-    /// Copies all (or the selected) items into `dest` (DS-05).
+    /// Copies all items into `dest` (DS-05).
     pub fn copy_to(&self, dest: &mut Dataset) {
         for (tag, item) in &self.items {
             dest.items.insert(tag.clone(), item.clone());

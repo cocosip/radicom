@@ -133,7 +133,8 @@ pub struct DicomFile {
     pub file_meta: Dataset,
     pub dataset: Dataset,
     pub format: FileFormat,
-    /// True when a stop predicate ended the parse early.
+    /// True when the parse ended before the source was exhausted: a truncated
+    /// source (`Suspended`) or a stop predicate (`Stopped`).
     pub is_partial: bool,
     /// The 128-byte preamble as read from disk (zeroes when there was none), so
     /// a write preserves it instead of always emitting an empty preamble.
@@ -201,7 +202,28 @@ impl DicomFile {
     /// range reads and `copy_to` streaming straight from disk; only `data()`
     /// materializes the value, once, because the buffer API returns `&[u8]`.
     pub fn open_with_options(path: impl AsRef<Path>, options: &ReadOptions) -> Result<Self, Error> {
-        let path = path.as_ref();
+        Self::open_streaming(path.as_ref(), options, None)
+    }
+
+    /// Opens a file and parses it until `stop` accepts a value (FILE-01; fo-dicom
+    /// `DicomFile.Open(path, fallbackEncoding, stop)`).
+    ///
+    /// Values are read exactly like [`Self::open_with_options`], so the rest of
+    /// the file stays unread once the scan stops; [`Self::is_partial`] reports
+    /// whether it did.
+    pub fn open_partial(
+        path: impl AsRef<Path>,
+        stop: &dyn Fn(&crate::io::reader::ParseState) -> bool,
+    ) -> Result<Self, Error> {
+        Self::open_streaming(path.as_ref(), &ReadOptions::default(), Some(stop))
+    }
+
+    /// The shared open path: streams `path` and stops when `stop` accepts a value.
+    fn open_streaming(
+        path: &Path,
+        options: &ReadOptions,
+        stop: Option<&dyn Fn(&crate::io::reader::ParseState) -> bool>,
+    ) -> Result<Self, Error> {
         let mut file = std::fs::File::open(path).map_err(|e| file_err(path, "open", e))?;
         let file_len = file
             .metadata()
@@ -259,7 +281,7 @@ impl DicomFile {
                 dataset_offset,
                 options.max_inflated_bytes,
             )?;
-            parse_slice(&plain, &syntax, options)?
+            parse_slice(&plain, &syntax, options, stop)?
         } else {
             file.seek(SeekFrom::Start(dataset_offset))
                 .map_err(|e| file_err(path, "seek", e))?;
@@ -288,7 +310,7 @@ impl DicomFile {
                 syntax.clone(),
                 options.fallback_encodings(),
             );
-            let outcome = reader.read(&mut source, &syntax, &mut builder, None)?;
+            let outcome = reader.read(&mut source, &syntax, &mut builder, stop)?;
             (builder.into_dataset(), outcome)
         };
         dataset.set_transfer_syntax(syntax.clone());
@@ -307,7 +329,7 @@ impl DicomFile {
             file_meta,
             dataset,
             format,
-            is_partial: outcome == crate::io::reader::ReadOutcome::Suspended,
+            is_partial: outcome != crate::io::reader::ReadOutcome::Success,
             preamble,
             source: Some(path.to_path_buf()),
             spooled: None,
@@ -395,58 +417,9 @@ impl DicomFile {
             file_meta,
             dataset,
             format,
-            is_partial: outcome == crate::io::reader::ReadOutcome::Suspended,
-            preamble,
-            source: None,
-            spooled: None,
-        })
-    }
-
-    /// Parses until `stop` returns true, leaving the rest unread (FILE-01).
-    pub fn open_partial(
-        path: impl AsRef<Path>,
-        stop: &dyn Fn(&crate::io::reader::ParseState) -> bool,
-    ) -> Result<Self, Error> {
-        let path = path.as_ref();
-        let bytes = std::fs::read(path).map_err(|e| file_err(path, "read", e))?;
-        let (format, meta_bytes, dataset_bytes) = detect(&bytes).map_err(|e| attach(e, path))?;
-        let mut preamble = [0u8; 128];
-        if format == FileFormat::Dicom3 {
-            preamble.copy_from_slice(&bytes[..128]);
-        }
-        let file_meta = match meta_bytes {
-            Some(meta) => parse_dataset_bytes(meta, &syntaxes::EXPLICIT_VR_LITTLE_ENDIAN)?,
-            None => Dataset::new(),
-        };
-        let syntax = match file_meta
-            .try_get_str(Tag::TRANSFER_SYNTAX_UID)
-            .and_then(|uid| crate::model::transfer_syntax::parse(uid.trim()).ok())
-        {
-            Some(syntax) => syntax,
-            None => dataset_syntax(format, dataset_bytes, dataset_bytes.len() as u64)?,
-        };
-
-        // A deflated transfer syntax stores the dataset as raw DEFLATE. Inflate
-        // it before parsing; otherwise the compressed bytes would be misread as
-        // Explicit VR elements (RD-04, matching the streaming open path).
-        let inflated;
-        let dataset_bytes: &[u8] = if syntax.is_deflate() {
-            inflated = crate::io::reader::inflate(dataset_bytes)?;
-            &inflated
-        } else {
-            dataset_bytes
-        };
-        let mut source = ByteSourceReader::new(Cursor::new(dataset_bytes), syntax.endian());
-        let mut builder = DatasetBuilder::with_transfer_syntax(syntax.clone());
-        let outcome =
-            DicomReader::default().read(&mut source, &syntax, &mut builder, Some(stop))?;
-        Ok(DicomFile {
-            file_meta,
-            dataset: builder.into_dataset(),
-            format,
             is_partial: outcome != crate::io::reader::ReadOutcome::Success,
             preamble,
-            source: Some(path.to_path_buf()),
+            source: None,
             spooled: None,
         })
     }
@@ -697,7 +670,7 @@ fn policy_of(read: FileReadOption) -> LargeValuePolicy {
 /// Deflated bodies are inflated first; there is no window source here, so
 /// `ReadLargeOnDemand` falls back to materializing. The caller-owned slice stays
 /// live alongside the inflated copy here (slice input cannot be freed); the
-/// file path uses [`crate::io::reader::inflate_stream`] instead.
+/// file path uses [`crate::io::reader::inflate_stream_limited`] instead.
 fn parse_dataset_with(
     bytes: &[u8],
     syntax: &TransferSyntax,
@@ -709,9 +682,9 @@ fn parse_dataset_with(
             0,
             options.max_inflated_bytes,
         )?;
-        parse_slice(&plain, syntax, options)
+        parse_slice(&plain, syntax, options, None)
     } else {
-        parse_slice(bytes, syntax, options)
+        parse_slice(bytes, syntax, options, None)
     }
 }
 
@@ -721,6 +694,7 @@ fn parse_slice(
     bytes: &[u8],
     syntax: &TransferSyntax,
     options: &ReadOptions,
+    stop: Option<&dyn Fn(&crate::io::reader::ParseState) -> bool>,
 ) -> Result<(Dataset, crate::io::reader::ReadOutcome), Error> {
     let mut source = ByteSourceReader::new(Cursor::new(bytes), syntax.endian());
     let reader = DicomReader {
@@ -733,7 +707,7 @@ fn parse_slice(
         Arc::new(syntax.clone()),
         options.fallback_encodings(),
     );
-    let outcome = reader.read(&mut source, syntax, &mut builder, None)?;
+    let outcome = reader.read(&mut source, syntax, &mut builder, stop)?;
     Ok((builder.into_dataset(), outcome))
 }
 

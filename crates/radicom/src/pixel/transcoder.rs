@@ -135,10 +135,12 @@ impl Transcoder {
         // (PS3.3 C.7.6.3), so drop them instead of writing wrong offsets.
         out.remove(Tag::EXTENDED_OFFSET_TABLE);
         out.remove(Tag::EXTENDED_OFFSET_TABLE_LENGTHS);
-        let encoded_bytes = PixelDataRef::from_dataset(&out)?.get_frame(0)?.size();
         // (0028,2110) marks the output lossy when the target syntax compresses
         // with loss (PS3.3 C.7.6.4; fo-dicom Transcoder write-lossy bookkeeping).
         if self.to.is_lossy() {
+            // Only a lossy target needs the encoded size, and materialising one
+            // frame is not free (a 1-bit frame is re-aligned on read).
+            let encoded_bytes = PixelDataRef::from_dataset(&out)?.get_frame(0)?.size();
             let method = self.to.lossy_compression_method().unwrap_or("UNKNOWN");
             Self::mark_lossy(&mut out, method, original_bytes, encoded_bytes);
         }

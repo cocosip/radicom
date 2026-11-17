@@ -22,7 +22,10 @@ impl PersonName {
     }
 
     fn component(&self, group: usize, index: usize) -> Option<&str> {
-        self.groups[group]
+        // `group` comes from the public `component_by_name`, so an out-of-range
+        // index is a caller error, not a panic (§13).
+        self.groups
+            .get(group)?
             .as_deref()
             .and_then(|g| g.split('^').nth(index))
             .filter(|c| !c.is_empty())

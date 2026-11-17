@@ -669,9 +669,10 @@ where
                                         }
                                     }
                                 }
+                                let was_cancelled = pending_cancels.remove(&command.message_id);
                                 let cancel = (command.field == CommandField::CFindRq).then(|| {
                                     let slot = CancelSlot::register(&cancels, command.message_id);
-                                    if pending_cancels.remove(&command.message_id) {
+                                    if was_cancelled {
                                         // a cancel that beat the dataset here
                                         slot.signal();
                                     }
@@ -1077,7 +1078,7 @@ where
             .await;
     };
 
-    if !is_valid_ae_title(&destination_ae) {
+    if crate::pdu::validate_ae_title(&destination_ae).is_err() {
         let request = crate::cmove::CMoveRequest {
             message_id: command.message_id,
             sop_class_uid: command.affected_sop_class_uid.clone().unwrap_or_default(),
@@ -1220,11 +1221,6 @@ where
             .await?;
     }
     Ok(())
-}
-
-fn is_valid_ae_title(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    !bytes.is_empty() && bytes.len() <= 16 && bytes.iter().all(|byte| (0x20..=0x7e).contains(byte))
 }
 
 /// The C-FIND path: decode the Identifier and stream the matches back (§11.4).
@@ -1682,6 +1678,9 @@ where
         loop {
             if let Some(unit) = self.pending_units.pop_front() {
                 if unit.stream != Stream::Command {
+                    // A stray dataset/command without a pending request is
+                    // skipped (never decoded) so the framer stays in sync; only
+                    // a negotiated window can hold it for later dispatch.
                     if self.incoming_window > 1 {
                         self.defer(unit)?;
                     }

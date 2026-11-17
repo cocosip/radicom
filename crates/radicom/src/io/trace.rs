@@ -134,7 +134,7 @@ fn dictionary_name(tag: &Tag) -> &'static str {
 /// The dataset itself is discarded — use [`crate::io::dataset_builder::parse_dataset_bytes`]
 /// when you need the result. Intended for tracing/debugging parse behavior.
 pub fn trace(bytes: &[u8], syntax: &TransferSyntax) -> Result<(), Error> {
-    let mut source = ByteSourceReader::new(std::io::Cursor::new(bytes.to_vec()), syntax.endian());
+    let mut source = ByteSourceReader::new(std::io::Cursor::new(bytes), syntax.endian());
     let mut observer = TraceObserver::new();
     DicomReader::default().read(&mut source, syntax, &mut observer, None)?;
     Ok(())

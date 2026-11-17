@@ -2,7 +2,9 @@
 //! docs/architecture.md §12).
 //!
 //! The profile is the fo-dicom PS3.15 de-identification map, extracted to
-//! `ps3.15.csv` (MS-PL, see `ATTRIBUTION.md`). Each row is:
+//! `ps3.15.csv` (MS-PL; provenance in
+//! `crates/radicom-dict/dictionaries/ATTRIBUTION.md`, "Anonymizer profile").
+//! Each row is:
 //!
 //! ```text
 //! tag-pattern ; action[11] ; ...

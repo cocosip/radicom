@@ -737,14 +737,26 @@ impl DicomDirectory {
     /// resulting layout, then patches the offset values in place. One record
     /// clone instead of two full sequences (review §3.5).
     fn rebuild(&mut self) -> Result<(), Error> {
-        // Refresh the adjacency so `children`/`next_sibling` below are O(1)/
-        // O(children); rebuilding this once removes the previous O(n²) scans.
+        // Refresh the adjacency once, then derive the link table in a single
+        // pass: the previous per-record sibling scan cloned and rescanned every
+        // sibling list, which made a large series quadratic.
         self.children_by_parent = build_children_map(&self.records);
+        let mut next_sibling: Vec<Option<usize>> = vec![None; self.records.len()];
+        for children in self.children_by_parent.values() {
+            for pair in children.windows(2) {
+                next_sibling[pair[0]] = Some(pair[1]);
+            }
+        }
+        for pair in self.roots.windows(2) {
+            next_sibling[pair[0]] = Some(pair[1]);
+        }
         let links: Vec<(Option<usize>, Option<usize>)> = (0..self.records.len())
             .map(|index| {
                 (
-                    self.next_sibling(index),
-                    self.children(index).first().copied(),
+                    next_sibling[index],
+                    self.children_by_parent
+                        .get(&index)
+                        .and_then(|children| children.first().copied()),
                 )
             })
             .collect();
@@ -909,16 +921,6 @@ impl DicomDirectory {
             }
         }
         Ok(())
-    }
-
-    /// The next record sharing this record's parent (§12.2).
-    fn next_sibling(&self, index: usize) -> Option<usize> {
-        let siblings = match self.records.get(index)?.parent {
-            Some(parent) => self.children(parent),
-            None => self.roots.clone(),
-        };
-        let position = siblings.iter().position(|i| *i == index)?;
-        siblings.get(position + 1).copied()
     }
 
     /// Saves the directory, rebuilding the offsets first (§12.2).

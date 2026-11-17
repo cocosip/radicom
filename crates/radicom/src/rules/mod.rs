@@ -1,8 +1,10 @@
 //! Match and transform rule DSLs.
 //!
-//! - [`match_rule`]: 14-rule dataset predicate DSL for query filtering.
-//! - [`transform`]: 16-rule dataset mutation DSL, with optional match conditions
-//!   and recording of original values into a Modified Attributes Sequence item.
+//! - [`match_rule`]: 11-rule dataset predicate DSL for query filtering (12 with
+//!   the `regex-rules` feature).
+//! - [`transform`]: 14-rule dataset mutation DSL, with optional match conditions
+//!   and recording of original values into a Modified Attributes Sequence item
+//!   (15 with the `regex-rules` feature).
 
 pub mod match_rule;
 pub mod transform;

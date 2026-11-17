@@ -419,18 +419,13 @@ impl ByteBuffer for EndianBuffer {
         ))
     }
     fn get_byte_range(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        // Bounds are an InvalidInput on both paths (§6); only the underlying
+        // read may report an EOF.
+        let range = checked_range(offset, buf.len(), self.size())?;
         if let Some(cached) = self.swapped.get() {
-            let start = usize::try_from(offset)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "offset too large"))?;
-            let end = start
-                .checked_add(buf.len())
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "range overflow"))?;
-            let slice = cached.get(start..end).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "byte range is past the swapped value",
-                )
-            })?;
+            let slice = cached
+                .get(range)
+                .ok_or_else(|| out_of_range(offset, buf.len(), self.size()))?;
             buf.copy_from_slice(slice);
             return Ok(());
         }
@@ -438,7 +433,6 @@ impl ByteBuffer for EndianBuffer {
         // return the requested window from it. Swapping only the window would
         // mis-pair bytes for an unaligned offset or a sub-unit read, disagreeing
         // with `data()` (CM-07).
-        let _ = checked_range(offset, buf.len(), self.size())?;
         let unit = self.unit.max(1) as u64;
         let start = offset - offset % unit;
         let end = offset + buf.len() as u64; // checked_range proved this fits

@@ -207,7 +207,7 @@ impl DicomWriter {
         // item); writing it with undefined length lets the reader's T4 private
         // probe recover the sequence. Only then is the body length needed
         // (review CORE-05).
-        let defined = self.options.explicit_length_sequences
+        let defined = (self.options.explicit_length_sequences && !seq.tag().is_private())
             || (seq.tag().is_private() && syntax.is_explicit_vr());
         let body = if defined {
             Some(self.sequence_body_len(seq, syntax, charset)?)
@@ -435,7 +435,7 @@ impl DicomWriter {
             }
             DicomItem::Sequence(seq) => {
                 let body = self.sequence_body_len(seq, syntax, charset)?;
-                let defined = self.options.explicit_length_sequences
+                let defined = (self.options.explicit_length_sequences && !seq.tag().is_private())
                     || (seq.tag().is_private() && syntax.is_explicit_vr());
                 if defined {
                     u32_length(seq.tag(), body)?;
@@ -770,7 +770,9 @@ fn align_up(n: u64, unit: usize) -> u64 {
 }
 
 fn io_err(e: std::io::Error) -> Error {
-    Error::Reader(crate::error::ReaderError::Other(e.to_string()))
+    // A failed target write is a writer error, not a reader one (§13 keeps the
+    // two paths distinguishable).
+    Error::Writer(crate::error::WriterError(e.to_string()))
 }
 
 #[cfg(test)]
@@ -1397,7 +1399,7 @@ mod tests {
     }
 
     #[test]
-    fn failing_target_maps_to_a_typed_reader_error() {
+    fn failing_target_maps_to_a_typed_writer_error() {
         struct Failing;
         impl std::io::Write for Failing {
             fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
@@ -1412,10 +1414,7 @@ mod tests {
         let err = DicomWriter::new(WriteOptions::default())
             .write_dataset(&ds, &le(), &mut Failing)
             .unwrap_err();
-        assert!(matches!(
-            err,
-            Error::Reader(crate::error::ReaderError::Other(_))
-        ));
+        assert!(matches!(err, Error::Writer(crate::error::WriterError(_))));
     }
 
     #[test]

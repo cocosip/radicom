@@ -438,7 +438,19 @@ pub async fn store_to_destination_with_failures(
             Ok(response) => {
                 summary.record(response.state());
                 if response.state() == StatusState::Failure {
-                    failed_uids.push(response.affected_sop_instance_uid);
+                    // The peer may omit the optional Failed SOP Instance UID
+                    // List entry; name the instance we actually sent instead of
+                    // recording an empty component.
+                    let uid = if response.affected_sop_instance_uid.is_empty() {
+                        file.dataset
+                            .try_get_str(Tag::SOP_INSTANCE_UID)
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string()
+                    } else {
+                        response.affected_sop_instance_uid
+                    };
+                    failed_uids.push(uid);
                 }
             }
             Err(error) => {

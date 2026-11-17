@@ -224,7 +224,8 @@ impl VolumeData {
         cols: u32,
         spacing: f64,
     ) -> Slice {
-        let mut output = vec![0.0f64; (rows * cols) as usize];
+        // usize arithmetic: a caller-supplied size must not wrap in a u32 first.
+        let mut output = vec![0.0f64; rows as usize * cols as usize];
 
         let delta_x = scale(&row_dir, spacing);
         let delta_y = scale(&col_dir, spacing);
@@ -419,7 +420,10 @@ impl Slice {
 /// RescaleSlope/Intercept (0028,1053/1052).
 fn read_grayscale(dataset: &Dataset, frame: u32) -> Result<Vec<f64>, Error> {
     let pixel = PixelDataRef::from_dataset(dataset)?;
-    let slots = (pixel.width() * pixel.height() * pixel.samples_per_pixel() as u32) as usize;
+    // usize arithmetic: 65535 x 65535 x 3 samples overflows a u32 (the render
+    // paths do the same, docs §10).
+    let slots =
+        pixel.width() as usize * pixel.height() as usize * pixel.samples_per_pixel() as usize;
     let frame = pixel.get_frame(frame)?;
     let frame_data = frame.data()?;
     let bytes = frame_data.as_ref();
