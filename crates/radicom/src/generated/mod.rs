@@ -1,5 +1,5 @@
 //! GENERATED module wiring (handwritten; `tags.rs` is refreshed by
-//! `cargo xtask gen-dict`).
+//! `cargo run --package xtask -- gen-dict`).
 //!
 //! The module is public so the generated inherent associated constants on
 //! [`crate::Tag`] are reachable (`Tag::ACCESSION_NUMBER`, ...).

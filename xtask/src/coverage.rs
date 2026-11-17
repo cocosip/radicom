@@ -1,4 +1,4 @@
-//! `cargo xtask coverage`: measure production line coverage against a floor.
+//! `cargo run --package xtask -- coverage`: measure production line coverage against a floor.
 //!
 //! Runs `cargo llvm-cov --workspace --all-features --lcov`, then keeps only
 //! production lines: test/bench/example targets, inline `#[cfg(test)]` modules
@@ -6,9 +6,9 @@
 //! reflects the library code, not the test code that exercises it.
 //!
 //! ```text
-//! cargo xtask coverage                 # run the suite, fail below 90%
-//! cargo xtask coverage --min 95        # raise the floor
-//! cargo xtask coverage --lcov cov.info # reuse an existing lcov file
+//! cargo run --package xtask -- coverage                 # run the suite, fail below 90%
+//! cargo run --package xtask -- coverage --min 95        # raise the floor
+//! cargo run --package xtask -- coverage --lcov cov.info # reuse an existing lcov file
 //! ```
 
 use std::collections::BTreeMap;

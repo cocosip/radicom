@@ -100,23 +100,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # Validates publishable metadata (license file, dependency versions,
-      # included files) without a crates.io token. `--list` is used because
-      # `cargo package` cannot resolve our own unpublished path deps.
-      - name: Check publishable metadata
+      # included files) without a crates.io token, and proves the files every
+      # published crate must ship. `--list` is used because `cargo package`
+      # cannot resolve our own unpublished path deps.
+      - name: Publishable metadata and shipped files
         run: |
           for pkg in radicom-dict radicom radicom-json radicom-network; do
             echo "::group::$pkg"
-            cargo package -p "$pkg" --list
+            listing=$(cargo package -p "$pkg" --list | tr -d '\r')
+            printf '%s\n' "$listing"
             echo "::endgroup::"
-          done
-
-      # The LICENSE must travel with every published crate (MIT requirement).
-      - name: Every crate ships the LICENSE
-        run: |
-          for pkg in radicom-dict radicom radicom-json radicom-network; do
-            if ! cargo package -p "$pkg" --list | tr -d '\r' | grep -qx "LICENSE"; then
-              echo "::error::$pkg does not package the LICENSE file"
-              exit 1
-            fi
-            echo "$pkg ships LICENSE"
+            # LICENSE is an MIT requirement; README.md carries the crate docs.
+            for file in LICENSE README.md; do
+              if ! printf '%s\n' "$listing" | grep -qx "$file"; then
+                echo "::error::$pkg does not package $file"
+                exit 1
+              fi
+            done
+            echo "$pkg ships LICENSE and README.md"
           done

@@ -237,7 +237,7 @@ fn dicomdir() {
     let ns = time_ops(iters, || {
         let mut dir = DicomDirectory::new("RADICOM^BENCH");
         for (i, file) in files.iter().enumerate() {
-            dir.add_file(file, format!("IMAGES/IM-{i}.dcm"))
+            dir.add_file(file, format!("IMAGES/IM{i:06}"))
                 .expect("add to DICOMDIR");
         }
         black_box(dir);
@@ -247,7 +247,7 @@ fn dicomdir() {
     let path = std::env::temp_dir().join(format!("radicom-bench-dicomdir-{}", std::process::id()));
     let mut dir = DicomDirectory::new("RADICOM^BENCH");
     for (i, file) in files.iter().enumerate() {
-        dir.add_file(file, format!("IMAGES/IM-{i}.dcm")).unwrap();
+        dir.add_file(file, format!("IMAGES/IM{i:06}")).unwrap();
     }
     let iters = 10;
     let ns = time_ops(iters, || {

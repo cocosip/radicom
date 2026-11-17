@@ -1,6 +1,6 @@
 [package]
 name = "radicom-dict"
-description = "Generated DICOM dictionary tables: tag constants, UID constants, dictionary lookups"
+description = "Generated DICOM UID constants and public/private dictionary tables"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
