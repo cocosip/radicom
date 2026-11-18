@@ -59,6 +59,16 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! # Third-party data
+//!
+//! The DICOM dictionary tables in `radicom-dict` and the de-identification map
+//! compiled into this crate (`src/anonymizer/ps3.15.csv`) are derived from the
+//! [fo-dicom](https://github.com/fo-dicom/fo-dicom) project and are licensed
+//! under the **Microsoft Public License (MS-PL)**; the fo-dicom copyright notice
+//! is retained. The ungenerated attribution and provenance live in
+//! `radicom-dict`'s `dictionaries/ATTRIBUTION.md`, which every published copy of
+//! that crate carries.
 
 pub mod dump;
 pub mod encoding;

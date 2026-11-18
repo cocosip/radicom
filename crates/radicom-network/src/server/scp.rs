@@ -1606,7 +1606,11 @@ where
     /// (`awaiting_dataset`). The bound applies per PDU, so a slow but
     /// progressing transfer is never cut off.
     async fn next_pdu_with_progress(&mut self, awaiting_dataset: bool) -> Result<Option<Pdu>> {
-        let in_flight = awaiting_dataset || self.assembler.holds_partial();
+        // A half-received frame in the framer is in-flight progress too: a peer
+        // that sends three bytes of a PDU header after a completed message must
+        // not hold the association unbounded.
+        let in_flight =
+            awaiting_dataset || self.assembler.holds_partial() || self.pdu_reader.has_partial();
         match self.options.progress_timeout {
             Some(limit) if in_flight => {
                 match tokio::time::timeout(limit, self.pdu_reader.read_pdu(self.stream)).await {

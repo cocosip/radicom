@@ -527,6 +527,25 @@ pub fn failure_response(request: &CStoreRequest, error: &NetworkError) -> CStore
     CStoreResponse::failure(request, store_failure_status(error), error.to_string())
 }
 
+/// A failure response for a C-STORE whose dataset never became a request.
+///
+/// The command carries everything the response needs (Message ID and the two
+/// UIDs); the dataset that failed to decode is not part of it. Used by the reverse
+/// C-STORE path in the SCU role: a decode failure must answer the peer instead of
+/// dropping the association, like the forward path does with [`failure_response`].
+pub fn failure_response_for_command(command: &Command, error: &NetworkError) -> CStoreResponse {
+    CStoreResponse {
+        message_id_being_responded_to: command.message_id,
+        status: store_failure_status(error),
+        affected_sop_class_uid: command.affected_sop_class_uid.clone().unwrap_or_default(),
+        affected_sop_instance_uid: command
+            .affected_sop_instance_uid
+            .clone()
+            .unwrap_or_default(),
+        error_comment: Some(crate::dimse::truncate_lo(&error.to_string())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,6 +575,46 @@ mod tests {
         // The C-STORE receiver already holds the bytes; the shipped default
         // must not write a temporary file only to parse the same bytes back.
         assert!(matches!(StoreSink::default(), StoreSink::Memory));
+    }
+
+    #[test]
+    fn a_decode_failure_answers_the_store_command_with_a_failure_status() {
+        // The reverse C-STORE path has no decoded request, only the command: the
+        // response must still carry its Message ID and SOP UIDs, and the status
+        // must distinguish a decode error (0xC000) from a resource shortfall
+        // (0xA700) and a generic failure (0x0110).
+        let command = c_store_command();
+        let too_large = failure_response_for_command(&command, &NetworkError::MessageTooLarge);
+        assert_eq!(too_large.status, status::OUT_OF_RESOURCES);
+        assert_eq!(too_large.message_id_being_responded_to, 11);
+        assert_eq!(
+            too_large.affected_sop_class_uid,
+            "1.2.840.10008.5.1.4.1.1.7"
+        );
+        assert_eq!(too_large.affected_sop_instance_uid, "1.2.3.4.5");
+        assert!(too_large.error_comment.is_some());
+
+        let invalid = failure_response_for_command(
+            &command,
+            &NetworkError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "not a dataset",
+            )),
+        );
+        assert_eq!(invalid.status, status::UNABLE_TO_PROCESS);
+
+        let plain = failure_response_for_command(
+            &command,
+            &NetworkError::ClosedPrematurely { source: None },
+        );
+        assert_eq!(plain.status, status::PROCESSING_FAILURE);
+        assert!(
+            plain
+                .error_comment
+                .as_deref()
+                .is_some_and(|comment| comment.len() <= 64),
+            "the error comment is truncated to the LO limit"
+        );
     }
 
     #[test]

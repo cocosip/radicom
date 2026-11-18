@@ -1365,6 +1365,47 @@ macro_rules! impl_into_float {
                         vr,
                         Arc::new(MemoryBuffer::from((self as i64).to_ne_bytes().to_vec())),
                     ),
+                    // An explicit integer VR still gets an integer: a float stored
+                    // as text under US/SS/... is unencodable (and `new_str` would
+                    // debug-assert on it).
+                    Vr::Us => DicomElement::new_bytes(
+                        tag,
+                        vr,
+                        Arc::new(MemoryBuffer::from((self as u16).to_ne_bytes().to_vec())),
+                    ),
+                    Vr::Ss => DicomElement::new_bytes(
+                        tag,
+                        vr,
+                        Arc::new(MemoryBuffer::from((self as i16).to_ne_bytes().to_vec())),
+                    ),
+                    Vr::Ul => DicomElement::new_bytes(
+                        tag,
+                        vr,
+                        Arc::new(MemoryBuffer::from((self as u32).to_ne_bytes().to_vec())),
+                    ),
+                    Vr::Sl => DicomElement::new_bytes(
+                        tag,
+                        vr,
+                        Arc::new(MemoryBuffer::from((self as i32).to_ne_bytes().to_vec())),
+                    ),
+                    Vr::Uv => DicomElement::new_bytes(
+                        tag,
+                        vr,
+                        Arc::new(MemoryBuffer::from((self as u64).to_ne_bytes().to_vec())),
+                    ),
+                    Vr::Sv => DicomElement::new_bytes(
+                        tag,
+                        vr,
+                        Arc::new(MemoryBuffer::from((self as i64).to_ne_bytes().to_vec())),
+                    ),
+                    // AT is a 4-byte tag value, SQ has no scalar form: an explicit
+                    // request for either yields the scalar's bytes / an empty item.
+                    Vr::At => DicomElement::new_bytes(
+                        tag,
+                        vr,
+                        Arc::new(MemoryBuffer::from((self as u32).to_ne_bytes().to_vec())),
+                    ),
+                    Vr::Sq => DicomElement::new_empty(tag, vr),
                     _ => DicomElement::new_str(
                         tag,
                         vr,

@@ -163,14 +163,7 @@ impl DicomWriter {
         let mut previous: Option<(u16, u16)> = None;
         for item in ds.items() {
             let g = item.tag().group();
-            let raw = (g, item.tag().element());
-            if previous == Some(raw) {
-                return Err(Error::other(format!(
-                    "duplicate tag ({:04X},{:04X}) in one dataset",
-                    raw.0, raw.1
-                )));
-            }
-            previous = Some(raw);
+            check_duplicate_tag(&mut previous, item.tag())?;
             let is_group_length = item.tag().element() == 0x0000;
             if group != Some(g) {
                 group = Some(g);
@@ -425,8 +418,12 @@ impl DicomWriter {
         let charset = charset.as_ref();
         let mut total = 0u64;
         let mut group: Option<u16> = None;
+        // The write path rejects a duplicate tag, so measuring a dataset must
+        // reject it too: the media writer computes its offsets from this length.
+        let mut previous: Option<(u16, u16)> = None;
         for item in ds.items() {
             let g = item.tag().group();
+            check_duplicate_tag(&mut previous, item.tag())?;
             if group != Some(g) {
                 group = Some(g);
                 // only a present group length is recalculated (L2)
@@ -828,6 +825,22 @@ fn write_buffer<W: Write>(
 fn align_up(n: u64, unit: usize) -> u64 {
     let unit = unit as u64;
     n.saturating_add(unit - 1) / unit * unit
+}
+
+/// PS3.5 §7.1: a tag may appear at most once in one dataset. Distinct private
+/// creators make two `Tag`s compare unequal, so the raw group/element pair is
+/// compared. The write and length paths share this check: a dataset that is
+/// measured must also be writable.
+fn check_duplicate_tag(previous: &mut Option<(u16, u16)>, tag: &Tag) -> Result<(), Error> {
+    let raw = (tag.group(), tag.element());
+    if *previous == Some(raw) {
+        return Err(Error::other(format!(
+            "duplicate tag ({:04X},{:04X}) in one dataset",
+            raw.0, raw.1
+        )));
+    }
+    *previous = Some(raw);
+    Ok(())
 }
 
 fn io_err(e: std::io::Error) -> Error {

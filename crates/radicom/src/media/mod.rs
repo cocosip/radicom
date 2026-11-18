@@ -14,6 +14,7 @@ use crate::error::{Error, FileError};
 use crate::io::file::{DicomFile, FileFormat, ReadOptions};
 use crate::io::writer::{DicomWriter, WriteOptions};
 use crate::model::dataset::Dataset;
+use crate::model::endian::Endian;
 use crate::model::tag::Tag;
 use crate::model::transfer_syntax::syntaxes;
 use crate::model::vr::Vr;
@@ -356,6 +357,9 @@ impl DicomDirectory {
     /// Parses a DICOMDIR from bytes (§12.2).
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         let mut file = DicomFile::from_bytes(bytes, &ReadOptions::default())?;
+        // The record positions are scanned out of the *source* bytes, so its
+        // byte order must be captured before the dataset is normalized below.
+        let little_endian = file.dataset.transfer_syntax().endian() == Endian::Little;
         // PS3.10 §8.1: the media directory is always Explicit VR Little Endian.
         // Normalizing on load keeps a re-save conformant even when the source
         // used another transfer syntax.
@@ -379,7 +383,7 @@ impl DicomDirectory {
                 crate::model::uid::Uid::generate_value(),
             );
         }
-        let (records, roots) = stitch(bytes, &file.dataset);
+        let (records, roots) = stitch(bytes, &file.dataset, little_endian);
         let children_by_parent = build_children_map(&records);
         Ok(DicomDirectory {
             file,
@@ -424,28 +428,29 @@ impl DicomDirectory {
         // Build from the current parent links so a hand-edited/corrupt tree is
         // walked correctly even if the cached adjacency is stale.
         let children = build_children_map(&self.records);
-        for root in &self.roots {
-            self.walk_from(*root, 0, &mut out, &mut visited, &children);
+        // An explicit stack instead of recursion: a crafted chain of N nested
+        // records would otherwise consume N stack frames (a deep file overflows
+        // the default thread stack). Children are pushed in reverse so the pop
+        // order stays the recursion's pre-order.
+        let mut stack: Vec<(usize, usize)> = self
+            .roots
+            .iter()
+            .rev()
+            .map(|root| (*root, 0usize))
+            .collect();
+        while let Some((index, depth)) = stack.pop() {
+            if index >= self.records.len() || visited[index] {
+                continue;
+            }
+            visited[index] = true;
+            out.push((index, depth));
+            if let Some(kids) = children.get(&index) {
+                for &child in kids.iter().rev() {
+                    stack.push((child, depth + 1));
+                }
+            }
         }
         out
-    }
-
-    fn walk_from(
-        &self,
-        index: usize,
-        depth: usize,
-        out: &mut Vec<(usize, usize)>,
-        visited: &mut [bool],
-        children: &HashMap<usize, Vec<usize>>,
-    ) {
-        if index >= self.records.len() || visited[index] {
-            return;
-        }
-        visited[index] = true;
-        out.push((index, depth));
-        for &child in children.get(&index).map(Vec::as_slice).unwrap_or(&[]) {
-            self.walk_from(child, depth + 1, out, visited, children);
-        }
     }
 
     /// Validates the record tree (§12.2): a valid FileSetID (it may be empty —
@@ -480,31 +485,33 @@ impl DicomDirectory {
         // 0 = unvisited, 1 = on the current path, 2 = finished
         let mut state = vec![0u8; count];
         let children = build_children_map(&self.records);
+        // Iterative DFS (enter/leave marks) keeps a crafted deep tree off the
+        // call stack; the recursion used one frame per level.
+        let mut stack: Vec<(usize, bool)> = Vec::new();
         for &root in &self.roots {
-            self.validate_visit(root, &mut state, &children)?;
+            stack.push((root, false));
+            while let Some((index, leaving)) = stack.pop() {
+                if leaving {
+                    state[index] = 2;
+                    continue;
+                }
+                match state[index] {
+                    1 => return Err(record_error("DICOMDIR record tree contains a cycle")),
+                    2 => continue,
+                    _ => {}
+                }
+                state[index] = 1;
+                stack.push((index, true));
+                if let Some(kids) = children.get(&index) {
+                    for &child in kids.iter().rev() {
+                        stack.push((child, false));
+                    }
+                }
+            }
         }
         if state.contains(&0) {
             return Err(record_error("a record is not reachable from any root"));
         }
-        Ok(())
-    }
-
-    fn validate_visit(
-        &self,
-        index: usize,
-        state: &mut [u8],
-        children: &HashMap<usize, Vec<usize>>,
-    ) -> Result<(), Error> {
-        match state[index] {
-            1 => return Err(record_error("DICOMDIR record tree contains a cycle")),
-            2 => return Ok(()),
-            _ => {}
-        }
-        state[index] = 1;
-        for &child in children.get(&index).map(Vec::as_slice).unwrap_or(&[]) {
-            self.validate_visit(child, state, children)?;
-        }
-        state[index] = 2;
         Ok(())
     }
 
@@ -1213,7 +1220,11 @@ fn record_offset(cursor: u64) -> Result<u32, Error> {
 /// `parent → child`; inverting them gives the tree view. A link that names an
 /// unknown offset is ignored rather than failing the load, which keeps dirty
 /// DICOMDIRs readable (§12.2 tolerance).
-fn stitch(bytes: &[u8], dataset: &Dataset) -> (Vec<DirectoryRecord>, Vec<usize>) {
+fn stitch(
+    bytes: &[u8],
+    dataset: &Dataset,
+    little_endian: bool,
+) -> (Vec<DirectoryRecord>, Vec<usize>) {
     let items: Vec<Dataset> = dataset
         .try_get_sequence(tags::DIR_RECORD_SEQUENCE)
         .map(|sequence| sequence.items().to_vec())
@@ -1224,7 +1235,17 @@ fn stitch(bytes: &[u8], dataset: &Dataset) -> (Vec<DirectoryRecord>, Vec<usize>)
 
     // positions of the record items in the file; fall back to item order when
     // the raw bytes cannot be scanned (e.g. round-tripped through a dataset)
-    let offsets = record_offsets(bytes, dataset, &items);
+    let (offsets, matched) = record_offsets(bytes, dataset, &items, little_endian);
+    if !matched && has_stored_links(dataset, &items) {
+        // A deflated payload has no byte positions to point at, and a source
+        // whose layout does not match the stored links cannot be stitched: the
+        // records stay in file order and the hierarchy is flat. Say so instead of
+        // silently handing back a tree the file does not describe.
+        tracing::warn!(
+            target: "radicom::media",
+            "DICOMDIR record offsets do not match the file layout; the directory hierarchy is flattened",
+        );
+    }
     // A zero link means "none" (PS3.3 F.4), so it never names a record. Without
     // this guard an index-order fallback (offset 0 == first record) would turn
     // every "no child" into a pointer at record 0.
@@ -1308,22 +1329,45 @@ fn stitch(bytes: &[u8], dataset: &Dataset) -> (Vec<DirectoryRecord>, Vec<usize>)
     (records, roots)
 }
 
-/// Positions of the record items in `bytes`, in sequence order (§12.2).
+/// Whether any record names another through a stored offset, or the dataset
+/// names a first/last root. Used to tell a real hierarchy from a flat one.
+fn has_stored_links(dataset: &Dataset, items: &[Dataset]) -> bool {
+    items.iter().any(|item| {
+        [tags::OFFSET_NEXT, tags::OFFSET_LOWER]
+            .into_iter()
+            .any(|tag| item.get::<u32>(tag).is_ok_and(|offset| offset != 0))
+    }) || [tags::OFFSET_FIRST_ROOT, tags::OFFSET_LAST_ROOT]
+        .into_iter()
+        .any(|tag| dataset.get::<u32>(tag).is_ok_and(|offset| offset != 0))
+}
+
+/// Positions of the record items in `bytes`, in sequence order (§12.2), plus
+/// whether they were matched exactly (false for the item-order fallback).
 ///
-/// A scan for item headers (`FFFE,E000`) also finds the items nested inside a
-/// record — an `IconImageSequence (0088,0200)` adds one per leaf — so the scan
-/// is narrowed to the positions the stored links actually name. When that does
-/// not identify every record (a dirty file with a broken chain), the trailing
-/// run of headers is used as a best effort; when the bytes carry no usable
-/// header at all (a dataset round-trip), item order is used.
-fn record_offsets(bytes: &[u8], dataset: &Dataset, items: &[Dataset]) -> Vec<u32> {
+/// A scan for item headers (`FFFE,E000` in the source's byte order) also finds
+/// the items nested inside a record — an `IconImageSequence (0088,0200)` adds one
+/// per leaf — so the scan is narrowed to the positions the stored links actually
+/// name. When that does not identify every record (a dirty file with a broken
+/// chain), the item headers are read structurally: only the items that are direct
+/// children of Directory Record Sequence (0004,1220) count. When the bytes carry
+/// no usable header at all (a dataset round-trip, a deflated payload), item order
+/// is used and the caller warns.
+fn record_offsets(
+    bytes: &[u8],
+    dataset: &Dataset,
+    items: &[Dataset],
+    little_endian: bool,
+) -> (Vec<u32>, bool) {
+    // (FFFE,E000) as stored: little endian in every conformant DICOMDIR, the
+    // byte-reversed form in a big-endian source.
+    let item_tag: [u8; 4] = if little_endian {
+        [0xFE, 0xFF, 0x00, 0xE0]
+    } else {
+        [0xFF, 0xFE, 0xE0, 0x00]
+    };
     let mut scanned = Vec::new();
     for index in 0..bytes.len().saturating_sub(4) {
-        if bytes[index] == 0xFE
-            && bytes[index + 1] == 0xFF
-            && bytes[index + 2] == 0x00
-            && bytes[index + 3] == 0xE0
-        {
+        if bytes[index..index + 4] == item_tag {
             scanned.push(index as u32);
         }
     }
@@ -1350,39 +1394,43 @@ fn record_offsets(bytes: &[u8], dataset: &Dataset, items: &[Dataset]) -> Vec<u32
         .filter(|position| linked.contains(position))
         .collect();
     if named.len() == items.len() {
-        return named;
+        return (named, true);
     }
     // A dirty file with a broken chain no longer names every record, so the raw
     // item headers are read structurally: only the items that are direct children
     // of Directory Record Sequence (0004,1220) count. A blind header scan also
     // finds the items nested in each record's IconImageSequence (0088,0200) and
     // shifted the child links to the wrong records.
-    if let Some(offsets) = record_sequence_item_offsets(bytes) {
+    if let Some(offsets) = record_sequence_item_offsets(bytes, little_endian) {
         if offsets.len() == items.len() {
-            return offsets;
+            return (offsets, true);
         }
     }
-    // No reliable byte layout (a dataset round-trip, or items this scan cannot
-    // skip): fall back to item order, which at least keeps the records in file
-    // order instead of guessing positions from trailing headers.
-    (0..items.len()).map(|index| index as u32).collect()
+    // No reliable byte layout (a dataset round-trip, a deflated payload, or items
+    // this scan cannot skip): fall back to item order, which at least keeps the
+    // records in file order instead of guessing positions from trailing headers.
+    ((0..items.len()).map(|index| index as u32).collect(), false)
 }
 
 /// Byte offsets of the items that are direct children of the Directory Record
 /// Sequence, in sequence order.
 ///
-/// DICOMDIR is always Explicit VR Little Endian (PS3.10 §8.1), so the element and
-/// item headers can be walked directly. Nested sequences (icons) are skipped by
-/// their own header, whichever length form they use. Returns `None` when the
-/// bytes are not the expected layout.
-fn record_sequence_item_offsets(bytes: &[u8]) -> Option<Vec<u32>> {
+/// The scan follows the source's byte order (a DICOMDIR is Explicit VR Little
+/// Endian per PS3.10 §8.1, but non-conformant big-endian sources are readable).
+/// Nested sequences (icons) are skipped by their own header, whichever length
+/// form they use. Returns `None` when the bytes are not the expected layout.
+fn record_sequence_item_offsets(bytes: &[u8], little_endian: bool) -> Option<Vec<u32>> {
     // (0004,1220) SQ as it appears on the wire: tag, "SQ", reserved, 4-byte length.
-    const SEQUENCE_HEADER: [u8; 6] = [0x04, 0x00, 0x20, 0x12, b'S', b'Q'];
-    let start = (0..bytes.len().saturating_sub(SEQUENCE_HEADER.len()))
-        .find(|index| bytes[*index..*index + SEQUENCE_HEADER.len()] == SEQUENCE_HEADER)?;
+    let sequence_header: [u8; 6] = if little_endian {
+        [0x04, 0x00, 0x20, 0x12, b'S', b'Q']
+    } else {
+        [0x00, 0x04, 0x12, 0x20, b'S', b'Q']
+    };
+    let start = (0..bytes.len().saturating_sub(sequence_header.len()))
+        .find(|index| bytes[*index..*index + sequence_header.len()] == sequence_header)?;
     // tag (4) + VR (2) + reserved (2) + length (4): the items start after all 12.
     let mut cursor = start + 12;
-    let length = read_u32(bytes, start + 8)?;
+    let length = read_u32(bytes, start + 8, little_endian)?;
     let sequence_end = if length == u32::MAX {
         bytes.len()
     } else {
@@ -1390,7 +1438,7 @@ fn record_sequence_item_offsets(bytes: &[u8]) -> Option<Vec<u32>> {
     };
     let mut offsets = Vec::new();
     while cursor + 8 <= sequence_end {
-        let (group, element) = read_tag(bytes, cursor)?;
+        let (group, element) = read_tag(bytes, cursor, little_endian)?;
         if (group, element) == (0xFFFE, 0xE0DD) {
             break; // sequence delimiter
         }
@@ -1398,7 +1446,7 @@ fn record_sequence_item_offsets(bytes: &[u8]) -> Option<Vec<u32>> {
             return None;
         }
         offsets.push(cursor as u32);
-        cursor = skip_item(bytes, cursor)?;
+        cursor = skip_item(bytes, cursor, little_endian)?;
     }
     if offsets.is_empty() {
         None
@@ -1409,8 +1457,8 @@ fn record_sequence_item_offsets(bytes: &[u8]) -> Option<Vec<u32>> {
 
 /// Skips one item header and the item's contents, returning the offset just past
 /// it (after its delimitation item for the undefined-length form).
-fn skip_item(bytes: &[u8], header: usize) -> Option<usize> {
-    let length = read_u32(bytes, header + 4)?;
+fn skip_item(bytes: &[u8], header: usize, little_endian: bool) -> Option<usize> {
+    let length = read_u32(bytes, header + 4, little_endian)?;
     if length != u32::MAX {
         return (header + 8)
             .checked_add(length as usize)
@@ -1419,7 +1467,7 @@ fn skip_item(bytes: &[u8], header: usize) -> Option<usize> {
     // undefined length: walk the item's elements until its item delimiter
     let mut cursor = header + 8;
     while cursor + 8 <= bytes.len() {
-        let (group, element) = read_tag(bytes, cursor)?;
+        let (group, element) = read_tag(bytes, cursor, little_endian)?;
         if (group, element) == (0xFFFE, 0xE00D) {
             return Some(cursor + 8);
         }
@@ -1428,16 +1476,21 @@ fn skip_item(bytes: &[u8], header: usize) -> Option<usize> {
         }
         let vr = [*bytes.get(cursor + 4)?, *bytes.get(cursor + 5)?];
         let (length, body) = if has_long_length_field(&vr) {
-            (read_u32(bytes, cursor + 8)?, cursor + 12)
+            (read_u32(bytes, cursor + 8, little_endian)?, cursor + 12)
         } else {
-            let length = u16::from_le_bytes(bytes.get(cursor + 6..cursor + 8)?.try_into().ok()?);
+            let raw: [u8; 2] = bytes.get(cursor + 6..cursor + 8)?.try_into().ok()?;
+            let length = if little_endian {
+                u16::from_le_bytes(raw)
+            } else {
+                u16::from_be_bytes(raw)
+            };
             (u32::from(length), cursor + 8)
         };
         cursor = if length == u32::MAX {
             if &vr != b"SQ" {
                 return None; // only sequences may use the undefined length here
             }
-            skip_sequence(bytes, body)?
+            skip_sequence(bytes, body, little_endian)?
         } else {
             body.checked_add(length as usize)
                 .filter(|end| *end <= bytes.len())?
@@ -1448,27 +1501,39 @@ fn skip_item(bytes: &[u8], header: usize) -> Option<usize> {
 
 /// Skips an undefined-length sequence body, returning the offset past its
 /// sequence delimiter.
-fn skip_sequence(bytes: &[u8], mut cursor: usize) -> Option<usize> {
+fn skip_sequence(bytes: &[u8], mut cursor: usize, little_endian: bool) -> Option<usize> {
     loop {
-        let (group, element) = read_tag(bytes, cursor)?;
+        let (group, element) = read_tag(bytes, cursor, little_endian)?;
         if (group, element) == (0xFFFE, 0xE0DD) {
             return Some(cursor + 8);
         }
         if (group, element) != (0xFFFE, 0xE000) {
             return None;
         }
-        cursor = skip_item(bytes, cursor)?;
+        cursor = skip_item(bytes, cursor, little_endian)?;
     }
 }
 
-fn read_tag(bytes: &[u8], at: usize) -> Option<(u16, u16)> {
-    let group = u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?);
-    let element = u16::from_le_bytes(bytes.get(at + 2..at + 4)?.try_into().ok()?);
+fn read_tag(bytes: &[u8], at: usize, little_endian: bool) -> Option<(u16, u16)> {
+    let pair = |raw: [u8; 2]| {
+        if little_endian {
+            u16::from_le_bytes(raw)
+        } else {
+            u16::from_be_bytes(raw)
+        }
+    };
+    let group = pair(bytes.get(at..at + 2)?.try_into().ok()?);
+    let element = pair(bytes.get(at + 2..at + 4)?.try_into().ok()?);
     Some((group, element))
 }
 
-fn read_u32(bytes: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+fn read_u32(bytes: &[u8], at: usize, little_endian: bool) -> Option<u32> {
+    let raw = bytes.get(at..at + 4)?.try_into().ok()?;
+    Some(if little_endian {
+        u32::from_le_bytes(raw)
+    } else {
+        u32::from_be_bytes(raw)
+    })
 }
 
 /// PS3.5 Table 7.1-1: VRs whose explicit-VR header has a 2-byte reserved field
@@ -2099,6 +2164,73 @@ mod tests {
         assert!(dataset.get::<u32>(tags::OFFSET_LAST_ROOT).unwrap() > 0);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_big_endian_dicomdir_keeps_its_hierarchy() {
+        // PS3.10 §8.1 pins the media directory to Explicit VR Little Endian, but
+        // a non-conformant big-endian source must still load with its tree: the
+        // record positions are scanned out of the source bytes in its byte order.
+        let mut dir = DicomDirectory::new("MYFS");
+        dir.add_file(
+            &instance("P1", "1.2.3", "1.2.3.4", CT, "1.2.3.4.5"),
+            "IMG0001",
+        )
+        .unwrap();
+        dir.add_file(
+            &instance("P1", "1.2.3", "1.2.3.4", CT, "1.2.3.4.6"),
+            "IMG0002",
+        )
+        .unwrap();
+        dir.file
+            .dataset
+            .set_transfer_syntax(syntaxes::EXPLICIT_VR_BIG_ENDIAN.clone());
+        let bytes = dir.to_bytes().unwrap();
+        assert!(
+            bytes
+                .windows(4)
+                .any(|window| window == [0xFF, 0xFE, 0xE0, 0x00]),
+            "a big-endian source stores the item tag byte-reversed"
+        );
+
+        let reopened = DicomDirectory::from_bytes(&bytes).unwrap();
+        assert_eq!(reopened.records().len(), 5, "every record survived");
+        assert_eq!(
+            reopened.roots(),
+            &[0],
+            "the stored first-root link matched a real position"
+        );
+        assert_eq!(reopened.children(2).len(), 2, "the sibling chain survived");
+        assert_eq!(
+            reopened.file().dataset.transfer_syntax().uid(),
+            syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.uid(),
+            "a re-save is normalized to Explicit VR Little Endian"
+        );
+    }
+
+    #[test]
+    fn a_deep_record_chain_walks_and_validates_without_recursion() {
+        // A crafted directory can nest tens of thousands of levels; walk() and
+        // validate() used one stack frame per level and overflowed the thread
+        // stack. The walk is iterative now, so depth is bounded by memory.
+        let depth = 20_000usize;
+        let mut dir = DicomDirectory::new("MYFS");
+        for index in 0..depth {
+            let mut record = Dataset::new();
+            record.insert_str(tags::RECORD_TYPE, Vr::Cs, "PATIENT");
+            dir.records.push(DirectoryRecord {
+                dataset: record,
+                parent: index.checked_sub(1),
+            });
+        }
+        dir.roots = vec![0];
+        dir.children_by_parent = build_children_map(&dir.records);
+
+        let walked = dir.walk();
+        assert_eq!(walked.len(), depth);
+        assert_eq!(walked[0], (0, 0));
+        assert_eq!(walked[depth - 1], (depth - 1, depth - 1));
+        dir.validate().expect("a single deep chain is valid");
     }
 
     #[test]

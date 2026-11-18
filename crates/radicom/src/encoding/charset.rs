@@ -217,8 +217,12 @@ pub fn decode_multi_charset(bytes: &[u8], first: &'static Encoding, pn: bool) ->
     // correctly when their ESC prefixes reach the decoder (encoding_rs's
     // ISO-2022-JP is stateful). Stripping the escapes and decoding the bare JIS
     // bytes would yield ASCII garbage, so hand the whole run to the stateful
-    // decoder, which handles the ESC $\"B\"/$@/$(B/(J/(I switches itself.
-    if first.name() == "ISO-2022-JP" {
+    // decoder, which handles the ESC $"B"/$@/$(B/(J/(I switches itself. A run
+    // that designates another graphic set (ESC - A for ISO 2022 IR 100, ...)
+    // cannot go to that decoder: it does not know the designator and would
+    // decode the alternate's bytes as replacement characters, so those runs take
+    // the per-segment path like every other multi-charset value.
+    if first.name() == "ISO-2022-JP" && jis_decoder_handles_designators(bytes) {
         let (text, _, _) = first.decode(bytes);
         return text.into_owned();
     }
@@ -249,13 +253,13 @@ pub fn decode_multi_charset(bytes: &[u8], first: &'static Encoding, pn: bool) ->
             return;
         }
         // ISO 2022 IR 13: ESC ( I / ESC ) I put JIS X 0201 katakana in G0/G1.
-        // The 7-bit GL codes 0x21-0x5E are the half-width katakana; Shift_JIS
-        // decodes them from their 8-bit JIS X 0201 form.
+        // The 7-bit GL codes 0x21-0x5F are the half-width katakana (63 positions,
+        // Shift_JIS 0xA1-0xDF); Shift_JIS decodes them from that 8-bit form.
         if katakana {
             let shifted: Vec<u8> = slice
                 .iter()
                 .map(|b| {
-                    if (0x21..=0x5E).contains(b) {
+                    if (0x21..=0x5F).contains(b) {
                         b + 0x80
                     } else {
                         *b
@@ -363,6 +367,36 @@ pub fn decode_multi_charset(bytes: &[u8], first: &'static Encoding, pn: bool) ->
         designator,
     );
     out
+}
+
+/// Whether every ISO 2022 designator in `bytes` is one the stateful
+/// ISO-2022-JP decoder handles by itself (ESC ( B/(J/(I, ESC $ @/B/(D).
+///
+/// A run that designates another graphic set (ESC - A for ISO 2022 IR 100, ESC
+/// $ ) C for IR 149, ...) must go through the per-segment path instead.
+fn jis_decoder_handles_designators(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != 0x1B {
+            i += 1;
+            continue;
+        }
+        let Some(len) = escape_sequence_len(bytes, i) else {
+            return false;
+        };
+        let sequence = &bytes[i..i + len];
+        let jis = sequence == &b"\x1B(B"[..]
+            || sequence == &b"\x1B(J"[..]
+            || sequence == &b"\x1B(I"[..]
+            || sequence == &b"\x1B$@"[..]
+            || sequence == &b"\x1B$B"[..]
+            || sequence == &b"\x1B$(D"[..];
+        if !jis {
+            return false;
+        }
+        i += len;
+    }
+    true
 }
 
 /// Length of a recognizable ISO 2022 escape sequence at `bytes[i]` (0x1B),
@@ -792,6 +826,45 @@ mod tests {
             out, "あ",
             "JIS X 0208 must decode to the Japanese char, not ASCII"
         );
+    }
+
+    #[test]
+    fn a_japanese_term_with_a_latin_alternate_decodes_the_alternate() {
+        use crate::io::file::{DicomFile, ReadOptions};
+        use crate::io::writer::WriteOptions;
+        use crate::model::{dataset::Dataset, tag::Tag, vr::Vr};
+
+        // PS3.3 C.12.2: IR 87 is the default (stateful JIS) term and IR 100 is a
+        // designated alternate. The value is not representable in JIS X 0208, so
+        // the writer emits ESC - A plus the Latin-1 byte; the reader must decode
+        // that segment instead of handing it to the ISO-2022-JP decoder.
+        let mut dataset = Dataset::new();
+        dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, "1.2.3");
+        dataset.insert_str(
+            Tag::SPECIFIC_CHARACTER_SET,
+            Vr::Cs,
+            "ISO 2022 IR 87\\ISO 2022 IR 100",
+        );
+        dataset.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Müller");
+        let bytes = DicomFile::from_dataset(dataset)
+            .to_bytes(&WriteOptions::default())
+            .unwrap();
+        assert!(
+            bytes.windows(3).any(|w| w == b"\x1B-A"),
+            "the alternate is designated as ESC - A"
+        );
+        let back = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
+        assert_eq!(back.dataset.get_str(Tag::PATIENT_NAME).unwrap(), "Müller");
+    }
+
+    #[test]
+    fn half_width_katakana_covers_the_whole_gl_range() {
+        // ISO 2022 IR 13 / PS3.5 §6.1.2.5.3: GL 0x21-0x5F maps to the 63
+        // half-width katakana (Shift_JIS 0xA1-0xDF); 0x5F is "ﾟ" (U+FF9F).
+        let base = charset_encoding("ISO 2022 IR 13");
+        let bytes = [0x1Bu8, 0x28, 0x49, 0x5F, 0x1B, 0x28, 0x42];
+        assert_eq!(decode_multi_charset(&bytes, base, false), "ﾟ");
     }
 
     #[test]

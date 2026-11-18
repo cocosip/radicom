@@ -97,7 +97,7 @@ pub enum LargeValuePolicy {
     /// Read into memory. The only option when no window source is attached.
     #[default]
     Materialize,
-    /// Skip the bytes and report an empty placeholder.
+    /// Skip the bytes and omit the attribute from the dataset (fo-dicom parity).
     Skip,
     /// Leave the value as a lazy file/stream window when a window source exists,
     /// otherwise fall back to materializing.
@@ -1652,8 +1652,10 @@ mod tests {
 
     #[test]
     fn private_creators_are_scoped_to_their_item() {
-        // PS3.5 §7.8.1: a private creator reserves element numbers for one Item
-        // only; items neither inherit nor leak creators to their parent/siblings.
+        // PS3.5 §7.8.1: a private creator is scoped to the Item that declares
+        // it, so an item's creator is restored when the item ends and never
+        // leaks to the parent or a sibling. An inner item still sees the
+        // creators of its enclosing item (fo-dicom's reader keeps them visible).
         let mut body = Vec::new();
         body.extend_from_slice(&explicit_element(0x0029, 0x0010, Vr::Lo, b"BETA"));
         body.extend_from_slice(&explicit_element(0x0029, 0x1001, Vr::Lo, b"inner"));

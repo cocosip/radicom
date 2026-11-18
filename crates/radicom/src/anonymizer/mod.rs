@@ -107,12 +107,20 @@ impl Anonymizer {
     /// the de-identification declarations are not written either: a dataset
     /// that still carries its PHI must never claim `PatientIdentityRemoved=YES`
     /// (PS3.15 E.1.1).
+    ///
+    /// The same rule applies to an options-only run: [`AnonOptions::bit`] does
+    /// not add the Basic Profile baseline, so if the caller selected no baseline
+    /// column nothing removed the patient identity and the declarations stay
+    /// unwritten. Only the Basic Profile column makes that claim true.
     pub fn anonymize_in_place(&self, dataset: &mut Dataset) -> Result<(), Error> {
         if self.options.is_empty() {
             return Ok(());
         }
         let mut replaced = lock(&self.replaced);
         self.walk(dataset, &mut replaced)?;
+        if !self.options.contains(AnonOption::BasicProfile) {
+            return Ok(());
+        }
         // PS3.15 E.1.1: a de-identified dataset declares that it has been
         // de-identified and by which method. Both are required output of the
         // Basic Profile (they are what tells a reader the PHI is gone).
@@ -144,15 +152,19 @@ impl Anonymizer {
         // PS3.15 E.1.1 item 7: the File Meta Information can identify the source
         // (AE titles, private information), so those entries are replaced by the
         // de-identifier's own description; the writer forces the implementation
-        // fields and the media-storage UIDs on save.
-        for tag in [
-            Tag::SOURCE_APPLICATION_ENTITY_TITLE,
-            Tag::SENDING_APPLICATION_ENTITY_TITLE,
-            Tag::RECEIVING_APPLICATION_ENTITY_TITLE,
-            Tag::PRIVATE_INFORMATION_CREATOR_UID,
-            Tag::PRIVATE_INFORMATION,
-        ] {
-            file.file_meta.remove(&tag);
+        // fields and the media-storage UIDs on save. This is a Basic Profile
+        // step: an options-only run did not de-identify, so it must not rewrite
+        // the source's meta either.
+        if self.options.contains(AnonOption::BasicProfile) {
+            for tag in [
+                Tag::SOURCE_APPLICATION_ENTITY_TITLE,
+                Tag::SENDING_APPLICATION_ENTITY_TITLE,
+                Tag::RECEIVING_APPLICATION_ENTITY_TITLE,
+                Tag::PRIVATE_INFORMATION_CREATOR_UID,
+                Tag::PRIVATE_INFORMATION,
+            ] {
+                file.file_meta.remove(&tag);
+            }
         }
         Ok(())
     }
@@ -576,6 +588,46 @@ mod tests {
         assert!(
             ds.item(&Tag::DEIDENTIFICATION_METHOD).is_none(),
             "NONE must not write a de-identification method"
+        );
+    }
+
+    #[test]
+    fn an_options_only_run_does_not_claim_deidentification() {
+        // AnonOptions::bit does not add the Basic Profile baseline, so nothing
+        // removed the patient identity: the PHI stays and must not be declared
+        // gone (PS3.15 E.1.1).
+        let mut ds = dataset();
+        Anonymizer::with_options(AnonOptions::bit(AnonOption::RetainUids))
+            .anonymize_in_place(&mut ds)
+            .unwrap();
+        assert_eq!(
+            ds.try_get_str(Tag::PATIENT_NAME).as_deref(),
+            Some("Doe^John"),
+            "no baseline column runs, so the name is kept"
+        );
+        assert!(
+            ds.item(&Tag::PATIENT_IDENTITY_REMOVED).is_none(),
+            "an options-only run must not claim that the PHI is gone"
+        );
+        assert!(
+            ds.item(&Tag::DEIDENTIFICATION_METHOD).is_none(),
+            "an options-only run must not write a de-identification method"
+        );
+
+        // The file-meta cleanup is part of the same Basic Profile step, so an
+        // options-only run must not rewrite the source's AE titles either.
+        let mut file = DicomFile::from_dataset(dataset());
+        file.file_meta
+            .insert_str(Tag::SOURCE_APPLICATION_ENTITY_TITLE, Vr::Ae, "SCU");
+        Anonymizer::with_options(AnonOptions::bit(AnonOption::RetainUids))
+            .anonymize_file_in_place(&mut file)
+            .unwrap();
+        assert_eq!(
+            file.file_meta
+                .try_get_str(Tag::SOURCE_APPLICATION_ENTITY_TITLE)
+                .as_deref(),
+            Some("SCU"),
+            "an options-only run leaves the file meta alone"
         );
     }
 

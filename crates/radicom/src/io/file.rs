@@ -970,7 +970,7 @@ fn dataset_syntax(
             (false, true) => syntaxes::IMPLICIT_VR_BIG_ENDIAN.clone(),
             (false, false) => syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone(),
         };
-        if first_element_fits(dataset, &syntax, total_len) {
+        if first_elements_fit(dataset, &syntax, total_len) {
             return Ok(syntax);
         }
     }
@@ -979,33 +979,62 @@ fn dataset_syntax(
     )))
 }
 
-/// True when the first element header under `syntax` is structurally consistent
-/// with the available byte count. `total_len` is the whole dataset length (the
-/// `dataset` slice may be only a bounded probe).
-fn first_element_fits(dataset: &[u8], syntax: &TransferSyntax, total_len: u64) -> bool {
+/// True when the first two element headers under `syntax` are structurally
+/// consistent with the available byte count. `total_len` is the whole dataset
+/// length (the `dataset` slice may be only a bounded probe).
+///
+/// One element is not enough to tell the byte orders apart: a `UL`/`OW` element
+/// whose value is equal under both readings has an ambiguous header, and a
+/// little-endian parse of big-endian bytes then accepts a VR and a length that
+/// happen to fit. Checking the element that follows doubles the evidence, which
+/// is what a zero-length first element (0002,0000 pairs) leaves as the only clue.
+fn first_elements_fit(dataset: &[u8], syntax: &TransferSyntax, total_len: u64) -> bool {
     if dataset.len() < 8 || total_len < 8 {
         return false;
     }
+    let Some(first) = element_end(dataset, 0, syntax, total_len) else {
+        return false;
+    };
+    let Some(end) = first else {
+        return true; // undefined length: nothing to skip to
+    };
+    if end >= total_len as usize || end + 8 > dataset.len() {
+        return true; // nothing follows, or the probe stops before it
+    }
+    element_end(dataset, end, syntax, total_len).is_some()
+}
+
+/// End offset of the element whose header starts at `at`, `Some(None)` for an
+/// undefined-length element, and `None` when the header itself does not fit or
+/// its length runs past `total_len`.
+fn element_end(
+    dataset: &[u8],
+    at: usize,
+    syntax: &TransferSyntax,
+    total_len: u64,
+) -> Option<Option<usize>> {
+    if dataset.len() < at + 8 {
+        return None;
+    }
     let endian = syntax.endian();
     let (value_len, header) = if syntax.is_explicit_vr() {
-        let Some(vr) = Vr::try_parse(&[dataset[4], dataset[5]]) else {
-            return false;
-        };
+        let vr = Vr::try_parse(&[dataset[at + 4], dataset[at + 5]])?;
         if vr.is_16bit_length() {
-            (read_u16(dataset, 6, endian) as u64, 8u64)
+            (read_u16(dataset, at + 6, endian) as u64, 8u64)
         } else {
-            if dataset.len() < 12 {
-                return false;
+            if dataset.len() < at + 12 {
+                return None;
             }
-            (read_u32(dataset, 8, endian) as u64, 12u64)
+            (read_u32(dataset, at + 8, endian) as u64, 12u64)
         }
     } else {
-        (read_u32(dataset, 4, endian) as u64, 8u64)
+        (read_u32(dataset, at + 4, endian) as u64, 8u64)
     };
     if value_len == 0xFFFF_FFFF {
-        return true;
+        return Some(None);
     }
-    header + value_len <= total_len
+    let end = at as u64 + header + value_len;
+    (end <= total_len).then_some(Some(end as usize))
 }
 
 fn read_u16(bytes: &[u8], at: usize, endian: Endian) -> u16 {
@@ -2572,6 +2601,52 @@ mod coverage_tests {
             "Doe^John"
         );
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_bare_big_endian_dataset_is_not_read_as_little_endian() {
+        // (0008,103E) LO with a 512-byte value: the big-endian length 0x0200 read
+        // little endian is 2, so the first header alone fits under both byte
+        // orders. The element that follows starts inside the value under the
+        // little-endian reading, where its VR bytes are text, so the second
+        // header is what recovers the byte order.
+        let mut value: Vec<u8> = "1.2.840.10008.5.1.4.1.1.2."
+            .bytes()
+            .cycle()
+            .take(511)
+            .collect();
+        value.push(b'X');
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x0008u16.to_be_bytes());
+        bytes.extend_from_slice(&0x1030u16.to_be_bytes());
+        bytes.extend_from_slice(b"LO");
+        bytes.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(&value);
+        // an unambiguous second element: (0010,0010) PN "AB"
+        bytes.extend_from_slice(&0x0010u16.to_be_bytes());
+        bytes.extend_from_slice(&0x0010u16.to_be_bytes());
+        bytes.extend_from_slice(b"PN");
+        bytes.extend_from_slice(&2u16.to_be_bytes());
+        bytes.extend_from_slice(b"AB");
+
+        let path = tmp_path("be-bare");
+        std::fs::write(&path, &bytes).unwrap();
+        let file = DicomFile::open(&path).unwrap();
+        assert_eq!(
+            file.dataset.transfer_syntax().endian(),
+            Endian::Big,
+            "the second header rules out the little-endian reading"
+        );
+        assert_eq!(
+            file.dataset
+                .get_str(Tag::STUDY_DESCRIPTION)
+                .unwrap()
+                .trim()
+                .len(),
+            512
+        );
+        assert_eq!(file.dataset.get_str(Tag::PATIENT_NAME).unwrap(), "AB");
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

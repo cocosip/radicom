@@ -96,7 +96,10 @@ impl TransformRule {
                 }
             }
             TransformRule::CopyValue(src, dst) => {
-                let found = dataset.items().find(|i| i.tag() == src).cloned();
+                // `item` resolves a dictionary-style private tag (element ≤ 0x00FF
+                // plus its creator) to the block the dataset assigned, so a rule
+                // written as (0029,0001:ACME) finds the stored (0029,1001).
+                let found = dataset.item(src).cloned();
                 if let Some(DicomItem::Element(e)) = found {
                     record(&mut modified, dataset, dst);
                     let dst_vr = tag_vr_or(dataset, dst.clone());
@@ -389,6 +392,10 @@ fn format_parts(format: &str, parts: &[&str]) -> String {
 /// `new_str` debug-asserts on a non-string VR). Anything else cannot be
 /// represented from text and is skipped with a warning instead of panicking.
 fn insert_text_value(dataset: &mut Dataset, tag: Tag, vr: Vr, text: String) {
+    // A private tag without a dictionary row reports UN, which cannot hold text;
+    // store it as LO (the VR `Dataset::insert_value` picks for a string) rather
+    // than warning and dropping the value.
+    let vr = if vr == Vr::Un { Vr::Lo } else { vr };
     if vr.is_string() || vr == Vr::Implicit {
         dataset.insert_str(tag, vr, text);
         return;
@@ -428,6 +435,11 @@ where
 }
 
 /// The dataset's own VR for the tag when present, else the dictionary VR, else LO.
+///
+/// An unknown/private tag reports `UN`; that is the correct *destination* VR for
+/// [`TransformRule::CopyValue`], which stores raw bytes under it. A text rule
+/// value cannot be stored as `UN`, so [`insert_text_value`] falls back to `LO`
+/// for it instead.
 fn tag_vr_or(dataset: &Dataset, tag: Tag) -> crate::model::vr::Vr {
     if let Ok(element) = dataset.get_element(&tag) {
         return element.vr();
@@ -679,6 +691,60 @@ mod tests {
         TransformRule::SetValue(Tag::STUDY_DATE, "20260101".into()).apply(&mut ds);
         let element = ds.get_element(Tag::STUDY_DATE).expect("value inserted");
         assert_eq!(element.vr(), Vr::Da);
+    }
+
+    #[test]
+    fn set_value_on_an_unknown_private_tag_stores_text() {
+        // The dictionary reports UN for a private tag without a private row;
+        // SetValue used to warn and store nothing.
+        let mut ds = Dataset::new();
+        let tag = Tag::new(0x0029, 0x1001); // private, no private-dictionary row
+        TransformRule::SetValue(tag.clone(), "kept".into()).apply(&mut ds);
+        assert_eq!(ds.try_get_str(&tag).as_deref(), Some("kept"));
+    }
+
+    #[test]
+    fn copy_value_reads_a_dictionary_style_private_source() {
+        // The source is stored under its block tag (0029,1001) while the rule
+        // names it in dictionary style (0029,0001 + creator). The lookup must
+        // resolve the creator block instead of comparing (group, element) as
+        // written, which found nothing.
+        let creator = std::sync::Arc::new(crate::model::private_creator::PrivateCreator::new(
+            "ACME 1.2",
+        ));
+        let mut ds = Dataset::new();
+        let src = Tag::private(0x0029, 0x0001, creator.clone());
+        let dst = Tag::private(0x0029, 0x0002, creator);
+        let src_block = ds.get_private_tag(src.clone(), true).unwrap();
+        assert_eq!(src_block.element(), 0x1001, "first free block is 0x10");
+        ds.insert_str(src_block, Vr::Lo, "widget");
+
+        TransformRule::CopyValue(src, dst.clone()).apply(&mut ds);
+        assert_eq!(ds.get_str(dst).unwrap(), "widget");
+    }
+
+    #[test]
+    fn copy_value_to_an_unknown_private_tag_keeps_the_bytes() {
+        // CopyValue must not reinterpret the source bytes as text: an unknown
+        // destination keeps the raw bytes under UN.
+        let mut ds = Dataset::new();
+        let src = Tag::new(0x7777, 0x0001);
+        let dst = Tag::new(0x7777, 0x1001);
+        ds.insert_or_update(crate::model::item::DicomItem::Element(
+            crate::model::element::DicomElement::new_bytes(
+                src.clone(),
+                Vr::Ow,
+                std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(vec![
+                    0xFFu8, 0x00, 0x80,
+                ])),
+            ),
+        ));
+        TransformRule::CopyValue(src, dst.clone()).apply(&mut ds);
+        let copied = ds.get_element(&dst).expect("destination written");
+        assert_eq!(
+            copied.value().as_buffer().unwrap().data().unwrap().to_vec(),
+            vec![0xFF, 0x00, 0x80]
+        );
     }
 
     #[test]

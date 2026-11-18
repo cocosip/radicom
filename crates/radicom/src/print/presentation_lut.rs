@@ -111,13 +111,15 @@ impl PresentationLutTable {
                 data.len()
             )));
         }
-        // The entries are 16-bit words with the value high-aligned: "stored in a
-        // format equivalent to 16 bits allocated where the high bit is equal to
-        // bits stored - 1". Shift down to the P-value, which is always unsigned.
-        let shift = 16 - bits;
+        // "The LUT Data shall be stored in a format equivalent to 16 bits
+        // allocated where the high bit is equal to bits stored - 1" for a
+        // 12-bit entry is High Bit 11, i.e. a right-justified P-value in the
+        // low `bits` bits (PS3.5 §8.1.1 Note 1). The unused high bits are masked
+        // off rather than trusted to be zero.
+        let mask = (1u32 << bits) - 1;
         for i in 0..count {
             let word = u16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]);
-            entries.push((word >> shift) as i32);
+            entries.push((u32::from(word) & mask) as i32);
         }
         Ok(PresentationLutTable {
             first_mapped,
@@ -300,7 +302,7 @@ mod tests {
 
     #[test]
     fn a_presentation_lut_sequence_is_parsed() {
-        // 12-bit, 4 entries, first mapped 0: 0, 0x555, 0xAAA, 0xFFF (high-aligned)
+        // 12-bit, 4 entries, first mapped 0: 0, 0x555, 0xAAA, 0xFFF (right-justified)
         let mut item = Dataset::new();
         let descriptor = [4u8, 0x00, 0x00, 0x00, 0x0C, 0x00]; // US 4, US 0, US 12
         item.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
@@ -312,7 +314,7 @@ mod tests {
             Tag::LUT_DATA,
             Vr::Ow,
             Arc::new(MemoryBuffer::from(vec![
-                0x00u8, 0x00, 0x50, 0x55, 0xA0, 0xAA, 0xF0, 0xFF,
+                0x00u8, 0x00, 0x55, 0x05, 0xAA, 0x0A, 0xFF, 0x0F,
             ])),
         )));
 
@@ -436,10 +438,10 @@ mod tests {
 
     #[test]
     fn ten_to_sixteen_bit_tables_produce_expected_bytes() {
-        // 12-bit, four entries high-aligned in 16-bit words: 0, 0x555, 0xAAA, 0xFFF
+        // 12-bit, four entries right-justified in 16-bit words: 0, 0x555, 0xAAA, 0xFFF
         let table = film_with_lut_item(lut_item(
             &[4, 0, 0, 0, 12, 0],
-            &[0x00, 0x00, 0x50, 0x55, 0xA0, 0xAA, 0xF0, 0xFF],
+            &[0x00, 0x00, 0x55, 0x05, 0xAA, 0x0A, 0xFF, 0x0F],
             Vr::Ow,
         ))
         .unwrap()
@@ -471,9 +473,9 @@ mod tests {
 
     #[test]
     fn a_twelve_bit_descriptor_parses_via_the_16_bit_path() {
-        // PS3.3 C.11.4 allows 10-15 bits per entry; they are stored as 16-bit
-        // words with the value high-aligned. A 12-bit descriptor must parse,
-        // not be rejected.
+        // PS3.3 C.11.4 allows 10-16 bits per entry, stored right-justified in
+        // 16-bit words; the unused high bits are ignored. A 12-bit descriptor
+        // must parse, not be rejected.
         let table = film_with_lut_item(lut_item(
             &[2, 0, 0, 0, 12, 0],
             &[0x00, 0x00, 0xFF, 0xFF],
@@ -485,7 +487,7 @@ mod tests {
         .clone();
         assert_eq!(table.bits(), 12);
         assert_eq!(table.len(), 2);
-        assert_eq!(table.value_at(1), Some(0x0FFF), "high-aligned 4095");
+        assert_eq!(table.value_at(1), Some(0x0FFF), "right-justified 4095");
         assert_eq!(table.map_byte(0), 0);
         assert_eq!(table.map_byte(1), 255, "4095 is the 12-bit maximum");
     }
@@ -503,7 +505,7 @@ mod tests {
     fn out_of_range_inputs_clamp_to_the_end_entries() {
         // PS3.3 C.11.4.1: the first mapped value is always 0; inputs outside the
         // table clamp to its first/last entry. 12-bit entries 100 and 200 are
-        // high-aligned in 16-bit words (0x0640, 0x0C80).
+        // right-justified in 16-bit words (0x0064, 0x00C8).
         let mut item = Dataset::new();
         let descriptor = [2u8, 0x00, 0x00, 0x00, 0x0C, 0x00]; // US 2, first 0, 12 bits
         item.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
@@ -514,7 +516,7 @@ mod tests {
         item.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
             Tag::LUT_DATA,
             Vr::Ow,
-            Arc::new(MemoryBuffer::from(vec![0x40u8, 0x06, 0x80, 0x0C])),
+            Arc::new(MemoryBuffer::from(vec![0x64u8, 0x00, 0xC8, 0x00])),
         )));
         let mut film = Dataset::new();
         film.insert_sequence(Tag::PRESENTATION_LUT_SEQUENCE)
@@ -555,7 +557,7 @@ mod tests {
         )));
         let mut data = Vec::new();
         for value in 0..4096u16 {
-            data.extend_from_slice(&(value << 4).to_le_bytes());
+            data.extend_from_slice(&value.to_ne_bytes());
         }
         item.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
             Tag::LUT_DATA,

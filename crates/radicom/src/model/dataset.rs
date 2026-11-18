@@ -833,7 +833,10 @@ impl Dataset {
 fn numeric_hint_fits(hint: Vr, dict_vr: Vr) -> bool {
     use Vr::*;
     match hint {
-        Is => matches!(dict_vr, Is | Us | Ss | Ul | Sl | Uv | Sv | Fl | Fd),
+        // An integer stores as `DS` text just as well (`IS`/`DS` are the two
+        // numeric-string VRs), and the dictionary VR is authoritative: Window
+        // Center written from an `i32` must be `DS`, never `IS`.
+        Is => matches!(dict_vr, Is | Ds | Us | Ss | Ul | Sl | Uv | Sv | Fl | Fd),
         Ds => matches!(dict_vr, Ds | Fl | Fd | Of | Od),
         _ => false,
     }
@@ -1232,6 +1235,18 @@ mod tests {
         assert_eq!(ds.get_str(PATIENT_NAME).unwrap(), "Doe^John");
     }
 
+    /// A float written with an explicit integer VR is converted to that integer,
+    /// not stored as text under it (which is unencodable and used to trip a
+    /// `debug_assert` in `new_str`).
+    #[test]
+    fn a_float_written_with_an_integer_vr_is_converted() {
+        let mut ds = Dataset::new();
+        ds.insert_value_with_vr(Tag::ROWS, Vr::Us, 512.9f64);
+        let element = ds.get_element(Tag::ROWS).unwrap();
+        assert_eq!(element.vr(), Vr::Us);
+        assert_eq!(ds.get::<u16>(Tag::ROWS).unwrap(), 512);
+    }
+
     /// The dictionary VR must win over a numeric value hint. Writing a `u16` to
     /// ROWS used to yield IS (a string VR), producing non-conformant bytes that
     /// only round-tripped because the reader shared the same mistake.
@@ -1278,6 +1293,16 @@ mod tests {
             .position(|w| w == [0x28, 0x00, 0x10, 0x00])
             .expect("ROWS element present");
         assert_eq!(&bytes[pos + 4..pos + 6], b"US", "encoded VR is US");
+    }
+
+    #[test]
+    fn an_integer_value_written_to_a_ds_attribute_takes_ds() {
+        // Window Center is DS: an integer value must be stored as DS text, not
+        // as IS (a different VR in the same attribute).
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::WINDOW_CENTER, 40i32);
+        assert_eq!(ds.get_element(Tag::WINDOW_CENTER).unwrap().vr(), Vr::Ds);
+        assert_eq!(ds.get::<f64>(Tag::WINDOW_CENTER).unwrap(), 40.0);
     }
 
     /// A hint that cannot be re-encoded must be preserved. An explicit VR on a

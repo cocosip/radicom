@@ -148,6 +148,19 @@ impl StructuredReport {
             Tag::TEXT_VALUE,
             Tag::NUMERIC_VALUE,
             Tag::MEASURED_VALUE_SEQUENCE,
+            // Sequence-valued macros leak the same way a scalar one does: a
+            // document re-rooted from a SCOORD would keep GraphicData next to its
+            // new CONTAINER value type.
+            tags::CONCEPT_CODE_SEQUENCE,
+            tags::REFERENCED_SOP_SEQUENCE,
+            tags::GRAPHIC_TYPE,
+            tags::GRAPHIC_DATA,
+            tags::REFERENCED_FRAME_OF_REFERENCE_UID,
+            tags::TEMPORAL_RANGE_TYPE,
+            tags::REFERENCED_SAMPLE_POSITIONS,
+            tags::REFERENCED_TIME_OFFSETS,
+            tags::REFERENCED_DATE_TIME,
+            tags::NUMERIC_VALUE_QUALIFIER_CODE_SEQUENCE,
         ] {
             self.file.dataset.remove(&tag);
         }
@@ -948,6 +961,18 @@ mod tests {
             .dataset
             .insert_sequence(Tag::MEASURED_VALUE_SEQUENCE)
             .push(Dataset::new());
+        // Sequence-valued macros leak the same way: a SCOORD/CODE root leaves a
+        // GraphicType/GraphicData pair or a ConceptCodeSequence behind.
+        report
+            .file
+            .dataset
+            .insert_str(tags::GRAPHIC_TYPE, Vr::Cs, "POINT");
+        report.file.dataset.insert_value(tags::GRAPHIC_DATA, 1.0f32);
+        report
+            .file
+            .dataset
+            .insert_sequence(tags::CONCEPT_CODE_SEQUENCE)
+            .push(Dataset::new());
 
         report.set_root(container());
 
@@ -961,6 +986,9 @@ mod tests {
             Tag::NUMERIC_VALUE,
             Tag::MEASURED_VALUE_SEQUENCE,
             Tag::RELATIONSHIP_TYPE,
+            tags::GRAPHIC_TYPE,
+            tags::GRAPHIC_DATA,
+            tags::CONCEPT_CODE_SEQUENCE,
         ] {
             assert!(
                 report.file.dataset.item(&tag).is_none(),

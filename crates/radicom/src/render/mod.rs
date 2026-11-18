@@ -133,7 +133,8 @@ impl LutTable {
                 out.extend(data[..count].iter().map(|b| *b as i32));
             } else if data.len() >= count * 2 {
                 for i in 0..count {
-                    out.push(data[i * 2] as i32);
+                    let word = u16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]);
+                    out.push((word & 0xFF) as i32);
                 }
             } else {
                 return None;
@@ -418,9 +419,11 @@ impl GrayscaleRenderOptions {
             Some((lo, hi)) => (lo.round() as i32, hi.round() as i32),
             None => return Err(unsupported("frame has no samples for a histogram")),
         };
-        // Guard the bin array against a 32-bit-stored value domain (a 2^32-bin
-        // histogram is not representable); 1/8/16-bit ranges are well under this.
-        if (max as i64 - min as i64) > 1_048_576 {
+        // A 32-bit-stored value domain has no representable bin array. The
+        // histogram holds MAX_BINS bins, so a wider range is refused here rather
+        // than truncated inside Histogram::new (which silently clipped the
+        // window and blew out the high end of the image).
+        if (max as i64 - min as i64) >= Histogram::MAX_BINS as i64 {
             return Err(unsupported("histogram window range is too wide to bin"));
         }
         let mut histogram = Histogram::new(min, max);
@@ -2001,7 +2004,9 @@ fn overlay_covers_frame(overlay: &OverlayData, frame: u32) -> bool {
     let frame_origin = overlay.frame_origin();
     let first = frame_origin.max(1) as u32 - 1;
     let count = overlay.number_of_frames().max(1);
-    frame >= first && frame < first + count
+    // `first + count` can overflow for peer-controlled (60xx,0015) values; the
+    // shift keeps the comparison exact.
+    frame >= first && frame - first < count
 }
 
 /// Borrows one native 8/16-bit frame buffer plus its dimensions and depth.

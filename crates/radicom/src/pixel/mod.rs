@@ -324,11 +324,15 @@ macro_rules! pixel_read_methods {
                 return Ok(Arc::new(MemoryBuffer::from(frame)));
             }
             let frame_size = self.uncompressed_frame_size()?;
-            let offset = index as u64 * frame_size;
-            if offset + frame_size > buffer.size() {
+            let offset = (index as u64)
+                .checked_mul(frame_size)
+                .ok_or_else(|| pixel_err(format!("frame {index} byte offset overflows")))?;
+            let end = offset
+                .checked_add(frame_size)
+                .ok_or_else(|| pixel_err(format!("frame {index} byte range overflows")))?;
+            if end > buffer.size() {
                 return Err(pixel_err(format!(
-                    "frame {index} needs bytes {offset}..{} but pixel data holds {}",
-                    offset + frame_size,
+                    "frame {index} needs bytes {offset}..{end} but pixel data holds {}",
                     buffer.size()
                 )));
             }
@@ -628,10 +632,16 @@ macro_rules! pixel_read_methods {
                 out.extend_from_slice(&raw[..count]);
             } else if raw.len() >= count * 2 {
                 // Two bytes per entry: an 8-bit descriptor inside 16-bit words
-                // takes the low byte, a 16-bit descriptor the high byte.
-                let offset = if bits == 16 { 1 } else { 0 };
+                // takes the low byte, a 16-bit descriptor the high byte. The
+                // buffer is host order (docs §9.1), so read the word, not a byte
+                // at a fixed offset.
                 for i in 0..count {
-                    out.push(raw[i * 2 + offset]);
+                    let word = u16::from_ne_bytes([raw[i * 2], raw[i * 2 + 1]]);
+                    out.push(if bits == 16 {
+                        (word >> 8) as u8
+                    } else {
+                        (word & 0xFF) as u8
+                    });
                 }
             } else {
                 return Err(pixel_err(format!(
@@ -789,7 +799,10 @@ impl<'a> PixelData<'a> {
                         let frame_bits = (self.width() as usize)
                             * (self.height() as usize)
                             * (self.samples_per_pixel() as usize);
-                        let start_bit = index as usize * frame_bits;
+                        let start_bit =
+                            (index as usize).checked_mul(frame_bits).ok_or_else(|| {
+                                pixel_err(format!("frame {index} bit offset overflows"))
+                            })?;
                         let end_byte = (start_bit + frame_bits).div_ceil(8);
                         combined.truncate(end_byte.min(combined.len()));
                         combined.resize(end_byte, 0);

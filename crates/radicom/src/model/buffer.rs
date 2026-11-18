@@ -725,7 +725,15 @@ impl ByteBuffer for FileWindow {
         let mut chunk = vec![0u8; CHUNK];
         let mut offset = 0u64;
         while offset < self.len {
-            let take = ((self.len - offset) as usize).min(CHUNK);
+            // Compare in u64 and only then narrow: `as usize` truncates on a
+            // 32-bit target, and a remaining length that is a multiple of 2^32
+            // became 0 (an infinite loop).
+            let remaining = self.len - offset;
+            let take = if remaining >= CHUNK as u64 {
+                CHUNK
+            } else {
+                remaining as usize
+            };
             self.read_into(offset, &mut chunk[..take])?;
             w.write_all(&chunk[..take])?;
             offset += take as u64;

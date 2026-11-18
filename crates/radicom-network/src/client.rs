@@ -3267,6 +3267,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_report_pushed_before_release_is_answered_by_the_release() {
+        // The SCP pushes the report right after its last response. The client
+        // sends no further request, so the report is still unread when release()
+        // runs; release must answer it and keep waiting for the A-RELEASE-RP
+        // instead of failing with "expected A-RELEASE-RP".
+        let actions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server = DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(PrinterScp {
+                actions: actions.clone(),
+                report_dataset: false,
+            }),
+            ServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let addr = server.local_addr();
+        let handle = tokio::spawn(async move { server.accept_one().await });
+
+        let seen: Arc<std::sync::Mutex<Vec<u16>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let mut client = DicomClient::new("SCU", "SCP", addr.to_string())
+            .with_n_event_report_handler(Arc::new(move |request| {
+                recorded
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(request.event_type_id.unwrap_or(0));
+                Ok(crate::nservice::NServiceResponse::success(request, None))
+            }));
+
+        client
+            .send_n_action(PRINTER_SOP_CLASS, "1.2.3.4", 1, None)
+            .await
+            .unwrap();
+        assert!(
+            seen.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty(),
+            "the report is still unread when the client goes idle"
+        );
+
+        client.release().await;
+        // If the release request wins the race, the peer abandons its outstanding
+        // report sub-operation and ends with `ClosedPrematurely`; the client's job
+        // is answering the report either way.
+        let _ = handle.await.unwrap();
+        assert_eq!(
+            *seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec![1],
+            "release answered the pushed report before the A-RELEASE-RP"
+        );
+    }
+
+    #[tokio::test]
     async fn an_unhandled_event_report_is_answered_and_the_association_survives() {
         // N-EVENT-REPORT is confirmed; a client with no handler must still
         // answer. Before, the command fell through to the response parser and

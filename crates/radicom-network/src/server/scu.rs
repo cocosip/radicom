@@ -2603,7 +2603,7 @@ impl Association {
                                     };
                                     let decode_syntax = store_syntax.clone();
                                     let limit = self.max_materialized_length;
-                                    let dataset = tokio::task::spawn_blocking(move || {
+                                    let decoded = tokio::task::spawn_blocking(move || {
                                         sink.materialize_body_with_fallback_limited(
                                             &body,
                                             &decode_syntax,
@@ -2616,8 +2616,35 @@ impl Association {
                                         NetworkError::Io(std::io::Error::other(format!(
                                             "reverse C-STORE decode task failed: {join}"
                                         )))
-                                    })??;
-                                    let mut file = dataset.file;
+                                    })
+                                    .and_then(|decoded| decoded);
+                                    let mut file = match decoded {
+                                        Ok(dataset) => dataset.file,
+                                        Err(error) => {
+                                            // PS3.4 Table B.2-1: a dataset the SCP cannot decode
+                                            // is answered with a failure status (0xC000/0xA700/
+                                            // 0x0110), not by dropping the association. The
+                                            // forward C-STORE path does the same; fo-dicom answers
+                                            // 0x0110 here ("send error response instead of
+                                            // aborting connection").
+                                            let response =
+                                                crate::store::failure_response_for_command(
+                                                    &store, &error,
+                                                );
+                                            let bytes = bytes::Bytes::from(command_bytes(
+                                                &response.to_command(),
+                                            )?);
+                                            for pdata in self.splitter.split_bytes(
+                                                unit.context_id,
+                                                true,
+                                                bytes,
+                                            )? {
+                                                write_pdu(&mut self.stream, &Pdu::PData(pdata))
+                                                    .await?;
+                                            }
+                                            continue;
+                                        }
+                                    };
                                     file.dataset.set_transfer_syntax(store_syntax.clone());
                                     let request = crate::store::c_store_request_from_message(
                                         &store,
@@ -3053,23 +3080,90 @@ impl Association {
     /// A peer that answers with an A-ABORT, with something else, or not at all
     /// within `release_timeout` did not release: reporting success there would
     /// hide a broken peer, so each case is an error.
+    ///
+    /// A report the peer pushed before releasing arrives before the A-RELEASE-RP
+    /// on the same stream. It is answered here (H2) instead of being mistaken for
+    /// the release response: N-EVENT-REPORT is confirmed, so dropping it left the
+    /// peer waiting and made a valid release fail.
     pub async fn release(mut self) -> Result<()> {
+        // H2: answer anything the peer already pushed before asking to release.
+        // A confirmed request (N-EVENT-REPORT) still unread would make the peer
+        // take our A-RELEASE-RQ for its response, so it must be answered first.
+        self.drain_incoming().await?;
         write_pdu(&mut self.stream, &Pdu::ReleaseRq).await?;
         let release_timeout = self.release_timeout;
-        let response =
-            tokio::time::timeout(release_timeout, self.pdu_reader.read_pdu(&mut self.stream))
-                .await
-                .map_err(|_| NetworkError::ReleaseTimedOut {
-                    timeout_ms: release_timeout.as_millis() as u64,
-                })??;
-        match response {
-            Some(Pdu::ReleaseRp) => Ok(()),
-            Some(Pdu::Abort(abort)) => Err(NetworkError::Abort {
-                source_code: abort.source.code(),
-                reason: abort.reason,
-            }),
-            Some(_) => Err(NetworkError::protocol("expected A-RELEASE-RP")),
-            None => Err(NetworkError::ClosedPrematurely { source: None }),
+        let deadline = tokio::time::Instant::now() + release_timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let response =
+                match tokio::time::timeout(remaining, self.pdu_reader.read_pdu(&mut self.stream))
+                    .await
+                {
+                    Ok(response) => response?,
+                    Err(_) => {
+                        return Err(NetworkError::ReleaseTimedOut {
+                            timeout_ms: release_timeout.as_millis() as u64,
+                        })
+                    }
+                };
+            match response {
+                Some(Pdu::ReleaseRp) => return Ok(()),
+                Some(Pdu::Abort(abort)) => {
+                    return Err(NetworkError::Abort {
+                        source_code: abort.source.code(),
+                        reason: abort.reason,
+                    })
+                }
+                Some(Pdu::PData(pdata)) => {
+                    for unit in self.push_pdata_offloaded(&pdata).await? {
+                        if !self.intercept_event_report(&unit).await? {
+                            return Err(NetworkError::protocol("expected A-RELEASE-RP"));
+                        }
+                    }
+                }
+                Some(_) => return Err(NetworkError::protocol("expected A-RELEASE-RP")),
+                None => return Err(NetworkError::ClosedPrematurely { source: None }),
+            }
+        }
+    }
+
+    /// Answers PDUs that already arrived but were never read (H2).
+    ///
+    /// The client reads only while an operation is in flight, so a confirmed
+    /// request the peer pushed after the last response stays unread until the
+    /// next operation. Answering it before A-RELEASE-RQ keeps the peer's
+    /// `await_n_response` consistent; only immediately available PDUs are taken,
+    /// so a quiet peer cannot delay the release.
+    async fn drain_incoming(&mut self) -> Result<()> {
+        loop {
+            let pdu = match tokio::time::timeout(
+                std::time::Duration::ZERO,
+                self.pdu_reader.read_pdu(&mut self.stream),
+            )
+            .await
+            {
+                Ok(pdu) => pdu?,
+                // nothing buffered: a push that is still in flight is picked up
+                // by the release loop below
+                Err(_) => return Ok(()),
+            };
+            match pdu {
+                Some(Pdu::PData(pdata)) => {
+                    for unit in self.push_pdata_offloaded(&pdata).await? {
+                        if !self.intercept_event_report(&unit).await? {
+                            return Err(NetworkError::protocol(
+                                "unexpected PDU before the release request",
+                            ));
+                        }
+                    }
+                }
+                Some(_) => {
+                    return Err(NetworkError::protocol(
+                        "unexpected PDU before the release request",
+                    ))
+                }
+                None => return Err(NetworkError::ClosedPrematurely { source: None }),
+            }
         }
     }
 

@@ -103,6 +103,11 @@ fn validate_da(content: &str) -> Result<(), String> {
     if let Some(second) = second {
         if !second.is_empty() {
             component(second)?;
+            // PS3.3 C.3.1: a range starts at or before it ends. Both sides are
+            // fixed-width YYYYMMDD, so the byte order is chronological.
+            if first > second {
+                return Err("range ends before it begins".into());
+            }
         }
     }
     Ok(())
@@ -225,7 +230,23 @@ fn validate_tm(content: &str) -> Result<(), String> {
     match second {
         // a trailing separator ("0900-") is an open range
         Some("") | None => Ok(()),
-        Some(second) => validate_tm_component(second),
+        Some(second) => {
+            validate_tm_component(second)?;
+            // PS3.3 C.3.2: a range starts at or before it ends. Components of
+            // different precision are not comparable (0900 could mean 09:00:xx),
+            // so only two complete HHMMSS values are ordered; equal precision
+            // makes the text order chronological.
+            fn complete(part: &str) -> Option<&str> {
+                let main = part.split('.').next().unwrap_or("");
+                (main.len() == 6).then_some(main)
+            }
+            if let (Some(start), Some(end)) = (complete(first), complete(second)) {
+                if start > end {
+                    return Err("range ends before it begins".into());
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -337,7 +358,14 @@ fn validate_dt(content: &str) -> Result<(), String> {
     if trailing_dt_offset(trimmed).is_some() {
         return validate_dt_component(trimmed);
     }
-    let bytes = trimmed.as_bytes();
+    // A range's right component may carry that same offset
+    // ("20240101120000-20240101130000-0500"): its `-` is a sign, not a second
+    // separator, so peel it before looking for the range separator.
+    let (range, right_offset) = match right_component_offset(trimmed) {
+        Some((range, offset)) => (range, Some(offset)),
+        None => (trimmed, None),
+    };
+    let bytes = range.as_bytes();
     let mut separator = None;
     for i in 1..bytes.len() {
         if bytes[i] != b'-' || bytes[i - 1] == b'&' {
@@ -351,13 +379,16 @@ fn validate_dt(content: &str) -> Result<(), String> {
     let Some(index) = separator else {
         return validate_dt_component(trimmed);
     };
-    let first = &trimmed[..index];
-    let second = &trimmed[index + 1..];
+    let first = &range[..index];
+    let second = &range[index + 1..];
     validate_dt_component(first)?;
     if second.is_empty() {
         return Ok(());
     }
-    validate_dt_component(second)?;
+    match right_offset {
+        Some(offset) => validate_dt_component(&format!("{second}{offset}"))?,
+        None => validate_dt_component(second)?,
+    }
     // DT values are big-endian, so the raw digits order chronologically
     // (a shorter partial value sorts before its extension).
     let first_body = dt_body(first);
@@ -366,6 +397,27 @@ fn validate_dt(content: &str) -> Result<(), String> {
         return Err("range ends before it begins".into());
     }
     Ok(())
+}
+
+/// Splits a right-anchored bare `[+-]HHMM` offset off the right component of a DT
+/// range (`...-20240101130000-0500`), returning the range and the offset.
+///
+/// Only a complete datetime may carry a bare offset, and a left component must
+/// remain, so a range keeps its single `-` separator after the peel (CM-04).
+fn right_component_offset(value: &str) -> Option<(&str, &str)> {
+    let bytes = value.as_bytes();
+    if bytes.len() <= 6 || !matches!(bytes[bytes.len() - 5], b'+' | b'-') {
+        return None;
+    }
+    if !bytes[bytes.len() - 4..].iter().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let range = &value[..value.len() - 5];
+    let (left, last) = range.rsplit_once('-')?;
+    if left.is_empty() || dt_body_digits(last).len() != 14 {
+        return None;
+    }
+    Some((range, &value[value.len() - 5..]))
 }
 
 /// The date/time digits of a DT component, without its UTC offset.
@@ -1079,6 +1131,35 @@ mod tests {
         assert!(validate_string(Vr::Pn, &"患".repeat(65)).is_err());
         assert!(validate_string(Vr::Lo, &"检".repeat(64)).is_ok());
         assert!(validate_string(Vr::Lo, &"检".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn a_range_that_ends_before_it_begins_is_rejected() {
+        // PS3.3 C.3.1/C.3.2: a range is ordered. fo-dicom's ValidateDA/ValidateTM
+        // never compare the two sides; a backwards range is a query that can
+        // never match, so it is a validation error here.
+        assert!(validate_single(Vr::Da, "20240307-20240305").is_err());
+        assert!(validate_single(Vr::Da, "20240305-20240305").is_ok());
+        assert!(validate_single(Vr::Tm, "120000-090000").is_err());
+        assert!(validate_single(Vr::Tm, "090000-120000.5").is_ok());
+        // different precisions are not comparable (0900 may mean 09:00:xx)
+        assert!(validate_single(Vr::Tm, "1200-0900").is_ok());
+        assert!(
+            validate_single(Vr::Dt, "20240101130000-20240101120000").is_err(),
+            "a backwards DT range is rejected too"
+        );
+    }
+
+    #[test]
+    fn a_dt_range_with_an_offset_on_its_right_component_is_accepted() {
+        // The offset's `-` is a sign, not a second range separator: this used to
+        // fail with "more than one range separator".
+        assert!(validate_single(Vr::Dt, "20240101120000-20240101130000-0500").is_ok());
+        assert!(validate_single(Vr::Dt, "20240101120000-20240101130000&+0500").is_ok());
+        // still exactly one separator when the offset is invalid
+        assert!(validate_single(Vr::Dt, "20240101120000-20240101130000-9900").is_err());
+        // a backwards range with a right offset is still backwards
+        assert!(validate_single(Vr::Dt, "20240101130000-20240101120000-0500").is_err());
     }
 
     #[test]

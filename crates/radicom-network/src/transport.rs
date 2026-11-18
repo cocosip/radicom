@@ -332,7 +332,16 @@ impl PduReader {
             return Ok(None);
         }
         let length = u32::from_be_bytes([self.buf[2], self.buf[3], self.buf[4], self.buf[5]]);
-        if length > self.max_pdu {
+        // The advertised Maximum-length-received bounds P-DATA only (PS3.8 §9.3.2):
+        // an A-ASSOCIATE-AC/RQ carries an item per presentation context and may
+        // legitimately be larger than the P-DATA limit. Every other PDU keeps
+        // the 256 KiB protocol ceiling (§11.2).
+        let limit = if self.buf[0] == 0x04 {
+            self.max_pdu
+        } else {
+            MAX_PDU_SIZE
+        };
+        if length > limit {
             return Err(NetworkError::protocol(
                 "PDU exceeds the configured receive limit",
             ));
@@ -343,6 +352,12 @@ impl PduReader {
         }
         let frame = self.buf.split_to(total);
         pdu::decode_bytes(frame.freeze()).map(Some)
+    }
+
+    /// Whether a frame has been partly received: bytes are buffered but no
+    /// complete PDU is available yet.
+    pub(crate) fn has_partial(&self) -> bool {
+        !self.buf.is_empty()
     }
 }
 
@@ -570,6 +585,36 @@ mod tests {
         // an ordinary IO error keeps its variant
         let plain: NetworkError = std::io::Error::from(std::io::ErrorKind::BrokenPipe).into();
         assert!(matches!(plain, NetworkError::Io(_)));
+    }
+
+    #[test]
+    fn the_p_data_limit_bounds_p_data_frames_only() {
+        // PS3.8 §9.3.2: Maximum-length-received bounds the P-DATA variable
+        // field. An A-ASSOCIATE-AC/RQ carries one item per accepted context and
+        // may legitimately be larger; rejecting it would break an association
+        // with many contexts.
+        let mut framer = PduReader::with_max_pdu(16);
+        // type 0x02 (A-ASSOCIATE-AC), length 256: larger than the P-DATA limit.
+        framer
+            .buf
+            .extend_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x01, 0x00]);
+        framer.buf.extend_from_slice(&[0u8; 32]);
+        assert!(
+            framer.take_frame().is_ok(),
+            "an A-ASSOCIATE-AC above the P-DATA limit is not an overrun"
+        );
+        assert!(framer.has_partial(), "the half-received frame is in flight");
+
+        // P-DATA above the advertised maximum is still a protocol error.
+        let mut framer = PduReader::with_max_pdu(16);
+        framer
+            .buf
+            .extend_from_slice(&[0x04, 0x00, 0x00, 0x00, 0x00, 0x20]);
+        framer.buf.extend_from_slice(&[0u8; 32]);
+        assert!(matches!(
+            framer.take_frame(),
+            Err(NetworkError::Protocol(_))
+        ));
     }
 
     #[tokio::test]

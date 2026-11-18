@@ -155,9 +155,6 @@ impl FilmBox {
         let cells = self.layout(margins);
         let boxes = self.image_boxes();
         for (index, cell) in cells.iter().enumerate() {
-            // Table C.13-3: an image box area with no image is painted with the
-            // empty-image density, so paint the cell before it gets an image.
-            canvas.fill_cell(cell, empty.background(), scale.pixels_per_mm);
             // PS3.3 C.11.1: ImageBoxPosition selects the cell (1-based). Fall back
             // to list order when a box omits the attribute.
             let position = (index + 1) as u16;
@@ -165,10 +162,18 @@ impl FilmBox {
                 Some(b) => b,
                 None => match boxes.get(index).filter(|b| b.position().is_none()) {
                     Some(b) => b,
-                    None => continue,
+                    None => {
+                        canvas.fill_cell(cell, empty.background(), scale.pixels_per_mm);
+                        continue;
+                    }
                 },
             };
             let Some(source) = image_box.images().first() else {
+                // Table C.13-3: EmptyImageDensity paints "the area of an image
+                // box that contains no image", so only an image-less cell takes
+                // it. An occupied cell keeps the film (border) density in the
+                // margins around its aspect-fitted image.
+                canvas.fill_cell(cell, empty.background(), scale.pixels_per_mm);
                 continue;
             };
             // docs §10: a cell that cannot be rendered fails the film. Skipping it
@@ -1108,6 +1113,21 @@ mod tests {
             0,
             "an image box with no image is the empty density"
         );
+
+        // The letterbox around an image is film area too: it keeps the border
+        // density, not the empty-image one. The 4x4 image fills a square inside
+        // the tall cell, so the rows below it are margin.
+        let mut occupied = film_with_one_box("", 128);
+        occupied.set_border_density("WHITE");
+        occupied.set_empty_image_density("BLACK");
+        let occupied = occupied
+            .render_to_image(10.0, scale, PrintDensity::Black)
+            .unwrap();
+        assert_eq!(
+            grey_at(&occupied, 105, 286),
+            255,
+            "a cell that holds an image keeps the border density around it"
+        );
     }
 
     #[test]
@@ -1599,10 +1619,10 @@ mod tests {
                 std::sync::Arc::new(crate::model::buffer::MemoryBuffer::from(desc)),
             ),
         ));
-        // 3212 high-aligned in a 16-bit word = 0xC8C0
+        // 3212 right-justified in a 16-bit 12-bit entry word
         let mut data = Vec::with_capacity(512);
         for _ in 0..256 {
-            data.extend_from_slice(&0xC8C0u16.to_ne_bytes());
+            data.extend_from_slice(&3212u16.to_ne_bytes());
         }
         item.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
@@ -1675,7 +1695,7 @@ mod tests {
         ));
         let mut data = Vec::new();
         for value in 0..4096u16 {
-            data.extend_from_slice(&(value << 4).to_le_bytes());
+            data.extend_from_slice(&value.to_ne_bytes());
         }
         lut.insert_or_update(crate::model::item::DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(
