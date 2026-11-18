@@ -87,17 +87,17 @@ Legend: ✅ implemented and tested. The codec **interfaces** (`Codec`, `CodecReg
 
 ```toml
 [dependencies]
-radicom = "0.2.0"
-radicom-network = "0.2.0"   # only if you need DIMSE networking
-radicom-json = "0.2.0"      # only if you need DICOM JSON / XML
+radicom = "0.3.0"
+radicom-network = "0.3.0"   # only if you need DIMSE networking
+radicom-json = "0.3.0"      # only if you need DICOM JSON / XML
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] } # networking examples
 ```
 
 `radicom-codecs` is a separate crate, not a feature of `radicom`. For compressed images, add a
-companion release whose `radicom` dependency accepts `0.2`, then call `radicom_codecs::install()`
-once at startup (see [Image Codecs](#image-codecs)). The codec interfaces are unchanged, but
-`radicom-codecs 0.1.2` depends on `radicom ^0.1.2`: combining it with `radicom 0.2` creates two core
-versions with separate codec registries. It does not register codecs in the `0.2` core.
+companion release whose `radicom` dependency accepts `0.3`, then call `radicom_codecs::install()`
+once at startup (see [Image Codecs](#image-codecs)). The codec interfaces are unchanged, but a codecs
+release that pins an older `radicom` creates two core versions with separate codec registries; it does
+not register codecs in the `0.3` core.
 
 Optional features of `radicom`:
 
@@ -107,7 +107,7 @@ Optional features of `radicom`:
 | `anonymize` | Compatibility feature; `radicom::anonymizer` is available without it |
 
 ```toml
-radicom = { version = "0.2.0", features = ["render", "anonymize"] }
+radicom = { version = "0.3.0", features = ["render", "anonymize"] }
 ```
 
 Other workspace features:
@@ -797,7 +797,7 @@ The mapping from fo-dicom to radicom — scope, intentional divergences and out-
 
 radicom's own code is licensed under the **MIT License** — see [LICENSE](LICENSE).
 
-Third-party data: the DICOM dictionary XML files reused from fo-dicom (and the tables generated from them) are licensed under the **Microsoft Public License (MS-PL)** and retain the fo-dicom copyright notice and attribution — see [NOTICE](NOTICE).
+Third-party data: the DICOM dictionary XML files reused from fo-dicom (and the tables generated from them) and the PS3.15 de-identification map are licensed under the **Microsoft Public License (MS-PL)** and retain the fo-dicom copyright notice and attribution — see [NOTICE](NOTICE) and, for the published crate, `radicom-dict`'s `dictionaries/ATTRIBUTION.md`.
 
 ## CI/CD
 
@@ -810,8 +810,8 @@ Third-party data: the DICOM dictionary XML files reused from fo-dicom (and the t
 crates.io API token with `publish-new` and `publish-update` scopes); releasing is done by pushing a tag:
 
 ```pwsh
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 The version lives once in the root `Cargo.toml` (`[workspace.package] version`, mirrored by the internal
@@ -823,6 +823,30 @@ Release notes are generated from the commit history, not written by hand: `relea
 commit subject between the previous tag and this one, plus a `compare` link (the first release lists the whole
 history and omits the link). To (re)generate the notes for a tag that was already published, run the `Release`
 workflow manually (**Actions → Release → Run workflow**) with that tag — a manual run never publishes crates.
+
+### Migrating from 0.2 to 0.3
+
+`radicom` follows SemVer for a `0.x` line: a breaking change bumps the minor version, so `0.3` is not
+source-compatible with `0.2`. The five breaking changes:
+
+- `ContentItem::referenced_sop` and `ContentItem::waveform` take one `ReferencedSop` instead of a slice
+  (PS3.3 C.18.3-C.18.5 allow exactly one Referenced SOP Sequence item). Replace `&[item]` with `item`.
+- The numeric element-read trait is `FromHostBytes` with `from_host` / `from_host_widened`; it reads the
+  in-memory host-order value that `EndianBuffer` produces for either file byte order. Rename any
+  `FromBytes` implementation you wrote.
+- `ImageBox` no longer exposes `MinDensity`/`MaxDensity` (PS3.3 Table C.13-5 gives an Image Box no density
+  attributes; they belong to the Presentation LUT / Printer modules) and the unused `Vr::max_value_length`
+  is gone.
+- `DicomGenerator::store_as_dicom` always writes native Explicit VR Little Endian MONOCHROME2 and drops
+  inherited colour, palette, ICC and lossy attributes; the film `Trim` border is drawn around every image.
+- `DicomDirectoryBuilder` skips an unreadable file like the scanner (`ScanErrorPolicy::Skip`) instead of
+  aborting the build; a file that parses but cannot be recorded is still an error.
+
+Behavior changes that can reject data an `0.2` build accepted: strict validation now rejects a DA/TM/DT
+range that ends before it begins and the ACR-NEMA date/time spellings, `add_file*` rejects a path that is
+not a conformant File ID, and the Presentation LUT Descriptor rules (bit depth 10-16, first mapped value
+0, one item, right-justified entries) are enforced. Upgrade the companion codec crate to a release whose
+`radicom` dependency accepts `0.3` before using compressed transfer syntaxes.
 
 ### Migrating from 0.1 to 0.2
 

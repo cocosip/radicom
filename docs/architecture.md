@@ -160,8 +160,9 @@ so they cannot drift from it. (A raw `(group, element)` pair in an ad-hoc query-
   or ≤ 8 bits → `OB`, otherwise `OW`). Without this a signed padding value reads as `65535` and
   re-writing it corrupts the dataset.
 - **A private creator reservation is scoped to one Item** (PS3.5 §7.8.1). The reader journals each
-  overwritten `(gggg,00bb)` slot and restores it when the item ends, so an item's creator neither leaks
-  into its parent/siblings nor inherits theirs.
+  overwritten `(gggg,00bb)` slot and restores it when the item ends, so an item's creator never leaks
+  into its parent or a sibling, and a sibling never inherits the previous item's creator. An inner item
+  still sees the creators declared by its enclosing item, which is what fo-dicom's reader exposes.
 
 ---
 
@@ -198,8 +199,18 @@ so they cannot drift from it. (A raw `(group, element)` pair in an ad-hoc query-
   `YYYY[MM[DD[HH[MM[SS[.F{1,6}]]]]]]` with a **bare** `+HHMM`/`-HHMM` offset. `&ZZXX` in PS3.5
   Table 6.2-1 is notation — `&` stands for the sign and is not a wire byte — so the legacy `&±HHMM`
   spelling is only tolerated on input. A bare offset is recognised after a complete 14-digit datetime,
-  which keeps `2024-2025` a year range. TM second `60` is the leap second and is accepted.
+  which keeps `2024-2025` a year range; the same offset is peeled off the *right* component of a range
+  (`…-20240101130000-0500`) so its sign is not counted as a second separator. TM second `60` is the
+  leap second and is accepted.
   Control characters below 0x20 (except the allowed escapes) and DEL (0x7F) are rejected in text VRs.
+- DA, TM and DT **ranges must be ordered**: `20240307-20240305` and `120000-090000` are validation
+  errors. DA (always full precision), complete (`HHMMSS`) TM and complete DT components are ordered;
+  components of different precision are not comparable (`0900` may mean `09:00:xx`) and are accepted.
+  fo-dicom's `ValidateDA`/`ValidateDT` never compare the two sides; a backwards range can never match a
+  query, so rejecting it is deliberate hardening rather than parity.
+- UR (0008,0120) has no dedicated validator in fo-dicom either: it is checked only for length, the
+  default repertoire and the general text rules (no control characters, no backslash). A URL is not
+  parsed or normalised, so any 0–2^32-2 byte conformant string round-trips unchanged.
 - VM checks honour the multiplicity step: `2-2n` requires an even value count, `3-3n` a multiple of three.
 - A binary numeric/AT value must be a whole number of VR units; a length that is not a multiple of the
   unit is rejected instead of being padded or truncated on write.
@@ -283,6 +294,11 @@ header is cut by the item boundary keeps the following element instead of consum
   already names the instance, as for a Media Storage Directory, which has no SOP Instance UID of its
   own; with neither present the save fails instead of inventing a UID that matches nothing in the data.
 - ACR-NEMA format is rejected on save.
+- A file without `(0002,0010)` transfer syntax (a bare dataset) is probed: the first **two** element
+  headers are validated under the candidate syntaxes, little endian first (ACR-NEMA 2.0 big endian first).
+  One header is ambiguous — a `UL`/`OW` value whose bytes read the same under both byte orders, or a
+  zero-length element such as a group length — so the second header is what tells a big-endian file from a
+  little-endian one instead of committing to a wrong byte order from a single field.
 
 ---
 
@@ -472,6 +488,14 @@ client/server. One tokio task per association. Locks must not be held across `.a
 - The service-class SCP initiates N-EVENT-REPORT. Without role selection the acceptor is SCP by default;
   the sender is gated by the same SCU-role predicate the receiver validates with, and a report with no
   registered handler is answered `Unrecognized Operation` rather than left unacknowledged.
+- **The client reads the socket only while an operation is in flight.** A report the SCP pushes after the
+  last response therefore stays unread until the next request or `release()`. Both answer it: an
+  operation's read loop dispatches pushed requests, and `release()` first drains whatever already arrived,
+  then answers a report that is still in flight before waiting for the A-RELEASE-RP (so a client that goes
+  idle after its last C-STORE/C-FIND still confirms the report and still releases cleanly). There is no
+  background reader task per association — that keeps the client's ownership and cancellation simple — so
+  an application that must react to a report immediately has to keep an operation in flight (a heartbeat
+  C-ECHO loop, or the next request). `serve_events` is deliberately not part of the API.
 - A Modality Worklist C-FIND is built from the Scheduled Procedure Step Sequence (§K.6.1.2.2), not from a
   Query/Retrieve Level; a strict MWL SCP rejects a stray `(0008,0052)`.
 - The client negotiates presentation contexts on the first request and **must renegotiate when switching
@@ -494,7 +518,8 @@ client/server. One tokio task per association. Locks must not be held across `.a
   deflated body under the same limit, and a body materialised outside that pipeline (a client-side response)
   is inflated under `ReadOptions::max_inflated_bytes` instead. Blocking file reads and parsing run on the
   blocking pool. A dataset that cannot be decoded is answered `0xC000` (Unable to process), distinct from a
-  resource shortfall (`0xA700`).
+  resource shortfall (`0xA700`); this holds for the reverse C-STORE path too, which answers the command
+  even though the dataset never became a request, instead of dropping the association.
 - Sub-operation counters must be populated from the actual results. Returning a defaulted summary makes a
   failed C-MOVE report success.
 - `max_clients` must actually be enforced (a semaphore or equivalent); a config field that no code path
@@ -582,7 +607,15 @@ client/server. One tokio task per association. Locks must not be held across `.a
   `(0004,1500)` — and on `/`, on every host alike: a File ID is not a host path, so the accepted spelling
   must not depend on the platform.
 - A DICOMDIR is always Explicit VR Little Endian (PS3.10 §8.1); `from_bytes` normalizes the loaded dataset
-  so a re-save stays conformant.
+  so a re-save stays conformant. A non-conformant big-endian source is still readable: the record scan
+  follows the source's byte order, so its stored links keep naming real item positions.
+- Reading a directory is iterative: the record scan walks item headers (skipping nested sequences by their
+  own header), and `walk()`/`validate()` use explicit stacks, so a crafted directory with tens of thousands
+  of nested records cannot overflow the thread stack.
+- When a file's bytes cannot be matched to the record items (a dataset round-trip, a deflated payload, or
+  a broken link chain), the records keep file order and the hierarchy is flattened. The flattening is
+  logged as a warning only when the directory *stores* links (a nonzero OFFSET_NEXT/LOWER/FIRST_ROOT/
+  LAST_ROOT); a directory that never had a hierarchy is not a problem worth a warning.
 
 ### 12.3 Structured Reports (SR-01/02)
 
@@ -616,10 +649,11 @@ client/server. One tokio task per association. Locks must not be held across `.a
 ### 12.4 Printing (PRINT-01/02)
 
 - Film Session / Film Box / Image Box / Presentation LUT are dataset-backed models.
-- Layout rendering reuses the render pipeline (BorderDensity film area, EmptyImageDensity image box
-  area, Trim box, per-cell aspect-fit, Polarity REVERSE, the MinDensity/MaxDensity window and the
-  SmoothingType filter). All of these are Film Box attributes (Table C.13-3) read from the dataset; an
-  Image Box SmoothingType overrides the film value (Table C.13-5).
+- Layout rendering reuses the render pipeline (BorderDensity film area including the letterbox around a
+  fitted image, EmptyImageDensity only for an image box area that holds no image, Trim box, per-cell
+  aspect-fit, Polarity REVERSE, the MinDensity/MaxDensity window and the SmoothingType filter). All of these
+  are Film Box attributes (Table C.13-3) read from the dataset; an Image Box SmoothingType overrides the
+  film value (Table C.13-5).
 - `Trim` surrounds **each image** on the film (Table C.13-3), so the border is drawn per image-box cell,
   not once around the film's outer edge.
 - `MagnificationType` treats `REPLICATE` and `NONE` as nearest-neighbour (no interpolation) and
@@ -630,7 +664,8 @@ client/server. One tokio task per association. Locks must not be held across `.a
 - Verify every tag against PS3.3 before use: `(2010,0120)` is MinDensity, `(2010,0500)` is
   ReferencedFilmSessionSequence, and `(2010,0510)` is ReferencedImageBoxSequence.
 - The Presentation LUT Descriptor is strict (PS3.3 C.11.4.1): bit depth 10-16 (never 8), first mapped value
-  always 0, one sequence item, and entries stored high-aligned in 16-bit words (`value >> (16 - bits)`).
+  always 0, one sequence item, and entries right-justified in 16-bit words (`word & ((1 << bits) - 1)`; High
+  Bit = Bits Stored - 1, PS3.5 §8.1.1).
 
 ### 12.5 Anonymization (ANON-01)
 
@@ -649,11 +684,14 @@ client/server. One tokio task per association. Locks must not be held across `.a
   sequence of the same tag and VR, so no fragment payload (an icon, a private blob) survives.
 - The `D` action must respect VR: numeric-string VRs (DS/IS) get a valid number such as `"0"`, never the
   word `ANONYMOUS`.
-- De-identification is declared, not implied (PS3.15 E.1.1): `anonymize_in_place` sets
-  PatientIdentityRemoved `(0012,0062)` = `YES` and DeidentificationMethod `(0012,0063)`.
-  `anonymize_file_in_place` syncs MediaStorageSOPInstanceUID with the anonymized dataset and drops the
-  identifying file-meta entries (source/sending/receiving AE titles, private information), which the writer
-  replaces with radicom's own implementation description on save.
+- De-identification is declared, not implied (PS3.15 E.1.1): when the Basic Profile column is in effect,
+  `anonymize_in_place` sets PatientIdentityRemoved `(0012,0062)` = `YES` and DeidentificationMethod
+  `(0012,0063)`. An options-only run (`AnonOptions::bit(..)` without the baseline) removes only what its
+  columns select, so it writes no declaration — the PHI may still be there.
+  `anonymize_file_in_place` syncs MediaStorageSOPInstanceUID with the anonymized dataset; when the Basic
+  Profile column is in effect it also drops the identifying file-meta entries (source/sending/receiving AE
+  titles, private information), which the writer replaces with radicom's own implementation description on
+  save. An options-only run leaves the file meta untouched.
 
 ---
 

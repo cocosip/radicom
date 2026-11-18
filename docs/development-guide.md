@@ -306,7 +306,7 @@ untracked `.cargo/` directory.
   pins under `[workspace.dependencies]` — followed by the normal checks, a commit, and a `vX.Y.Z` tag. Keep the
   tag equal to the version: `release.yml` rejects any other tag.
 - A bump also renames the peer-visible Implementation Version Name (`RADICOM <workspace version>`, currently
-  `RADICOM 0.2.0`): file meta (`radicom`) and association user information (`radicom-network`) both derive it
+  `RADICOM 0.3.0`): file meta (`radicom`) and association user information (`radicom-network`) both derive it
   from `CARGO_PKG_VERSION`, and a compile-time check rejects any name longer than the 16-byte SH limit, so a
   pre-release version must be shortened first.
 - Publishing needs a `CARGO_REGISTRY_TOKEN` repository secret (crates.io API token with `publish-new` and
@@ -319,8 +319,10 @@ untracked `.cargo/` directory.
   non-merge commit subject between the previous tag and this one, plus a `compare` link. The first release lists
   the whole history instead. A `workflow_dispatch` run with a tag input regenerates those notes for an existing
   tag without publishing anything, which is how a release that predates the notes job is backfilled.
-- The first public release was `v0.1.0`; the current release line is `v0.2.0`. See the root README's
-  migration section for Common Extended Negotiation initializers and the companion codec version requirement.
+- The first public release was `v0.1.0`; the current release line is `v0.3.0`. See the root README's
+  migration section for the `0.2` → `0.3` breaking changes (ContentItem Referenced SOP, `FromHostBytes`,
+  Image Box density, `store_as_dicom`, directory builder error policy) and the companion codec version
+  requirement.
   Local `cargo package`
   verification for `radicom`, `radicom-json` and `radicom-network` cannot resolve their own unpublished
   dependencies; that is expected, and the tag run publishes the crates in dependency order.

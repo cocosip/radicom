@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0] - 2026-11-18
 
 ### Changed
 
@@ -13,7 +13,7 @@
 - Strict validation rejects ACR-NEMA date/time forms (bare `±HHMM` DT offsets, `HH:MM:SS` TM), DEL in text
   VRs, undefined Specific Character Set terms, and VM counts that violate the multiplicity step.
 - Presentation LUT Descriptor follows PS3.3 C.11.4.1: bit depth 10-16, first mapped value 0, one sequence
-  item, entries high-aligned in 16-bit words.
+  item, entries right-justified in 16-bit words (High Bit = Bits Stored - 1, PS3.5 §8.1.1).
 - `BulkDataURI` is emitted only for the PS3.18 F.2.2 VRs; Native XML gains `xml:space="preserve"` and drops
   Group Length elements.
 - **Breaking:** `ImageBox` no longer exposes Min/MaxDensity (PS3.3 Table C.13-5 gives the Image Box no density
@@ -39,6 +39,8 @@
 - `ReadOptions::max_inflated_bytes` (default 1 GiB) caps deflate expansion of a dataset body.
 - `ServerOptions::progress_timeout` (default 60 s, `None` disables) bounds the wait for the next PDU while a
   peer has a message in flight, so a stalled peer cannot hold the association and its client slot.
+- `radicom_network::store::failure_response_for_command` builds the C-STORE failure response for a dataset
+  that never became a request (the reverse C-STORE path has only the command).
 
 ### Fixed
 
@@ -75,13 +77,52 @@
 - OF/OV/OL values read numerically, and a float or integer written to a FL/FD/OF/OD attribute is encoded as
   that binary VR instead of `IS`/`DS` text; `Dataset::try_get_str_ref` returns byte-backed string values.
 - A C-STORE whose dataset cannot be decoded answers `0xC000` (Unable to process) and a resource/size
-  shortfall answers `0xA700`, both distinct from `0x0110`; an N-ACTION/N-EVENT-REPORT failure reply keeps the
-  supplied Action/Event Type ID (PS3.7).
+  shortfall answers `0xA700`, both distinct from `0x0110`; this holds for the reverse C-STORE of a C-GET,
+  which answers the command even though the dataset never became a request, instead of dropping the
+  association. An N-ACTION/N-EVENT-REPORT failure reply keeps the supplied Action/Event Type ID (PS3.7).
 - `PixelData` counts frames correctly after `clear()`/`ensure_pixel_element`, which now create a fragment
   sequence for encapsulated data; an embedded overlay rejects a bit position inside the stored sample
   (including bit 0); `StructuredReport::validate` accepts an empty Type-2 Series Number.
 - JSON and MPR read and write in-memory values in host byte order (the earlier host-order fix had missed those
   two modules).
+- Presentation LUT entries are read right-justified (High Bit = Bits Stored - 1): 10-15-bit tables had been
+  shifted down, crushing a 12-bit print LUT to an eighth of its P-Value range.
+- Anonymization writes `PatientIdentityRemoved`/`DeidentificationMethod` only when the Basic Profile column
+  ran; an options-only set (`AnonOptions::bit(..)` without the baseline) no longer declares an identity it did
+  not remove.
+- ISO 2022: a run whose first term is `ISO 2022 IR 87` and that designates a Latin alternate (`ESC - A`)
+  decodes the alternate instead of handing it to the stateful JIS decoder, and half-width katakana includes
+  GL 0x5F.
+- The private-sequence VR probe skips an empty undefined-length item, so a private SQ whose first item is
+  empty is no longer misread as implicit VR; the write-side length API rejects duplicate tags like the writer.
+- `SetValue` on a private tag without a private-dictionary row stores the text as `LO` instead of skipping it,
+  and an integer written to a `DS` attribute is stored as `DS`, not `IS`.
+- A P-DATA receive limit no longer rejects a larger A-ASSOCIATE-AC/RQ (PS3.8 §9.3.2), and `progress_timeout`
+  also bounds a half-received PDU frame.
+- Printing: the letterbox inside a cell that holds an image keeps the border density (only an image box with
+  no image takes the empty-image density); the histogram window refuses a range wider than its bin array
+  instead of clipping it; palette LUT words are read in host byte order; overlay frame ranges and frame
+  offsets cannot overflow.
+- `StructuredReport::set_root` clears every value macro of the previous root, including the sequence-valued
+  ones (`ConceptCodeSequence`, `ReferencedSOPSequence`, `GraphicData`, temporal-coordinate lists).
+- Media: the DICOMDIR record scan follows the source's byte order, so a non-conformant big-endian directory
+  keeps its hierarchy instead of collapsing every record into a root; reading is iterative, so a crafted
+  chain of tens of thousands of nested records cannot overflow the thread stack; the flattened-hierarchy
+  warning is emitted only when the directory actually stores links.
+- Networking: an N-EVENT-REPORT the SCP pushed after the last response is answered by `release()` (it drains
+  what already arrived and answers a report still in flight before the A-RELEASE-RP), so a client that goes
+  idle after its last request no longer fails its release with "expected A-RELEASE-RP".
+- A dataset without file meta is probed with two element headers, so a big-endian dataset whose first value
+  reads the same under both byte orders is no longer misread as little endian.
+- Strict validation rejects a DA/TM/DT range that ends before it begins, and accepts a DT range whose right
+  component carries a bare `±HHMM` offset (its sign had been counted as a second separator).
+- A float written with an explicit integer VR (`US`/`SS`/`UL`/`SL`/`UV`/`SV`/`AT`) is converted to that
+  integer instead of being stored as text under it (which is unencodable and tripped a debug assertion);
+  an explicit `SQ` yields an empty item.
+- `CopyValue` resolves a dictionary-style private source tag (`(gggg,00ee)` plus its creator) to the block
+  the dataset assigned, instead of finding nothing.
+- `FileWindow::copy_to` sizes its chunk in 64 bits, so a large rewindable window no longer stalls on a host
+  where `usize` is 32 bits.
 
 ## [0.2.0] - 2026-11-09
 

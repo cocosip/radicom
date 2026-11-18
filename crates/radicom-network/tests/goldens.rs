@@ -2,7 +2,7 @@
 //! docs/architecture.md §11.1).
 //!
 //! The hex fixtures under `tests-data/goldens/` are produced by
-//! `cargo xtask regen-goldens`. Whitespace is ignored, so the comparison pins the
+//! `cargo run --package xtask -- regen-goldens`. Whitespace is ignored, so the comparison pins the
 //! exact encoded byte sequence regardless of line wrapping.
 
 use std::fmt::Write as _;
@@ -158,7 +158,7 @@ fn check(golden: &str, bytes: Vec<u8>) {
     assert_eq!(
         normalized(&produced),
         normalized(&expected),
-        "PDU golden {golden} is stale; run `cargo xtask regen-goldens`"
+        "PDU golden {golden} is stale; run `cargo run --package xtask -- regen-goldens`"
     );
 }
 

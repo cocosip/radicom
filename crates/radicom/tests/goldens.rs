@@ -1,7 +1,7 @@
 //! Golden snapshot baselines (docs/development-guide.md §3.4).
 //!
 //! The golden files under `tests-data/goldens/` are produced by
-//! `cargo xtask regen-goldens` from deterministic corpus files. These tests fail
+//! `cargo run --package xtask -- regen-goldens` from deterministic corpus files. These tests fail
 //! when the produced output drifts from the committed golden.
 
 use std::path::PathBuf;
@@ -28,7 +28,7 @@ fn dump_goldens_are_current() {
             .unwrap_or_else(|e| panic!("read golden {golden}: {e}"));
         assert_eq!(
             produced, expected,
-            "dump golden {golden} is stale; run `cargo xtask regen-goldens`"
+            "dump golden {golden} is stale; run `cargo run --package xtask -- regen-goldens`"
         );
     }
 }

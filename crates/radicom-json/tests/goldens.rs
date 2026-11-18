@@ -1,6 +1,6 @@
 //! JSON golden snapshot baseline (docs/development-guide.md §3.4).
 //!
-//! Regenerate with `cargo xtask regen-goldens`; this test fails when the JSON
+//! Regenerate with `cargo run --package xtask -- regen-goldens`; this test fails when the JSON
 //! output drifts from the committed `tests-data/goldens/GH178.json`.
 
 use std::path::PathBuf;
@@ -21,6 +21,6 @@ fn json_golden_is_current() {
         .expect("read golden GH178.json");
     assert_eq!(
         produced, expected,
-        "json golden is stale; run `cargo xtask regen-goldens`"
+        "json golden is stale; run `cargo run --package xtask -- regen-goldens`"
     );
 }
