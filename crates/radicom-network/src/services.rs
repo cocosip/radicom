@@ -600,11 +600,38 @@ fn store_file_name(instance_uid: &str) -> String {
             }
         })
         .collect();
-    let cleaned = cleaned.trim_start_matches('.').to_string();
+    // A stem must not end in a dot or a space: Windows silently drops both, so
+    // "1.2.3." and "1.2.3" would name the same file.
+    let cleaned = cleaned
+        .trim_start_matches('.')
+        .trim_end_matches(['.', ' '])
+        .to_string();
     if cleaned.is_empty() {
-        "instance".to_string()
-    } else {
-        cleaned
+        return "instance".to_string();
+    }
+    // The peer controls this string: `CON` (or `NUL`, `COM1`, ...) would open a
+    // device instead of a file, so the stem is prefixed to keep it a plain name.
+    if is_windows_device_name(&cleaned) {
+        return format!("_{cleaned}");
+    }
+    cleaned
+}
+
+/// True when Windows reserves `stem` as a device name.
+///
+/// The reserved set applies with or without an extension (`CON`, `CON.txt`), so
+/// the part before the first dot is what decides.
+fn is_windows_device_name(stem: &str) -> bool {
+    let base = stem.split('.').next().unwrap_or(stem);
+    let upper = base.to_ascii_uppercase();
+    if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
+        return true;
+    }
+    match upper.split_at_checked(3) {
+        Some((prefix, digit)) if prefix == "COM" || prefix == "LPT" => {
+            digit.len() == 1 && matches!(digit.as_bytes()[0], b'1'..=b'9')
+        }
+        _ => false,
     }
 }
 
@@ -995,6 +1022,30 @@ mod tests {
         assert_eq!(store_file_name("1.2.3.4"), "1.2.3.4");
         assert_eq!(store_file_name("../../etc/passwd"), "_.._etc_passwd");
         assert_eq!(store_file_name("..."), "instance");
+    }
+
+    #[test]
+    fn file_store_provider_never_names_a_windows_device() {
+        // The UID is peer-controlled: "CON" would open the console device, not a
+        // file, so the stem is prefixed. "CONSOLE" is an ordinary name.
+        for (uid, expected) in [
+            ("CON", "_CON"),
+            ("nul", "_nul"),
+            ("COM1", "_COM1"),
+            ("LPT9", "_LPT9"),
+            ("CONSOLE", "CONSOLE"),
+            ("1.2.3.4", "1.2.3.4"),
+            // Windows reserves the device name with any extension too
+            ("NUL.1.2.3", "_NUL.1.2.3"),
+        ] {
+            assert_eq!(store_file_name(uid), expected, "for {uid}");
+        }
+        assert_eq!(
+            store_file_name("1.2.3.4."),
+            "1.2.3.4",
+            "a trailing dot is stripped, not carried into the file name"
+        );
+        assert_eq!(store_file_name("CON."), "_CON");
     }
 
     #[tokio::test]

@@ -216,6 +216,23 @@ struct Parser<'a, R: Read + Seek> {
     /// Set when `partial_on_eof` absorbed a truncated value.
     suspended: bool,
     private_creators: &'a mut PrivateCreators,
+    /// Slots overwritten while parsing the current Item, with the value they
+    /// held before. PS3.5 §7.8.1 scopes a private creator reservation to one
+    /// Item, so they are restored when the item ends.
+    creator_journal: Vec<(
+        u16,
+        u8,
+        Option<Arc<crate::model::private_creator::PrivateCreator>>,
+    )>,
+    /// Dataset-scoped `(0028,0103) Pixel Representation`, used to resolve the
+    /// dictionary's "US or SS" attributes (PS3.6). Saved/restored per Item.
+    pixel_representation: Option<u16>,
+    /// Dataset-scoped `(0028,0100) Bits Allocated`, used to resolve the OB/OW
+    /// ambiguity of an implicitly encoded Pixel Data element.
+    bits_allocated: Option<u16>,
+    /// Pixel data of the parsed syntax is encapsulated (never native), so its
+    /// VR is OB regardless of Bits Allocated (PS3.5 §8.2).
+    encapsulated: bool,
 }
 
 impl<'a, R: Read + Seek> Parser<'a, R> {
@@ -260,8 +277,22 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
             [] => Vr::Un,
             [only] => *only,
             many => {
-                if many.contains(&Vr::Ob) && many.contains(&Vr::Ow) {
+                if *tag == Tag::PIXEL_DATA
+                    && (self.encapsulated || self.bits_allocated.is_some_and(|bits| bits <= 8))
+                {
+                    // PS3.5 §8.2: encapsulated pixel data is OB; native pixel
+                    // data is OB up to 8 bits and OW above.
+                    Vr::Ob
+                } else if many.contains(&Vr::Ob) && many.contains(&Vr::Ow) {
                     Vr::Ow
+                } else if many.contains(&Vr::Us) && many.contains(&Vr::Ss) {
+                    // PS3.3 C.7.6.3.1.2 Note / PS3.6 "US or SS": the sign of
+                    // the stored value depends on Pixel Representation.
+                    if self.pixel_representation == Some(1) {
+                        Vr::Ss
+                    } else {
+                        Vr::Us
+                    }
                 } else {
                     many[0]
                 }
@@ -790,6 +821,16 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
             }
             Err(e) => return Err(e),
         };
+        // Dataset context that disambiguates dictionary VRs: Pixel
+        // Representation resolves "US or SS" and Bits Allocated resolves the
+        // native OB/OW form of Pixel Data. Buffers are host-order normalized.
+        if tag.group() == 0x0028 {
+            match tag.element() {
+                0x0103 => self.pixel_representation = host_u16(&buffer)?,
+                0x0100 => self.bits_allocated = host_u16(&buffer)?,
+                _ => {}
+            }
+        }
         // RD-05: private creator tracking
         if tag.is_private() && tag.is_private_creator_slot() && vr == Vr::Lo {
             let creator = Arc::new(crate::model::private_creator::PrivateCreator::new(
@@ -799,8 +840,17 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
             ));
             self.private_creators
                 .entry(group)
-                .or_insert_with(|| Box::new(std::array::from_fn(|_| None)))
-                [(element & 0xFF) as usize] = Some(creator);
+                .or_insert_with(|| Box::new(std::array::from_fn(|_| None)));
+            let slot = (element & 0xFF) as u8;
+            let previous = self
+                .private_creators
+                .get_mut(&group)
+                .expect("creator table was just inserted")[slot as usize]
+                .take();
+            self.creator_journal.push((group, slot, previous));
+            self.private_creators
+                .get_mut(&group)
+                .expect("creator table was just inserted")[slot as usize] = Some(creator);
         }
         Ok(Step::Element {
             raw,
@@ -952,6 +1002,15 @@ fn io_err(e: std::io::Error, position: u64) -> Error {
     io_err_need(e, position, 0)
 }
 
+/// Reads a scalar `US` value from a (host-order normalized) buffer; `None` for
+/// an empty or truncated value.
+fn host_u16(buffer: &SharedBuffer) -> Result<Option<u16>, Error> {
+    let data = buffer.data()?;
+    Ok(data
+        .get(..2)
+        .map(|bytes| u16::from_ne_bytes([bytes[0], bytes[1]])))
+}
+
 /// Like [`io_err`], but records how many bytes the read expected. `read_exact`
 /// cannot report that from `io::Error`, so the call site supplies it.
 fn io_err_need(e: std::io::Error, position: u64, needed: u64) -> Error {
@@ -982,6 +1041,10 @@ impl DicomReader {
             stopped: false,
             suspended: false,
             private_creators: &mut private_creators,
+            creator_journal: Vec::new(),
+            pixel_representation: None,
+            bits_allocated: None,
+            encapsulated: syntax.is_encapsulated(),
         };
         parser.parse_level(observer, stop, Mode::Top, 0)?;
         Ok(if parser.suspended {
@@ -1128,14 +1191,38 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
     ) -> Result<LevelEnd, Error> {
         observer.on_begin_sequence_item(&self.ctx(pos), defined)?;
         self.enter()?;
+        let journal_len = self.creator_journal.len();
+        let saved_representation = self.pixel_representation;
+        let saved_bits = self.bits_allocated;
         let inner = match defined {
             Some(len) => Mode::Limited { limit: len as u64 },
             None => Mode::ItemDelimiter,
         };
         let end = self.parse_level(observer, None, inner, pos)?;
+        // PS3.5 §7.8.1: a private creator reservation is scoped to one Item; it
+        // does not leak back into the parent and siblings do not inherit it.
+        self.restore_private_creators(journal_len);
+        // The per-Item dataset context holds for the top-level dataset only;
+        // a value inside an Item must not change its parent's or siblings'.
+        self.pixel_representation = saved_representation;
+        self.bits_allocated = saved_bits;
         self.depth -= 1;
         observer.on_end_sequence_item(&self.here()?)?;
         Ok(end)
+    }
+
+    /// Rolls the private creator table back to its state at `len` journal
+    /// entries, undoing every registration inside the Item that just ended.
+    fn restore_private_creators(&mut self, len: usize) {
+        while self.creator_journal.len() > len {
+            let (group, slot, previous) = self
+                .creator_journal
+                .pop()
+                .expect("journal length was just checked");
+            if let Some(slots) = self.private_creators.get_mut(&group) {
+                slots[slot as usize] = previous;
+            }
+        }
     }
 }
 
@@ -1412,6 +1499,131 @@ mod tests {
         Ok(builder.into_dataset())
     }
 
+    /// An implicit-VR-little-endian element header plus value.
+    fn implicit_element(group: u16, element: u16, value: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&group.to_le_bytes());
+        bytes.extend_from_slice(&element.to_le_bytes());
+        bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(value);
+        bytes
+    }
+
+    fn read_with_syntax(
+        bytes: &[u8],
+        syntax: &Arc<TransferSyntax>,
+    ) -> Result<crate::model::dataset::Dataset, Error> {
+        use crate::io::dataset_builder::DatasetBuilder;
+        let mut source =
+            ByteSourceReader::new(std::io::Cursor::new(bytes.to_vec()), syntax.endian());
+        let mut builder = DatasetBuilder::with_transfer_syntax(syntax.clone());
+        DicomReader::default().read(&mut source, syntax, &mut builder, None)?;
+        Ok(builder.into_dataset())
+    }
+
+    #[test]
+    fn implicit_us_or_ss_and_pixel_data_are_resolved_from_dataset_context() {
+        use crate::io::writer::DicomWriter;
+        use crate::model::item::DicomItem;
+        use crate::model::transfer_syntax::syntaxes;
+
+        // PS3.3 C.7.6.3.1.2 Note / PS3.6 "US or SS": with Pixel Representation
+        // 1 (signed), Pixel Padding Value -1 must be SS -1, not US 65535.
+        let mut bytes = implicit_element(0x0028, 0x0103, &1u16.to_le_bytes());
+        bytes.extend_from_slice(&implicit_element(0x0028, 0x0100, &16u16.to_le_bytes()));
+        bytes.extend_from_slice(&implicit_element(0x0028, 0x0120, &(-1i16).to_ne_bytes()));
+        bytes.extend_from_slice(&implicit_element(0x0028, 0x0106, &(-2i16).to_ne_bytes()));
+        let ds = read_implicit(&bytes).expect("implicit dataset parses");
+        let vr_of = |ds: &crate::model::dataset::Dataset, element: u16| -> Option<Vr> {
+            ds.items()
+                .find(|item| item.tag().group() == 0x0028 && item.tag().element() == element)
+                .and_then(|item| match item {
+                    DicomItem::Element(e) => Some(e.vr()),
+                    _ => None,
+                })
+        };
+        assert_eq!(
+            vr_of(&ds, 0x0120),
+            Some(Vr::Ss),
+            "signed Pixel Representation selects SS"
+        );
+        assert_eq!(
+            vr_of(&ds, 0x0106),
+            Some(Vr::Ss),
+            "signed Pixel Representation selects SS for the min pixel value"
+        );
+        assert_eq!(
+            ds.get::<i16>(Tag::PIXEL_PADDING_VALUE).unwrap(),
+            -1,
+            "the value is a signed -1, not 65535"
+        );
+
+        // A write/read round-trip under Implicit VR keeps the sign.
+        let mut out = Vec::new();
+        let syntax = syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone();
+        DicomWriter::default()
+            .write_dataset(&ds, &syntax, &mut out)
+            .unwrap();
+        let back = read_implicit(&out).unwrap();
+        assert_eq!(back.get::<i16>(Tag::PIXEL_PADDING_VALUE).unwrap(), -1);
+
+        // Pixel Representation 0 (unsigned) keeps US.
+        let mut bytes = implicit_element(0x0028, 0x0103, &0u16.to_le_bytes());
+        bytes.extend_from_slice(&implicit_element(0x0028, 0x0120, &0xFFFFu16.to_le_bytes()));
+        let ds = read_implicit(&bytes).unwrap();
+        assert_eq!(
+            vr_of(&ds, 0x0120),
+            Some(Vr::Us),
+            "unsigned Pixel Representation selects US"
+        );
+
+        // Implicit native Pixel Data: 8-bit is OB, 16-bit is OW.
+        for (bits, expected) in [(8u16, Vr::Ob), (16u16, Vr::Ow)] {
+            let mut bytes = implicit_element(0x0028, 0x0100, &bits.to_le_bytes());
+            bytes.extend_from_slice(&implicit_element(0x7FE0, 0x0010, &[0u8; 4]));
+            let ds = read_implicit(&bytes).unwrap();
+            let vr = ds
+                .items()
+                .find(|item| item.tag() == &Tag::PIXEL_DATA)
+                .and_then(|item| match item {
+                    DicomItem::Element(e) => Some(e.vr()),
+                    _ => None,
+                });
+            assert_eq!(vr, Some(expected), "{bits}-bit native pixel data");
+        }
+
+        // Encapsulated fragments are always OB, regardless of Bits Allocated.
+        let encapsulated = crate::model::transfer_syntax::register(
+            "1.2.826.0.1.3680043.10.1330.4242",
+            "Implicit VR encapsulated (test)",
+            Endian::Little,
+            false,
+            true,
+        );
+        let mut bytes = implicit_element(0x0028, 0x0100, &16u16.to_le_bytes());
+        bytes.extend_from_slice(&implicit_element(0x7FE0, 0x0010, &[]));
+        // replace the defined length with the undefined-length marker and
+        // append one fragment plus the sequence delimiter
+        let len_at = bytes.len() - 4;
+        bytes[len_at..].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        bytes.extend_from_slice(&0xE000u16.to_le_bytes());
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&[1, 2, 3, 4]);
+        bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        bytes.extend_from_slice(&0xE0DDu16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        let ds = read_with_syntax(&bytes, &encapsulated).unwrap();
+        let vr = ds
+            .items()
+            .find_map(|item| match item {
+                DicomItem::Fragments(f) => Some(f.vr()),
+                _ => None,
+            })
+            .expect("encapsulated pixel data is a fragment sequence");
+        assert_eq!(vr, Vr::Ob, "encapsulated pixel data is OB");
+    }
+
     /// An explicit-VR element with the length form its VR requires.
     fn explicit_element(group: u16, element: u16, vr: Vr, value: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -1436,6 +1648,69 @@ mod tests {
         bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
         bytes.extend_from_slice(body);
         bytes
+    }
+
+    #[test]
+    fn private_creators_are_scoped_to_their_item() {
+        // PS3.5 §7.8.1: a private creator reserves element numbers for one Item
+        // only; items neither inherit nor leak creators to their parent/siblings.
+        let mut body = Vec::new();
+        body.extend_from_slice(&explicit_element(0x0029, 0x0010, Vr::Lo, b"BETA"));
+        body.extend_from_slice(&explicit_element(0x0029, 0x1001, Vr::Lo, b"inner"));
+
+        let mut bytes = explicit_element(0x0029, 0x0010, Vr::Lo, b"ACME");
+        bytes.extend_from_slice(&explicit_element(
+            0x0029,
+            0x1000,
+            Vr::Sq,
+            &defined_item(&body),
+        ));
+        // resolved *after* the item that re-registered (0029,0010)
+        bytes.extend_from_slice(&explicit_element(0x0029, 0x1001, Vr::Lo, b"parent"));
+
+        let ds = read_with(&bytes, DicomReader::default()).expect("dataset parses");
+        let creator_of = |ds: &crate::model::dataset::Dataset, element: u16| {
+            ds.items()
+                .find(|item| item.tag().group() == 0x0029 && item.tag().element() == element)
+                .and_then(|item| item.tag().private_creator().map(|c| c.as_str().to_string()))
+        };
+        assert_eq!(
+            creator_of(&ds, 0x1001).as_deref(),
+            Some("ACME"),
+            "the parent creator survives the item's creator"
+        );
+
+        // A sibling item without its own creator sees the parent's ACME.
+        let mut first_item = Vec::new();
+        first_item.extend_from_slice(&explicit_element(0x0029, 0x0010, Vr::Lo, b"BETA"));
+        first_item.extend_from_slice(&explicit_element(0x0029, 0x1001, Vr::Lo, b"one"));
+        let second_item = explicit_element(0x0029, 0x1001, Vr::Lo, b"two");
+        let mut bytes = explicit_element(0x0029, 0x0010, Vr::Lo, b"ACME");
+        let mut sq_body = defined_item(&first_item);
+        sq_body.extend_from_slice(&defined_item(&second_item));
+        bytes.extend_from_slice(&explicit_element(0x0029, 0x1000, Vr::Sq, &sq_body));
+
+        let ds = read_with(&bytes, DicomReader::default()).expect("dataset parses");
+        let sequence = ds
+            .items()
+            .find_map(|item| match item {
+                crate::model::item::DicomItem::Sequence(seq) if seq.tag().element() == 0x1000 => {
+                    Some(seq)
+                }
+                _ => None,
+            })
+            .expect("private sequence");
+        assert_eq!(sequence.items().len(), 2);
+        let sibling = &sequence.items()[1];
+        let creator = sibling
+            .items()
+            .find(|item| item.tag().element() == 0x1001)
+            .and_then(|item| item.tag().private_creator().map(|c| c.as_str().to_string()));
+        assert_eq!(
+            creator.as_deref(),
+            Some("ACME"),
+            "a sibling item must not inherit the previous item's creator"
+        );
     }
 
     #[test]

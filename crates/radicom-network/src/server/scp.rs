@@ -12,6 +12,9 @@ pub struct DicomServer<P: ServiceProvider> {
     local_addr: std::net::SocketAddr,
     _registration: crate::registry::DicomServerRegistration,
     connected_clients: Arc<AtomicUsize>,
+    /// `max_clients` as a shared limiter, so `run_until` and `accept_one` obey
+    /// the same bound instead of the single-shot entry point ignoring it.
+    slots: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl<P: ServiceProvider + 'static> DicomServer<P> {
@@ -30,6 +33,9 @@ impl<P: ServiceProvider + 'static> DicomServer<P> {
         let listener = TcpListener::bind(addr).await.map_err(NetworkError::Io)?;
         let local_addr = listener.local_addr().map_err(NetworkError::Io)?;
         let registration = crate::registry::DicomServerRegistry::register(local_addr)?;
+        // 0 = unlimited (a semaphore with no permits would block forever)
+        let slots = (options.max_clients > 0)
+            .then(|| Arc::new(tokio::sync::Semaphore::new(options.max_clients)));
         Ok(DicomServer {
             listener,
             provider,
@@ -37,6 +43,7 @@ impl<P: ServiceProvider + 'static> DicomServer<P> {
             local_addr,
             _registration: registration,
             connected_clients: Arc::new(AtomicUsize::new(0)),
+            slots,
         })
     }
 
@@ -69,9 +76,8 @@ impl<P: ServiceProvider + 'static> DicomServer<P> {
         let provider = self.provider.clone();
         let options = self.options.clone();
         let connected_clients = self.connected_clients.clone();
-        // 0 = unlimited (a semaphore with no permits would block forever)
-        let slots = (options.max_clients > 0)
-            .then(|| Arc::new(tokio::sync::Semaphore::new(options.max_clients)));
+        // the limiter lives on the server, so `accept_one` obeys the same bound
+        let slots = self.slots.clone();
         loop {
             // B: take a client slot *before* accepting, so a full server leaves
             // the next peer in the listen backlog instead of accepting it and
@@ -153,7 +159,21 @@ impl<P: ServiceProvider + 'static> DicomServer<P> {
     }
 
     /// Serves exactly one connection, then returns (test and single-shot use).
+    ///
+    /// `max_clients` applies here too: the slot is taken before accepting, so a
+    /// second single-shot accept waits for a free slot instead of serving
+    /// concurrently with the connection that already holds it.
     pub async fn accept_one(&self) -> Result<()> {
+        let _permit = match &self.slots {
+            Some(slots) => Some(
+                slots
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| NetworkError::protocol("connection limiter closed"))?,
+            ),
+            None => None,
+        };
         let (stream, _peer) = self.listener.accept().await.map_err(NetworkError::Io)?;
         crate::transport::apply_options(&stream, &self.options.tcp)?;
         self.connected_clients.fetch_add(1, Ordering::AcqRel);
@@ -187,6 +207,10 @@ where
     // reports open/close so every return path is covered ------------------
     let metrics = options.metrics.clone();
     let _connection = crate::observability::ConnectionGuard::new(metrics.clone());
+    // One wrapper bounds every write of this connection (`write_timeout`): a
+    // peer that negotiates and then stops reading cannot pin the task and its
+    // client slot inside a socket write (§11.4).
+    let stream = crate::transport::TimedWriter::new(stream, options.write_timeout);
     let mut stream = crate::observability::CountingStream::new(stream, metrics.clone());
 
     let result = serve_connection_inner(&mut stream, provider, options).await;
@@ -1461,26 +1485,39 @@ where
     /// `select!` that drops this future keeps any half-read frame for the next
     /// call instead of resynchronising mid-frame (review #13).
     /// Queues another negotiated request while a streaming service is active.
+    ///
+    /// Only a *request* consumes the peer's negotiated asynchronous-operation
+    /// window (PS3.7 §9.3.1). A response is not an incoming operation — the peer
+    /// may answer a later-deferred request of this side after the fact — so it is
+    /// parked without counting. Diagnosing it as a window violation told the
+    /// peer it had broken a limit it never touched.
     pub(crate) fn defer(&mut self, unit: MessageUnit) -> Result<()> {
-        if self.incoming_window <= 1 {
-            return Err(NetworkError::protocol(
-                "unexpected message while a request is in flight",
-            ));
-        }
+        let mut incoming_operation = false;
         if unit.stream == Stream::Command {
             let command = command_from_bytes(&unit.bytes)?;
             self.accepted
                 .validate_request(unit.context_id, &command, true)?;
-            if command.field != CommandField::CCancelRq {
-                if crate::dimse::response_field(command.field).is_none()
-                    || self.deferred_requests + 1 >= self.incoming_window
-                {
-                    return Err(NetworkError::protocol(
-                        "peer exceeded the negotiated asynchronous-operation window",
-                    ));
-                }
-                self.deferred_requests += 1;
+            incoming_operation =
+                command.field.is_request() && command.field != CommandField::CCancelRq;
+        }
+        if incoming_operation {
+            if self.incoming_window <= 1 {
+                return Err(NetworkError::protocol(
+                    "unexpected message while a request is in flight",
+                ));
             }
+            if self.deferred_requests + 1 >= self.incoming_window {
+                return Err(NetworkError::protocol(
+                    "peer exceeded the negotiated asynchronous-operation window",
+                ));
+            }
+            self.deferred_requests += 1;
+        } else if unit.stream != Stream::Command && self.incoming_window <= 1 {
+            // a dataset can only follow a deferred request, and with a window of
+            // one no request may be deferred at all
+            return Err(NetworkError::protocol(
+                "unexpected message while a request is in flight",
+            ));
         }
         // a spooled dataset counts its file length: parking it must not let a
         // peer fill the temp directory instead of memory (H3)
@@ -1879,9 +1916,10 @@ where
             let command = event.to_command();
             self.send_with_dataset(context_id, &command, event.dataset.as_ref(), &target)
                 .await?;
-            // the response is informational: the N-ACTION was answered already,
-            // so a rejected report must not fail the association
-            let _ = self.await_n_response(message_id, expected, &target).await?;
+            // The reply is informational for the caller, but a peer that
+            // violates the N-EVENT-REPORT exchange still ends the association:
+            // `?` propagates, it does not discard the error.
+            self.await_n_response(message_id, expected, &target).await?;
         }
         Ok(())
     }
@@ -2805,13 +2843,22 @@ where
 /// True for failures that mean the association itself is unusable.
 ///
 /// Everything else — a missing SOP class, an instance without the UIDs needed
-/// to address it, a transcode that cannot run — describes one sub-operation,
-/// so C-GET records it as failed and carries on with the next instance.
+/// to address it, a transcode that cannot run (a local `InvalidData` failure,
+/// reported before a byte of the message is written) — describes one
+/// sub-operation, so C-GET and C-MOVE record it as failed and carry on with the
+/// next instance.
 pub fn is_fatal(error: &NetworkError) -> bool {
-    matches!(
-        error,
-        NetworkError::Io(_) | NetworkError::Abort { .. } | NetworkError::ClosedPrematurely { .. }
-    )
+    match error {
+        // a transport failure of any other kind (EOF, reset, a write that made
+        // no progress) means the stream is gone; `InvalidData` is this side's
+        // own encode/decode failure and leaves the association usable
+        NetworkError::Io(io_error) => io_error.kind() != std::io::ErrorKind::InvalidData,
+        NetworkError::Abort { .. }
+        | NetworkError::ClosedPrematurely { .. }
+        | NetworkError::WriteTimedOut { .. }
+        | NetworkError::MessageTooLarge => true,
+        _ => false,
+    }
 }
 
 /// Sends a command-only message (§11.1).

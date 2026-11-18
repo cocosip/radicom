@@ -13,9 +13,10 @@
 //!
 //! There is no reader: XML is a debugging/interchange export only. PN expands
 //! to `Alphabetic`/`Ideographic`/`Phonetic` child elements, binary VRs use
-//! `<InlineBinary>` (base64), sequences nest their items inside the same
-//! `<DicomAttribute>` element, and encapsulated pixel data becomes numbered
-//! `<Fragment>` elements.
+//! `<InlineBinary>` (base64), and sequences nest their items inside the same
+//! `<DicomAttribute>` element. Encapsulated pixel data (a fragment sequence) is
+//! not representable: PS3.19 has no `Fragment` element and allows at most one
+//! `<InlineBinary>` per attribute, so it is a typed error.
 
 use base64::Engine as _;
 use radicom::model::dataset::Dataset;
@@ -47,10 +48,13 @@ fn write_dataset(out: &mut String, dataset: &Dataset, depth: usize) -> Result<()
         match item {
             DicomItem::Element(element) => write_element(out, element, depth)?,
             DicomItem::Sequence(sequence) => write_sequence(out, sequence, depth)?,
-            // encapsulated pixel data exports as numbered <Fragment> elements,
-            // which is what fo-dicom's DicomXML writer does too
-            DicomItem::Fragments(fragments) => {
-                write_fragments(out, fragments.tag(), fragments.vr(), fragments, depth)?
+            // PS3.19 has no <Fragment> element and allows at most one
+            // <InlineBinary> per attribute, so the Native DICOM Model cannot
+            // represent encapsulated pixel data (the JSON side rejects it too).
+            DicomItem::Fragments(_) => {
+                return Err(Error::Data(DataError::Other {
+                    message: "encapsulated pixel data (a fragment sequence) cannot be represented in the Native DICOM Model".to_string(),
+                }))
             }
         }
     }
@@ -66,7 +70,7 @@ fn indent(out: &mut String, depth: usize) {
 /// Writes a `<DicomAttribute>` for one element.
 fn write_element(out: &mut String, element: &DicomElement, depth: usize) -> Result<(), Error> {
     indent(out, depth);
-    write_attribute_open(out, element.tag(), element.vr());
+    write_attribute_open(out, element.tag(), element.vr())?;
     out.push('>');
     out.push('\n');
 
@@ -84,22 +88,40 @@ fn write_element(out: &mut String, element: &DicomElement, depth: usize) -> Resu
     Ok(())
 }
 
-/// `<DicomAttribute tag=.. vr=.. keyword=..>` (no closing bracket).
-fn write_attribute_open(out: &mut String, tag: &Tag, vr: Vr) {
-    let keyword = radicom::default_dictionary().entry(tag).keyword.to_string();
+/// `<DicomAttribute tag=.. vr=.. keyword=.. privateCreator=..>` (no closing
+/// bracket).
+///
+/// PS3.19 A.1.5-2: a private data element's tag hides the block number
+/// (`gggg00ee`) and is only valid together with its `privateCreator`, so one
+/// without a creator is a typed error. A private creator-slot element keeps its
+/// real tag and carries no creator. Only a PS3.6 keyword is written: unknown,
+/// masked and private tags get none.
+fn write_attribute_open(out: &mut String, tag: &Tag, vr: Vr) -> Result<(), Error> {
+    let mut xml_tag = tag.to_json_string();
+    let mut creator = None;
+    if tag.is_private() && tag.element() > 0x00FF {
+        let Some(private_creator) = tag.private_creator() else {
+            return Err(Error::Data(DataError::Other {
+                message: format!(
+                    "private tag {tag} has no private creator: the Native DICOM Model requires a privateCreator attribute (PS3.19 A.1.5-2)"
+                ),
+            }));
+        };
+        xml_tag = format!("{:04X}00{:02X}", tag.group(), tag.element() & 0x00FF);
+        creator = Some(private_creator.as_str());
+    }
     let _ = write!(
         out,
-        "<DicomAttribute tag=\"{}\" vr=\"{}\"",
-        tag.to_json_string(),
+        "<DicomAttribute tag=\"{xml_tag}\" vr=\"{}\"",
         vr.code()
     );
-    if !keyword.is_empty() {
-        let _ = write!(out, " keyword=\"{}\"", escape(&keyword));
+    if let Some((keyword, _)) = crate::keyword_and_name(tag) {
+        let _ = write!(out, " keyword=\"{}\"", escape(keyword));
     }
-    // private creators carry the creator name as an attribute
-    if let Some(creator) = tag.private_creator() {
-        let _ = write!(out, " privateCreator=\"{}\"", escape(creator.as_str()));
+    if let Some(creator) = creator {
+        let _ = write!(out, " privateCreator=\"{}\"", escape(creator));
     }
+    Ok(())
 }
 
 fn write_values(out: &mut String, element: &DicomElement, depth: usize) -> Result<(), Error> {
@@ -279,7 +301,7 @@ fn write_inline_binary(
 /// Writes a sequence attribute with its items nested as `<Item>` (§12.1).
 fn write_sequence(out: &mut String, sequence: &DicomSequence, depth: usize) -> Result<(), Error> {
     indent(out, depth);
-    write_attribute_open(out, sequence.tag(), Vr::Sq);
+    write_attribute_open(out, sequence.tag(), Vr::Sq)?;
     out.push_str(">\n");
     for (index, item) in sequence.items().iter().enumerate() {
         indent(out, depth + 1);
@@ -287,34 +309,6 @@ fn write_sequence(out: &mut String, sequence: &DicomSequence, depth: usize) -> R
         write_dataset(out, item, depth + 2)?;
         indent(out, depth + 1);
         out.push_str("</Item>\n");
-    }
-    indent(out, depth);
-    out.push_str("</DicomAttribute>\n");
-    Ok(())
-}
-
-/// Fragment sequences are not representable; render what the bytes carry so
-/// the export does not silently drop it (§12.1 rejects them on the JSON side).
-fn write_fragments(
-    out: &mut String,
-    tag: &Tag,
-    vr: Vr,
-    fragments: &radicom::model::item::DicomFragmentSequence,
-    depth: usize,
-) -> Result<(), Error> {
-    indent(out, depth);
-    write_attribute_open(out, tag, vr);
-    out.push_str(">\n");
-    for (index, fragment) in fragments.fragments().iter().enumerate() {
-        let encoded = base64::engine::general_purpose::STANDARD.encode(fragment.data()?.as_ref());
-        // fo-dicom DicomXML wraps each fragment in <Fragment number="n">: the
-        // fragment index must survive the export (FEAT-17)
-        indent(out, depth + 1);
-        let _ = writeln!(out, "<Fragment number=\"{}\">", index + 1);
-        indent(out, depth + 2);
-        let _ = writeln!(out, "<InlineBinary>{encoded}</InlineBinary>");
-        indent(out, depth + 1);
-        out.push_str("</Fragment>\n");
     }
     indent(out, depth);
     out.push_str("</DicomAttribute>\n");
@@ -372,7 +366,7 @@ mod tests {
     fn binary_numeric_values_keep_separate_xml_value_numbers() {
         let mut ds = Dataset::new();
         ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
-            Tag::new(0x0011, 0x1010),
+            Tag::new(0x7776, 0x1010),
             Vr::Us,
             Arc::new(radicom::model::buffer::MemoryBuffer::from(vec![1, 0, 2, 0])),
         )));
@@ -383,7 +377,7 @@ mod tests {
 
     #[test]
     fn review_single_text_xml_keeps_literal_backslashes() {
-        let tag = Tag::new(0x0011, 0x1010);
+        let tag = Tag::new(0x7776, 0x1010);
         for vr in [Vr::Lt, Vr::St, Vr::Ut] {
             for element in [
                 DicomElement::new_str(tag.clone(), vr, "A\\B\nC"),
@@ -613,8 +607,10 @@ mod tests {
     }
 
     #[test]
-    fn fragments_are_wrapped_and_numbered() {
-        // FEAT-17: fo-dicom wraps every fragment in <Fragment number="n">.
+    fn fragment_sequences_are_rejected_instead_of_exported_as_a_nonstandard_element() {
+        // FEAT-17 (review): PS3.19 has no <Fragment> element and permits at most
+        // one <InlineBinary> per attribute, so encapsulated pixel data cannot be
+        // exported; a typed error replaces the non-standard element.
         let mut ds = Dataset::new();
         let fragments = ds.insert_fragments(Tag::PIXEL_DATA, Vr::Ob);
         fragments.push_fragment(Arc::new(radicom::model::buffer::MemoryBuffer::from(vec![
@@ -624,12 +620,62 @@ mod tests {
             3u8,
         ])));
 
+        let error = dataset_to_xml(&ds).expect_err("fragment sequences are not representable");
+        assert!(
+            error.to_string().contains("Native DICOM Model"),
+            "the error names the model: {error}"
+        );
+    }
+
+    #[test]
+    fn a_private_data_element_uses_the_block_zeroed_tag_and_no_keyword() {
+        // PS3.19 A.1.5-2: the XML tag of a private data element carries the block
+        // offset only (gggg00ee) and is valid only with `privateCreator`.
+        let creator = Arc::new(radicom::model::private_creator::PrivateCreator::new("ACME"));
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_str(
+            Tag::private(0x0029, 0x1001, creator),
+            Vr::Lo,
+            "widget",
+        )));
         let xml = dataset_to_xml(&ds).unwrap();
-        assert!(xml.contains("<Fragment number=\"1\">"), "{xml}");
-        assert!(xml.contains("<Fragment number=\"2\">"), "{xml}");
-        assert!(xml.contains("<InlineBinary>AQI=</InlineBinary>"), "{xml}");
-        assert!(xml.contains("<InlineBinary>Aw==</InlineBinary>"), "{xml}");
-        assert_eq!(xml.matches("</Fragment>").count(), 2, "{xml}");
+        assert!(xml.contains("tag=\"00290001\""), "{xml}");
+        assert!(xml.contains("privateCreator=\"ACME\""), "{xml}");
+        assert!(
+            !xml.contains("keyword="),
+            "a private tag has no PS3.6 keyword: {xml}"
+        );
+    }
+
+    #[test]
+    fn a_private_creator_slot_keeps_its_real_tag_without_a_creator_attribute() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::new(0x0029, 0x0010), Vr::Lo, "ACME");
+        let xml = dataset_to_xml(&ds).unwrap();
+        assert!(xml.contains("tag=\"00290010\""), "{xml}");
+        assert!(!xml.contains("privateCreator="), "{xml}");
+        assert!(!xml.contains("keyword="), "{xml}");
+    }
+
+    #[test]
+    fn a_private_data_element_without_a_creator_is_an_error() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::new(0x0029, 0x1001), Vr::Lo, "widget");
+        let error =
+            dataset_to_xml(&ds).expect_err("a private element without a creator is not valid XML");
+        assert!(error.to_string().contains("private"), "{error}");
+    }
+
+    #[test]
+    fn an_unknown_tag_has_no_keyword_attribute() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::new(0x7776, 0x0010), Vr::Lo, "x");
+        let xml = dataset_to_xml(&ds).unwrap();
+        assert!(xml.contains("tag=\"77760010\""), "{xml}");
+        assert!(
+            !xml.contains("keyword="),
+            "an unknown tag has no PS3.6 keyword: {xml}"
+        );
     }
 
     #[test]

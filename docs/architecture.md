@@ -145,6 +145,23 @@ so they cannot drift from it. (A raw `(group, element)` pair in an ad-hoc query-
   caller's choice, because that value cannot be silently re-encoded. Without this rule
   `insert_value(Tag::ROWS, 512u16)` wrote an `IS` string — non-conformant bytes that round-tripped only
   because the reader made the same mistake.
+- **Binary `IntoElement` impls exist for every numeric type.** `Vr::Ob`/`Un` take the scalar's native
+  bytes and `Ow`/`Of`/`Ol`/`Od`/`Ov` their own unit; the numeric hint also loses to a *binary* dictionary
+  VR, so `insert_value(Tag::PIXEL_DATA, vec![0u16; 4])` writes eight bytes, not an `IS` text list.
+- **`insert_sequence`/`insert_fragments` replace.** They take `&mut self`, have no `Result`, and insert
+  over any existing item of the tag (a second call on a populated sequence yields an empty one). A
+  private tag whose group has no free creator block panics; use `try_insert_or_update` where that must be
+  reported.
+- **Zero-unit numerics are type errors.** Reading a `SQ` (or an internal marker) through the numeric
+  `FromElement` impls returns an error instead of widening a zero-length unit slice into a silent `0`.
+- **Implicit VR ambiguities are resolved from the dataset.** PS3.6 gives several attributes two VRs:
+  `US or SS` (`PixelPaddingValue`, `Smallest/Largest*PixelValue`, …) is `SS` when
+  `Pixel Representation (0028,0103)` is 1, and `Pixel Data`'s `OB or OW` follows PS3.5 §8.2 (encapsulated
+  or ≤ 8 bits → `OB`, otherwise `OW`). Without this a signed padding value reads as `65535` and
+  re-writing it corrupts the dataset.
+- **A private creator reservation is scoped to one Item** (PS3.5 §7.8.1). The reader journals each
+  overwritten `(gggg,00bb)` slot and restores it when the item ends, so an item's creator neither leaks
+  into its parent/siblings nor inherits theirs.
 
 ---
 
@@ -153,8 +170,14 @@ so they cannot drift from it. (A raw `(group, element)` pair in an ad-hoc query-
 - Driven by `(0008,0005) Specific Character Set`, including ISO 2022 escape-sequence switching and
   multi-byte encodings.
 - Decoded values are always UTF-8.
-- A `SpecificCharacterSet` list with an empty leading term resolves to its first non-empty term
-  (`\ISO 2022 IR 58` → GBK, `\ISO 2022 IR 87` → ISO-2022-JP).
+- A `SpecificCharacterSet` list with an **empty leading term declares the default repertoire**
+  (PS3.5 §6.1.2.5.4 / CP-965): `\ISO 2022 IR 58` starts in ISO-IR 6 and reaches GBK only through an
+  `ESC $ ) A` designation; the remaining terms are the alternates an escape may switch into. Writing a
+  value with no declared charset (and no parse-time fallback) is an error when the text is non-ASCII,
+  because the default repertoire cannot carry it (§7).
+- The encoder never masks a character into `?` while an alternate could encode it: a strict-ASCII first
+  term (ISO-IR 6) only short-circuits when the text is pure 7-bit ASCII, and the designation is emitted
+  after the PN/text delimiter that starts the segment (PS3.5 §6.1.2.5.3).
 - **Single-byte `ISO_IR nnn` terms must map to the corresponding ISO-8859-x**, never to a Windows code
   page: `ISO_IR 109/110/126/127/138/144/148` map to `iso-8859-3/4/7/6/8/5/9`. The exception is
   `ISO_IR 166`, which maps to `windows-874` — the WHATWG alias of TIS-620, and a superset of it.
@@ -172,11 +195,17 @@ so they cannot drift from it. (A raw `(group, element)` pair in an ad-hoc query-
   **not** call it, so tolerant real-world round-trips keep working.
 - The strict validators follow the VR grammar, not the tolerant parsers: TM accepts only
   `HH[MM[SS[.F{1,6}]]]` (no ACR-NEMA `HH:MM:SS`/`HH.MM.SS`) and DT only
-  `YYYY[MM[DD[HH[MM[SS[.F{1,6}]]]]]]` with an `&ZZXX` offset (no bare `±HHMM`, no dotted dates).
+  `YYYY[MM[DD[HH[MM[SS[.F{1,6}]]]]]]` with a **bare** `+HHMM`/`-HHMM` offset. `&ZZXX` in PS3.5
+  Table 6.2-1 is notation — `&` stands for the sign and is not a wire byte — so the legacy `&±HHMM`
+  spelling is only tolerated on input. A bare offset is recognised after a complete 14-digit datetime,
+  which keeps `2024-2025` a year range. TM second `60` is the leap second and is accepted.
   Control characters below 0x20 (except the allowed escapes) and DEL (0x7F) are rejected in text VRs.
 - VM checks honour the multiplicity step: `2-2n` requires an even value count, `3-3n` a multiple of three.
-- Every value of Specific Character Set (0008,0005) must be a term the charset registry knows (PS3.5
-  §6.1.1); a zero-length first value means the default repertoire.
+- A binary numeric/AT value must be a whole number of VR units; a length that is not a multiple of the
+  unit is rejected instead of being padded or truncated on write.
+- Every value of Specific Character Set (0008,0005) must be one of the PS3.3 C.12.2 Defined Terms,
+  matched exactly after trimming spaces (`iso_ir 100` is not a term); a zero-length first value means the
+  default repertoire.
 
 ---
 
@@ -341,7 +370,12 @@ Changing it breaks `radicom-codecs`.
 - A transcoded encapsulated dataset drops `(7FE0,0001)`/`(7FE0,0002)`: the rewrite builds a fresh basic
   offset table, and these extended tables are optional, so stale offsets are removed rather than kept.
 - Export is `RawImage` plus hand-written PNG/BMP encoders; there is no external image dependency.
-- Rendering failures must return an error, never silently produce a blank image.
+- `RawImage` needs a non-zero size: a zero-sized PNG/BMP has an invalid header, so both `new` (documented
+  panic) and `try_new` (typed error) refuse it.
+- Rendering failures must return an error, never silently produce a blank image. A frame shorter than
+  `rows × columns × samples` for its bit depth is a typed error before the min/max or row pass slices it;
+  an encapsulated icon's pixel data is rejected instead of being read as native samples; a print film
+  without a usable ImageDisplayFormat, or with a cell that cannot be rendered, fails the render.
 
 ---
 
@@ -465,6 +499,18 @@ client/server. One tokio task per association. Locks must not be held across `.a
   failed C-MOVE report success.
 - `max_clients` must actually be enforced (a semaphore or equivalent); a config field that no code path
   reads is a bug. The same applies to `association_timeout` on the server side.
+- Every socket write is bounded by `write_timeout` (server and client, default 60 s): a peer that
+  negotiates an association and then stops reading otherwise parks the connection task and its client
+  slot forever. The clock restarts on progress, so a slow transfer is never cut off; expiry is
+  `NetworkError::WriteTimedOut` and is fatal.
+- C-ECHO is Verification-only (PS3.4 §C.2): both the high-level client and the expert `Association`
+  refuse any other SOP class before proposing a context, and an association stays usable afterwards.
+- A C-MOVE delivery that fails for one instance (a SOP class the destination did not accept, a role it
+  did not grant, a dataset this side cannot transcode) is one failed sub-operation: the batch records it
+  and continues with the next file (PS3.4 §C.4.2). Only `is_fatal` failures end the association.
+- A response is followed by its dataset exactly when `(0000,0800)` says so (PS3.7 Table 9.3-5). The SCU
+  consumes that dataset even when the caller has no use for it; a dataset without the announcement is
+  tolerated only for C-ECHO, and a response dataset on the wrong context is a protocol error.
 - A peer cannot hold an association by stalling *inside* a message: while a command still awaits its
   dataset, or a command/dataset PDU sequence is only partly received, the wait for the next PDU is
   bounded by `progress_timeout` (default 60 s; `None` disables it). The bound is per PDU, so a slow but
@@ -490,7 +536,15 @@ client/server. One tokio task per association. Locks must not be held across `.a
   `JsonOptions::bulk_data_uri` names one, and is then never materialised; otherwise it is base64-encoded.
 - `BulkDataURI` is legal only for the PS3.18 F.2.2 VRs (DS, FL, FD, IS, LT, OB, OD, OF, OL, OV, OW, SL,
   SS, ST, SV, UC, UL, UN, US, UT, UV); deferring any other VR by URI is an error, never a silent drop.
+  Exactly one of the three carriers may be present; `InlineBinary` is rejected for a text VR, and a
+  `BulkDataURI` must be non-empty. When a provider supplies a value it is consulted for every
+  allow-listed VR (including DS), so a provided value is not silently re-derived.
+- The writer refuses a value that is only a `BulkDataURI` (nobody hosts those bytes for a DICOM file),
+  a duplicate `(group,element)`, and non-ASCII text with no declared charset; those are typed errors
+  rather than zero-length or `?`-masked output.
 - Native XML (PS3.19) carries `xml:space="preserve"` on the root and never encodes Group Length.
+- A private data element is written as `gggg00ee` with its `privateCreator` attribute; one without a
+  creator is an error. A `<Fragment>` has no Native XML representation and is a typed error.
 - PN uses the three groups (Alphabetic / Ideographic / Phonetic).
 - Numeric mode is configurable (AsNumber / AsString / PreferablyAsNumber); DS keeps trailing zeros.
 - **Group length elements `(gggg,0000)` must be stripped at every level of the tree.**
@@ -504,11 +558,22 @@ client/server. One tokio task per association. Locks must not be held across `.a
   `FFFE,E000` headers. A record containing an embedded sequence (an icon, for instance) makes the scan
   return the wrong item — a PATIENT record would be mistaken for a STUDY.
 - `add_file` deduplicates through Patient → Study → Series → Instance, reusing nodes by UID.
+- Type 1 record keys are required, never fabricated (PS3.3 F.5-1..F.5-4): a source dataset without
+  PatientID, StudyDate/StudyTime/StudyID, Modality/SeriesNumber or InstanceNumber fails `add_file` instead
+  of indexing a record with an invented value. A second record claiming the same ReferencedFileID is the
+  same file twice and is rejected.
+- The Basic Directory IOD has **no SOP Common module**: its identity is the file meta
+  `(0002,0003) MediaStorageSOPInstanceUID`, kept stable across saves; there is no dataset `(0008,0018)`.
+  A directory loaded without `(0002,0003)` gets one generated once on the next save.
+- Records inherit the directory dataset's SpecificCharacterSet when saved: each item is measured and
+  written as a dataset of its own, so a record without its own `(0008,0005)` would price non-ASCII text
+  as ASCII and corrupt every later offset.
 - `(0004,1130) File-set ID` is Type 2: it must be present, may be empty, and is validated as `CS` with
   the 16-character PS3.5 limit; a longer value is an error rather than a truncated ID.
 - `DicomDirectoryBuilder` follows `ScanErrorPolicy`: an unreadable file is skipped (with a warning) by
   default, matching the scanner, and fails the build only under `Stop`. A file that parses but cannot be
-  recorded is always an error.
+  recorded is always an error. The scanner follows file symlinks but skips symlinked directories, so a
+  directory cycle cannot hang a scan.
 - Record offsets are written as 32-bit `UL` values: a directory larger than 4 GiB is reported, never
   truncated.
 - Referenced File IDs are validated, not copied: each component is 1-8 characters of `A-Z`, `0-9` or `_`
@@ -575,7 +640,9 @@ client/server. One tokio task per association. Locks must not be held across `.a
   first matching row wins (fo-dicom `LoadProfile` + `FirstOrDefault`). `AnonOptions::bit(..)` requests
   one column without the baseline, which is what fo-dicom's options-only calls do.
 - Actions: `X` remove, `Z` zero-length, `D` replace with dummy, `U` replace with a new UID, `K` keep,
-  `C` clean.
+  `C` clean. Under `RetainLongModifDates` (PS3.15 E.3.6) a `C`/`U` date or time is shifted by a constant
+  offset instead of blanked, so intervals between studies survive; a dummy is always syntactically legal
+  for its VR (`000Y` for AS, a reserved `example.invalid` URL for UR, `0` for DS/IS).
 - UID replacement must stay consistent **within one anonymizer instance**, otherwise references break.
 - Recurse into sequences; an `X` action removes the whole sequence, not just its children. A
   blanking action (`D`/`Z`/`U`/`C`) on an encapsulated fragment sequence replaces it with an empty
@@ -637,3 +704,7 @@ Known limitations (recorded so they are not mistaken for conformance):
 - `(7FE0,0001)`/`(7FE0,0002)` extended offset tables are read as plain values and never generated; a
   transcoded dataset drops them rather than carrying stale offsets.
 - `CUBIC` magnification falls back to bilinear.
+- ISO 2022 IR 159 (JIS X 0213) is not decoded: a designation for it keeps the text as replacement
+  characters rather than pretending the bytes are JIS X 0208.
+- The scanner follows file symlinks but skips symlinked directories; a file reachable only through a
+  symlinked directory is not indexed.

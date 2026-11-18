@@ -6,6 +6,7 @@
 
 use crate::error::{NetworkError, Result};
 use crate::pdu::{self, Pdu, MAX_PDU_SIZE};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// The 6-byte PDU header: type, reserved, length.
@@ -53,6 +54,173 @@ impl Default for TcpOptions {
             send_buffer_size: None,
             receive_buffer_size: None,
         }
+    }
+}
+
+/// The error behind [`NetworkError::WriteTimedOut`].
+///
+/// The wrapper hands it out as an `io::Error` (the `AsyncWrite` contract) and
+/// [`NetworkError::from`] recognises it by type, so no message is parsed.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WriteTimeout {
+    pub(crate) timeout_ms: u64,
+}
+
+impl std::fmt::Display for WriteTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "socket write timed out after {} ms", self.timeout_ms)
+    }
+}
+
+impl std::error::Error for WriteTimeout {}
+
+fn write_timeout_error(timeout_ms: u64) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::TimedOut, WriteTimeout { timeout_ms })
+}
+
+/// Bounds every socket write of one connection by `timeout` (§11.4).
+///
+/// A peer can complete association negotiation and then stop reading: without a
+/// bound, the next PDU write parks the connection task and its `max_clients`
+/// slot forever. This wrapper sits under every write path (`write_pdu`,
+/// `write_pdus`, the streamed C-STORE writer, releases and aborts), so there is
+/// a single place that enforces the limit.
+///
+/// The deadline is per stalled write: every completed write restarts it, so a
+/// slow but progressing transfer is never cut off. Once a write times out the
+/// stream stays failed — the peer is out of step with the byte stream and
+/// nothing may be written after a partial PDU.
+pub struct TimedWriter<S> {
+    inner: S,
+    timeout: Option<Duration>,
+    /// When the write that is currently parked started; cleared on progress.
+    stalled_since: Option<tokio::time::Instant>,
+    timer: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+    /// `Some(ms)` once a write timed out: every later write reports the same
+    /// failure instead of resynchronising on a half-written PDU.
+    timed_out: Option<u64>,
+}
+
+impl<S> TimedWriter<S> {
+    pub fn new(inner: S, timeout: Option<Duration>) -> Self {
+        TimedWriter {
+            inner,
+            timeout,
+            stalled_since: None,
+            timer: None,
+            timed_out: None,
+        }
+    }
+
+    /// The inner stream (tests unwrap it to inspect what was written).
+    pub fn get_ref(&self) -> &S {
+        &self.inner
+    }
+
+    /// The stream with its writes unbounded again.
+    pub fn into_inner(self) -> S {
+        self.inner
+    }
+
+    /// Polls one inner write attempt, arming the deadline when it parks.
+    fn poll_bounded<T>(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        mut attempt: impl FnMut(
+            &mut S,
+            &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<T>>,
+    ) -> std::task::Poll<std::io::Result<T>> {
+        let Some(timeout) = self.timeout else {
+            return attempt(&mut self.inner, cx);
+        };
+        if let Some(ms) = self.timed_out {
+            return std::task::Poll::Ready(Err(write_timeout_error(ms)));
+        }
+        match attempt(&mut self.inner, cx) {
+            std::task::Poll::Ready(result) => {
+                // progress (or a final result): the next write gets a new clock
+                self.stalled_since = None;
+                self.timer = None;
+                std::task::Poll::Ready(result)
+            }
+            std::task::Poll::Pending => {
+                let since = match self.stalled_since {
+                    Some(since) => since,
+                    None => {
+                        let now = tokio::time::Instant::now();
+                        self.stalled_since = Some(now);
+                        now
+                    }
+                };
+                if self.timer.is_none() {
+                    self.timer = Some(Box::pin(tokio::time::sleep_until(since + timeout)));
+                }
+                let expired = {
+                    let timer = self.timer.as_mut().expect("armed just above");
+                    std::future::Future::poll(timer.as_mut(), cx).is_ready()
+                };
+                if expired {
+                    let timeout_ms = timeout.as_millis() as u64;
+                    self.timed_out = Some(timeout_ms);
+                    return std::task::Poll::Ready(Err(write_timeout_error(timeout_ms)));
+                }
+                std::task::Poll::Pending
+            }
+        }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for TimedWriter<S> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        // Only writes are bounded: an idle association may stay quiet forever
+        // (§11.4 leaves reads to `progress_timeout`/`request_timeout`).
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for TimedWriter<S> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        self.get_mut().poll_bounded(cx, |inner, cx| {
+            std::pin::Pin::new(inner).poll_write(cx, buf)
+        })
+    }
+
+    fn poll_write_vectored(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        self.get_mut().poll_bounded(cx, |inner, cx| {
+            std::pin::Pin::new(inner).poll_write_vectored(cx, bufs)
+        })
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.get_mut()
+            .poll_bounded(cx, |inner, cx| std::pin::Pin::new(inner).poll_flush(cx))
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
     }
 }
 
@@ -187,8 +355,8 @@ impl PduReader {
 pub async fn write_pdu<W: AsyncWrite + Unpin>(writer: &mut W, pdu: &Pdu) -> Result<()> {
     let mut bytes = Vec::new();
     pdu::encode_into(pdu, &mut bytes)?;
-    writer.write_all(&bytes).await.map_err(NetworkError::Io)?;
-    writer.flush().await.map_err(NetworkError::Io)?;
+    writer.write_all(&bytes).await.map_err(NetworkError::from)?;
+    writer.flush().await.map_err(NetworkError::from)?;
     Ok(())
 }
 
@@ -204,11 +372,14 @@ pub async fn write_pdus<W: AsyncWrite + Unpin>(writer: &mut W, pdus: &[Pdu]) -> 
             _ => {
                 let mut buffer = Vec::new();
                 pdu::encode_into(pdu, &mut buffer)?;
-                writer.write_all(&buffer).await.map_err(NetworkError::Io)?;
+                writer
+                    .write_all(&buffer)
+                    .await
+                    .map_err(NetworkError::from)?;
             }
         }
     }
-    writer.flush().await.map_err(NetworkError::Io)?;
+    writer.flush().await.map_err(NetworkError::from)?;
     Ok(())
 }
 
@@ -262,7 +433,7 @@ async fn write_all_vectored<W: AsyncWrite + Unpin>(
         let written = writer
             .write_vectored(&remaining[..take])
             .await
-            .map_err(NetworkError::Io)?;
+            .map_err(NetworkError::from)?;
         if written == 0 {
             return Err(NetworkError::Io(std::io::ErrorKind::WriteZero.into()));
         }
@@ -317,6 +488,89 @@ mod tests {
     use crate::error::AbortSource;
     use crate::pdu::{Abort, PData, Pdv};
     use tokio::io::duplex;
+
+    #[tokio::test]
+    async fn a_stalled_write_returns_a_typed_timeout() {
+        // A peer that negotiates and then stops reading used to pin the task
+        // inside the write forever. The duplex pair has a tiny buffer, so the
+        // large PDU cannot be drained while nobody reads it.
+        let (mut client, _unread_peer) = duplex(8);
+        let mut writer = TimedWriter::new(&mut client, Some(Duration::from_millis(50)));
+        let pdu = Pdu::PData(PData {
+            pdvs: vec![Pdv {
+                context_id: 1,
+                is_command: true,
+                is_last: true,
+                data: vec![0u8; 4096].into(),
+            }],
+        });
+        let started = std::time::Instant::now();
+        let error = write_pdu(&mut writer, &pdu)
+            .await
+            .expect_err("the peer never reads");
+        assert!(
+            matches!(error, NetworkError::WriteTimedOut { timeout_ms: 50 }),
+            "got {error:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the write returned promptly instead of waiting for the peer"
+        );
+        // the stream is out of step after a partial PDU: later writes stay failed
+        let again = write_pdu(&mut writer, &Pdu::ReleaseRq).await;
+        assert!(matches!(again, Err(NetworkError::WriteTimedOut { .. })));
+    }
+
+    #[tokio::test]
+    async fn a_normal_write_succeeds_under_the_bound() {
+        let (mut client, mut peer) = duplex(4096);
+        let mut writer = TimedWriter::new(&mut client, Some(Duration::from_secs(5)));
+        let pdu = Pdu::PData(PData {
+            pdvs: vec![Pdv {
+                context_id: 1,
+                is_command: true,
+                is_last: true,
+                data: vec![7u8; 64].into(),
+            }],
+        });
+        write_pdu(&mut writer, &pdu)
+            .await
+            .expect("a drained write succeeds");
+        assert_eq!(read_pdu(&mut peer).await.unwrap(), Some(pdu));
+    }
+
+    #[tokio::test]
+    async fn a_write_without_a_timeout_stays_unbounded() {
+        let (mut client, _unread_peer) = duplex(8);
+        let mut writer = TimedWriter::new(&mut client, None);
+        let pdu = Pdu::PData(PData {
+            pdvs: vec![Pdv {
+                context_id: 1,
+                is_command: true,
+                is_last: true,
+                data: vec![0u8; 1024].into(),
+            }],
+        });
+        // no timeout configured: it parks exactly like the bare stream did
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), write_pdu(&mut writer, &pdu))
+                .await
+                .is_err(),
+            "an unbounded write keeps waiting"
+        );
+    }
+
+    #[test]
+    fn a_write_timeout_converts_to_the_typed_error() {
+        let error: NetworkError = write_timeout_error(1234).into();
+        assert!(
+            matches!(error, NetworkError::WriteTimedOut { timeout_ms: 1234 }),
+            "got {error:?}"
+        );
+        // an ordinary IO error keeps its variant
+        let plain: NetworkError = std::io::Error::from(std::io::ErrorKind::BrokenPipe).into();
+        assert!(matches!(plain, NetworkError::Io(_)));
+    }
 
     #[tokio::test]
     async fn a_cancelled_read_keeps_the_partial_frame() {

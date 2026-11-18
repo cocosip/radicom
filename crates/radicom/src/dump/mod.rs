@@ -125,12 +125,7 @@ fn render_value(value: &ElementValue, vr: crate::model::vr::Vr, options: &DumpOp
             if text.is_empty() {
                 return "(empty)".to_string();
             }
-            if text.chars().count() > options.max_value_chars {
-                let truncated: String = text.chars().take(options.max_value_chars).collect();
-                format!("{truncated}… ({} chars)", text.chars().count())
-            } else {
-                text.to_string()
-            }
+            render_str(text, options)
         }
         ElementValue::Bytes(buffer) => {
             let size = buffer.size();
@@ -179,12 +174,30 @@ fn render_value(value: &ElementValue, vr: crate::model::vr::Vr, options: &DumpOp
 }
 
 fn render_str(text: &str, options: &DumpOptions) -> String {
-    if text.chars().count() > options.max_value_chars {
-        let truncated: String = text.chars().take(options.max_value_chars).collect();
-        format!("{truncated}… ({} chars)", text.chars().count())
+    let truncated = text.chars().count() > options.max_value_chars;
+    let shown: String = text.chars().take(options.max_value_chars).collect();
+    let escaped = escape_text(&shown);
+    if truncated {
+        format!("{escaped}… ({} chars)", text.chars().count())
     } else {
-        text.to_string()
+        escaped
     }
+}
+
+/// Escapes control characters so a dumped value cannot drive the terminal
+/// (ESC/CR in a PN or an ISO 2022 escape in a text value, for example).
+fn escape_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\x{:02X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// The element's in-memory byte length (fo-dicom `DicomElement.Length`).
@@ -280,6 +293,19 @@ mod tests {
         ds.insert_sequence(Tag::REFERENCED_IMAGE_SEQUENCE)
             .push(item);
         ds
+    }
+
+    #[test]
+    fn control_characters_in_text_values_are_escaped() {
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Doe\u{1B}^John\tX");
+        ds.insert_str(Tag::CODE_VALUE, Vr::Sh, "a\rb");
+        let out = dump_dataset(&ds, &DumpOptions::default());
+        assert!(out.contains("\\x1B"), "ESC is shown as an escape: {out}");
+        assert!(out.contains("\\t"), "TAB is shown as an escape: {out}");
+        assert!(out.contains("\\r"), "CR is shown as an escape: {out}");
+        assert!(!out.contains('\u{1B}'), "no raw ESC reaches the terminal");
+        assert!(!out.contains('\t'), "no raw TAB reaches the terminal");
     }
 
     #[test]

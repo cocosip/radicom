@@ -998,14 +998,22 @@ impl RawImage {
     ///
     /// # Panics
     ///
-    /// Panics unless `bytes.len() == width * height * 4`. Every public encoder
-    /// (`to_png`, `to_bmp`, `copy_overlays`, `scaled`, …) indexes the buffer by
-    /// that invariant, so a short buffer can no longer panic later with an
+    /// Panics when a dimension is zero — a zero-sized PNG/BMP has an invalid
+    /// header, so an empty image can never be encoded — or unless
+    /// `bytes.len() == width * height * 4`. Every public encoder (`to_png`,
+    /// `to_bmp`, `copy_overlays`, `scaled`, …) indexes the buffer by that
+    /// invariant, so a short buffer can no longer panic later with an
     /// out-of-bounds index. Use [`RawImage::try_new`] for untrusted lengths.
     pub fn new(width: u32, height: u32, bytes: Vec<u8>) -> Self {
+        assert!(
+            width > 0 && height > 0,
+            "RawImage needs a non-zero size (got {width}x{height})"
+        );
         assert_eq!(
-            bytes.len(),
-            width as usize * height as usize * 4,
+            (width as usize)
+                .checked_mul(height as usize)
+                .and_then(|pixels| pixels.checked_mul(4)),
+            Some(bytes.len()),
             "RawImage bytes must be width*height*4 BGRA32 ({width}x{height})"
         );
         RawImage {
@@ -1015,14 +1023,24 @@ impl RawImage {
         }
     }
 
-    /// Like [`RawImage::new`] but returns an error instead of panicking when
-    /// `bytes` is not exactly `width * height * 4`.
+    /// Like [`RawImage::new`] but returns an error instead of panicking when a
+    /// dimension is zero or `bytes` is not exactly `width * height * 4`.
     pub fn try_new(width: u32, height: u32, bytes: Vec<u8>) -> Result<Self, Error> {
-        let expected = width as usize * height as usize * 4;
-        if bytes.len() != expected {
+        if width == 0 || height == 0 {
             return Err(Error::Data(DataError::Other {
                 message: format!(
-                    "RawImage needs {expected} BGRA bytes for {width}x{height}, got {}",
+                    "RawImage needs a non-zero size (got {width}x{height}); \
+                     a zero-sized image has no valid PNG/BMP header"
+                ),
+            }));
+        }
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4));
+        if expected != Some(bytes.len()) {
+            return Err(Error::Data(DataError::Other {
+                message: format!(
+                    "RawImage needs {expected:?} BGRA bytes for {width}x{height}, got {}",
                     bytes.len()
                 ),
             }));
@@ -1465,6 +1483,15 @@ fn render_grayscale_with_threshold(
     // bounds check per row/pixel pair rather than one `Option` per sample
     // (FEAT-22).
     let unit = if bits == 8 { 1 } else { 2 };
+    // A frame shorter than its shape is a typed error, not a panic: the min/max
+    // pass below and `emit_rows` both slice by `rows * columns * unit` (docs
+    // §10/§13). `get_frame` catches a short native element, but a fragment
+    // buffer under a native syntax reaches this pass directly.
+    if raw.len() < count * unit {
+        return Err(unsupported(
+            "frame is shorter than rows×cols samples for its bit depth",
+        ));
+    }
     let (mut min, mut max) = (u16::MAX, 0u16);
     if unit == 1 {
         for &b in &raw[..count] {
@@ -4034,6 +4061,13 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "non-zero size")]
+    fn raw_image_new_rejects_zero_dimensions() {
+        // A 0-wide image is an invalid PNG/BMP, so it can never be constructed.
+        RawImage::new(0, 0, Vec::new());
+    }
+
+    #[test]
     fn raw_image_try_new_checks_the_length() {
         let ok = RawImage::try_new(1, 1, vec![1, 2, 3, 255]).expect("exact length is valid");
         assert!(!ok.to_png().is_empty());
@@ -4043,8 +4077,13 @@ mod tests {
         assert!(RawImage::try_new(2, 1, vec![0u8; 4]).is_err(), "short");
         assert!(RawImage::try_new(1, 1, vec![0u8; 8]).is_err(), "long");
         assert!(
-            RawImage::try_new(0, 0, Vec::new()).is_ok(),
-            "empty is valid"
+            RawImage::try_new(0, 0, Vec::new()).is_err(),
+            "a zero-sized image has no valid header"
+        );
+        assert!(RawImage::try_new(0, 1, vec![0u8; 4]).is_err(), "zero width");
+        assert!(
+            RawImage::try_new(1, 0, vec![0u8; 4]).is_err(),
+            "zero height"
         );
     }
 
@@ -5130,5 +5169,35 @@ mod tests {
     fn palette_render_rejects_a_non_single_sample_frame() {
         let ds = color_image("PALETTE COLOR", 2, 8, &[0, 0], 0);
         assert!(render_frame(&ds, 0).is_err());
+    }
+
+    #[test]
+    fn a_short_grayscale_frame_is_a_typed_error_not_a_panic() {
+        // 8x8 16-bit needs 128 bytes. A single 64-byte fragment under a native
+        // syntax passes the encapsulation gate and reaches the pixel pass with a
+        // buffer shorter than rows*columns*unit; the min/max slice used to panic
+        // with "range end index out of range" (docs §10/§13: no panic, no blank).
+        let mut ds = gray_image(8, 8, 16, &[], Some(128.0), Some(256.0));
+        ds.remove(&Tag::PIXEL_DATA);
+        let fragments = ds.insert_fragments(Tag::PIXEL_DATA, Vr::Ob);
+        fragments.push_fragment(std::sync::Arc::new(
+            crate::model::buffer::MemoryBuffer::from(vec![0u8; 64]),
+        ));
+        let error = render_frame(&ds, 0).expect_err("a 64-byte frame cannot fill 8x8x16");
+        assert!(error.to_string().contains("shorter"), "{error}");
+    }
+
+    #[test]
+    fn a_short_colour_frame_is_a_typed_error_not_a_panic() {
+        // RGB 2x2 needs 12 bytes; a 2-byte fragment passes the encapsulation gate
+        // and reaches the colour assembly path short of its shape.
+        let mut ds = color_image("RGB", 3, 8, &[1, 2, 3, 4, 5, 6], 0);
+        ds.remove(&Tag::PIXEL_DATA);
+        let fragments = ds.insert_fragments(Tag::PIXEL_DATA, Vr::Ob);
+        fragments.push_fragment(std::sync::Arc::new(
+            crate::model::buffer::MemoryBuffer::from(vec![0u8; 2]),
+        ));
+        let error = render_frame(&ds, 0).expect_err("a 2-byte frame cannot fill 2x2 RGB");
+        assert!(error.to_string().contains("shorter"), "{error}");
     }
 }

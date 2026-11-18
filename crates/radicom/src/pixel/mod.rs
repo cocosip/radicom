@@ -516,54 +516,68 @@ macro_rules! pixel_read_methods {
                     "palette LUT requested for a non-PALETTE COLOR image",
                 ));
             }
-            let red = self.read_lut(RED_DESCRIPTOR, RED_DATA)?;
-            let green = self.read_lut(GREEN_DESCRIPTOR, GREEN_DATA)?;
-            let blue = self.read_lut(BLUE_DESCRIPTOR, BLUE_DATA)?;
-            let len = red.len().min(green.len()).min(blue.len());
-            Ok((0..len)
-                .map(|i| Color32::new(red[i], green[i], blue[i]))
+            // PS3.3 C.7.6.3.1.5: the three descriptors must describe the same
+            // table (entry count, first mapped value, bits per entry). Truncating
+            // to the shortest of three disagreeing tables silently rendered a
+            // wrong palette, and the first-mapped value then still came from red.
+            let red = self.read_palette_descriptor(RED_DESCRIPTOR)?;
+            let green = self.read_palette_descriptor(GREEN_DESCRIPTOR)?;
+            let blue = self.read_palette_descriptor(BLUE_DESCRIPTOR)?;
+            if red.count != green.count
+                || red.count != blue.count
+                || red.first_mapped != green.first_mapped
+                || red.first_mapped != blue.first_mapped
+                || red.bits != green.bits
+                || red.bits != blue.bits
+            {
+                return Err(pixel_err(format!(
+                    "palette LUT descriptors disagree: red ({} entries, first {}, {} bits), \
+                     green ({} entries, first {}, {} bits), blue ({} entries, first {}, {} bits)",
+                    red.count, red.first_mapped, red.bits,
+                    green.count, green.first_mapped, green.bits,
+                    blue.count, blue.first_mapped, blue.bits,
+                )));
+            }
+            let channels = [
+                self.read_lut_data(&red, RED_DATA)?,
+                self.read_lut_data(&green, GREEN_DATA)?,
+                self.read_lut_data(&blue, BLUE_DATA)?,
+            ];
+            Ok((0..red.count)
+                .map(|i| Color32::new(channels[0][i], channels[1][i], channels[2][i]))
                 .collect())
         }
 
-        /// The first input value mapped by the palette LUTs (PS3.3 C.7.6.3.1.5),
-        /// read from the red descriptor. A PALETTE COLOR input value `v` maps to
-        /// entry `v - first` (all three channels share the descriptor's first value).
-        /// An unreadable descriptor counts as absent, exactly like a malformed one.
+        /// The first input value mapped by the palette LUTs (PS3.3 C.7.6.3.1.5).
+        /// A PALETTE COLOR input value `v` maps to entry `v - first`; all three
+        /// channels must share it, which
+        /// [`palette_color_lut_checked`](Self::palette_color_lut_checked) validates.
+        /// A missing/unreadable descriptor counts as absent.
         pub fn palette_first_mapped(&self) -> Option<i32> {
-            let DicomItem::Element(element) = self.dataset.item(&RED_DESCRIPTOR)? else {
-                return None;
-            };
-            let descriptor = element.value().as_buffer()?;
-            let desc = descriptor.data().ok()?;
-            if desc.len() < 6 {
-                return None;
-            }
-            let first = [desc[2], desc[3]];
-            Some(match element.vr() {
-                Vr::Ss => i16::from_ne_bytes(first) as i32,
-                _ => u16::from_ne_bytes(first) as i32,
-            })
+            Some(self.read_palette_descriptor(RED_DESCRIPTOR).ok()?.first_mapped)
         }
 
-        /// One LUT channel: descriptor-driven 8-bit expansion, validated against the
-        /// descriptor entry count and the stored data length.
-        ///
-        /// The LUT Descriptor (PS3.3 C.7.6.3.1.5) is three US values: `[0]` number of
-        /// entries (0 ⇒ 65536), `[1]` first mapped pixel value, `[2]` bits per entry.
-        /// Each US is little-endian, so the byte layout is entries@0..2, first@2..4,
-        /// bits@4..6 — a 6-byte descriptor.
-        fn read_lut(&self, descriptor_tag: Tag, data_tag: Tag) -> Result<Vec<u8>, Error> {
-            let descriptor = self
+        /// Parses one LUT Descriptor (PS3.3 C.7.6.3.1.5): three US values, `[0]`
+        /// number of entries (0 ⇒ 65536), `[1]` first mapped pixel value, `[2]`
+        /// bits per entry. Each US is little-endian, so the byte layout is
+        /// entries@0..2, first@2..4, bits@4..6 — a 6-byte descriptor. The buffer
+        /// is host order in memory (docs §9.1 invariant).
+        fn read_palette_descriptor(&self, descriptor_tag: Tag) -> Result<PaletteDescriptor, Error> {
+            let DicomItem::Element(element) = self
                 .dataset
                 .item(&descriptor_tag)
-                .and_then(DicomItem::as_element_buffer)
-                .ok_or_else(|| pixel_err("palette LUT descriptor missing"))?;
+                .ok_or_else(|| pixel_err("palette LUT descriptor missing"))?
+            else {
+                return Err(pixel_err("palette LUT descriptor is not an element"));
+            };
+            let descriptor = element
+                .value()
+                .as_buffer()
+                .ok_or_else(|| pixel_err("palette LUT descriptor holds no bytes"))?;
             let desc = descriptor.data()?;
             if desc.len() < 6 {
                 return Err(pixel_err("palette LUT descriptor is shorter than 6 bytes"));
             }
-            // The descriptor is little-endian on the wire, but the element buffer
-            // is host order in memory (docs §9.1 invariant).
             let entries = u16::from_ne_bytes([desc[0], desc[1]]);
             // a descriptor count of 0 means 65536 entries (PS3.3 C.7.6.3.1.5)
             let count = if entries == 0 {
@@ -571,13 +585,33 @@ macro_rules! pixel_read_methods {
             } else {
                 entries as usize
             };
+            let first = [desc[2], desc[3]];
+            let first_mapped = match element.vr() {
+                Vr::Ss => i16::from_ne_bytes(first) as i32,
+                _ => u16::from_ne_bytes(first) as i32,
+            };
             let bits = u16::from_ne_bytes([desc[4], desc[5]]);
             if !matches!(bits, 8 | 16) {
                 return Err(pixel_err(format!(
                     "palette LUT bits per entry {bits} is not 8 or 16"
                 )));
             }
+            Ok(PaletteDescriptor {
+                count,
+                first_mapped,
+                bits,
+            })
+        }
 
+        /// One LUT channel: descriptor-driven 8-bit expansion, validated against
+        /// the descriptor entry count and the stored data length.
+        fn read_lut_data(
+            &self,
+            descriptor: &PaletteDescriptor,
+            data_tag: Tag,
+        ) -> Result<Vec<u8>, Error> {
+            let count = descriptor.count;
+            let bits = descriptor.bits;
             let data = self
                 .dataset
                 .item(&data_tag)
@@ -608,6 +642,13 @@ macro_rules! pixel_read_methods {
             Ok(out)
         }
     };
+}
+
+/// One parsed palette LUT descriptor (PS3.3 C.7.6.3.1.5).
+struct PaletteDescriptor {
+    count: usize,
+    first_mapped: i32,
+    bits: u16,
 }
 
 /// Read-only gate over a dataset's pixel data.
@@ -2138,6 +2179,50 @@ mod tests {
             PixelData::create_new(&mut ds).unwrap().kind(),
             PixelDataKind::OtherByte
         );
+    }
+
+    #[test]
+    fn palette_descriptors_must_agree() {
+        // PS3.3 C.7.6.3.1.5: all three descriptors describe the same table. A
+        // mismatched first-mapped value used to be silently ignored (and the red
+        // one still drove the index), producing a wrong palette.
+        let mut ds = palette_dataset(2, 8, &[10, 20]);
+        let mut descriptor = Vec::new();
+        descriptor.extend_from_slice(&2u16.to_ne_bytes());
+        descriptor.extend_from_slice(&5u16.to_ne_bytes()); // red says first = 0
+        descriptor.extend_from_slice(&8u16.to_ne_bytes());
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            GREEN_DESCRIPTOR,
+            Vr::Us,
+            Arc::new(MemoryBuffer::from(descriptor)),
+        )));
+        let error = PixelData::from_dataset(&mut ds)
+            .unwrap()
+            .palette_color_lut_checked()
+            .expect_err("descriptors disagree");
+        assert!(error.to_string().contains("descriptor"), "{error}");
+
+        // an entry-count disagreement is the same defect
+        let mut ds = palette_dataset(2, 8, &[10, 20]);
+        let mut descriptor = Vec::new();
+        descriptor.extend_from_slice(&3u16.to_ne_bytes());
+        descriptor.extend_from_slice(&0u16.to_ne_bytes());
+        descriptor.extend_from_slice(&8u16.to_ne_bytes());
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            BLUE_DESCRIPTOR,
+            Vr::Us,
+            Arc::new(MemoryBuffer::from(descriptor)),
+        )));
+        assert!(PixelData::from_dataset(&mut ds)
+            .unwrap()
+            .palette_color_lut_checked()
+            .is_err());
+
+        // matching descriptors still succeed, and the shared first value is used
+        let mut ds = palette_dataset(2, 8, &[10, 20]);
+        let pixel = PixelData::from_dataset(&mut ds).unwrap();
+        assert!(pixel.palette_color_lut_checked().is_ok());
+        assert_eq!(pixel.palette_first_mapped(), Some(0));
     }
 
     #[test]

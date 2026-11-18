@@ -110,6 +110,18 @@ pub enum NetworkError {
     ConnectTimedOut { timeout_ms: u64 },
     #[error("A-RELEASE-RP did not arrive within {timeout_ms} ms")]
     ReleaseTimedOut { timeout_ms: u64 },
+    /// A socket write made no progress inside `write_timeout` (§11.4).
+    ///
+    /// The transport is pinned: a peer that negotiated an association and then
+    /// stops reading used to hold the connection task and its client slot
+    /// forever. Fatal — the association must be dropped.
+    #[error("socket write timed out after {timeout_ms} ms")]
+    WriteTimedOut { timeout_ms: u64 },
+    /// A DIMSE message (or the aggregate buffered set) exceeded the configured
+    /// receive ceiling. A resource shortfall, not a malformed command: the
+    /// C-STORE path answers `0xA700` (OUT_OF_RESOURCES).
+    #[error("DIMSE message exceeds the maximum size")]
+    MessageTooLarge,
     #[error("connection closed prematurely")]
     ClosedPrematurely { source: Option<Box<NetworkError>> },
     #[error("protocol violation: {0}")]
@@ -128,7 +140,7 @@ pub enum NetworkError {
     #[error("DIMSE violation: {0}")]
     PeerViolation(&'static str),
     #[error("io error: {0}")]
-    Io(#[from] io::Error),
+    Io(io::Error),
     /// C-GET/C-MOVE sub-operation handlers must be registered up front.
     #[error("no reverse C-STORE handler registered (required for C-GET)")]
     ReverseStoreHandlerMissing,
@@ -144,6 +156,25 @@ pub enum NetworkError {
     /// The TLS handshake did not finish inside `tls_handshake_timeout`.
     #[error("TLS handshake timed out after {timeout_ms} ms")]
     TlsHandshakeTimedOut { timeout_ms: u64 },
+}
+
+impl From<io::Error> for NetworkError {
+    /// Keeps [`NetworkError::WriteTimedOut`] a typed failure instead of a bare
+    /// IO error: the transport wrapper tags its own timeout, and every write
+    /// path maps an IO error through this conversion.
+    fn from(error: io::Error) -> Self {
+        if error.kind() == io::ErrorKind::TimedOut {
+            if let Some(timeout) = error
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<crate::transport::WriteTimeout>())
+            {
+                return NetworkError::WriteTimedOut {
+                    timeout_ms: timeout.timeout_ms,
+                };
+            }
+        }
+        NetworkError::Io(error)
+    }
 }
 
 impl NetworkError {
@@ -216,6 +247,14 @@ mod tests {
         let err = NetworkError::PeerViolation("peer sent a response");
         assert!(err.to_string().contains("peer sent a response"));
         assert!(!matches!(err, NetworkError::Protocol(_)));
+    }
+
+    #[test]
+    fn message_too_large_is_a_typed_ceiling() {
+        // a size ceiling must not be re-recognised by matching its message
+        let error = NetworkError::MessageTooLarge;
+        assert_eq!(error.to_string(), "DIMSE message exceeds the maximum size");
+        assert!(matches!(error, NetworkError::MessageTooLarge));
     }
 
     #[test]

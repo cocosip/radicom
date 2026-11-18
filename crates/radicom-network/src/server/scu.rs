@@ -68,7 +68,8 @@ impl tokio::io::AsyncWrite for ClientStream {
 
 /// An open association from the SCU side (§11.4 expert layer).
 pub struct Association {
-    pub(crate) stream: crate::observability::CountingStream<ClientStream>,
+    pub(crate) stream:
+        crate::observability::CountingStream<crate::transport::TimedWriter<ClientStream>>,
     contexts: AcceptedContexts,
     pub(crate) splitter: PduSplitter,
     assembler: PdvAssembler,
@@ -237,6 +238,9 @@ impl Association {
         // L6: count this SCU's bytes the way the SCP already does (fo-dicom
         // instruments `DicomService`, not just the server); the open/close
         // guards live in the association, so they fire exactly once.
+        // The write bound is the SCU counterpart of the SCP's (see
+        // `ServerOptions::write_timeout`).
+        let stream = crate::transport::TimedWriter::new(stream, options.write_timeout);
         let mut stream = crate::observability::CountingStream::new(stream, options.metrics.clone());
 
         let mut request = Associate::new(called_ae, calling_ae);
@@ -1465,7 +1469,15 @@ impl Association {
     }
 
     /// Sends a C-ECHO and waits for its response (§11.4).
+    ///
+    /// PS3.4 §C.2 defines C-ECHO only for the Verification SOP Class; any other
+    /// abstract syntax is refused instead of being negotiated and sent.
     pub async fn send_c_echo(&mut self, abstract_syntax: &str) -> Result<CEchoResponse> {
+        if abstract_syntax != crate::association::sop_class::VERIFICATION {
+            return Err(NetworkError::protocol(
+                "C-ECHO is only valid for the Verification SOP Class",
+            ));
+        }
         let context = self.contexts.pick(abstract_syntax, "")?;
         let context_id = context.id;
         let message_id = self.allocate_message_id()?;
@@ -2723,6 +2735,15 @@ impl Association {
             .1)
     }
 
+    /// Waits for one response command, following its `no_dataset` bit.
+    ///
+    /// PS3.7 Table 9.3-5 makes (0000,0800) authoritative: a response that
+    /// announces a dataset is followed by one, and this side must consume it
+    /// even when the service has no use for it. Ignoring the bit left the
+    /// dataset in the stream, where the *next* request read it and blamed that
+    /// request for an unexpected dataset. A dataset arriving with no
+    /// announcement is only tolerated where the caller allows it (C-ECHO); for a
+    /// C-STORE response it is a typed protocol violation.
     async fn await_response_with_context(
         &mut self,
         message_id: u16,
@@ -2730,6 +2751,8 @@ impl Association {
         reject_dataset: bool,
         expected_context_id: Option<u8>,
     ) -> Result<(u8, Command)> {
+        // The matched command whose announced dataset is still to be consumed.
+        let mut awaiting_dataset: Option<(u8, Command)> = None;
         loop {
             let Some(pdu) = self.read_request_pdu(message_id).await? else {
                 return Err(NetworkError::ClosedPrematurely { source: None });
@@ -2742,8 +2765,23 @@ impl Association {
                         if self.intercept_event_report(&unit).await? {
                             continue;
                         }
+                        if let Some((context_id, command)) = awaiting_dataset.take() {
+                            return match unit.stream {
+                                Stream::Data if unit.context_id == context_id => {
+                                    Ok((context_id, command))
+                                }
+                                Stream::Data => Err(NetworkError::protocol(
+                                    "response dataset used the wrong presentation context",
+                                )),
+                                Stream::Command => Err(NetworkError::protocol(
+                                    "peer announced a response dataset and sent a command instead",
+                                )),
+                            };
+                        }
                         if unit.stream != Stream::Command {
                             if !reject_dataset {
+                                // leftovers of a reverse C-STORE this side already
+                                // answered are not this wait's business
                                 continue;
                             }
                             return Err(NetworkError::protocol(
@@ -2761,7 +2799,10 @@ impl Association {
                                     "C-ECHO",
                                 )?;
                             }
-                            return Ok((unit.context_id, command));
+                            if command.no_dataset {
+                                return Ok((unit.context_id, command));
+                            }
+                            awaiting_dataset = Some((unit.context_id, command));
                         }
                     }
                 }

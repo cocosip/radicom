@@ -722,6 +722,20 @@ impl DicomGenerator {
                 Tag::ICC_PROFILE,
                 Tag::LOSSY_IMAGE_COMPRESSION,
                 Tag::LOSSY_IMAGE_COMPRESSION_METHOD,
+                // The output values are physical (identity rescale below), so the
+                // stored-domain range/in-range descriptors, the padding values and
+                // the source Modality LUT no longer describe the pixels. Keeping
+                // them made viewers auto-window on the old range and apply the LUT
+                // a second time. VOI/Window stay: they are valid for new values.
+                Tag::SMALLEST_IMAGE_PIXEL_VALUE,
+                Tag::LARGEST_IMAGE_PIXEL_VALUE,
+                Tag::SMALLEST_PIXEL_VALUE_IN_SERIES,
+                Tag::LARGEST_PIXEL_VALUE_IN_SERIES,
+                Tag::SMALLEST_IMAGE_PIXEL_VALUE_IN_PLANE,
+                Tag::LARGEST_IMAGE_PIXEL_VALUE_IN_PLANE,
+                Tag::PIXEL_PADDING_VALUE,
+                Tag::PIXEL_PADDING_RANGE_LIMIT,
+                Tag::MODALITY_LUT_SEQUENCE,
             ] {
                 ds.remove(&tag);
             }
@@ -1070,6 +1084,56 @@ mod tests {
             // the pixel data decodes back through the facade
             let pixel = PixelDataRef::from_dataset(ds).unwrap();
             assert!(pixel.get_frame(0).is_ok(), "pixel data written");
+        }
+    }
+
+    #[test]
+    fn a_generated_slice_drops_the_stored_domain_scaling_attributes() {
+        // The output holds physical values with an identity rescale, so the source
+        // stored-domain range, padding and modality LUT no longer describe it:
+        // viewers would auto-window on the old range and apply the LUT twice.
+        let slices: Vec<Dataset> = (0..2).map(|z| axial_slice(z as f64, 100)).collect();
+        let volume = VolumeData::from_datasets(&slices).unwrap();
+        let stack = Stack::new(&volume, StackType::Axial, 1.0, 1.0).unwrap();
+
+        let mut common = slices[0].clone();
+        for tag in [
+            Tag::SMALLEST_IMAGE_PIXEL_VALUE,
+            Tag::LARGEST_IMAGE_PIXEL_VALUE,
+            Tag::SMALLEST_PIXEL_VALUE_IN_SERIES,
+            Tag::LARGEST_PIXEL_VALUE_IN_SERIES,
+            Tag::SMALLEST_IMAGE_PIXEL_VALUE_IN_PLANE,
+            Tag::LARGEST_IMAGE_PIXEL_VALUE_IN_PLANE,
+            Tag::PIXEL_PADDING_VALUE,
+            Tag::PIXEL_PADDING_RANGE_LIMIT,
+        ] {
+            common.insert_value(tag, 7u16);
+        }
+        common.insert_sequence(Tag::MODALITY_LUT_SEQUENCE);
+        // these stay valid for the new physical values
+        common.insert_str(Tag::VOILUT_FUNCTION, Vr::Cs, "LINEAR");
+        common.insert_str(Tag::WINDOW_CENTER, Vr::Ds, "50");
+        common.insert_str(Tag::WINDOW_WIDTH, Vr::Ds, "100");
+
+        let outputs = DicomGenerator::new(common)
+            .store_as_dicom(&stack, "MPR axial")
+            .unwrap();
+        let out = &outputs[0];
+        for tag in [
+            Tag::SMALLEST_IMAGE_PIXEL_VALUE,
+            Tag::LARGEST_IMAGE_PIXEL_VALUE,
+            Tag::SMALLEST_PIXEL_VALUE_IN_SERIES,
+            Tag::LARGEST_PIXEL_VALUE_IN_SERIES,
+            Tag::SMALLEST_IMAGE_PIXEL_VALUE_IN_PLANE,
+            Tag::LARGEST_IMAGE_PIXEL_VALUE_IN_PLANE,
+            Tag::PIXEL_PADDING_VALUE,
+            Tag::PIXEL_PADDING_RANGE_LIMIT,
+            Tag::MODALITY_LUT_SEQUENCE,
+        ] {
+            assert!(!out.contains(&tag), "{tag} must not survive the rewrite");
+        }
+        for tag in [Tag::VOILUT_FUNCTION, Tag::WINDOW_CENTER, Tag::WINDOW_WIDTH] {
+            assert!(out.contains(&tag), "{tag} stays valid for the new values");
         }
     }
 

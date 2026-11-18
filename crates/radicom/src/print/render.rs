@@ -143,6 +143,14 @@ impl FilmBox {
         // band and not a 1-px hairline.
         let trim_thickness = ((2.0 * scale.pixels_per_mm).round() as i64).max(1);
 
+        // docs §10: a missing or unparseable layout must fail the render. An empty
+        // cell list would silently produce a blank film that is indistinguishable
+        // from a legitimately empty one.
+        if self.image_display_format().is_none() {
+            return Err(Error::Data(DataError::Other {
+                message: "no usable ImageDisplayFormat (2010,0010) to render".into(),
+            }));
+        }
         // Parse/validate once: a malformed shape or truncated LUT fails the render.
         let cells = self.layout(margins);
         let boxes = self.image_boxes();
@@ -163,15 +171,9 @@ impl FilmBox {
             let Some(source) = image_box.images().first() else {
                 continue;
             };
-            let mut patch = match render_frame(source, 0) {
-                Ok(image) => image,
-                Err(error) => {
-                    // an unrenderable cell stays background, but silently: a
-                    // blank film is indistinguishable from an empty cell
-                    tracing::warn!(cell = ?cell, %error, "film cell left empty");
-                    continue;
-                }
-            };
+            // docs §10: a cell that cannot be rendered fails the film. Skipping it
+            // left a blank cell indistinguishable from an empty image box.
+            let mut patch = render_frame(source, 0)?;
             if let Some(table) = presentation_lut.table() {
                 apply_lut(&mut patch, table);
             } else if presentation_lut.shape() == Some(PresentationLutShape::Inverse) {
@@ -1339,6 +1341,28 @@ mod tests {
     }
 
     #[test]
+    fn rendering_without_a_display_format_errors() {
+        // docs §10: a missing or unparseable layout is an error, never a blank
+        // film. A film size alone is not a layout.
+        let mut film = FilmBox::new();
+        film.set_film_size("A4").unwrap();
+        let error = film
+            .render_to_image(10.0, RenderScale::default(), PrintDensity::Black)
+            .expect_err("no ImageDisplayFormat");
+        assert!(error.to_string().contains("ImageDisplayFormat"), "{error}");
+
+        // an unparseable value is the same defect
+        let mut film = FilmBox::new();
+        film.set_film_size("A4").unwrap();
+        let mut dataset = film.into_dataset();
+        dataset.insert_str(Tag::new(0x2010, 0x0010), Vr::Cs, "NOT A FORMAT");
+        let error = FilmBox::from_dataset(dataset)
+            .render_to_image(10.0, RenderScale::default(), PrintDensity::Black)
+            .expect_err("unparseable ImageDisplayFormat");
+        assert!(error.to_string().contains("ImageDisplayFormat"), "{error}");
+    }
+
+    #[test]
     fn blit_scaled_matches_the_previous_rgb_round_trip_bytes() {
         // the new direct-BGRA blit must produce the same canvas bytes as the
         // old to_rgb24 → bilinear_color24 → per-pixel set path (incl. clipping).
@@ -1533,8 +1557,9 @@ mod tests {
     }
 
     #[test]
-    fn an_unrenderable_cell_stays_background() {
-        // HSV is not a supported render photometric: the cell is skipped, not fatal
+    fn an_unrenderable_cell_is_an_error_not_a_blank_film() {
+        // HSV is not a supported render photometric: docs §10 requires the render
+        // to return the error instead of leaving an empty (blank) cell behind.
         let mut broken = grayscale_image(&[255; 16]);
         broken.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "HSV");
         let image_display_format = Tag::new(0x2010, 0x0010);
@@ -1552,10 +1577,10 @@ mod tests {
         film.insert_str(film_size_id, Vr::Cs, "A5");
         film.insert_sequence(referenced_image_box_sequence)
             .push(boxed);
-        let image = FilmBox::from_dataset(film)
+        let error = FilmBox::from_dataset(film)
             .render_to_image(0.0, RenderScale { pixels_per_mm: 0.1 }, PrintDensity::White)
-            .unwrap();
-        assert!(image.as_bytes().chunks(4).all(|pixel| pixel[0] == 255));
+            .expect_err("an unrenderable image box is fatal");
+        assert!(error.to_string().contains("not rendered"), "{error}");
     }
 
     #[test]

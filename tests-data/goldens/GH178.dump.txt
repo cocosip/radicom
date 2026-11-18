@@ -145,8 +145,4 @@
         (0008,0100) SH CodeValue                      113691 # 6
         (0008,0102) SH CodingSchemeDesignator         DCM # 3
         (0008,0104) LO CodeMeaning                    IEC Body Dosimetry Phantom # 26
-(0040,0310) ST CommentsOnRadiationDose        TotalDLP=1748.68
-Event=1
-Event=2
-Event=3 DLP=769.67
-Event=4 … (74 chars) # 74
+(0040,0310) ST CommentsOnRadiationDose        TotalDLP=1748.68\r\nEvent=1\r\nEvent=2\r\nEvent=3 DLP=769.67\r\nEvent=4 … (74 chars) # 74

@@ -330,7 +330,7 @@ where
     for pdu in splitter.split_message_bytes(context_id, command, None)? {
         let mut bytes = Vec::new();
         crate::pdu::encode_into(&crate::pdu::Pdu::PData(pdu), &mut bytes)?;
-        stream.write_all(&bytes).await.map_err(NetworkError::Io)?;
+        stream.write_all(&bytes).await.map_err(NetworkError::from)?;
     }
 
     let pdv_value = match max_data_pdv {
@@ -352,15 +352,18 @@ where
     });
 
     while let Some(frame) = rx.recv().await {
-        stream.write_all(&frame).await.map_err(NetworkError::Io)?;
+        stream.write_all(&frame).await.map_err(NetworkError::from)?;
     }
-    stream.flush().await.map_err(NetworkError::Io)?;
+    stream.flush().await.map_err(NetworkError::from)?;
     match encoder.await {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) => Err(NetworkError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("dataset could not be encoded: {error}"),
-        ))),
+        // The command PDUs are already on the wire, so the peer holds a partial
+        // message: this is fatal. Deliberately *not* `InvalidData`, which the
+        // C-GET/C-MOVE batch loops treat as one instance's local dataset
+        // failure and would then reuse a broken stream.
+        Ok(Err(error)) => Err(NetworkError::Io(std::io::Error::other(format!(
+            "dataset could not be encoded: {error}"
+        )))),
         Err(join) => Err(NetworkError::Io(std::io::Error::other(format!(
             "dataset encoder task failed: {join}"
         )))),

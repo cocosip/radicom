@@ -169,7 +169,7 @@ impl FilmSession {
 
     pub fn set_label(&mut self, label: impl Into<String>) {
         self.dataset
-            .insert_str(tags::FILM_SESSION_LABEL, Vr::Sh, label);
+            .insert_str(tags::FILM_SESSION_LABEL, Vr::Lo, label);
     }
 
     pub fn label(&self) -> Option<String> {
@@ -355,8 +355,10 @@ impl FilmBox {
     pub fn set_image_display_format(&mut self, format: impl Into<String>) -> Result<(), Error> {
         let text = format.into();
         ImageDisplayFormat::parse(&text)?;
+        // PS3.6: ImageDisplayFormat is ST; legal geometries exceed the 16-char
+        // SH limit.
         self.dataset
-            .insert_str(tags::IMAGE_DISPLAY_FORMAT, Vr::Cs, text);
+            .insert_str(tags::IMAGE_DISPLAY_FORMAT, Vr::St, text);
         Ok(())
     }
 
@@ -859,6 +861,33 @@ mod tests {
         assert_eq!(session.priority().as_deref(), Some("HIGH"));
         assert_eq!(session.medium_type().as_deref(), Some("PAPER"));
         assert_eq!(session.destination().as_deref(), Some("PROCESSOR"));
+    }
+
+    #[test]
+    fn print_text_attributes_use_their_ps36_vrs() {
+        // PS3.6: ImageDisplayFormat is ST (legal geometries exceed 16 chars) and
+        // FilmSessionLabel is LO, not SH.
+        let mut film = FilmBox::new();
+        film.set_image_display_format("STANDARD\\1,1").unwrap();
+        assert_eq!(
+            film.dataset()
+                .get_element(tags::IMAGE_DISPLAY_FORMAT)
+                .unwrap()
+                .vr(),
+            Vr::St,
+            "ImageDisplayFormat is ST"
+        );
+        let mut session = FilmSession::new();
+        session.set_label("FS-1");
+        assert_eq!(
+            session
+                .dataset()
+                .get_element(tags::FILM_SESSION_LABEL)
+                .unwrap()
+                .vr(),
+            Vr::Lo,
+            "FilmSessionLabel is LO"
+        );
     }
 
     #[test]

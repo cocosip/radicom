@@ -273,6 +273,11 @@ fn read_host_unit<T: FromHostBytes>(
     // US element (2-byte stride), so every such read landed out of range and
     // silently produced 0 — this is why Rows/Columns read as 0 on real files.
     let unit = e.vr().unit_size();
+    // A VR with no numeric unit (SQ and the internal markers) has no value to
+    // read; an empty zero-width unit used to widen to a silent 0.
+    if unit == 0 {
+        return Err(type_err(e, "a numeric value"));
+    }
     let i = index.unwrap_or(0);
     let data = b.data()?;
     // `index` is caller input, so the stride multiplication must not wrap:
@@ -643,6 +648,24 @@ mod tests {
 
     fn el(vr: Vr, text: &str) -> DicomElement {
         DicomElement::new_str(Tag::PATIENT_NAME, vr, text)
+    }
+
+    #[test]
+    fn numeric_reads_on_a_zero_unit_vr_are_type_errors() {
+        // A sequence-like VR has unit_size 0; reading it as a number must not
+        // yield a silent 0 from a zero-length unit slice.
+        let seq = DicomElement::new_bytes(
+            Tag::REFERENCED_IMAGE_SEQUENCE,
+            Vr::Sq,
+            Arc::new(MemoryBuffer::from(vec![0u8; 4])),
+        );
+        assert!(seq.get::<u16>(None).is_err(), "SQ read as u16");
+        assert!(seq.get::<i32>(Some(0)).is_err(), "SQ read as i32");
+        assert!(seq.get::<f64>(None).is_err(), "SQ read as f64");
+        assert!(
+            seq.get::<Option<u16>>(None).unwrap().is_none(),
+            "the Option tier yields None, not 0"
+        );
     }
 
     #[test]
@@ -1229,6 +1252,42 @@ macro_rules! impl_into_int_string {
                         vr,
                         Arc::new(MemoryBuffer::from((self as f64).to_ne_bytes().to_vec())),
                     ),
+                    // Binary "Other" VRs get the scalar's native bytes rather
+                    // than IS text, which `new_str` only debug-asserts against.
+                    Vr::Ob | Vr::Un => DicomElement::new_bytes(
+                        tag,
+                        vr,
+                        Arc::new(MemoryBuffer::from(self.to_ne_bytes().to_vec())),
+                    ),
+                    Vr::Ow => DicomElement::new_bytes(
+                        tag,
+                        vr,
+                        Arc::new(MemoryBuffer::from(
+                            (self as i64 as i16).to_ne_bytes().to_vec(),
+                        )),
+                    ),
+                    Vr::Of => DicomElement::new_bytes(
+                        tag,
+                        vr,
+                        Arc::new(MemoryBuffer::from((self as f32).to_ne_bytes().to_vec())),
+                    ),
+                    Vr::Ol => DicomElement::new_bytes(
+                        tag,
+                        vr,
+                        Arc::new(MemoryBuffer::from(
+                            (self as i64 as i32).to_ne_bytes().to_vec(),
+                        )),
+                    ),
+                    Vr::Od => DicomElement::new_bytes(
+                        tag,
+                        vr,
+                        Arc::new(MemoryBuffer::from((self as f64).to_ne_bytes().to_vec())),
+                    ),
+                    Vr::Ov => DicomElement::new_bytes(
+                        tag,
+                        vr,
+                        Arc::new(MemoryBuffer::from((self as i64).to_ne_bytes().to_vec())),
+                    ),
                     _ => DicomElement::new_str(tag, vr, self.to_string()),
                 }
             }
@@ -1284,6 +1343,28 @@ macro_rules! impl_into_float {
                             Arc::new(MemoryBuffer::from(v.to_ne_bytes().to_vec())),
                         )
                     }
+                    // Other binary VRs take the scalar's native bytes; `new_str`
+                    // would only debug-assert for them.
+                    Vr::Ob | Vr::Un => DicomElement::new_bytes(
+                        tag,
+                        vr,
+                        Arc::new(MemoryBuffer::from(self.to_ne_bytes().to_vec())),
+                    ),
+                    Vr::Ow => DicomElement::new_bytes(
+                        tag,
+                        vr,
+                        Arc::new(MemoryBuffer::from((self as i16).to_ne_bytes().to_vec())),
+                    ),
+                    Vr::Ol => DicomElement::new_bytes(
+                        tag,
+                        vr,
+                        Arc::new(MemoryBuffer::from((self as i32).to_ne_bytes().to_vec())),
+                    ),
+                    Vr::Ov => DicomElement::new_bytes(
+                        tag,
+                        vr,
+                        Arc::new(MemoryBuffer::from((self as i64).to_ne_bytes().to_vec())),
+                    ),
                     _ => DicomElement::new_str(
                         tag,
                         vr,
@@ -1310,6 +1391,9 @@ macro_rules! impl_into_int_vec {
                 fn bytes<const N: usize>(tag: Tag, vr: Vr, units: Vec<[u8; N]>) -> DicomElement {
                     DicomElement::new_bytes(tag, vr, Arc::new(MemoryBuffer::from(units.concat())))
                 }
+                fn raw(tag: Tag, vr: Vr, bytes: Vec<u8>) -> DicomElement {
+                    DicomElement::new_bytes(tag, vr, Arc::new(MemoryBuffer::from(bytes)))
+                }
                 match vr {
                     Vr::Ss | Vr::Us => bytes(
                         tag,
@@ -1329,6 +1413,47 @@ macro_rules! impl_into_int_vec {
                         tag,
                         vr,
                         self.iter().map(|v| (*v as i64).to_ne_bytes()).collect(),
+                    ),
+                    // Binary "Other" VRs get native value units, never an IS
+                    // text list: `new_str` only debug-asserts for these VRs and
+                    // the bytes would not form the value the VR describes.
+                    Vr::Ob | Vr::Un => {
+                        raw(tag, vr, self.iter().flat_map(|v| v.to_ne_bytes()).collect())
+                    }
+                    Vr::Ow => raw(
+                        tag,
+                        vr,
+                        self.iter()
+                            .flat_map(|v| (*v as i64 as i16).to_ne_bytes())
+                            .collect(),
+                    ),
+                    Vr::Of => raw(
+                        tag,
+                        vr,
+                        self.iter()
+                            .flat_map(|v| (*v as f32).to_ne_bytes())
+                            .collect(),
+                    ),
+                    Vr::Ol => raw(
+                        tag,
+                        vr,
+                        self.iter()
+                            .flat_map(|v| (*v as i64 as i32).to_ne_bytes())
+                            .collect(),
+                    ),
+                    Vr::Od => raw(
+                        tag,
+                        vr,
+                        self.iter()
+                            .flat_map(|v| (*v as f64).to_ne_bytes())
+                            .collect(),
+                    ),
+                    Vr::Ov => raw(
+                        tag,
+                        vr,
+                        self.iter()
+                            .flat_map(|v| (*v as i64).to_ne_bytes())
+                            .collect(),
                     ),
                     _ => DicomElement::new_str(
                         tag,
@@ -1358,24 +1483,48 @@ macro_rules! impl_into_float_vec {
                 Some(Vr::Ds)
             }
             fn into_element(self, tag: Tag, vr: Vr) -> DicomElement {
+                fn raw(tag: Tag, vr: Vr, bytes: Vec<u8>) -> DicomElement {
+                    DicomElement::new_bytes(tag, vr, Arc::new(MemoryBuffer::from(bytes)))
+                }
+                fn units<const N: usize>(tag: Tag, vr: Vr, units: Vec<[u8; N]>) -> DicomElement {
+                    DicomElement::new_bytes(tag, vr, Arc::new(MemoryBuffer::from(units.concat())))
+                }
                 match vr {
-                    Vr::Fl => DicomElement::new_bytes(
+                    Vr::Fl | Vr::Of => units(
                         tag,
                         vr,
-                        Arc::new(MemoryBuffer::from(
-                            self.iter()
-                                .flat_map(|v| (*v as f32).to_ne_bytes())
-                                .collect::<Vec<u8>>(),
-                        )),
+                        self.iter().map(|v| (*v as f32).to_ne_bytes()).collect(),
                     ),
-                    Vr::Fd => DicomElement::new_bytes(
+                    Vr::Fd | Vr::Od => units(
                         tag,
                         vr,
-                        Arc::new(MemoryBuffer::from(
-                            self.iter()
-                                .flat_map(|v| (*v as f64).to_ne_bytes())
-                                .collect::<Vec<u8>>(),
-                        )),
+                        self.iter().map(|v| (*v as f64).to_ne_bytes()).collect(),
+                    ),
+                    // Other binary VRs take native value units instead of a DS
+                    // text list (which those VRs cannot represent).
+                    Vr::Ob | Vr::Un => {
+                        raw(tag, vr, self.iter().flat_map(|v| v.to_ne_bytes()).collect())
+                    }
+                    Vr::Ow => raw(
+                        tag,
+                        vr,
+                        self.iter()
+                            .flat_map(|v| (*v as i16).to_ne_bytes())
+                            .collect(),
+                    ),
+                    Vr::Ol => raw(
+                        tag,
+                        vr,
+                        self.iter()
+                            .flat_map(|v| (*v as i32).to_ne_bytes())
+                            .collect(),
+                    ),
+                    Vr::Ov => raw(
+                        tag,
+                        vr,
+                        self.iter()
+                            .flat_map(|v| (*v as i64).to_ne_bytes())
+                            .collect(),
                     ),
                     _ => DicomElement::new_str(
                         tag,

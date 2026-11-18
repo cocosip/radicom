@@ -188,6 +188,22 @@ fn validate_tm_component(part: &str) -> Result<(), String> {
             return Err("fraction needs SS and 1-6 digits".into());
         }
     }
+    // PS3.5 §6.2: second 60 is the leap second and is valid. The tolerant
+    // parser cannot represent it (chrono has no leap seconds), so its hour and
+    // minute are checked here instead of rejecting the value.
+    if main.len() == 6 && &main[4..6] == "60" {
+        let hour: u32 = main[..2]
+            .parse()
+            .map_err(|_| "not a valid time".to_string())?;
+        let minute: u32 = main[2..4]
+            .parse()
+            .map_err(|_| "not a valid time".to_string())?;
+        return if hour <= 23 && minute <= 59 {
+            Ok(())
+        } else {
+            Err("not a valid time".into())
+        };
+    }
     parse_tm(main)
         .map(|_| ())
         .map_err(|_| "not a valid time".to_string())
@@ -213,35 +229,24 @@ fn validate_tm(content: &str) -> Result<(), String> {
     }
 }
 
-/// One DT component per PS3.5 §6.2: `YYYY[MM[DD[HH[MM[SS[.F{1,6}]]]]]]`
-/// followed by an optional `&ZZXX` UTC offset. Dotted/slashed dates and a bare
-/// `±HHMM` offset are ACR-NEMA forms, not conformant DT.
+/// One DT component per PS3.5 Table 6.2-1:
+/// `YYYY[MM[DD[HH[MM[SS[.F{1,6}]]]]]]` followed by an optional UTC offset.
+/// The conformant offset is a bare `+HHMM`/`-HHMM` (the standard's `&ZZXX`
+/// notation uses `&` as a placeholder for the sign); the legacy `&±HHMM`
+/// spelling is still accepted on input. Dotted/slashed dates are ACR-NEMA
+/// forms, not conformant DT.
 fn validate_dt_component(part: &str) -> Result<(), String> {
     let part = part.trim_end_matches(' ');
     let (body, offset) = match part.split_once('&') {
         Some((body, offset)) => (body, Some(offset)),
-        None => (part, None),
+        // A trailing 5-byte `[+-]HHMM` after a complete datetime is the offset,
+        // not a range separator (callers strip it before splitting ranges).
+        None => match trailing_dt_offset(part) {
+            Some((body, offset)) => (body, Some(offset)),
+            None => (part, None),
+        },
     };
-    let (digits, fraction) = match body.split_once('.') {
-        Some((digits, fraction)) => (digits, Some(fraction)),
-        None => (body, None),
-    };
-    if !matches!(digits.len(), 4 | 6 | 8 | 10 | 12 | 14)
-        || !digits.bytes().all(|b| b.is_ascii_digit())
-    {
-        return Err("expected YYYY[MM[DD[HH[MM[SS]]]]]".into());
-    }
-    if let Some(fraction) = fraction {
-        if digits.len() != 14
-            || fraction.is_empty()
-            || fraction.len() > 6
-            || !fraction.bytes().all(|b| b.is_ascii_digit())
-        {
-            return Err("fraction needs seconds and 1-6 digits".into());
-        }
-    }
-    // the tolerant parser validates the calendar date and the clock ranges
-    parse_dt(digits).map_err(|_| "not a valid date or time".to_string())?;
+    validate_dt_body(body)?;
     if let Some(offset) = offset {
         let mut chars = offset.chars();
         let sign = match chars.next() {
@@ -272,39 +277,102 @@ fn validate_dt_component(part: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// DT per PS3.5 §6.2: a single value or a `-` range. A `-` inside `&ZZXX` is
-/// the offset sign, not the range separator.
+/// Splits a trailing bare `[+-]HHMM` offset (5 bytes) off `part`.
+///
+/// Only a *complete* datetime (`YYYYMMDDHHMMSS[.F]`) can carry a bare offset:
+/// otherwise `2024-2025` would be read as year 2024 with a -20:25 offset
+/// instead of a year range (CM-04).
+fn trailing_dt_offset(part: &str) -> Option<(&str, &str)> {
+    let bytes = part.as_bytes();
+    if bytes.len() > 5
+        && matches!(bytes[bytes.len() - 5], b'+' | b'-')
+        && bytes[bytes.len() - 4..].iter().all(|b| b.is_ascii_digit())
+    {
+        let body = &part[..bytes.len() - 5];
+        let digits = dt_body_digits(body);
+        if digits.len() == 14 && digits.bytes().all(|b| b.is_ascii_digit()) {
+            return Some((body, &part[bytes.len() - 5..]));
+        }
+    }
+    None
+}
+
+/// The date/time digits of a DT body, before an optional fraction.
+fn dt_body_digits(body: &str) -> &str {
+    body.split_once('.').map_or(body, |(digits, _)| digits)
+}
+
+/// The date/time body of a DT component: digits and an optional 1-6 digit
+/// fraction after seconds.
+fn validate_dt_body(body: &str) -> Result<(), String> {
+    let (digits, fraction) = match body.split_once('.') {
+        Some((digits, fraction)) => (digits, Some(fraction)),
+        None => (body, None),
+    };
+    if !matches!(digits.len(), 4 | 6 | 8 | 10 | 12 | 14)
+        || !digits.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err("expected YYYY[MM[DD[HH[MM[SS]]]]]".into());
+    }
+    if let Some(fraction) = fraction {
+        if digits.len() != 14
+            || fraction.is_empty()
+            || fraction.len() > 6
+            || !fraction.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err("fraction needs seconds and 1-6 digits".into());
+        }
+    }
+    // the tolerant parser validates the calendar date and the clock ranges
+    parse_dt(digits).map_err(|_| "not a valid date or time".to_string())?;
+    Ok(())
+}
+
+/// DT per PS3.5 Table 6.2-1: a single value or a `-` range. A `-` inside an
+/// offset (legacy `&-HHMM` or the conformant trailing `-HHMM`) is the offset
+/// sign, not the range separator.
 fn validate_dt(content: &str) -> Result<(), String> {
     let trimmed = content.trim_end_matches(' ');
+    // A trailing bare offset after a complete datetime is not a range.
+    if trailing_dt_offset(trimmed).is_some() {
+        return validate_dt_component(trimmed);
+    }
     let bytes = trimmed.as_bytes();
-    let is_separator =
-        |index: usize| bytes[index] == b'-' && (index == 0 || bytes[index - 1] != b'&');
-    match bytes.iter().enumerate().find(|(i, _)| is_separator(*i)) {
-        None => validate_dt_component(trimmed),
-        Some((index, _)) => {
-            let first = &trimmed[..index];
-            let second = &trimmed[index + 1..];
-            if second
-                .bytes()
-                .enumerate()
-                .any(|(i, _)| second.as_bytes()[i] == b'-' && is_separator(index + 1 + i))
-            {
-                return Err("more than one range separator".into());
-            }
-            validate_dt_component(first)?;
-            if second.is_empty() {
-                return Ok(());
-            }
-            validate_dt_component(second)?;
-            // DT values are big-endian, so the raw digits order chronologically
-            // (a shorter partial value sorts before its extension).
-            let first_body = first.split('&').next().unwrap_or(first);
-            let second_body = second.split('&').next().unwrap_or(second);
-            if first_body > second_body {
-                return Err("range ends before it begins".into());
-            }
-            Ok(())
+    let mut separator = None;
+    for i in 1..bytes.len() {
+        if bytes[i] != b'-' || bytes[i - 1] == b'&' {
+            continue;
         }
+        if separator.is_some() {
+            return Err("more than one range separator".into());
+        }
+        separator = Some(i);
+    }
+    let Some(index) = separator else {
+        return validate_dt_component(trimmed);
+    };
+    let first = &trimmed[..index];
+    let second = &trimmed[index + 1..];
+    validate_dt_component(first)?;
+    if second.is_empty() {
+        return Ok(());
+    }
+    validate_dt_component(second)?;
+    // DT values are big-endian, so the raw digits order chronologically
+    // (a shorter partial value sorts before its extension).
+    let first_body = dt_body(first);
+    let second_body = dt_body(second);
+    if first_body > second_body {
+        return Err("range ends before it begins".into());
+    }
+    Ok(())
+}
+
+/// The date/time digits of a DT component, without its UTC offset.
+fn dt_body(part: &str) -> &str {
+    match part.split_once('&') {
+        Some((body, _)) => body,
+        None => trailing_dt_offset(part).map_or(part, |(body, _)| body),
     }
 }
 
@@ -496,6 +564,38 @@ pub fn validate_vm(element: &DicomElement) -> Result<(), String> {
 /// Returns a [`ValidationFailure`]-shaped error.
 /// Byte-backed strings are materialized so their values and VM are checked.
 pub fn validate_element(element: &DicomElement) -> Result<(), Error> {
+    let tag_ref = TagRef(element.tag().group(), element.tag().element());
+    // A binary numeric/AT value must be a whole number of VR units; otherwise
+    // the writer would pad or truncate it into a different value.
+    if matches!(
+        element.vr(),
+        Vr::Us
+            | Vr::Ss
+            | Vr::Ul
+            | Vr::Sl
+            | Vr::Uv
+            | Vr::Sv
+            | Vr::Fl
+            | Vr::Fd
+            | Vr::At
+            | Vr::Ol
+            | Vr::Ov
+            | Vr::Of
+            | Vr::Od
+    ) {
+        if let Some(buffer) = element.value().as_buffer() {
+            let unit = element.vr().unit_size() as u64;
+            let size = buffer.size();
+            if unit > 0 && size % unit != 0 {
+                return Err(Error::Validation(ValidationFailure {
+                    tag: tag_ref,
+                    vr: element.vr().code(),
+                    content: format!("{size} bytes"),
+                    reason: format!("length is not a multiple of the {unit}-byte VR unit"),
+                }));
+            }
+        }
+    }
     if element.vr().is_string()
         && matches!(
             element.value(),
@@ -509,7 +609,6 @@ pub fn validate_element(element: &DicomElement) -> Result<(), Error> {
         );
         return validate_element(&decoded);
     }
-    let tag_ref = TagRef(element.tag().group(), element.tag().element());
     if let crate::model::element::ElementValue::Str(s) = element.value() {
         validate_string(element.vr(), s).map_err(|reason| {
             Error::Validation(ValidationFailure {
@@ -519,15 +618,17 @@ pub fn validate_element(element: &DicomElement) -> Result<(), Error> {
                 reason,
             })
         })?;
-        // PS3.5 §6.1.1: every Specific Character Set value must be a Defined
-        // Term. A zero-length first value means the default repertoire; any
-        // other unrecognized term cannot be encoded or decoded.
+        // PS3.3 C.12.2: every Specific Character Set value must be a Defined
+        // Term, exactly (spaces around a term are trimmed). A zero-length first
+        // value means the default repertoire; any other term must match the
+        // registry's spelling, not a normalized variant.
         if element.tag() == &crate::model::tag::Tag::SPECIFIC_CHARACTER_SET {
             for (index, term) in s.split('\\').enumerate() {
+                let term = term.trim();
                 if term.is_empty() && index == 0 {
                     continue;
                 }
-                if !crate::encoding::charset::is_known_charset(term) {
+                if !crate::encoding::charset::is_defined_charset_term(term) {
                     return Err(Error::Validation(ValidationFailure {
                         tag: tag_ref,
                         vr: element.vr().code(),
@@ -559,6 +660,76 @@ mod tests {
 
     fn el(vr: Vr, text: &str) -> DicomElement {
         DicomElement::new_str(Tag::PATIENT_NAME, vr, text)
+    }
+
+    #[test]
+    fn binary_numeric_lengths_must_be_a_multiple_of_the_vr_unit() {
+        use crate::model::buffer::MemoryBuffer;
+        let tag = Tag::new(0x0029, 0x1001);
+        for (vr, bytes) in [
+            (Vr::Us, 3usize),
+            (Vr::Ss, 1),
+            (Vr::Ul, 6),
+            (Vr::Sl, 2),
+            (Vr::Uv, 4),
+            (Vr::Sv, 4),
+            (Vr::Fl, 3),
+            (Vr::Fd, 4),
+            (Vr::At, 6),
+            (Vr::Ol, 6),
+            (Vr::Ov, 4),
+            (Vr::Of, 6),
+            (Vr::Od, 4),
+        ] {
+            let element = DicomElement::new_bytes(
+                tag.clone(),
+                vr,
+                std::sync::Arc::new(MemoryBuffer::from(vec![0u8; bytes])),
+            );
+            assert!(
+                validate_element(&element).is_err(),
+                "{vr:?} with {bytes} bytes is not a whole number of units"
+            );
+        }
+        for (vr, bytes) in [(Vr::Us, 4usize), (Vr::At, 8), (Vr::Ul, 8), (Vr::Fd, 16)] {
+            let element = DicomElement::new_bytes(
+                tag.clone(),
+                vr,
+                std::sync::Arc::new(MemoryBuffer::from(vec![0u8; bytes])),
+            );
+            assert!(validate_element(&element).is_ok(), "{vr:?} {bytes}");
+        }
+    }
+
+    #[test]
+    fn tm_accepts_a_leap_second_but_not_a_bad_minute_or_hour() {
+        // PS3.5 §6.2: second 60 denotes a leap second and is valid TM.
+        assert!(validate_single(Vr::Tm, "235960").is_ok());
+        assert!(validate_single(Vr::Tm, "235960.123456").is_ok());
+        assert!(validate_single(Vr::Tm, "236060").is_err(), "minute 60");
+        assert!(validate_single(Vr::Tm, "240060").is_err(), "hour 24");
+    }
+
+    #[test]
+    fn specific_character_set_terms_are_exact() {
+        // PS3.3 C.12.2: only the defined terms are valid. Spaces are trimmed,
+        // but case/underscore variants are not terms.
+        let element = |text: &str| DicomElement::new_str(Tag::SPECIFIC_CHARACTER_SET, Vr::Cs, text);
+        assert!(validate_element(&element("ISO_IR 100\\ISO_IR 192")).is_ok());
+        assert!(validate_element(&element(" \\ISO 2022 IR 58 ")).is_ok());
+        assert!(validate_element(&element("")).is_ok(), "empty default term");
+        assert!(
+            validate_element(&element("ISO IR 100")).is_err(),
+            "a space instead of the underscore is not the defined term"
+        );
+        assert!(
+            validate_element(&element("ISO_IR 100\\ISO 2022IR 58")).is_err(),
+            "a missing space is not the defined term"
+        );
+        assert!(
+            validate_element(&element("ISO_IR 999")).is_err(),
+            "undefined term"
+        );
     }
 
     #[test]
@@ -603,27 +774,33 @@ mod tests {
         assert!(validate_single(Vr::Tm, "103015").is_ok());
         assert!(validate_single(Vr::Tm, "240000").is_err());
 
-        // PS3.5 §6.2: DT offsets use `&ZZXX`; a bare ±HHMM is ACR-NEMA.
+        // PS3.5 Table 6.2-1: the DT UTC offset is a bare ±HHMM; `&` in the
+        // grammar is the sign placeholder, and the legacy spelling stays valid.
+        assert!(validate_single(Vr::Dt, "20240305103015+0530").is_ok());
         assert!(validate_single(Vr::Dt, "20240305103015&+0530").is_ok());
         assert!(
-            validate_single(Vr::Dt, "20240305103015+0530").is_err(),
-            "a bare offset is not a DT value"
+            validate_single(Vr::Dt, "20240305103015&1500").is_err(),
+            "an offset needs its sign"
         );
         assert!(
-            validate_single(Vr::Dt, "20240305103015&+1500").is_err(),
+            validate_single(Vr::Dt, "20240305103015+1500").is_err(),
             "offset hour 15"
         );
         // PS3.3 §6.2: negative offsets cap at 12h, positive at 14h.
         assert!(
-            validate_single(Vr::Dt, "20240305103015&-1300").is_err(),
+            validate_single(Vr::Dt, "20240305103015-1300").is_err(),
             "negative offset hour 13"
         );
         assert!(
-            validate_single(Vr::Dt, "20240305103015&-1200").is_ok(),
+            validate_single(Vr::Dt, "20240305103015&-1300").is_err(),
+            "negative offset hour 13 (legacy)"
+        );
+        assert!(
+            validate_single(Vr::Dt, "20240305103015-1200").is_ok(),
             "negative offset hour 12"
         );
         assert!(
-            validate_single(Vr::Dt, "20240305103015&+1400").is_ok(),
+            validate_single(Vr::Dt, "20240305103015+1400").is_ok(),
             "positive offset hour 14"
         );
 

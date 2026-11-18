@@ -67,7 +67,17 @@ impl Charsets {
                 strict_ascii: c.strict_ascii,
             })
         };
-        let Some(DicomItem::Element(element)) = ds.item(&Tag::SPECIFIC_CHARACTER_SET) else {
+        // Only a text encoding of (0008,0005) declares a charset; a
+        // non-conformant binary value selects nothing.
+        let charset_element = match ds.item(&Tag::SPECIFIC_CHARACTER_SET) {
+            Some(DicomItem::Element(element))
+                if matches!(element.vr(), Vr::Cs | Vr::Lo | Vr::Sh) =>
+            {
+                Some(element)
+            }
+            _ => None,
+        };
+        let Some(element) = charset_element else {
             // A dataset read with a fallback encoding writes its text back with
             // that encoding, so a round-trip of a legacy Latin-1/Shift-JIS file
             // does not silently become UTF-8 without (0008,0005) (H1). No ISO 2022
@@ -84,15 +94,24 @@ impl Charsets {
             return inherit();
         };
         let text = element.string_value();
-        let mut terms = text.split('\\').map(str::trim).filter(|t| !t.is_empty());
-        let Some(first) = terms.next() else {
-            return inherit();
+        // PS3.5 §6.1.2.5.4 / CP-965: a leading empty term declares the default
+        // repertoire (not "inherit the parent"); the remaining terms are the
+        // alternates an escape may switch into.
+        let mut terms = text.split('\\').map(str::trim);
+        let first = terms.next().unwrap_or("");
+        let first_encoding = if first.is_empty() {
+            charset_encoding("ISO_IR 6")
+        } else {
+            charset_encoding(first)
         };
         Some(Charsets {
-            first: charset_encoding(first),
-            alternates: terms.map(charset_encoding).collect(),
+            first: first_encoding,
+            alternates: terms
+                .filter(|term| !term.is_empty())
+                .map(charset_encoding)
+                .collect(),
             first_designator: iso2022_designator_for_term(first),
-            strict_ascii: is_strict_ascii_term(first),
+            strict_ascii: first.is_empty() || is_strict_ascii_term(first),
         })
     }
 }
@@ -139,8 +158,19 @@ impl DicomWriter {
         let charset = Charsets::resolve(ds, inherited);
         let charset = charset.as_ref();
         let mut group: Option<u16> = None;
+        // PS3.5 §7.1: a tag may appear at most once. Distinct private creators
+        // make two Tags compare unequal, so the raw pair is checked explicitly.
+        let mut previous: Option<(u16, u16)> = None;
         for item in ds.items() {
             let g = item.tag().group();
+            let raw = (g, item.tag().element());
+            if previous == Some(raw) {
+                return Err(Error::other(format!(
+                    "duplicate tag ({:04X},{:04X}) in one dataset",
+                    raw.0, raw.1
+                )));
+            }
+            previous = Some(raw);
             let is_group_length = item.tag().element() == 0x0000;
             if group != Some(g) {
                 group = Some(g);
@@ -180,6 +210,7 @@ impl DicomWriter {
     ) -> Result<u64, Error> {
         match item {
             DicomItem::Element(e) => {
+                ensure_resolved_value(e)?;
                 match encode_value(e, charset)? {
                     Some(value) => {
                         self.write_leaf(e.tag(), e.vr(), ValueRef::Bytes(&value), syntax, out)
@@ -421,6 +452,7 @@ impl DicomWriter {
     ) -> Result<u64, Error> {
         Ok(match item {
             DicomItem::Element(e) => {
+                ensure_resolved_value(e)?;
                 let value_len = match encode_value(e, charset)? {
                     Some(bytes) => bytes.len() as u64,
                     None => {
@@ -606,7 +638,20 @@ fn encode_value(e: &DicomElement, charset: Option<&Charsets>) -> Result<Option<V
                     c.first_designator,
                     c.strict_ascii,
                 ),
-                _ => text.as_bytes().to_vec(),
+                Some(_) => text.as_bytes().to_vec(),
+                // No declared charset and no fallback encoding: the default
+                // repertoire is ISO-IR 6, so raw UTF-8 would be decoded as
+                // Latin-1 garbage. Refuse to write it (WR-03) instead of
+                // emitting bytes that no reader can recover.
+                None => {
+                    if e.vr().is_string() && !text.is_ascii() {
+                        return Err(Error::other(format!(
+                            "{}: non-ASCII text requires a declared character set",
+                            e.tag()
+                        )));
+                    }
+                    text.as_bytes().to_vec()
+                }
             };
             if bytes.len() % 2 == 1 {
                 bytes.push(e.vr().padding());
@@ -625,6 +670,22 @@ fn encode_value(e: &DicomElement, charset: Option<&Charsets>) -> Result<Option<V
             Ok(Some(bytes))
         }
     }
+}
+
+/// A `BulkDataURI` carrier holds no bytes until the caller resolves it; writing
+/// it as a zero-length value would silently drop the attribute's content
+/// (PS3.18 F.2.2). A URI buffer with materialized fallback bytes is writable.
+fn ensure_resolved_value(e: &DicomElement) -> Result<(), Error> {
+    let Some(buffer) = e.value().as_buffer() else {
+        return Ok(());
+    };
+    if buffer.bulk_uri().is_some() && buffer.size() == 0 {
+        return Err(Error::other(format!(
+            "{}: BulkDataURI value must be resolved before writing",
+            e.tag()
+        )));
+    }
+    Ok(())
 }
 
 /// CP-1066 guard: a value too long for a 16-bit length field is demoted to
@@ -814,6 +875,107 @@ mod tests {
         ))
         .unwrap();
         ds
+    }
+
+    #[test]
+    fn a_duplicate_group_element_pair_is_rejected() {
+        use crate::model::private_creator::PrivateCreator;
+        // PS3.5 §7.1: a tag may appear at most once in a dataset. Two private
+        // creators make the Tags distinct in the BTreeMap, but the wire still
+        // carries the same (0029,1001) twice.
+        let mut ds = Dataset::new();
+        for creator in ["ACME", "BETA"] {
+            ds.insert_or_update(DicomElement::new_str(
+                Tag::private(0x0029, 0x1001, Arc::new(PrivateCreator::new(creator))),
+                Vr::Lo,
+                creator,
+            ));
+        }
+        assert_eq!(ds.len(), 2, "both creators are stored");
+        let mut out = Vec::new();
+        let error = DicomWriter::default()
+            .write_dataset(&ds, &le(), &mut out)
+            .expect_err("the same (group,element) must not be serialized twice");
+        assert!(
+            error.to_string().contains("duplicate tag"),
+            "the error names the duplicate: {error}"
+        );
+
+        // A normal dataset (including one private element) still writes.
+        let mut ok = sample();
+        ok.insert_or_update(DicomElement::new_str(
+            Tag::private(0x0029, 0x1001, Arc::new(PrivateCreator::new("ACME"))),
+            Vr::Lo,
+            "one",
+        ));
+        encode(&ok, &le(), WriteOptions::default());
+    }
+
+    #[test]
+    fn a_uri_only_value_is_not_written_as_empty_data() {
+        use crate::model::buffer::BulkDataUri;
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomElement::new_bytes(
+            Tag::PIXEL_DATA,
+            Vr::Ob,
+            Arc::new(BulkDataUri::new("http://example.org/x")),
+        ));
+        let mut out = Vec::new();
+        let error = DicomWriter::default()
+            .write_dataset(&ds, &le(), &mut out)
+            .expect_err("an unresolved BulkDataURI must not become an empty value");
+        assert!(
+            error.to_string().contains("BulkDataURI"),
+            "the error names the cause: {error}"
+        );
+
+        // A URI with materialized fallback bytes may be written.
+        let mut resolved = Dataset::new();
+        resolved.insert_or_update(DicomElement::new_bytes(
+            Tag::PIXEL_DATA,
+            Vr::Ob,
+            Arc::new(BulkDataUri::with_data("http://example.org/x", vec![1u8, 2])),
+        ));
+        let bytes = encode(&resolved, &le(), WriteOptions::default());
+        assert!(bytes.ends_with(&[1, 2]), "the fallback bytes are written");
+    }
+
+    #[test]
+    fn non_ascii_text_without_a_charset_is_a_write_error() {
+        // Without (0008,0005) the default repertoire is ISO-IR 6, so raw UTF-8
+        // must not be emitted: a reader would decode it under another charset.
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::PATIENT_NAME, Vr::Pn, "山田");
+        let mut out = Vec::new();
+        let error = DicomWriter::default()
+            .write_dataset(&ds, &le(), &mut out)
+            .expect_err("raw UTF-8 without a declared charset must fail");
+        assert!(
+            error.to_string().contains("character set"),
+            "the error names the missing charset: {error}"
+        );
+        assert!(
+            DicomWriter::default().dataset_length(&ds, &le()).is_err(),
+            "the length path reports it too"
+        );
+
+        // ASCII-only values keep writing without a charset.
+        let mut ascii = Dataset::new();
+        ascii.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Yamada^Taro");
+        let bytes = encode(&ascii, &le(), WriteOptions::default());
+        assert!(bytes.windows(10).any(|w| w == b"Yamada^Tar"));
+
+        // A dataset parsed with a fallback encoding still writes with it.
+        let mut latin = Dataset::new();
+        latin.set_fallback_encodings(vec![crate::encoding::charset::charset_encoding(
+            "ISO_IR 100",
+        )]);
+        latin.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Müller");
+        let bytes = encode(&latin, &le(), WriteOptions::default());
+        assert!(
+            bytes.contains(&0xFC),
+            "the fallback Latin-1 encoding is used: {bytes:02X?}"
+        );
     }
 
     #[test]
@@ -1358,6 +1520,23 @@ mod tests {
             "the odd value is padded and the length agrees with the bytes"
         );
         assert_eq!(out[out.len() - 1], 0, "OB pads with NUL");
+    }
+
+    #[test]
+    fn an_empty_charset_element_declares_the_default_repertoire() {
+        // A present but empty (0008,0005) declares ISO-IR 6 for that level; it
+        // must not silently inherit the parent's Latin-1 (CP-965).
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::SPECIFIC_CHARACTER_SET, Vr::Cs, "ISO_IR 100");
+        let mut item = Dataset::new();
+        item.insert_str(Tag::SPECIFIC_CHARACTER_SET, Vr::Cs, "");
+        item.insert_str(Tag::PATIENT_NAME, Vr::Pn, "Müller");
+        ds.insert_sequence(Tag::PLANE_POSITION_SEQUENCE).push(item);
+        let bytes = encode(&ds, &le(), WriteOptions::default());
+        assert!(
+            !bytes.contains(&0xFC),
+            "the item's default repertoire does not emit Latin-1 ü: {bytes:02X?}"
+        );
     }
 
     #[test]

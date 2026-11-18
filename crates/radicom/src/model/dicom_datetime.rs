@@ -4,8 +4,8 @@
 //! Accepted input shapes mirror fo-dicom's format arrays:
 //! - DA: `YYYY`, `YYYYMM`, `YYYYMMDD`, `YYYY.MM.DD`, `YYYY/MM/DD`
 //! - DT: `YYYY[MM[DD[HH[MM[SS[.F{1,6}]]]]]]` plus optional UTC offset
-//!   (`&ZZXX`, and on input the tolerant `±HHMM`, `±HH:MM`, `±HH`),
-//!   dotted/slashed date variants
+//!   (`±HHMM`; the legacy `&ZZXX` and the tolerant `±HH:MM`/`±HH` are still
+//!   accepted on input), dotted/slashed date variants
 //! - TM: `HH[MM[SS[.F{1,6}]]]` with `.`, `:` or none as fraction separator
 //!
 //! Ranges (`min-max`, at most two segments) parse into [`Range`].
@@ -394,12 +394,12 @@ pub fn format_tm(t: NaiveTime) -> String {
     s
 }
 
-/// Formats DT canonically: `YYYYMMDDHHMMSS[.F…][&ZZXX]`.
+/// Formats DT canonically: `YYYYMMDDHHMMSS[.F…][+HHMM|-HHMM]`.
 ///
-/// PS3.5 §6.2 spells the UTC offset as `&ZZXX` (ampersand before the sign); the
-/// formatter emits that conformant form, which is also what the strict
-/// validator (`validation::validate_dt_component`) accepts. `parse_dt` still
-/// tolerates the ACR-NEMA bare `±HHMM` on input.
+/// PS3.5 Table 6.2-1 writes the UTC offset as `&ZZXX` in the *grammar*, where
+/// `&` stands for the mandatory sign (`+`/`-`); `&` itself is not in the DT
+/// repertoire, so the formatter emits `+0530`/`-0800`. `parse_dt` and the
+/// validator still tolerate the legacy `&±HHMM` spelling on input.
 pub fn format_dt(p: DtPoint) -> String {
     let d = p.naive.date();
     let mut s = format!("{}{}", d.format("%Y%m%d"), format_tm(p.naive.time()));
@@ -407,7 +407,6 @@ pub fn format_dt(p: DtPoint) -> String {
         let total = o.local_minus_utc();
         let sign = if total < 0 { '-' } else { '+' };
         let abs = total.abs();
-        s.push('&');
         s.push(sign);
         s.push_str(&format!("{:02}{:02}", abs / 3600, (abs % 3600) / 60));
     }
@@ -491,6 +490,60 @@ mod tests {
     }
 
     #[test]
+    fn dt_offset_is_the_conformant_bare_form_and_validates() {
+        // PS3.5 Table 6.2-1: DT's UTC offset is `+HHMM`/`-HHMM`; the `&` of the
+        // standard's notation is a placeholder for the sign, not a wire byte.
+        let text = format_dt(parse_dt("20170101120000+0530").unwrap().min);
+        assert_eq!(text, "20170101120000+0530");
+        assert!(!text.contains('&'), "no ampersand in a DT value: {text:?}");
+        assert!(
+            crate::validation::validate_single(crate::model::vr::Vr::Dt, &text).is_ok(),
+            "the canonical output must validate: {text:?}"
+        );
+        // Legacy `&ZZXX` (and a fraction before the offset) are still accepted
+        // on read, so old data keeps validating.
+        for legacy in [
+            "20170101120000&+0530",
+            "20170101120000&-0800",
+            "20170101120000.123456+0100",
+            "20170101120000.123456&+0100",
+        ] {
+            assert!(
+                crate::validation::validate_single(crate::model::vr::Vr::Dt, legacy).is_ok(),
+                "{legacy:?}"
+            );
+        }
+        // A negative offset round-trips through format -> validate too.
+        for input in ["20170101120000+0530", "20170101120000-0800"] {
+            let point = parse_dt(input).unwrap().min;
+            let formatted = format_dt(point);
+            assert!(!formatted.contains('&'), "{formatted:?}");
+            assert!(
+                crate::validation::validate_single(crate::model::vr::Vr::Dt, &formatted).is_ok(),
+                "{formatted:?}"
+            );
+        }
+        // A complete datetime followed by a 5-byte signed offset is an offset,
+        // not a range; a real range keeps parsing as a range.
+        assert!(crate::validation::validate_single(
+            crate::model::vr::Vr::Dt,
+            "20170101120000-0800"
+        )
+        .is_ok());
+        assert!(
+            crate::validation::validate_single(crate::model::vr::Vr::Dt, "20240101-20241231")
+                .is_ok()
+        );
+        // On the wire `20170101120000-0800` is a single point with an offset.
+        let p = parse_dt("20170101120000-0800").unwrap();
+        assert_eq!(
+            p.min.offset.map(|o| o.local_minus_utc()),
+            Some(-8 * 3600),
+            "a DT range must not swallow a negative offset"
+        );
+    }
+
+    #[test]
     fn dt_shapes_offsets_and_round_trip() {
         let p = parse_dt("20240305103015").unwrap().min;
         assert_eq!(p.naive.to_string(), "2024-03-05 10:30:15");
@@ -501,7 +554,7 @@ mod tests {
             with_off.offset.map(|o| o.local_minus_utc()),
             Some(5 * 3600 + 30 * 60)
         );
-        assert_eq!(format_dt(with_off), "20240305103015&+0530");
+        assert_eq!(format_dt(with_off), "20240305103015+0530");
         // the canonical output must itself pass the strict DT validator
         assert!(
             crate::validation::validate_single(crate::model::vr::Vr::Dt, &format_dt(with_off))
@@ -513,11 +566,11 @@ mod tests {
             colon_off.offset.map(|o| o.local_minus_utc()),
             Some(-8 * 3600)
         );
-        assert_eq!(format_dt(colon_off), "20240305103015&-0800");
+        assert_eq!(format_dt(colon_off), "20240305103015-0800");
 
         let frac = parse_dt("20240305103015.123456+0100").unwrap().min;
         assert_eq!(frac.naive.nanosecond(), 123_456_000);
-        assert_eq!(format_dt(frac), "20240305103015.123456&+0100");
+        assert_eq!(format_dt(frac), "20240305103015.123456+0100");
 
         assert_eq!(
             format_dt(parse_dt("202403051030").unwrap().min),

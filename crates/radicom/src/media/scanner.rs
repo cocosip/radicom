@@ -226,7 +226,25 @@ where
             }
             continue;
         }
-        if !file_type.is_file() {
+        if file_type.is_symlink() {
+            // A file-set may be assembled from links. Follow a link to a file, but
+            // never descend into a linked directory: that can form a cycle.
+            match std::fs::metadata(&path) {
+                Ok(target) if target.is_dir() => {
+                    tracing::debug!(
+                        path = %path.display(),
+                        "scan skips a symlinked directory"
+                    );
+                    continue;
+                }
+                Ok(target) if target.is_file() => {}
+                Ok(_) => continue,
+                Err(e) => {
+                    handle_error(options, summary, &path, &e)?;
+                    continue;
+                }
+            }
+        } else if !file_type.is_file() {
             continue;
         }
 
@@ -755,6 +773,32 @@ mod tests {
                 crate::model::vr::Vr::Ui,
                 *uid,
             );
+            for (tag, vr, value) in [
+                (
+                    crate::model::tag::Tag::STUDY_DATE,
+                    crate::model::vr::Vr::Da,
+                    "20240101",
+                ),
+                (
+                    crate::model::tag::Tag::STUDY_TIME,
+                    crate::model::vr::Vr::Tm,
+                    "120000",
+                ),
+                (
+                    crate::model::tag::Tag::STUDY_ID,
+                    crate::model::vr::Vr::Sh,
+                    "S1",
+                ),
+            ] {
+                dataset.insert_str(tag, vr, value);
+            }
+            dataset.insert_str(
+                crate::model::tag::Tag::MODALITY,
+                crate::model::vr::Vr::Cs,
+                "CT",
+            );
+            dataset.insert_value(crate::model::tag::Tag::SERIES_NUMBER, 1i32);
+            dataset.insert_value(crate::model::tag::Tag::INSTANCE_NUMBER, 1i32);
             dataset.set_transfer_syntax(
                 crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
             );
@@ -817,9 +861,31 @@ mod tests {
                 crate::model::vr::Vr::Ui,
                 "1.2.3.4.5",
             ),
+            (
+                crate::model::tag::Tag::STUDY_DATE,
+                crate::model::vr::Vr::Da,
+                "20240101",
+            ),
+            (
+                crate::model::tag::Tag::STUDY_TIME,
+                crate::model::vr::Vr::Tm,
+                "120000",
+            ),
+            (
+                crate::model::tag::Tag::STUDY_ID,
+                crate::model::vr::Vr::Sh,
+                "S1",
+            ),
+            (
+                crate::model::tag::Tag::MODALITY,
+                crate::model::vr::Vr::Cs,
+                "CT",
+            ),
         ] {
             dataset.insert_str(tag, vr, value);
         }
+        dataset.insert_value(crate::model::tag::Tag::SERIES_NUMBER, 1i32);
+        dataset.insert_value(crate::model::tag::Tag::INSTANCE_NUMBER, 1i32);
         dataset.set_transfer_syntax(
             crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
         );
@@ -856,6 +922,143 @@ mod tests {
         assert!(
             build(ScanErrorPolicy::Stop).is_err(),
             "Stop fails the whole build on the unreadable file"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    fn make_file_link(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(unix)]
+    fn make_dir_link(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn make_file_link(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+
+    #[cfg(windows)]
+    fn make_dir_link(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_dir(target, link)
+    }
+
+    #[test]
+    fn a_symlinked_file_is_indexed_but_a_symlinked_directory_is_not_descended() {
+        let base = temp_dir("symlink");
+        let scan = base.join("scan");
+        let real = base.join("real");
+        fs::create_dir_all(&scan).unwrap();
+        fs::create_dir_all(&real).unwrap();
+        touch(&real.join("img.dcm"));
+        if make_file_link(&real.join("img.dcm"), &scan.join("link.dcm")).is_err() {
+            // Creating a symlink needs a privilege this host may not grant
+            // (verified: Windows without Developer Mode/admin refuses), so the
+            // test skips instead of failing on an environment limitation.
+            let _ = fs::remove_dir_all(&base);
+            return;
+        }
+        let _ = make_dir_link(&real, &scan.join("sub"));
+
+        let options = ScanOptions {
+            glob: Some("*.dcm".into()),
+            ..Default::default()
+        };
+        let mut seen = Vec::new();
+        scan_directory(&scan, &options, &mut |_| {}, |path| {
+            seen.push(path.to_path_buf());
+            Ok::<(), Error>(())
+        })
+        .unwrap();
+        assert_eq!(
+            seen.len(),
+            1,
+            "the linked file is indexed; the linked directory is not descended: {seen:?}"
+        );
+        assert!(seen[0].ends_with("link.dcm"));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_file_that_parses_but_cannot_be_recorded_fails_the_build() {
+        // docs §12.2: a file that parses but cannot be recorded is always an
+        // error — never a fabricated record and never a panic.
+        let dir = temp_dir("build-type1");
+        let mut dataset = crate::model::dataset::Dataset::new();
+        for (tag, vr, value) in [
+            (
+                crate::media::tags::PATIENT_ID,
+                crate::model::vr::Vr::Lo,
+                "P1",
+            ),
+            (
+                crate::media::tags::STUDY_INSTANCE_UID,
+                crate::model::vr::Vr::Ui,
+                "1.2.3",
+            ),
+            (
+                crate::media::tags::SERIES_INSTANCE_UID,
+                crate::model::vr::Vr::Ui,
+                "1.2.3.4",
+            ),
+            (
+                crate::media::tags::SOP_CLASS_UID,
+                crate::model::vr::Vr::Ui,
+                "1.2.840.10008.5.1.4.1.1.2",
+            ),
+            (
+                crate::media::tags::SOP_INSTANCE_UID,
+                crate::model::vr::Vr::Ui,
+                "1.2.3.4.5",
+            ),
+            // deliberately no StudyDate: the STUDY record cannot be built
+            (
+                crate::model::tag::Tag::STUDY_TIME,
+                crate::model::vr::Vr::Tm,
+                "120000",
+            ),
+            (
+                crate::model::tag::Tag::STUDY_ID,
+                crate::model::vr::Vr::Sh,
+                "S1",
+            ),
+        ] {
+            dataset.insert_str(tag, vr, value);
+        }
+        dataset.insert_str(
+            crate::model::tag::Tag::MODALITY,
+            crate::model::vr::Vr::Cs,
+            "CT",
+        );
+        dataset.insert_value(crate::model::tag::Tag::SERIES_NUMBER, 1i32);
+        dataset.insert_value(crate::model::tag::Tag::INSTANCE_NUMBER, 1i32);
+        dataset.set_transfer_syntax(
+            crate::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
+        DicomFile::from_dataset(dataset)
+            .save(dir.join("img.dcm"))
+            .unwrap();
+
+        let mut builder = DicomDirectoryBuilder::new("MYFS");
+        {
+            let mut collector = builder.collector();
+            let options = ScanOptions {
+                glob: Some("*.dcm".into()),
+                ..Default::default()
+            };
+            scan_directory(&dir, &options, &mut |_| {}, &mut collector).unwrap();
+        }
+        let result = builder.build::<Error>(|_| PathBuf::from("IMG"));
+        let error = match result {
+            Ok(_) => panic!("a file without StudyDate must fail the build"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("StudyDate"),
+            "the missing Type 1 key is reported: {error}"
         );
         let _ = fs::remove_dir_all(dir);
     }

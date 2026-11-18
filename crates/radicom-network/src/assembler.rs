@@ -450,9 +450,7 @@ impl PdvAssembler {
                     self.spilling.remove(&pdv.context_id);
                     self.spilled = self.spilled.saturating_sub(written as usize);
                     self.armed.remove(&pdv.context_id);
-                    return Err(NetworkError::protocol(
-                        "DIMSE message exceeds the maximum size",
-                    ));
+                    return Err(NetworkError::MessageTooLarge);
                 }
             }
         }
@@ -477,9 +475,7 @@ impl PdvAssembler {
             // Drop any partial message for this key so the assembler does not
             // stay non-idle after a protocol error.
             self.drop_buffer(key);
-            return Err(NetworkError::protocol(
-                "DIMSE message exceeds the maximum size",
-            ));
+            return Err(NetworkError::MessageTooLarge);
         }
         // Fast path: a complete message arriving in one PDV is shared, not copied.
         if pdv.is_last && !self.buffers.contains_key(&key) {
@@ -495,9 +491,7 @@ impl PdvAssembler {
         // needs (NET-05 follow-up)
         if self.aggregate_len().saturating_add(pdv.data.len()) > self.max_buffered_bytes {
             self.drop_buffer(key);
-            return Err(NetworkError::protocol(
-                "buffered DIMSE messages exceed the maximum size",
-            ));
+            return Err(NetworkError::MessageTooLarge);
         }
         let buffer = self.buffers.entry(key).or_default();
         buffer.extend_from_slice(&pdv.data);
@@ -538,9 +532,7 @@ impl PdvAssembler {
                 if self.aggregate_len().saturating_add(pdv.data.len()) > self.max_buffered_bytes {
                     self.drop_buffer(key);
                     self.armed.remove(&context_id);
-                    return Err(NetworkError::protocol(
-                        "buffered DIMSE messages exceed the maximum size",
-                    ));
+                    return Err(NetworkError::MessageTooLarge);
                 }
                 let buffer = self.buffers.entry(key).or_default();
                 buffer.extend_from_slice(&pdv.data);
@@ -562,9 +554,7 @@ impl PdvAssembler {
             if total as u64 > config.max_message_length {
                 self.drop_buffer(key);
                 self.armed.remove(&context_id);
-                return Err(NetworkError::protocol(
-                    "spilled DIMSE message exceeds the maximum size",
-                ));
+                return Err(NetworkError::MessageTooLarge);
             }
             // Aggregate ceiling: buffered bytes plus bytes already in spool
             // files plus this PDV. The prefix moves from memory to the file, so
@@ -572,9 +562,7 @@ impl PdvAssembler {
             if self.aggregate_len().saturating_add(pdv.data.len()) > self.max_buffered_bytes {
                 self.drop_buffer(key);
                 self.armed.remove(&context_id);
-                return Err(NetworkError::protocol(
-                    "buffered DIMSE messages exceed the maximum size",
-                ));
+                return Err(NetworkError::MessageTooLarge);
             }
             let prefix = self.drop_buffer(key).unwrap_or_default();
             let writer = match self.open_spill(&config, &prefix) {
@@ -596,9 +584,7 @@ impl PdvAssembler {
             self.spilling.remove(&context_id);
             self.spilled = self.spilled.saturating_sub(written as usize);
             self.armed.remove(&context_id);
-            return Err(NetworkError::protocol(
-                "spilled DIMSE message exceeds the maximum size",
-            ));
+            return Err(NetworkError::MessageTooLarge);
         }
         // the aggregate ceiling counts spooled bytes too, so parallel spills
         // across many contexts share one budget (F)
@@ -606,9 +592,7 @@ impl PdvAssembler {
             self.spilling.remove(&context_id);
             self.spilled = self.spilled.saturating_sub(written as usize);
             self.armed.remove(&context_id);
-            return Err(NetworkError::protocol(
-                "buffered DIMSE messages exceed the maximum size",
-            ));
+            return Err(NetworkError::MessageTooLarge);
         }
         // Append through a short borrow so a write failure rolls back the spool
         // state instead of leaving counters/file inconsistent (§13).
@@ -1363,7 +1347,7 @@ mod tests {
             .push_pdv(&pdv(3, false, false, &[0; 1]))
             .expect_err("a third context would exceed the total");
         assert!(
-            error.to_string().contains("buffered DIMSE messages"),
+            matches!(error, NetworkError::MessageTooLarge),
             "unexpected error: {error}"
         );
 
@@ -1477,7 +1461,7 @@ mod tests {
             .push_pdv(&dataset_pdv(3, false, 8))
             .expect_err("the aggregate spool budget is enforced");
         assert!(
-            error.to_string().contains("buffered DIMSE messages"),
+            matches!(error, NetworkError::MessageTooLarge),
             "unexpected error: {error}"
         );
         std::fs::remove_dir_all(&dir).ok();

@@ -49,6 +49,19 @@ impl IconImage {
             ));
         }
 
+        // An icon's pixel data must be a native byte value. A fragmented item can
+        // only be decoded by a codec, which may not be registered, and forcing a
+        // native syntax on it made the renderer read fragments as native samples
+        // and panic (docs §10). Reject it instead of pretending it is native.
+        if matches!(
+            item.item(&crate::pixel::PIXEL_DATA),
+            Some(crate::model::item::DicomItem::Fragments(_))
+        ) {
+            return Err(invalid(
+                "icon pixel data is fragmented; a codec is required to render it",
+            ));
+        }
+
         // clone so we can normalise without touching the source item, and force
         // a single frame (docs §1.4)
         let mut owned = item.clone();
@@ -184,6 +197,23 @@ mod tests {
 
         // no sequence at all
         assert!(IconImage::try_from_dataset(&Dataset::new()).is_none());
+    }
+
+    #[test]
+    fn a_fragmented_icon_item_is_rejected() {
+        // The icon item's pixel data may be encapsulated (only a codec can decode
+        // it). Forcing Explicit VR LE on it made the renderer treat fragments as
+        // native samples and panic; the constructor must return an error instead.
+        use crate::model::item::{DicomFragmentSequence, DicomItem};
+        let mut item = icon_item("MONOCHROME2", 0);
+        item.remove(Tag::PIXEL_DATA);
+        let mut fragments = DicomFragmentSequence::new(Tag::PIXEL_DATA, Vr::Ob);
+        fragments.push_fragment(std::sync::Arc::new(
+            crate::model::buffer::MemoryBuffer::from(vec![0u8; 16]),
+        ));
+        item.insert_or_update(DicomItem::Fragments(fragments));
+        let error = IconImage::try_from_sequence_item(&item).expect_err("fragmented icon");
+        assert!(error.to_string().contains("fragmented"), "{error}");
     }
 
     #[test]

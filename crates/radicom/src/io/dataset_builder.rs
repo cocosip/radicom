@@ -101,15 +101,15 @@ impl DatasetBuilder {
     }
 
     fn charset_of(value: &str) -> Option<&'static encoding_rs::Encoding> {
-        // Specific Character Set is multi-valued; a leading empty value means the
-        // default repertoire (ISO-IR 6). Use the first *non-empty* value as the
-        // governing encoding so a list like `\ISO 2022 IR 58` resolves to GBK
-        // rather than falling back to ASCII.
-        let first = value
-            .split('\\')
-            .map(str::trim)
-            .find(|term| !term.is_empty())?;
-        Some(charset_encoding(first))
+        // PS3.5 §6.1.2.5.4 / CP-965: a leading empty term declares the default
+        // repertoire (ISO-IR 6); the remaining terms are alternates reached by
+        // an ISO 2022 escape, never the governing encoding.
+        let first = value.split('\\').next().unwrap_or("").trim();
+        Some(if first.is_empty() {
+            charset_encoding("ISO_IR 6")
+        } else {
+            charset_encoding(first)
+        })
     }
 
     /// Decodes raw value bytes with the active charset (ENC-02).
@@ -127,16 +127,27 @@ impl ParseObserver for DatasetBuilder {
         buffer: SharedBuffer,
     ) -> Result<(), Error> {
         // SpecificCharacterSet: ASCII by definition, and it governs this
-        // level plus nested items that do not override it
+        // level plus nested items that do not override it. Only a text VR can
+        // select a charset; a non-conformant binary/UN encoding is stored
+        // as-is instead of being re-labelled CS and decoded as text.
         if tag.group() == 0x0008 && tag.element() == 0x0005 {
-            let text = String::from_utf8_lossy(&buffer.data()?)
-                .trim_end_matches([' ', '\0'])
-                .to_string();
-            let enc = Self::charset_of(&text).unwrap_or_else(|| charset_encoding("ISO_IR 6"));
-            if let Some(top) = self.charset_stack.last_mut() {
-                *top = enc;
+            if matches!(vr, Vr::Cs | Vr::Lo | Vr::Sh) {
+                let text = String::from_utf8_lossy(&buffer.data()?)
+                    .trim_end_matches([' ', '\0'])
+                    .to_string();
+                let enc = Self::charset_of(&text).unwrap_or_else(|| charset_encoding("ISO_IR 6"));
+                if let Some(top) = self.charset_stack.last_mut() {
+                    *top = enc;
+                }
+                self.current().insert_str(tag.clone(), vr, text);
+            } else {
+                self.current()
+                    .insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+                        tag.clone(),
+                        vr,
+                        buffer,
+                    )));
             }
-            self.current().insert_str(tag.clone(), Vr::Cs, text);
             return Ok(());
         }
 
@@ -309,6 +320,64 @@ mod tests {
 
     fn implicit() -> Arc<TransferSyntax> {
         syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone()
+    }
+
+    #[test]
+    fn an_empty_first_charset_term_means_the_default_repertoire() {
+        // PS3.5 §6.1.2.5.4 / CP-965: a leading empty term declares the default
+        // repertoire; the remaining terms are only alternates reached by an
+        // escape. Raw GBK bytes must therefore NOT decode as GBK.
+        let mut bytes = el_header(0x0008, 0x0005, "CS", b"\\ISO 2022 IR 58 ");
+        bytes.extend_from_slice(&el_header(0x0010, 0x0020, "LO", &[0xD5, 0xC5]));
+        let ds = parse(&bytes, &le());
+        assert_eq!(
+            ds.get_str(Tag::PATIENT_ID).unwrap(),
+            "\u{D5}\u{C5}",
+            "the default repertoire decodes the raw bytes, not GBK"
+        );
+
+        // With the GBK designation the same bytes decode as Chinese.
+        let mut bytes = el_header(0x0008, 0x0005, "CS", b"\\ISO 2022 IR 58 ");
+        bytes.extend_from_slice(&el_header(
+            0x0010,
+            0x0020,
+            "LO",
+            &[0x1B, 0x24, 0x29, 0x41, 0xD5, 0xC5],
+        ));
+        let ds = parse(&bytes, &le());
+        assert_eq!(
+            ds.get_str(Tag::PATIENT_ID).unwrap(),
+            "张",
+            "an ESC $ ) A designation switches to GBK"
+        );
+    }
+
+    #[test]
+    fn a_binary_specific_character_set_keeps_its_vr() {
+        // A non-conformant (0008,0005) encoded as OB must not be re-labelled CS
+        // and decoded as text; its bytes are opaque and it selects no charset.
+        let mut bytes = el_long(0x0008, 0x0005, "OB", &[0xFF, 0xFE, 0x00, 0x80]);
+        bytes.extend_from_slice(&el_header(0x0010, 0x0010, "PN", b"Doe^John"));
+        let ds = parse(&bytes, &le());
+        let element = ds
+            .items()
+            .find(|item| item.tag() == &Tag::SPECIFIC_CHARACTER_SET)
+            .and_then(|item| match item {
+                crate::model::item::DicomItem::Element(element) => Some(element),
+                _ => None,
+            })
+            .expect("the character set element is present");
+        assert_eq!(element.vr(), Vr::Ob, "the original VR is preserved");
+        assert_eq!(
+            element.value().as_buffer().unwrap().size(),
+            4,
+            "the raw bytes are kept"
+        );
+        assert_eq!(
+            ds.get_str(Tag::PATIENT_NAME).unwrap(),
+            "Doe^John",
+            "parsing continues with the default repertoire"
+        );
     }
 
     #[test]

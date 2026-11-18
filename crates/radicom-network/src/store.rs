@@ -131,9 +131,7 @@ impl StoreSink {
         };
         let max_materialized_length = max_materialized_length.min(spool.max_message_length());
         if spool.len() > max_materialized_length {
-            return Err(NetworkError::protocol(
-                "DIMSE dataset exceeds the maximum size",
-            ));
+            return Err(NetworkError::MessageTooLarge);
         }
         match self {
             StoreSink::Memory => {
@@ -392,9 +390,7 @@ pub fn decode_body_with_fallback_limited(
         max_materialized_length.min(spool.max_message_length())
     });
     if body.len() > limit {
-        return Err(NetworkError::protocol(
-            "DIMSE dataset exceeds the maximum size",
-        ));
+        return Err(NetworkError::MessageTooLarge);
     }
     let bytes = body.read_all()?;
     decode_limited(&bytes, syntax, fallback, limit)
@@ -407,9 +403,7 @@ fn decode_limited(
     max_materialized_length: u64,
 ) -> Result<Dataset> {
     if bytes.len() as u64 > max_materialized_length {
-        return Err(NetworkError::protocol(
-            "DIMSE dataset exceeds the maximum size",
-        ));
+        return Err(NetworkError::MessageTooLarge);
     }
     if !syntax.is_deflate() {
         return decode(bytes, syntax, fallback);
@@ -517,10 +511,10 @@ pub fn store_failure_status(error: &NetworkError) -> u16 {
         }
         NetworkError::Io(_) => status::STORAGE_FAILURE,
         // the receive-side size ceiling is a resource shortfall, not a decode
-        // error: answer 0xA700 rather than 0x0110.
-        NetworkError::Protocol(message) if message.contains("maximum size") => {
-            status::OUT_OF_RESOURCES
-        }
+        // error: answer 0xA700 rather than 0x0110. A dedicated variant, not a
+        // string that happens to contain "maximum size" (which any provider
+        // comment could also contain).
+        NetworkError::MessageTooLarge => status::OUT_OF_RESOURCES,
         _ => status::PROCESSING_FAILURE,
     }
 }
@@ -718,10 +712,8 @@ mod tests {
 
         // a cap smaller than the body is rejected before parsing
         match decode_limited(&bytes, &syntax, None, 1) {
-            Err(NetworkError::Protocol(message)) => {
-                assert!(message.contains("maximum"), "got {message}")
-            }
-            other => panic!("expected a size-limit protocol error, got {other:?}"),
+            Err(NetworkError::MessageTooLarge) => {}
+            other => panic!("expected a size-limit error, got {other:?}"),
         }
 
         // the deflated syntax inflates first, then parses as Explicit VR LE
@@ -1016,14 +1008,14 @@ mod tests {
 
         // the decoded-body helper enforces the cap on an in-memory body
         match decode_body_with_fallback_limited(&body, &syntax, None, 1) {
-            Err(NetworkError::Protocol(message)) => assert!(message.contains("maximum")),
+            Err(NetworkError::MessageTooLarge) => {}
             other => panic!("expected a size-limit error, got {other:?}"),
         }
 
         // the spilled materialise path enforces the cap before parsing
         let (spilled, dir) = spilled_body(&syntax, "cap");
         match StoreSink::Memory.materialize_body_with_fallback_limited(&spilled, &syntax, None, 1) {
-            Err(NetworkError::Protocol(message)) => assert!(message.contains("maximum")),
+            Err(NetworkError::MessageTooLarge) => {}
             other => panic!("expected a size-limit error, got {other:?}"),
         }
         std::fs::remove_dir_all(&dir).ok();
@@ -1036,7 +1028,7 @@ mod tests {
         assert_eq!(store_failure_status(&decode), status::UNABLE_TO_PROCESS);
         let resource = NetworkError::Io(std::io::Error::other("disk full"));
         assert_eq!(store_failure_status(&resource), status::STORAGE_FAILURE);
-        let capped = NetworkError::protocol("DIMSE dataset exceeds the maximum size");
+        let capped = NetworkError::MessageTooLarge;
         assert_eq!(store_failure_status(&capped), status::OUT_OF_RESOURCES);
         assert_eq!(
             store_failure_status(&NetworkError::protocol("other")),

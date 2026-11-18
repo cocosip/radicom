@@ -450,10 +450,18 @@ impl Dataset {
         self.try_insert_or_update(DicomElement::new_str(tag, vr, text))
     }
 
-    /// Appends a sequence and returns it for item population.
+    /// Inserts a sequence, replacing any existing item, and returns it for item
+    /// population.
     ///
     /// A dictionary-style private tag is resolved (and its creator block
     /// claimed) before insertion, exactly like [`Self::insert_or_update`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when the tag is dictionary-style private and its private group
+    /// has no free creator block. The infallible insert helpers have no
+    /// `Result`; the fallible [`Self::try_insert_or_update`] is the channel
+    /// that reports it.
     pub fn insert_sequence(&mut self, tag: Tag) -> &mut DicomSequence {
         let tag = self.resolved_insert_tag(tag);
         self.items.insert(
@@ -480,10 +488,16 @@ impl Dataset {
         }
     }
 
-    /// Appends a fragment sequence for encapsulated pixel data.
+    /// Inserts a fragment sequence, replacing any existing item, for
+    /// encapsulated pixel data.
     ///
     /// A dictionary-style private tag is resolved (and its creator block
     /// claimed) before insertion, exactly like [`Self::insert_or_update`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when the tag is dictionary-style private and its private group
+    /// has no free creator block (see [`Self::insert_sequence`]).
     pub fn insert_fragments(&mut self, tag: Tag, vr: Vr) -> &mut DicomFragmentSequence {
         let tag = self.resolved_insert_tag(tag);
         self.items.insert(
@@ -757,6 +771,7 @@ impl Dataset {
         // writer shared the same mistake.
         let entry = crate::model::dictionary::dictionary().entry(tag);
         let vrs = &entry.vrs;
+        let known = entry.keyword != "Unknown";
         let Some(&dict_vr) = vrs.first() else {
             return preferred.unwrap_or(Vr::Un);
         };
@@ -769,6 +784,14 @@ impl Dataset {
         // A negative integer must not be written into an unsigned VR. When the
         // dictionary offers the `US\SS` alternatives, select SS (CM-01).
         let pick_ss = negative && dict_vr == Vr::Us && vrs.contains(&Vr::Ss);
+        // A numeric value written to a binary attribute (Pixel Data, OB/OW/UN,
+        // ...) must take the dictionary's binary VR: the value's IS/DS hint is
+        // only text and cannot represent those bytes (CM-12).
+        if let Some(p) = preferred {
+            if known && is_numeric_hint(p) && is_binary_vr(dict_vr) {
+                return dict_vr;
+            }
+        }
         match preferred {
             Some(p) if p == dict_vr || numeric_hint_fits(p, dict_vr) => {
                 if pick_ss {
@@ -816,6 +839,18 @@ fn numeric_hint_fits(hint: Vr, dict_vr: Vr) -> bool {
     }
 }
 
+/// Every numeric VR a value may prefer (IS/DS) or carry explicitly.
+fn is_numeric_hint(vr: Vr) -> bool {
+    use Vr::*;
+    matches!(vr, Is | Ds | Us | Ss | Ul | Sl | Sv | Uv | Fl | Fd)
+}
+
+/// The binary VR family whose values are raw bytes, not text.
+fn is_binary_vr(vr: Vr) -> bool {
+    use Vr::*;
+    matches!(vr, Ob | Ow | Of | Od | Ol | Ov | Un)
+}
+
 /// Deep-traversal callback trait (DS-09).
 ///
 /// Implement it for structured enter/exit events, or pass a
@@ -844,11 +879,50 @@ where
 mod tests {
     use super::*;
     use crate::model::buffer::MemoryBuffer;
+    use crate::model::item::DicomItem;
 
     const PATIENT_NAME: Tag = Tag::PATIENT_NAME;
     const PATIENT_ID: Tag = Tag::PATIENT_ID;
     const ROWS: Tag = Tag::ROWS;
     const COLUMNS: Tag = Tag::COLUMNS;
+
+    #[test]
+    fn insert_value_uses_the_binary_dictionary_vr_for_a_numeric_vector() {
+        // The numeric hint (IS) is only a hint: Pixel Data's dictionary VR is
+        // binary, so the values must be encoded as native byte units, not IS
+        // text (8 bytes for four u16 values).
+        let mut ds = Dataset::new();
+        ds.insert_value(Tag::PIXEL_DATA, vec![0u16; 4]);
+        let item = ds
+            .items()
+            .find(|item| item.tag() == &Tag::PIXEL_DATA)
+            .expect("pixel data stored");
+        let DicomItem::Element(element) = item else {
+            panic!("pixel data is an element");
+        };
+        assert_eq!(
+            element.vr(),
+            Vr::Ob,
+            "the dictionary's first binary VR wins over the IS hint"
+        );
+        assert_eq!(
+            element.value().as_buffer().unwrap().size(),
+            8,
+            "four u16 values are eight bytes of native units"
+        );
+
+        // A numeric dictionary VR still resolves normally.
+        ds.insert_value(ROWS, 512u16);
+        let rows = ds
+            .items()
+            .find(|item| item.tag() == &ROWS)
+            .expect("rows stored");
+        let DicomItem::Element(rows) = rows else {
+            panic!("rows is an element");
+        };
+        assert_eq!(rows.vr(), Vr::Us, "Rows stays US");
+        assert_eq!(rows.get::<u16>(None).unwrap(), 512);
+    }
 
     #[test]
     fn three_tier_reads() {

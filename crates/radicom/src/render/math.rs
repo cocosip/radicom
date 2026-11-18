@@ -517,7 +517,7 @@ impl Interval {
 #[derive(Debug, Clone)]
 pub struct Histogram {
     values: Vec<i32>,
-    offset: i32,
+    offset: i64,
     total: i32,
     window: i32,
     wstart: usize,
@@ -526,11 +526,19 @@ pub struct Histogram {
 }
 
 impl Histogram {
+    /// Most bins a histogram allocates. A requested range wider than this (for
+    /// example the whole `i32` domain) is clamped to the first
+    /// [`Histogram::MAX_BINS`] values instead of overflowing or allocating
+    /// gigabytes; values outside the clamped bins are ignored.
+    pub const MAX_BINS: usize = 65_536;
+
     pub fn new(min: i32, max: i32) -> Self {
-        let range = (max - min + 1).max(1) as usize;
+        // `max - min + 1` overflows i32 for the full range, so widen before the
+        // arithmetic and clamp the allocation to a sane maximum.
+        let range = (i64::from(max) - i64::from(min) + 1).clamp(1, Self::MAX_BINS as i64) as usize;
         Histogram {
             values: vec![0; range],
-            offset: -min,
+            offset: -i64::from(min),
             total: 0,
             window: -1,
             wstart: 0,
@@ -539,8 +547,8 @@ impl Histogram {
         }
     }
 
-    fn position(&self, value: i32) -> i32 {
-        value + self.offset
+    fn position(&self, value: i32) -> i64 {
+        i64::from(value) + self.offset
     }
 
     /// Count at `value` (0 when out of range).
@@ -588,12 +596,12 @@ impl Histogram {
 
     /// The current window's start value.
     pub fn window_start(&self) -> i32 {
-        self.wstart as i32 - self.offset
+        (self.wstart as i64 - self.offset) as i32
     }
 
     /// The current window's end value.
     pub fn window_end(&self) -> i32 {
-        self.wend as i32 - self.offset
+        (self.wend as i64 - self.offset) as i32
     }
 
     /// Total count currently inside the window.
@@ -648,9 +656,9 @@ impl Histogram {
             self.window = 0;
             return;
         }
-        let last = len as i32 - 1;
-        let start_pos = start + self.offset;
-        let end_pos = end + self.offset;
+        let last = len as i64 - 1;
+        let start_pos = i64::from(start) + self.offset;
+        let end_pos = i64::from(end) + self.offset;
         // An entirely-out-of-range or inverted window is empty, not a panic
         // (PR-08: a negative `end` used to become a huge usize).
         if end_pos < 0 || start_pos > last || start_pos > end_pos {
@@ -1040,6 +1048,39 @@ mod tests {
         h.add(5); // below min
         h.add(25); // above max
         assert_eq!(h.total(), 0, "out-of-range values are dropped");
+    }
+
+    #[test]
+    fn histogram_clamps_a_range_wider_than_its_bin_cap() {
+        // max - min + 1 overflows i32 for the full domain and a naive Vec would
+        // be 4 Gi bins; the documented fallback clamps to MAX_BINS.
+        let mut h = Histogram::new(i32::MIN, i32::MAX);
+        assert_eq!(h.count(i32::MIN), 0);
+        h.add(i32::MIN);
+        assert_eq!(
+            h.count(i32::MIN),
+            1,
+            "the low end of the clamped range is binned"
+        );
+        h.add(i32::MAX);
+        assert_eq!(h.total(), 1, "values outside the clamped bins are dropped");
+        assert_eq!(h.window_start(), i32::MIN);
+        h.apply_window_percent(50);
+        assert!(h.window_end() >= h.window_start());
+        h.apply_window(i32::MIN, i32::MAX);
+        assert!(h.window_end() >= h.window_start());
+    }
+
+    #[test]
+    fn histogram_range_within_the_cap_is_unchanged() {
+        let mut h = Histogram::new(-3, 3);
+        h.add(-3);
+        h.add(3);
+        assert_eq!((h.count(-3), h.count(3)), (1, 1));
+        assert_eq!((h.window_start(), h.window_end()), (-3, 3));
+        h.apply_window(-1, 1);
+        assert_eq!((h.window_start(), h.window_end()), (-1, 1));
+        assert_eq!(h.window_total(), 0, "only the values in [-1,1] count");
     }
 
     #[test]

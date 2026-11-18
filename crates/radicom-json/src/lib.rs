@@ -321,11 +321,12 @@ fn element_to_value(element: &DicomElement, options: &JsonOptions) -> Result<Val
         }
     }
 
-    if is_binary(vr) {
+    // A non-memory value of an allow-listed VR goes out as a URI when the caller
+    // names one and is never materialised for it (§12.1). An empty value has
+    // nothing to defer and a blank URI is not a carrier, so both fall through.
+    // This covers string-backed VRs too (DS/IS/...), not just the binary ones.
+    if allows_bulk_data_uri(vr) {
         if let Some(buffer) = element.value().as_buffer() {
-            // a deferred value goes out as a URI when the caller names one, and
-            // is never materialised for it (§12.1). An empty value has nothing to
-            // defer and a blank URI is not a carrier, so both fall through.
             if buffer.size() > 0 && !buffer.is_memory() {
                 let uri = options
                     .bulk_data_uri
@@ -337,6 +338,11 @@ fn element_to_value(element: &DicomElement, options: &JsonOptions) -> Result<Val
                     return Ok(Value::Object(object));
                 }
             }
+        }
+    }
+
+    if is_binary(vr) {
+        if let Some(buffer) = element.value().as_buffer() {
             // an empty binary value carries no carrier at all (§12.1)
             if buffer.size() > 0 {
                 let encoded =
@@ -549,19 +555,15 @@ fn binary_number(chunk: &[u8], vr: Vr) -> Option<Value> {
         Vr::Fl if chunk.len() >= 4 => {
             let f = f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             // Preserve the f32 shortest decimal form: fo-dicom writes 0.1f32 as
-            // "0.1", not the f64 expansion "0.10000000149011612". Re-parsing the
-            // Display text keeps serde_json to a Number while emitting the short
-            // form. Non-finite values stay as the DICOM JSON strings below.
+            // "0.1", not the f64 expansion "0.10000000149011612". The text comes
+            // from serde_json's own f32 writer, so the exponent range and
+            // spelling match the rest of the document. Non-finite values stay as
+            // the DICOM JSON strings below.
             return Some(if f.is_finite() {
-                let mut text = format!("{f}");
-                // Keep FL a JSON float even for integral values (1.0f -> "1.0"),
-                // preserving the previous float-typed output; fractional values
-                // keep f32-shortest text ("0.1", never the f64 expansion).
-                if !(text.contains('.') || text.contains('e') || text.contains('E')) {
-                    text.push_str(".0");
-                }
-                serde_json::from_str::<Value>(&text)
-                    .unwrap_or_else(|_| Value::Number(Number::from_f64(f as f64).expect("finite")))
+                serde_json::to_string(&f)
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                    .unwrap_or_else(|| Value::Number(Number::from_f64(f as f64).expect("finite")))
             } else {
                 Value::String(
                     if f.is_nan() {
@@ -633,11 +635,18 @@ fn numeric_value(part: &str, mode: NumberMode) -> Value {
         },
         NumberMode::PreferablyAsNumber => {
             // write a number only when reading it back yields the same text:
-            // "1.50" stays a string because a number would lose the zero
+            // "1.50" stays a string because a number would lose the zero. The
+            // comparison uses the JSON number's own text (serde_json: shortest
+            // round-trip, exponent form), not a hand-rolled formatter.
             match trimmed.parse::<f64>() {
-                Ok(value) if value.is_finite() && format_number_like(value) == trimmed => {
-                    integer_aware_number(trimmed, value)
-                        .unwrap_or_else(|| Value::String(part.to_string()))
+                Ok(value) if value.is_finite() => {
+                    let number = integer_aware_number(trimmed, value)
+                        .unwrap_or_else(|| Value::String(part.to_string()));
+                    if serde_json::to_string(&number).is_ok_and(|text| text == trimmed) {
+                        number
+                    } else {
+                        Value::String(part.to_string())
+                    }
                 }
                 _ => Value::String(part.to_string()),
             }
@@ -656,14 +665,6 @@ fn integer_aware_number(text: &str, value: f64) -> Option<Value> {
         }
     }
     Number::from_f64(value).map(Value::Number)
-}
-
-/// Formats a float the way serde_json would, for the lossless check.
-fn format_number_like(value: f64) -> String {
-    if value == value.trunc() && value.abs() < 1e16 {
-        return format!("{}", value as i64);
-    }
-    format!("{value}")
 }
 
 /// PN as the three-group object (§12.1).
@@ -907,7 +908,37 @@ fn attribute_to_item(tag: Tag, attribute: &Value) -> Result<DicomItem> {
         vr: vr_code.to_string(),
     })?;
 
-    if let Some(uri) = object.get("BulkDataURI").and_then(Value::as_str) {
+    // PS3.18 F.2.2: a value lives in exactly one carrier.
+    let carriers = ["Value", "InlineBinary", "BulkDataURI"]
+        .iter()
+        .filter(|key| object.contains_key(**key))
+        .count();
+    if carriers > 1 {
+        return Err(JsonError::Malformed {
+            tag: tag.to_json_string(),
+            reason:
+                "an attribute carries exactly one of \"Value\", \"InlineBinary\" or \"BulkDataURI\""
+                    .to_string(),
+        });
+    }
+
+    if let Some(uri) = object.get("BulkDataURI") {
+        // PS3.18 F.2.2: a BulkDataURI is a non-empty string, and only the
+        // allow-listed VRs may carry one.
+        let uri = uri
+            .as_str()
+            .map(str::trim)
+            .filter(|uri| !uri.is_empty())
+            .ok_or_else(|| JsonError::Malformed {
+                tag: tag.to_json_string(),
+                reason: "\"BulkDataURI\" must be a non-empty string".to_string(),
+            })?;
+        if !allows_bulk_data_uri(vr) {
+            return Err(JsonError::Malformed {
+                tag: tag.to_json_string(),
+                reason: format!("VR {} cannot carry a BulkDataURI (PS3.18 F.2.2)", vr.code()),
+            });
+        }
         // JSON-02: keep the reference as a BulkDataUri buffer; the resolver that
         // owns fetching is out of scope, so the bytes stay unloaded until asked.
         return Ok(DicomItem::Element(DicomElement::new_bytes(
@@ -918,6 +949,14 @@ fn attribute_to_item(tag: Tag, attribute: &Value) -> Result<DicomItem> {
     }
 
     if let Some(inline) = object.get("InlineBinary") {
+        // PS3.18 F.2.2: InlineBinary is only for the binary VRs; a text VR must
+        // use Value.
+        if !is_binary(vr) {
+            return Err(JsonError::Malformed {
+                tag: tag.to_json_string(),
+                reason: format!("VR {} must use Value, not InlineBinary", vr.code()),
+            });
+        }
         // fo-dicom also accepts the single-element array form
         let encoded = match inline {
             Value::String(text) => Some(text.as_str()),
@@ -970,6 +1009,18 @@ fn attribute_to_item(tag: Tag, attribute: &Value) -> Result<DicomItem> {
     }
 
     check_value_vr(vr, &tag)?;
+    if vr == Vr::At {
+        // An AT component is a tag: a null or empty one has no representation
+        // and dropping it would silently change the value multiplicity.
+        for value in values {
+            if !matches!(value, Value::String(text) if !text.trim().is_empty()) {
+                return Err(JsonError::Malformed {
+                    tag: tag.to_json_string(),
+                    reason: "an AT value component must be a non-empty tag string".to_string(),
+                });
+            }
+        }
+    }
     let text = values_to_text(vr, values, &tag)?;
     let element = text_element(tag, vr, text)?;
     Ok(DicomItem::Element(element))
@@ -982,13 +1033,17 @@ fn attribute_to_item(tag: Tag, attribute: &Value) -> Result<DicomItem> {
 fn text_element(tag: Tag, vr: Vr, text: String) -> Result<DicomElement> {
     if vr == Vr::At {
         let mut bytes = Vec::new();
-        for part in text.split('\\').filter(|part| !part.is_empty()) {
-            let parsed = Tag::parse(part).map_err(|_| JsonError::Malformed {
-                tag: tag.to_json_string(),
-                reason: format!("AT value \"{part}\" is not a tag"),
-            })?;
-            bytes.extend_from_slice(&parsed.group().to_ne_bytes());
-            bytes.extend_from_slice(&parsed.element().to_ne_bytes());
+        // An empty Value array is an empty element; every component of a
+        // non-empty text is a tag, so an empty one is rejected, not dropped.
+        if !text.is_empty() {
+            for part in text.split('\\') {
+                let parsed = Tag::parse(part).map_err(|_| JsonError::Malformed {
+                    tag: tag.to_json_string(),
+                    reason: format!("AT value \"{part}\" is not a tag"),
+                })?;
+                bytes.extend_from_slice(&parsed.group().to_ne_bytes());
+                bytes.extend_from_slice(&parsed.element().to_ne_bytes());
+            }
         }
         return Ok(DicomElement::new_bytes(
             tag,
@@ -2646,9 +2701,227 @@ mod tests {
     #[test]
     fn a_bulk_data_uri_on_a_forbidden_vr_is_an_error() {
         // PS3.18 F.2.2 lists the VRs a BulkDataURI may carry; PN is not one, so
-        // the value must be materialised rather than emitted as an invalid URI.
+        // neither the reader nor the writer may accept it.
         let json = r#"{"00100010":{"vr":"PN","BulkDataURI":"http://example/pn"}}"#;
-        let ds = json_to_dataset(json, &JsonOptions::default()).unwrap();
+        match json_to_dataset(json, &JsonOptions::default()) {
+            Err(JsonError::Malformed { reason, .. }) => {
+                assert!(reason.contains("BulkDataURI"), "{reason}")
+            }
+            other => panic!("a URI on PN must be rejected: {other:?}"),
+        }
+
+        // a dataset that holds such a reference cannot be exported either
+        let mut ds = Dataset::new();
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::PATIENT_NAME,
+            Vr::Pn,
+            Arc::new(radicom::model::buffer::BulkDataUri::new(
+                "http://example/pn",
+            )),
+        )));
         assert!(dataset_to_value(&ds, &JsonOptions::default()).is_err());
+    }
+
+    #[test]
+    fn an_attribute_carries_exactly_one_value_carrier() {
+        // PS3.18 F.2.2: Value, InlineBinary and BulkDataURI are alternatives.
+        for json in [
+            r#"{"7FE00010":{"vr":"OB","InlineBinary":"AA==","BulkDataURI":"http://x"}}"#,
+            r#"{"00100020":{"vr":"LO","Value":["x"],"InlineBinary":"AA=="}}"#,
+            r#"{"00100020":{"vr":"LO","Value":["x"],"BulkDataURI":"http://x"}}"#,
+        ] {
+            match json_to_dataset(json, &JsonOptions::default()) {
+                Err(JsonError::Malformed { reason, .. }) => {
+                    assert!(reason.contains("carries exactly one"), "{json}: {reason}")
+                }
+                other => panic!("{json} must be rejected, got {other:?}"),
+            }
+        }
+
+        // one carrier each is still read
+        for json in [
+            r#"{"00100020":{"vr":"LO","Value":["x"]}}"#,
+            r#"{"7FE00010":{"vr":"OB","InlineBinary":"AA=="}}"#,
+            r#"{"7FE00010":{"vr":"OB","BulkDataURI":"http://x"}}"#,
+        ] {
+            json_to_dataset(json, &JsonOptions::default())
+                .unwrap_or_else(|e| panic!("{json}: {e}"));
+        }
+    }
+
+    #[test]
+    fn inline_binary_is_accepted_only_for_a_binary_vr() {
+        // PS3.18 F.2.2: InlineBinary belongs to OB, OD, OF, OL, OV, OW and UN.
+        for vr in ["OB", "OD", "OF", "OL", "OV", "OW", "UN"] {
+            let json = format!(r#"{{"7FE00010":{{"vr":"{vr}","InlineBinary":"AA=="}}}}"#);
+            json_to_dataset(&json, &JsonOptions::default())
+                .unwrap_or_else(|e| panic!("{vr} accepts InlineBinary: {e}"));
+        }
+        let json = r#"{"00100020":{"vr":"LO","InlineBinary":"AA=="}}"#;
+        match json_to_dataset(json, &JsonOptions::default()) {
+            Err(JsonError::Malformed { reason, .. }) => {
+                assert!(reason.contains("InlineBinary"), "{reason}")
+            }
+            other => panic!("a text VR must not take InlineBinary: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_bulk_data_uri_must_be_a_non_empty_string() {
+        for value in ["\"\"", "\"   \"", "null", "5", "[]"] {
+            let json = format!(r#"{{"7FE00010":{{"vr":"OB","BulkDataURI":{value}}}}}"#);
+            match json_to_dataset(&json, &JsonOptions::default()) {
+                Err(JsonError::Malformed { reason, .. }) => {
+                    assert!(reason.contains("BulkDataURI"), "{json}: {reason}")
+                }
+                other => panic!("{json} must be rejected, got {other:?}"),
+            }
+        }
+        // a non-empty string is the carrier
+        let ds = json_to_dataset(
+            r#"{"7FE00010":{"vr":"OB","BulkDataURI":"http://example/x"}}"#,
+            &JsonOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            ds.get_element(Tag::PIXEL_DATA)
+                .unwrap()
+                .value()
+                .as_buffer()
+                .unwrap()
+                .bulk_uri(),
+            Some("http://example/x")
+        );
+    }
+
+    #[test]
+    fn an_at_value_component_must_not_be_null_or_empty() {
+        // dropping an empty component would silently change the VM
+        for value in [
+            r#"[""]"#,
+            "[null]",
+            r#"["00100010",null]"#,
+            r#"["00100010",""]"#,
+        ] {
+            let json = format!(r#"{{"00080052":{{"vr":"AT","Value":{value}}}}}"#);
+            match json_to_dataset(&json, &JsonOptions::default()) {
+                Err(JsonError::Malformed { reason, .. }) => {
+                    assert!(reason.contains("AT"), "{json}: {reason}")
+                }
+                other => panic!("{json} must be rejected, got {other:?}"),
+            }
+        }
+        // real tags still parse, and an empty Value array is an empty element
+        let ds = json_to_dataset(
+            r#"{"00080052":{"vr":"AT","Value":["00100010","00280010"]}}"#,
+            &JsonOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            ds.get_element(Tag::QUERY_RETRIEVE_LEVEL)
+                .unwrap()
+                .value()
+                .as_buffer()
+                .unwrap()
+                .size(),
+            8
+        );
+        let empty = json_to_dataset(
+            r#"{"00080052":{"vr":"AT","Value":[]}}"#,
+            &JsonOptions::default(),
+        )
+        .unwrap();
+        assert!(empty
+            .get_element(Tag::QUERY_RETRIEVE_LEVEL)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_provider_defers_an_allow_listed_non_binary_value_by_uri() {
+        // PS3.18 F.2.2 allows a BulkDataURI for DS; a deferred buffer must be
+        // offered to the provider before the value is materialised as Value.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mut ds = Dataset::new();
+        // write-time validation would read the deferred DS value while checking
+        // it; the exporter is what must not materialise it
+        ds.set_validation(false);
+        ds.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::SLICE_THICKNESS,
+            Vr::Ds,
+            Arc::new(UnreadableDeferred(4)),
+        )));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let options = JsonOptions {
+            bulk_data_uri: Some(Arc::new(move |tag: &Tag, _: &SharedBuffer| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Some(format!("file:///bulk/{}", tag.to_json_string()))
+            })),
+            ..Default::default()
+        };
+        let value = dataset_to_value(&ds, &options).unwrap();
+        assert_eq!(value["00180050"]["BulkDataURI"], "file:///bulk/00180050");
+        assert!(
+            value["00180050"].get("Value").is_none(),
+            "the deferred DS value was never materialised: {value}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "one provider call");
+
+        // a blank URI is not a carrier: the bytes are used instead
+        let mut readable = Dataset::new();
+        readable.insert_or_update(DicomItem::Element(DicomElement::new_bytes(
+            Tag::SLICE_THICKNESS,
+            Vr::Ds,
+            Arc::new(DeferredBytes(b"1.5".to_vec())),
+        )));
+        let blank = JsonOptions {
+            bulk_data_uri: Some(Arc::new(|_: &Tag, _: &SharedBuffer| Some("  ".into()))),
+            ..Default::default()
+        };
+        let value = dataset_to_value(&readable, &blank).unwrap();
+        assert_eq!(value["00180050"]["Value"][0], serde_json::json!(1.5));
+        assert!(
+            value["00180050"].get("BulkDataURI").is_none(),
+            "a blank URI is not emitted: {value}"
+        );
+    }
+
+    #[test]
+    fn float_values_use_serde_json_number_text() {
+        // FL keeps the f32 shortest decimal, in serde_json's own exponent form.
+        for f in [1e-7f32, 1e20, -0.0, 1.5] {
+            let value = binary_number(&f.to_ne_bytes(), Vr::Fl).unwrap();
+            assert_eq!(
+                serde_json::to_string(&value).unwrap(),
+                serde_json::to_string(&f).unwrap(),
+                "FL {f:?}"
+            );
+        }
+        // FD and DS use the same number text as serde_json for the same f64.
+        for f in [1e-7f64, 1e20, -0.0, 2.25] {
+            let value = binary_number(&f.to_ne_bytes(), Vr::Fd).unwrap();
+            assert_eq!(
+                serde_json::to_string(&value).unwrap(),
+                serde_json::to_string(&f).unwrap(),
+                "FD {f:?}"
+            );
+        }
+        for text in ["1e-7", "1e+20", "-0.0", "2.25"] {
+            // the text serde_json itself emits for the value stays a number
+            let value = numeric_value(text, NumberMode::PreferablyAsNumber);
+            assert_eq!(
+                serde_json::to_string(&value).unwrap(),
+                text,
+                "DS {text} keeps the JSON number form"
+            );
+        }
+        // Rust's own Display spelling is not the JSON number form, so writing it
+        // as a number would change the text; the lossless form is the string.
+        assert_eq!(
+            numeric_value("1e20", NumberMode::PreferablyAsNumber),
+            Value::String("1e20".into())
+        );
     }
 }

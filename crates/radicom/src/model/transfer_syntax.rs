@@ -475,7 +475,7 @@ pub fn builtin_entries() -> Vec<TransferSyntax> {
         .retired()
         .implicit(),
         TransferSyntax::new(
-            "1.2.840.10008.1.2.2.123456",
+            "1.2.826.0.1.3680043.10.1330.2",
             "Implicit VR Big Endian",
         )
         .implicit()
@@ -527,7 +527,7 @@ pub mod syntaxes {
     ts_const!(HTJ2K_LOSSLESS_RPCL, uids::HTJ2_K_LOSSLESS_RPCL);
     ts_const!(HTJ2K_LOSSY, uids::HTJ2_K);
     ts_const!(RLE_LOSSLESS, uids::RLE_LOSSLESS);
-    ts_const!(IMPLICIT_VR_BIG_ENDIAN, "1.2.840.10008.1.2.2.123456");
+    ts_const!(IMPLICIT_VR_BIG_ENDIAN, "1.2.826.0.1.3680043.10.1330.2");
     ts_const!(GE_PRIVATE_IMPLICIT_VR_BIG_ENDIAN, "1.2.840.113619.5.2");
 }
 
@@ -661,10 +661,17 @@ mod tests {
     #[test]
     fn virtual_syntaxes() {
         let implicit_be = IMPLICIT_VR_BIG_ENDIAN.clone();
+        // A synthetic syntax is not a NEMA UID: PS3.5 §9 reserves the
+        // 1.2.840.10008 root, so the pseudo UID lives under this
+        // implementation's registered root.
         assert_eq!(
             implicit_be.uid(),
-            "1.2.840.10008.1.2.2.123456",
-            "pseudo UID"
+            "1.2.826.0.1.3680043.10.1330.2",
+            "pseudo UID under the implementation root"
+        );
+        assert!(
+            !implicit_be.uid().starts_with("1.2.840.10008"),
+            "the NEMA root is reserved"
         );
         assert!(!implicit_be.is_explicit_vr() && implicit_be.endian() == Endian::Big);
 

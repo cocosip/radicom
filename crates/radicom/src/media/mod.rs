@@ -315,13 +315,6 @@ impl DicomDirectory {
         let mut dataset = Dataset::new();
         dataset.insert_str(tags::FILE_SET_ID, Vr::Cs, file_set_id);
         dataset.insert_value(tags::FILE_SET_CONSISTENCY_FLAG, 0u16);
-        // a DICOMDIR carries its own SOP Instance UID; setting it once keeps the
-        // file identity (and thus every record offset) stable across re-serialisation
-        dataset.insert_str(
-            tags::SOP_INSTANCE_UID,
-            Vr::Ui,
-            crate::model::uid::Uid::generate_value(),
-        );
         dataset.insert_sequence(tags::DIR_RECORD_SEQUENCE);
         dataset.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
 
@@ -330,6 +323,15 @@ impl DicomDirectory {
             Tag::MEDIA_STORAGE_SOP_CLASS_UID,
             Vr::Ui,
             MEDIA_STORAGE_DIRECTORY_SOP_CLASS,
+        );
+        // The Basic Directory IOD has no SOP Common module, so the directory's
+        // identity is the file meta's MediaStorageSOPInstanceUID (0002,0003), not
+        // a dataset (0008,0018). Keep the generated value there once so it stays
+        // stable across saves and loads.
+        file_meta.insert_str(
+            Tag::MEDIA_STORAGE_SOP_INSTANCE_UID,
+            Vr::Ui,
+            crate::model::uid::Uid::generate_value(),
         );
         let mut file = DicomFile::from_dataset(dataset);
         file.file_meta = file_meta;
@@ -362,6 +364,20 @@ impl DicomDirectory {
         {
             file.dataset
                 .set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
+        }
+        // The Basic Directory IOD has no SOP Common module: its identity lives in
+        // the file meta group. A source file that omitted (0002,0003) still needs
+        // one to be re-saved, so generate it once here and keep it thereafter.
+        if file
+            .file_meta
+            .try_get_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID)
+            .is_none()
+        {
+            file.file_meta.insert_str(
+                Tag::MEDIA_STORAGE_SOP_INSTANCE_UID,
+                Vr::Ui,
+                crate::model::uid::Uid::generate_value(),
+            );
         }
         let (records, roots) = stitch(bytes, &file.dataset);
         let children_by_parent = build_children_map(&records);
@@ -576,6 +592,7 @@ impl DicomDirectory {
         let series_uid = required(dataset, tags::SERIES_INSTANCE_UID, "Series Instance UID")?;
         let sop_class = required(dataset, tags::SOP_CLASS_UID, "SOP Class UID")?;
         let sop_instance = required(dataset, tags::SOP_INSTANCE_UID, "SOP Instance UID")?;
+        let file_id = path_to_file_id(referenced_file_id)?;
 
         let patient = match self.find_patient(&patient_id) {
             Some(index) => index,
@@ -584,12 +601,16 @@ impl DicomDirectory {
                 record
                     .dataset
                     .insert_str(tags::PATIENT_ID, Vr::Lo, patient_id.clone());
+                // PS3.3 F.5-1: PatientID is Type 1; a source without it cannot be
+                // indexed, and inventing one would put a fabricated key in the
+                // directory.
+                validate_type_one(&record.dataset, &RecordType::Patient)?;
                 self.push_root(record)
             }
         };
 
-        let study = self.find_or_create_child(patient, RecordType::Study, &study_uid, dataset);
-        let series = self.find_or_create_child(study, RecordType::Series, &series_uid, dataset);
+        let study = self.find_or_create_child(patient, RecordType::Study, &study_uid, dataset)?;
+        let series = self.find_or_create_child(study, RecordType::Series, &series_uid, dataset)?;
 
         // fo-dicom `CreateImageRecord`: an existing record for this SOP instance
         // is returned instead of appending a second one (FEAT-14).
@@ -603,6 +624,20 @@ impl DicomDirectory {
             });
         }
 
+        // ReferencedFileID must identify one file: two records claiming the same
+        // relative path would describe the same file twice.
+        if self.records.iter().any(|record| {
+            record
+                .dataset
+                .try_get_str(tags::REFERENCED_FILE_ID)
+                .as_deref()
+                == Some(file_id.as_str())
+        }) {
+            return Err(record_error(format!(
+                "duplicate Referenced File ID {file_id}: another record already indexes that file"
+            )));
+        }
+
         let mut record = Dataset::new();
         record.insert_str(tags::RECORD_TYPE, Vr::Cs, category.record_type().as_str());
         record.insert_value(tags::RECORD_IN_USE_FLAG, 0xFFFFu16);
@@ -613,11 +648,7 @@ impl DicomDirectory {
             Vr::Ui,
             dataset.transfer_syntax().uid(),
         );
-        record.insert_str(
-            tags::REFERENCED_FILE_ID,
-            Vr::Cs,
-            path_to_file_id(referenced_file_id)?,
-        );
+        record.insert_str(tags::REFERENCED_FILE_ID, Vr::Cs, file_id);
 
         // Identifying attributes of the leaf record, matching fo-dicom's
         // `DicomDirectoryRecordType` tag sets (FEAT-15).
@@ -648,6 +679,10 @@ impl DicomDirectory {
                 attach_icon(&mut record, icon);
             }
         }
+
+        // PS3.3 F.5-4: InstanceNumber is Type 1 in the IMAGE record. The image
+        // dataset itself has it as Type 3, so it is often absent; do not invent it.
+        validate_type_one(&record, &category.record_type())?;
 
         let instance = self.records.len();
         self.records.push(DirectoryRecord {
@@ -685,7 +720,7 @@ impl DicomDirectory {
         kind: RecordType,
         uid: &str,
         source: &Dataset,
-    ) -> usize {
+    ) -> Result<usize, Error> {
         let existing = self.children(parent).into_iter().find(|index| {
             let record = &self.records[*index];
             if record.record_type() != kind {
@@ -698,7 +733,7 @@ impl DicomDirectory {
             }
         });
         if let Some(index) = existing {
-            return index;
+            return Ok(index);
         }
         let mut record = level_record(kind.clone(), source);
         let uid_tag = match kind {
@@ -706,6 +741,9 @@ impl DicomDirectory {
             _ => tags::STUDY_INSTANCE_UID,
         };
         record.dataset.insert_str(uid_tag, Vr::Ui, uid.to_string());
+        // PS3.3 F.5-2/F.5-3: StudyDate/StudyTime/StudyID and Modality/SeriesNumber
+        // are Type 1; the record can only be built when the source carries them.
+        validate_type_one(&record.dataset, &kind)?;
         let index = self.records.len();
         self.records.push(DirectoryRecord {
             dataset: record.dataset,
@@ -715,7 +753,7 @@ impl DicomDirectory {
             .entry(parent)
             .or_default()
             .push(index);
-        index
+        Ok(index)
     }
 
     fn push_root(&mut self, mut record: DirectoryRecord) -> usize {
@@ -737,6 +775,28 @@ impl DicomDirectory {
     /// resulting layout, then patches the offset values in place. One record
     /// clone instead of two full sequences (review §3.5).
     fn rebuild(&mut self) -> Result<(), Error> {
+        // PS3.3 F.5.1: record items inherit the directory dataset's
+        // SpecificCharacterSet. When saving, each item is measured and written as
+        // a dataset of its own, so a record without its own (0008,0005) priced
+        // non-ASCII text as ASCII and every offset after it was wrong. Giving the
+        // record the same declaration keeps the bytes and the measurement equal.
+        if let Some(charset) = self.file.dataset.try_get_str(Tag::SPECIFIC_CHARACTER_SET) {
+            if !charset.trim().is_empty() {
+                for record in &mut self.records {
+                    if record
+                        .dataset
+                        .try_get_str(Tag::SPECIFIC_CHARACTER_SET)
+                        .is_none()
+                    {
+                        record.dataset.insert_str(
+                            Tag::SPECIFIC_CHARACTER_SET,
+                            Vr::Cs,
+                            charset.clone(),
+                        );
+                    }
+                }
+            }
+        }
         // Refresh the adjacency once, then derive the link table in a single
         // pass: the previous per-record sibling scan cloned and rescanned every
         // sibling list, which made a large series quadratic.
@@ -943,10 +1003,8 @@ fn level_record(kind: RecordType, source: &Dataset) -> DirectoryRecord {
     record.insert_str(tags::RECORD_TYPE, Vr::Cs, kind.as_str());
     record.insert_value(tags::RECORD_IN_USE_FLAG, 0xFFFFu16);
     for (tag, vr) in identifying_attributes(&kind) {
-        if !record.contains(tag) {
-            if let Some(text) = source.try_get_str(tag) {
-                record.insert_str(tag.clone(), *vr, text);
-            }
+        if let Some(text) = source.try_get_str(tag) {
+            record.insert_str(tag.clone(), *vr, text);
         }
     }
     copy_specific_character_set(&mut record, source);
@@ -1029,6 +1087,52 @@ fn leaf_sequences(category: StorageCategory) -> &'static [Tag] {
         StorageCategory::Presentation => PRESENTATION,
         StorageCategory::Image => &[],
     }
+}
+
+/// Type 1 attributes each directory record must carry (PS3.3 F.5-1..F.5-4).
+///
+/// A record without them is not a conformant Basic Directory record, so the
+/// build fails instead of fabricating a placeholder value. `InstanceNumber`
+/// is Type 3 in the image dataset itself but Type 1 in the IMAGE record, so it
+/// is checked on the record, not on the source.
+fn type_one_attributes(kind: &RecordType) -> &'static [(Tag, &'static str)] {
+    const PATIENT: &[(Tag, &str)] = &[(tags::PATIENT_ID, "PatientID")];
+    const STUDY: &[(Tag, &str)] = &[
+        (Tag::STUDY_DATE, "StudyDate"),
+        (Tag::STUDY_TIME, "StudyTime"),
+        (Tag::STUDY_ID, "StudyID"),
+        (tags::STUDY_INSTANCE_UID, "StudyInstanceUID"),
+    ];
+    const SERIES: &[(Tag, &str)] = &[
+        (Tag::MODALITY, "Modality"),
+        (tags::SERIES_INSTANCE_UID, "SeriesInstanceUID"),
+        (Tag::SERIES_NUMBER, "SeriesNumber"),
+    ];
+    const IMAGE: &[(Tag, &str)] = &[(Tag::INSTANCE_NUMBER, "InstanceNumber")];
+    match kind {
+        RecordType::Patient => PATIENT,
+        RecordType::Study => STUDY,
+        RecordType::Series => SERIES,
+        RecordType::Image => IMAGE,
+        // Lower-level leaves (SR DOCUMENT, PRESENTATION STATE, …) have their own
+        // Type 1 sets; those are not fabricated here either.
+        _ => &[],
+    }
+}
+
+fn validate_type_one(record: &Dataset, kind: &RecordType) -> Result<(), Error> {
+    for (tag, name) in type_one_attributes(kind) {
+        let present = record
+            .try_get_str(tag)
+            .is_some_and(|value| !value.trim().is_empty());
+        if !present {
+            return Err(record_error(format!(
+                "{} directory record is missing its Type 1 attribute {name} {tag}",
+                kind.as_str()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn required(dataset: &Dataset, tag: Tag, what: &str) -> Result<String, Error> {
@@ -1121,7 +1225,15 @@ fn stitch(bytes: &[u8], dataset: &Dataset) -> (Vec<DirectoryRecord>, Vec<usize>)
     // positions of the record items in the file; fall back to item order when
     // the raw bytes cannot be scanned (e.g. round-tripped through a dataset)
     let offsets = record_offsets(bytes, dataset, &items);
-    let index_of = |offset: u32| offsets.iter().position(|o| *o == offset);
+    // A zero link means "none" (PS3.3 F.4), so it never names a record. Without
+    // this guard an index-order fallback (offset 0 == first record) would turn
+    // every "no child" into a pointer at record 0.
+    let index_of = |offset: u32| {
+        if offset == 0 {
+            return None;
+        }
+        offsets.iter().position(|o| *o == offset)
+    };
     let next_of = |index: usize| -> Option<usize> {
         items[index]
             .get::<u32>(tags::OFFSET_NEXT)
@@ -1240,10 +1352,132 @@ fn record_offsets(bytes: &[u8], dataset: &Dataset, items: &[Dataset]) -> Vec<u32
     if named.len() == items.len() {
         return named;
     }
-    if scanned.len() >= items.len() {
-        return scanned[scanned.len() - items.len()..].to_vec();
+    // A dirty file with a broken chain no longer names every record, so the raw
+    // item headers are read structurally: only the items that are direct children
+    // of Directory Record Sequence (0004,1220) count. A blind header scan also
+    // finds the items nested in each record's IconImageSequence (0088,0200) and
+    // shifted the child links to the wrong records.
+    if let Some(offsets) = record_sequence_item_offsets(bytes) {
+        if offsets.len() == items.len() {
+            return offsets;
+        }
     }
+    // No reliable byte layout (a dataset round-trip, or items this scan cannot
+    // skip): fall back to item order, which at least keeps the records in file
+    // order instead of guessing positions from trailing headers.
     (0..items.len()).map(|index| index as u32).collect()
+}
+
+/// Byte offsets of the items that are direct children of the Directory Record
+/// Sequence, in sequence order.
+///
+/// DICOMDIR is always Explicit VR Little Endian (PS3.10 §8.1), so the element and
+/// item headers can be walked directly. Nested sequences (icons) are skipped by
+/// their own header, whichever length form they use. Returns `None` when the
+/// bytes are not the expected layout.
+fn record_sequence_item_offsets(bytes: &[u8]) -> Option<Vec<u32>> {
+    // (0004,1220) SQ as it appears on the wire: tag, "SQ", reserved, 4-byte length.
+    const SEQUENCE_HEADER: [u8; 6] = [0x04, 0x00, 0x20, 0x12, b'S', b'Q'];
+    let start = (0..bytes.len().saturating_sub(SEQUENCE_HEADER.len()))
+        .find(|index| bytes[*index..*index + SEQUENCE_HEADER.len()] == SEQUENCE_HEADER)?;
+    // tag (4) + VR (2) + reserved (2) + length (4): the items start after all 12.
+    let mut cursor = start + 12;
+    let length = read_u32(bytes, start + 8)?;
+    let sequence_end = if length == u32::MAX {
+        bytes.len()
+    } else {
+        cursor.checked_add(length as usize)?.min(bytes.len())
+    };
+    let mut offsets = Vec::new();
+    while cursor + 8 <= sequence_end {
+        let (group, element) = read_tag(bytes, cursor)?;
+        if (group, element) == (0xFFFE, 0xE0DD) {
+            break; // sequence delimiter
+        }
+        if (group, element) != (0xFFFE, 0xE000) {
+            return None;
+        }
+        offsets.push(cursor as u32);
+        cursor = skip_item(bytes, cursor)?;
+    }
+    if offsets.is_empty() {
+        None
+    } else {
+        Some(offsets)
+    }
+}
+
+/// Skips one item header and the item's contents, returning the offset just past
+/// it (after its delimitation item for the undefined-length form).
+fn skip_item(bytes: &[u8], header: usize) -> Option<usize> {
+    let length = read_u32(bytes, header + 4)?;
+    if length != u32::MAX {
+        return (header + 8)
+            .checked_add(length as usize)
+            .filter(|end| *end <= bytes.len());
+    }
+    // undefined length: walk the item's elements until its item delimiter
+    let mut cursor = header + 8;
+    while cursor + 8 <= bytes.len() {
+        let (group, element) = read_tag(bytes, cursor)?;
+        if (group, element) == (0xFFFE, 0xE00D) {
+            return Some(cursor + 8);
+        }
+        if group == 0xFFFE {
+            return None; // an item header where an element header belongs
+        }
+        let vr = [*bytes.get(cursor + 4)?, *bytes.get(cursor + 5)?];
+        let (length, body) = if has_long_length_field(&vr) {
+            (read_u32(bytes, cursor + 8)?, cursor + 12)
+        } else {
+            let length = u16::from_le_bytes(bytes.get(cursor + 6..cursor + 8)?.try_into().ok()?);
+            (u32::from(length), cursor + 8)
+        };
+        cursor = if length == u32::MAX {
+            if &vr != b"SQ" {
+                return None; // only sequences may use the undefined length here
+            }
+            skip_sequence(bytes, body)?
+        } else {
+            body.checked_add(length as usize)
+                .filter(|end| *end <= bytes.len())?
+        };
+    }
+    None
+}
+
+/// Skips an undefined-length sequence body, returning the offset past its
+/// sequence delimiter.
+fn skip_sequence(bytes: &[u8], mut cursor: usize) -> Option<usize> {
+    loop {
+        let (group, element) = read_tag(bytes, cursor)?;
+        if (group, element) == (0xFFFE, 0xE0DD) {
+            return Some(cursor + 8);
+        }
+        if (group, element) != (0xFFFE, 0xE000) {
+            return None;
+        }
+        cursor = skip_item(bytes, cursor)?;
+    }
+}
+
+fn read_tag(bytes: &[u8], at: usize) -> Option<(u16, u16)> {
+    let group = u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?);
+    let element = u16::from_le_bytes(bytes.get(at + 2..at + 4)?.try_into().ok()?);
+    Some((group, element))
+}
+
+fn read_u32(bytes: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+}
+
+/// PS3.5 Table 7.1-1: VRs whose explicit-VR header has a 2-byte reserved field
+/// and a 4-byte length instead of a 2-byte length.
+fn has_long_length_field(vr: &[u8; 2]) -> bool {
+    matches!(
+        vr,
+        b"OB" | b"OD" | b"OF" | b"OL" | b"OV" | b"OW" | b"SQ" | b"UC" | b"UR" | b"UT" | b"UN"
+    )
 }
 
 #[cfg(test)]
@@ -1266,6 +1500,13 @@ mod tests {
         dataset.insert_str(tags::SERIES_INSTANCE_UID, Vr::Ui, series);
         dataset.insert_str(tags::SOP_CLASS_UID, Vr::Ui, sop_class);
         dataset.insert_str(tags::SOP_INSTANCE_UID, Vr::Ui, instance_uid);
+        // PS3.3 F.5: Type 1 directory-record keys
+        dataset.insert_str(Tag::STUDY_DATE, Vr::Da, "20240101");
+        dataset.insert_str(Tag::STUDY_TIME, Vr::Tm, "120000");
+        dataset.insert_str(Tag::STUDY_ID, Vr::Sh, "S1");
+        dataset.insert_str(Tag::MODALITY, Vr::Cs, "CT");
+        dataset.insert_value(Tag::SERIES_NUMBER, 1i32);
+        dataset.insert_value(Tag::INSTANCE_NUMBER, 1i32);
         dataset.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
         DicomFile::from_dataset(dataset)
     }
@@ -1295,6 +1536,12 @@ mod tests {
         dataset.insert_str(tags::SERIES_INSTANCE_UID, Vr::Ui, series);
         dataset.insert_str(tags::SOP_CLASS_UID, Vr::Ui, CT);
         dataset.insert_str(tags::SOP_INSTANCE_UID, Vr::Ui, instance_uid);
+        dataset.insert_str(Tag::STUDY_DATE, Vr::Da, "20240101");
+        dataset.insert_str(Tag::STUDY_TIME, Vr::Tm, "120000");
+        dataset.insert_str(Tag::STUDY_ID, Vr::Sh, "S1");
+        dataset.insert_str(Tag::MODALITY, Vr::Cs, "CT");
+        dataset.insert_value(Tag::SERIES_NUMBER, 1i32);
+        dataset.insert_value(Tag::INSTANCE_NUMBER, 1i32);
         dataset.set_transfer_syntax(syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone());
         dataset.insert_value(Tag::SAMPLES_PER_PIXEL, 1u16);
         dataset.insert_str(Tag::PHOTOMETRIC_INTERPRETATION, Vr::Cs, "MONOCHROME2");
@@ -2435,19 +2682,29 @@ mod tests {
         // PS3.10 §8.2 separates the components of (0004,1500) with "\", so both
         // spellings must produce the same File ID on every host; splitting with
         // `Path::components` accepted "\" only where it is a host separator.
-        let mut dir = DicomDirectory::new("FS");
+        // A duplicated File ID is rejected, so each spelling gets its own
+        // directory to prove both normalize to the same record path.
         let first = instance("P1", "1.2.3", "1.2.4", CT, "1.2.5");
+        let mut backslash_dir = DicomDirectory::new("FS");
+        let backslash = backslash_dir.add_file_entry(&first, "SUB\\IMG001").unwrap();
         let second = instance("P1", "1.2.3", "1.2.4", CT, "1.2.6");
-        let backslash = dir.add_file_entry(&first, "SUB\\IMG001").unwrap();
-        let slash = dir.add_file_entry(&second, "SUB/IMG001").unwrap();
+        let mut slash_dir = DicomDirectory::new("FS");
+        let slash = slash_dir.add_file_entry(&second, "SUB/IMG001").unwrap();
         assert_eq!(
-            dir.records()[backslash.instance].referenced_file_id(),
+            backslash_dir.records()[backslash.instance].referenced_file_id(),
             Some(PathBuf::from("SUB").join("IMG001"))
         );
         assert_eq!(
-            dir.records()[slash.instance].referenced_file_id(),
+            slash_dir.records()[slash.instance].referenced_file_id(),
             Some(PathBuf::from("SUB").join("IMG001"))
         );
+        // A second record may not claim the same File ID.
+        let duplicate = instance("P1", "1.2.3", "1.2.4", CT, "1.2.7");
+        let error = slash_dir
+            .add_file_entry(&duplicate, "SUB\\IMG001")
+            .expect_err("duplicate ReferencedFileID is rejected");
+        assert!(error.to_string().contains("duplicate"), "{error}");
+        let mut dir = DicomDirectory::new("FS");
         // a path that is not relative is still rejected, whichever separator
         // (a fresh SOP instance each time: an already recorded one short-circuits)
         for (suffix, id) in [
@@ -2546,5 +2803,240 @@ mod tests {
         });
         let err = dir.validate().unwrap_err().to_string();
         assert!(err.contains("not reachable"), "{err}");
+    }
+
+    /// Asserts every non-zero stored offset names an item header in `bytes`.
+    fn assert_offsets_name_item_headers(bytes: &[u8], dataset: &Dataset) {
+        let mut offsets = Vec::new();
+        for item in dataset
+            .try_get_sequence(tags::DIR_RECORD_SEQUENCE)
+            .expect("a record sequence")
+            .items()
+        {
+            for tag in [tags::OFFSET_NEXT, tags::OFFSET_LOWER] {
+                if let Ok(value) = item.get::<u32>(tag) {
+                    if value != 0 {
+                        offsets.push(value);
+                    }
+                }
+            }
+        }
+        for tag in [tags::OFFSET_FIRST_ROOT, tags::OFFSET_LAST_ROOT] {
+            if let Ok(value) = dataset.get::<u32>(tag) {
+                if value != 0 {
+                    offsets.push(value);
+                }
+            }
+        }
+        assert!(!offsets.is_empty(), "the directory stores offsets");
+        for offset in offsets {
+            let at = offset as usize;
+            assert_eq!(
+                &bytes[at..at + 4],
+                &[0xFE, 0xFF, 0x00, 0xE0],
+                "offset {offset} must point at an item header"
+            );
+        }
+    }
+
+    #[test]
+    fn the_directory_identity_is_the_file_meta_not_the_dataset() {
+        // PS3.3 F.3: the Basic Directory IOD has no SOP Common module, so a
+        // dataset (0008,0018) is not part of a DICOMDIR; its identity is the
+        // meta's MediaStorageSOPInstanceUID (0002,0003).
+        let mut dir = DicomDirectory::new("FS");
+        dir.add_file(&instance("P1", "1.2.3", "1.2.4", CT, "1.2.5"), "A")
+            .unwrap();
+        let bytes = dir.to_bytes().unwrap();
+        let file = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
+        assert!(
+            file.dataset.item(&Tag::SOP_INSTANCE_UID).is_none(),
+            "a DICOMDIR dataset carries no SOP Instance UID"
+        );
+        let identity = file
+            .file_meta
+            .try_get_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID)
+            .expect("the media storage identity is present");
+
+        // A re-save keeps the same value, so references to the directory stay valid.
+        let mut reopened = DicomDirectory::from_bytes(&bytes).unwrap();
+        let again = reopened.to_bytes().unwrap();
+        let reparsed = DicomFile::from_bytes(&again, &ReadOptions::default()).unwrap();
+        assert_eq!(
+            reparsed
+                .file_meta
+                .try_get_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID)
+                .as_deref(),
+            Some(identity.as_str()),
+            "the directory identity is stable across saves"
+        );
+        assert!(reparsed.dataset.item(&Tag::SOP_INSTANCE_UID).is_none());
+    }
+
+    #[test]
+    fn a_directory_without_a_media_storage_identity_gets_one_on_load() {
+        // A source that omitted (0002,0003) cannot be re-saved as-is, so loading
+        // supplies one. It must then stay stable.
+        let mut dir = DicomDirectory::new("FS");
+        dir.add_file(&instance("P1", "1.2.3", "1.2.4", CT, "1.2.5"), "A")
+            .unwrap();
+        let mut bytes = dir.to_bytes().unwrap();
+        // Splice the element out of the serialized file meta (a structured source
+        // without it cannot be produced through DicomFile, which always writes
+        // one) and keep the group length consistent.
+        let at = bytes
+            .windows(4)
+            .position(|window| window == [0x02, 0x00, 0x03, 0x00])
+            .expect("the meta identity is present");
+        let value_len = u16::from_le_bytes([bytes[at + 6], bytes[at + 7]]) as usize;
+        let removed = 8 + value_len;
+        let group_length = bytes
+            .windows(8)
+            .position(|window| window == [0x02, 0x00, 0x00, 0x00, b'U', b'L', 0x04, 0x00])
+            .expect("the file meta group length is present");
+        let old = u32::from_le_bytes([
+            bytes[group_length + 8],
+            bytes[group_length + 9],
+            bytes[group_length + 10],
+            bytes[group_length + 11],
+        ]);
+        bytes[group_length + 8..group_length + 12]
+            .copy_from_slice(&(old - removed as u32).to_le_bytes());
+        bytes.drain(at..at + removed);
+
+        let mut reopened = DicomDirectory::from_bytes(&bytes).unwrap();
+        let first = reopened
+            .file()
+            .file_meta
+            .try_get_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID)
+            .expect("loading generates a missing identity");
+        let again = reopened.to_bytes().unwrap();
+        let reparsed = DicomFile::from_bytes(&again, &ReadOptions::default()).unwrap();
+        assert_eq!(
+            reparsed
+                .file_meta
+                .try_get_str(Tag::MEDIA_STORAGE_SOP_INSTANCE_UID)
+                .as_deref(),
+            Some(first.as_str())
+        );
+    }
+
+    #[test]
+    fn a_record_missing_its_type_1_key_is_an_error_not_invented() {
+        // PS3.3 F.5-1..F.5-4 Type 1 keys: the directory cannot invent PatientID,
+        // StudyDate/Time/ID, Modality, SeriesNumber or InstanceNumber.
+        for (tag, name) in [
+            (Tag::PATIENT_ID, "PatientID"),
+            (Tag::STUDY_DATE, "StudyDate"),
+            (Tag::STUDY_TIME, "StudyTime"),
+            (Tag::STUDY_ID, "StudyID"),
+            (Tag::MODALITY, "Modality"),
+            (Tag::SERIES_NUMBER, "SeriesNumber"),
+            (Tag::INSTANCE_NUMBER, "InstanceNumber"),
+        ] {
+            let mut dir = DicomDirectory::new("FS");
+            let mut file = instance("P1", "1.2.3", "1.2.4", CT, "1.2.5");
+            file.dataset.remove(&tag);
+            let error = dir
+                .add_file(&file, "A")
+                .expect_err(&format!("{name} is Type 1"));
+            assert!(
+                error.to_string().contains(name),
+                "{name} must be named in {error}"
+            );
+        }
+
+        // An empty value is not a key either.
+        let mut dir = DicomDirectory::new("FS");
+        let mut file = instance("P1", "1.2.3", "1.2.4", CT, "1.2.5");
+        file.dataset.insert_str(Tag::STUDY_ID, Vr::Sh, "");
+        let error = dir.add_file(&file, "A").expect_err("empty StudyID");
+        assert!(error.to_string().contains("StudyID"), "{error}");
+    }
+
+    #[test]
+    fn a_broken_link_chain_still_finds_the_record_items_beneath_an_icon() {
+        // A dirty file no longer names every record, so the child links are read
+        // from the record-sequence item headers — not from a blind header scan,
+        // which also sees the item nested in IconImageSequence (0088,0200) and
+        // then points the links at the wrong records.
+        use crate::media::icon::BasicIconGenerator;
+        let mut dir = DicomDirectory::new("FS");
+        dir.add_file_with_icon(
+            &image_instance("P1", "1.2.3", "1.2.4", "1.2.5"),
+            "IMG001",
+            &BasicIconGenerator,
+        )
+        .unwrap();
+        let mut bytes = dir.to_bytes().unwrap();
+
+        let mut file = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
+        {
+            let mut items: Vec<Dataset> = file
+                .dataset
+                .try_get_sequence(tags::DIR_RECORD_SEQUENCE)
+                .expect("a record sequence")
+                .items()
+                .to_vec();
+            items[0].insert_value(tags::OFFSET_NEXT, 123_456u32);
+            *file
+                .dataset
+                .insert_sequence(tags::DIR_RECORD_SEQUENCE)
+                .items_mut() = items;
+            file.dataset.insert_value(tags::OFFSET_FIRST_ROOT, 7u32);
+            file.dataset.insert_value(tags::OFFSET_LAST_ROOT, 7u32);
+        }
+        bytes = file.to_bytes(&WriteOptions::default()).unwrap();
+
+        let reopened = DicomDirectory::from_bytes(&bytes).unwrap();
+        assert_eq!(reopened.records().len(), 4, "records still load");
+        assert_eq!(reopened.roots(), [0], "the patient is the root");
+        assert_eq!(
+            reopened
+                .records()
+                .iter()
+                .map(|r| r.parent)
+                .collect::<Vec<_>>(),
+            [None, Some(0), Some(1), Some(2)],
+            "the child links still name the records, not the nested icon item"
+        );
+    }
+
+    #[test]
+    fn offsets_stay_correct_when_a_record_inherits_the_directory_charset() {
+        // PS3.3 F.5.1: record items inherit the directory dataset's charset. A
+        // record without its own (0008,0005) used to be measured as ASCII, so
+        // every offset after non-ASCII text was wrong.
+        let mut source = instance("P1", "1.2.3", "1.2.4", CT, "1.2.5");
+        source
+            .dataset
+            .insert_str(Tag::SPECIFIC_CHARACTER_SET, Vr::Cs, "ISO_IR 100");
+        source
+            .dataset
+            .insert_str(tags::PATIENT_NAME, Vr::Pn, "Müller^Jörg");
+        let mut dir = DicomDirectory::new("FS");
+        dir.add_file(&source, "A").unwrap();
+        dir.file
+            .dataset
+            .insert_str(Tag::SPECIFIC_CHARACTER_SET, Vr::Cs, "ISO_IR 100");
+        // Simulate a foreign directory whose records rely on the inherited charset.
+        for record in &mut dir.records {
+            record.dataset.remove(&Tag::SPECIFIC_CHARACTER_SET);
+        }
+
+        let bytes = dir.to_bytes().unwrap();
+        let file = DicomFile::from_bytes(&bytes, &ReadOptions::default()).unwrap();
+        assert_offsets_name_item_headers(&bytes, &file.dataset);
+
+        let reopened = DicomDirectory::from_bytes(&bytes).unwrap();
+        assert_eq!(
+            reopened.records()[0]
+                .dataset
+                .try_get_str(tags::PATIENT_NAME)
+                .as_deref(),
+            Some("Müller^Jörg"),
+            "the inherited charset still decodes the name"
+        );
+        assert_eq!(reopened.roots(), [0], "the tree still stitches");
     }
 }

@@ -583,8 +583,17 @@ impl DicomClient {
     }
 
     /// Sends a C-ECHO (§11.4).
+    ///
+    /// PS3.4 §C.2 defines C-ECHO only for the Verification SOP Class, so any
+    /// other class is refused here — before a presentation context is proposed
+    /// or an association is opened.
     pub async fn send_c_echo(&mut self, sop_class: impl Into<String>) -> Result<CEchoResponse> {
         let sop_class = sop_class.into();
+        if sop_class != crate::association::sop_class::VERIFICATION {
+            return Err(NetworkError::protocol(
+                "C-ECHO is only valid for the Verification SOP Class",
+            ));
+        }
         let context = PresentationContext::new(
             1,
             sop_class.clone(),
@@ -1219,6 +1228,26 @@ mod tests {
         CEchoRequest, CEchoResponse, CStoreRequest, ServiceProvider, VerificationProvider,
     };
     use crate::store::StoreSink;
+
+    #[tokio::test]
+    async fn c_echo_refuses_a_non_verification_sop_class() {
+        // PS3.4 §C.2: C-ECHO is defined only for the Verification SOP Class.
+        // The refusal happens before a presentation context is proposed, so an
+        // unreachable address still reports the conformance error.
+        let mut client = DicomClient::new("SCU", "SCP", "127.0.0.1:1");
+        let error = client
+            .send_c_echo("1.2.3")
+            .await
+            .expect_err("C-ECHO is Verification-only");
+        assert!(
+            matches!(&error, NetworkError::Protocol(message) if message.contains("Verification")),
+            "{error}"
+        );
+        assert!(
+            client.association().is_none(),
+            "no association was opened for a class C-ECHO cannot verify"
+        );
+    }
 
     #[tokio::test]
     async fn independent_handle_cancels_a_find_with_an_automatic_message_id() {

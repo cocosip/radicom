@@ -81,6 +81,16 @@ pub struct ServerOptions {
     /// legitimately pause mid-dataset, or set `None` where an idle-association
     /// watchdog exists instead.
     pub progress_timeout: Option<Duration>,
+    /// How long one socket write may make no progress (default 60 s).
+    ///
+    /// A peer that completes association negotiation and then stops reading
+    /// pins this connection — and its `max_clients` slot — forever, because
+    /// every socket write was unbounded. This bounds each write attempt of every
+    /// path (association accept/reject, release, command, dataset and flush);
+    /// progress restarts the clock, so a slow transfer is never cut off. On
+    /// expiry the connection fails with [`crate::NetworkError::WriteTimedOut`],
+    /// which is fatal. `None` restores the unbounded behaviour.
+    pub write_timeout: Option<Duration>,
     /// Answers SOP Class Extended Negotiation requests (§11.2).
     pub extended_negotiation: crate::extended::ExtendedNegotiationPolicy,
     /// User identity types this SCP accepts, and the response to echo (§11.2).
@@ -174,6 +184,7 @@ impl Default for ServerOptions {
             fallback_encoding: None,
             request_timeout: None,
             progress_timeout: Some(Duration::from_secs(60)),
+            write_timeout: Some(Duration::from_secs(60)),
             extended_negotiation: crate::extended::ExtendedNegotiationPolicy::decline_all(),
             user_identity: UserIdentityPolicy::default(),
             #[cfg(feature = "tls")]
@@ -212,6 +223,13 @@ pub struct ClientOptions {
     /// Maximum quiet time while waiting for a response to one DIMSE request.
     /// `None` keeps the request wait unbounded.
     pub request_timeout: Option<Duration>,
+    /// How long one socket write may make no progress (default 60 s).
+    ///
+    /// The SCU counterpart of [`ServerOptions::write_timeout`]: a peer that
+    /// negotiates an association and then stops reading would otherwise park
+    /// this task inside a socket write forever. On expiry the write fails with
+    /// [`crate::NetworkError::WriteTimedOut`]; `None` keeps it unbounded.
+    pub write_timeout: Option<Duration>,
     /// Socket options applied to the connected stream.
     pub tcp: TcpOptions,
     /// How long a graceful release waits for the peer's A-RELEASE-RP before
@@ -278,6 +296,7 @@ impl Default for ClientOptions {
             #[cfg(feature = "tls")]
             tls_handshake_timeout: Duration::from_secs(10),
             request_timeout: None,
+            write_timeout: Some(Duration::from_secs(60)),
             release_timeout: Duration::from_secs(10),
             tcp: TcpOptions::default(),
             user_identity: None,

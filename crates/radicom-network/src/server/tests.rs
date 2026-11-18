@@ -118,6 +118,309 @@ async fn loopback_c_echo_succeeds() {
 }
 
 #[tokio::test]
+async fn association_c_echo_refuses_a_non_verification_sop_class() {
+    // PS3.4 §C.2: the expert layer applies the same rule as the high-level
+    // client, and the association stays usable afterwards.
+    let server = DicomServer::bind(
+        "127.0.0.1:0",
+        Arc::new(VerificationProvider),
+        ServerOptions::default(),
+    )
+    .await
+    .unwrap();
+    let addr = server.local_addr();
+    let serving = tokio::spawn(async move { server.accept_one().await });
+    let mut association = Association::open(
+        addr,
+        "SCU",
+        "SCP",
+        vec![echo_context()],
+        ClientOptions::default(),
+    )
+    .await
+    .unwrap();
+
+    let error = association
+        .send_c_echo("1.2.3")
+        .await
+        .expect_err("C-ECHO is Verification-only");
+    assert!(
+        matches!(&error, NetworkError::Protocol(message) if message.contains("Verification")),
+        "{error}"
+    );
+    assert_eq!(
+        association
+            .send_c_echo(sop_class::VERIFICATION)
+            .await
+            .unwrap()
+            .status,
+        crate::dimse::status::SUCCESS,
+        "the refusal does not disturb the association"
+    );
+    association.release().await.unwrap();
+    serving.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn a_deferred_response_is_not_a_window_violation() {
+    // A peer may answer this side's request after the fact (PS3.7 §9.3.1
+    // asynchronous operations). `defer` used to treat any command whose field has
+    // no response counterpart — including a *response* — as an overrun of the
+    // negotiated window, so a legitimate late answer aborted the association.
+    let (_peer, mut io) = tokio::io::duplex(64);
+    let provider = Arc::new(VerificationProvider);
+    let options = ServerOptions::default();
+    let policy = NegotiationPolicy::new(provider.supported_sop_classes());
+    let accepted = AcceptedContexts::from_negotiated(policy.negotiate(&[echo_context()]));
+    let splitter = PduSplitter::new(16384, 16);
+    let mut serving = Serving {
+        active_request_ids: Default::default(),
+        stream: &mut io,
+        splitter: &splitter,
+        provider: &provider,
+        options: &options,
+        assembler: PdvAssembler::new(),
+        pending_units: VecDeque::new(),
+        deferred_units: VecDeque::new(),
+        deferred_requests: 0,
+        // the classic association negotiates no window at all
+        incoming_window: 1,
+        accepted: &accepted,
+        reverse_message_id: 1,
+        transcoder_cache: std::collections::HashMap::new(),
+        pdu_reader: crate::transport::PduReader::new(),
+    };
+    let mut response = Command::response(
+        &Command::request(CommandField::CEchoRq, 9),
+        crate::dimse::status::SUCCESS,
+    )
+    .unwrap();
+    response.no_dataset = true;
+    serving
+        .defer(MessageUnit {
+            context_id: 1,
+            stream: Stream::Command,
+            bytes: command_bytes(&response).unwrap().into(),
+            spool: None,
+        })
+        .expect("a response is not an incoming operation");
+    assert_eq!(
+        serving.deferred_requests, 0,
+        "a response must not consume the peer's window"
+    );
+    assert_eq!(serving.deferred_units.len(), 1);
+
+    // a second *request* still overruns the window of one
+    let request = CEchoRequest {
+        message_id: 3,
+        affected_sop_class_uid: sop_class::VERIFICATION.into(),
+    };
+    let error = serving
+        .defer(MessageUnit {
+            context_id: 1,
+            stream: Stream::Command,
+            bytes: command_bytes(&request.to_command()).unwrap().into(),
+            spool: None,
+        })
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("while a request is in flight"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn a_commanded_response_dataset_is_consumed_before_the_next_request() {
+    // PS3.7 Table 9.3-5 makes (0000,0800) authoritative: a response that
+    // announces a dataset is followed by one. The echo path ignored the bit, so
+    // such a dataset stayed in the stream and the *next* request read it as its
+    // own response dataset — a desynchronised association caused by the previous
+    // request.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let peer = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let Some(Pdu::AssociateRq(rq)) = read_pdu(&mut stream).await.unwrap() else {
+            panic!("expected A-ASSOCIATE-RQ")
+        };
+        let mut answer = rq.clone();
+        for context in &mut answer.presentation_contexts {
+            context.abstract_syntax.clear();
+            context.transfer_syntaxes.truncate(1);
+            context.result = 0;
+        }
+        write_pdu(&mut stream, &Pdu::AssociateAc(answer))
+            .await
+            .unwrap();
+
+        // answer the C-ECHO with a command that announces a dataset, then send it
+        let Some(Pdu::PData(echo)) = read_pdu(&mut stream).await.unwrap() else {
+            panic!("expected the C-ECHO request")
+        };
+        let echo_context_id = echo.pdvs[0].context_id;
+        let echo_request = command_from_bytes(&echo.pdvs[0].data).unwrap();
+        let mut response = Command::response(&echo_request, crate::dimse::status::SUCCESS).unwrap();
+        // deliberately wrong for a C-ECHO: it promises a dataset
+        response.no_dataset = false;
+        write_pdu(
+            &mut stream,
+            &pdata(echo_context_id, true, command_bytes(&response).unwrap()),
+        )
+        .await
+        .unwrap();
+        write_pdu(
+            &mut stream,
+            &pdata(echo_context_id, false, identifier_bytes()),
+        )
+        .await
+        .unwrap();
+
+        // The next message must be a C-STORE: a desynced SCU would still be
+        // reading the echo's dataset bytes, so nothing (or garbage) would arrive.
+        let mut assembler = PdvAssembler::new();
+        let mut command = None;
+        let mut store_context_id = None;
+        let mut complete = false;
+        while !complete {
+            let Some(Pdu::PData(data)) =
+                tokio::time::timeout(Duration::from_secs(5), read_pdu(&mut stream))
+                    .await
+                    .expect("the SCU sends its next request instead of waiting on stale bytes")
+                    .unwrap()
+            else {
+                panic!("expected the C-STORE request")
+            };
+            for unit in assembler.push_pdata(&data).unwrap() {
+                if unit.stream == Stream::Command {
+                    let parsed = command_from_bytes(&unit.bytes).unwrap();
+                    complete = parsed.no_dataset;
+                    store_context_id = Some(unit.context_id);
+                    command = Some(parsed);
+                } else {
+                    complete = true;
+                }
+            }
+        }
+        let command = command.expect("the C-STORE command arrived");
+        assert_eq!(command.field, CommandField::CStoreRq);
+        let mut response = Command::response(&command, crate::dimse::status::SUCCESS).unwrap();
+        response.no_dataset = true;
+        write_pdu(
+            &mut stream,
+            &pdata(
+                store_context_id.expect("the C-STORE command context"),
+                true,
+                command_bytes(&response).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            read_pdu(&mut stream).await.unwrap(),
+            Some(Pdu::ReleaseRq)
+        ));
+        write_pdu(&mut stream, &Pdu::ReleaseRp).await.unwrap();
+    });
+
+    let mut association = Association::open(
+        addr,
+        "SCU",
+        "SCP",
+        vec![echo_context(), store_context()],
+        ClientOptions::default(),
+    )
+    .await
+    .unwrap();
+    association
+        .send_c_echo(sop_class::VERIFICATION)
+        .await
+        .expect("the announced response dataset is consumed, not left behind");
+    association
+        .send_c_store(&instance_file())
+        .await
+        .expect("the association stayed in step after the echo response");
+    association.release().await.unwrap();
+    peer.await.unwrap();
+}
+
+#[tokio::test]
+async fn accept_one_honours_max_clients() {
+    // `accept_one` ignored `max_clients` while `run_until` gated the accept loop,
+    // so a single-shot accept could serve a peer beyond the configured bound.
+    let server = Arc::new(
+        DicomServer::bind(
+            "127.0.0.1:0",
+            Arc::new(VerificationProvider),
+            ServerOptions {
+                max_clients: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap(),
+    );
+    let addr = server.local_addr();
+    let first = tokio::spawn({
+        let server = server.clone();
+        async move { server.accept_one().await }
+    });
+    let mut held = Association::open(
+        addr,
+        "SCU",
+        "SCP",
+        vec![echo_context()],
+        ClientOptions::default(),
+    )
+    .await
+    .expect("the single slot is free");
+    assert_eq!(
+        held.send_c_echo(sop_class::VERIFICATION)
+            .await
+            .unwrap()
+            .status,
+        crate::dimse::status::SUCCESS
+    );
+
+    // A second accept_one must wait for the slot: the peer connects (the
+    // listener backlog accepts a TCP connection) but never gets an AC.
+    let second = tokio::spawn({
+        let server = server.clone();
+        async move { server.accept_one().await }
+    });
+    let mut waiting = TcpStream::connect(addr).await.unwrap();
+    let mut request = Associate::new("SCP", "SCU");
+    request.presentation_contexts.push(echo_context());
+    write_pdu(&mut waiting, &Pdu::AssociateRq(request))
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), read_pdu(&mut waiting))
+            .await
+            .is_err(),
+        "a second connection must not be served while the only slot is held"
+    );
+
+    // Releasing the first connection frees the slot, and the second proceeds.
+    held.release().await.unwrap();
+    first.await.unwrap().unwrap();
+    let answer = tokio::time::timeout(Duration::from_secs(5), read_pdu(&mut waiting))
+        .await
+        .expect("the second accept_one proceeds once the slot is free")
+        .unwrap();
+    assert!(
+        matches!(answer, Some(Pdu::AssociateAc(_))),
+        "got {answer:?}"
+    );
+    write_pdu(&mut waiting, &Pdu::ReleaseRq).await.unwrap();
+    assert!(matches!(
+        read_pdu(&mut waiting).await.unwrap(),
+        Some(Pdu::ReleaseRp)
+    ));
+    second.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn server_policy_rejects_unknown_transfer_syntax_before_binding() {
     assert!(DicomServer::bind(
         "127.0.0.1:0",
@@ -342,9 +645,9 @@ async fn a_negotiated_window_answers_an_echo_while_the_find_is_pending() {
             .status,
         Some(crate::dimse::status::PENDING)
     );
-    // The pending Identifier must also be consumed before awaiting another command.
-    let pdu = association.read_request_pdu(10).await.unwrap().unwrap();
-    assert!(matches!(pdu, Pdu::PData(_)));
+    // `await_response` now consumes the pending Identifier itself, following the
+    // command's (0000,0800) bit (PS3.7 Table 9.3-5); the caller must not read it
+    // a second time.
     // Start the echo once FIND is Pending: response order across requests is unspecified.
     let echo = CEchoRequest {
         message_id: 11,

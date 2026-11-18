@@ -38,6 +38,8 @@ pub const IMPLEMENTATION_CLASS_UID: &str = "1.2.826.0.1.3680043.10.1330.2";
 pub use radicom::io::file::IMPLEMENTATION_VERSION_NAME;
 
 pub use options::{ClientOptions, ConnectedClients, ServerOptions, UserIdentityPolicy};
+/// Fatal-vs-per-instance classification shared by the C-GET and C-MOVE batches.
+pub(crate) use scp::is_fatal;
 pub use scp::DicomServer;
 pub use scu::{Association, NEventReportHandler, ReverseStoreHandler};
 pub use wire::{command_bytes, command_from_bytes};

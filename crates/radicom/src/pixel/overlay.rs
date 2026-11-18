@@ -294,10 +294,22 @@ impl OverlayData {
     /// normalizes bits allocated / bit position (§9.1).
     pub fn store(&self, ds: &mut Dataset, data: SharedBuffer) -> Result<(), Error> {
         let group = self.group;
-        let vr = if self.bits_allocated <= 8 {
-            Vr::Ob
-        } else {
+        // PS3.5 §8.1.2: under Implicit VR the VR comes from the dictionary, which
+        // gives Overlay Data OW, so an 8-bit overlay must still be written as OW
+        // (OB is only legal in Explicit VR). The bit plane is a sequence of
+        // 16-bit words there, so an odd plane gets one padding byte; otherwise
+        // the trailing byte takes part in the big-endian word swap and moves.
+        let vr = if !ds.transfer_syntax().is_explicit_vr() || self.bits_allocated > 8 {
             Vr::Ow
+        } else {
+            Vr::Ob
+        };
+        let data = if vr == Vr::Ow && data.size() % 2 == 1 {
+            let mut bytes = data.data()?.into_owned();
+            bytes.push(0);
+            Arc::new(MemoryBuffer::from(bytes)) as SharedBuffer
+        } else {
+            data
         };
         ds.insert_or_update(DicomItem::Element(
             crate::model::element::DicomElement::new_bytes(Tag::new(group, 0x3000), vr, data),
@@ -660,6 +672,74 @@ mod tests {
             data.data().unwrap().as_ref(),
             &[0b0000_0001],
             "big-endian bit 12 of pixel 0 read correctly"
+        );
+    }
+
+    #[test]
+    fn implicit_vr_stores_overlay_data_as_ow_and_round_trips_it() {
+        // PS3.5 §8.1.2: in Implicit VR the Overlay Data VR must be OW (the
+        // dictionary has no OB row), so writing OB would make a reader treat the
+        // bytes as 16-bit words with the wrong layout policy.
+        let mut ds = base(8, 4, 4);
+        ds.set_transfer_syntax(syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone());
+        add_overlay_shape(&mut ds, 0x6000, 4, 4, 0);
+        let overlay = OverlayData::from_dataset(&ds).pop().unwrap();
+        overlay
+            .store(
+                &mut ds,
+                Arc::new(MemoryBuffer::from(vec![0b1010_0101u8, 0x3C])),
+            )
+            .unwrap();
+        assert_eq!(
+            ds.get_element(Tag::new(0x6000, 0x3000)).unwrap().vr(),
+            Vr::Ow,
+            "implicit VR requires OW for Overlay Data"
+        );
+
+        let bytes = crate::io::file::DicomFile::from_dataset(ds)
+            .to_bytes(&crate::io::writer::WriteOptions::default())
+            .unwrap();
+        let back = crate::io::file::DicomFile::from_bytes(
+            &bytes,
+            &crate::io::file::ReadOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            back.dataset
+                .get_element(Tag::new(0x6000, 0x3000))
+                .unwrap()
+                .vr(),
+            Vr::Ow,
+            "the re-read value is OW"
+        );
+        let loaded = OverlayData::from_dataset(&back.dataset)[0]
+            .load(&back.dataset)
+            .unwrap();
+        assert_eq!(
+            loaded.data().unwrap().as_ref(),
+            &[0b1010_0101u8, 0x3C],
+            "the bit plane survives the implicit-VR round trip unchanged"
+        );
+    }
+
+    #[test]
+    fn an_odd_overlay_plane_gets_an_ow_padding_byte() {
+        // An OW value is a sequence of 16-bit words, so an odd bit plane needs one
+        // padding byte before it is stored; otherwise the last byte would move in
+        // the big-endian word swap.
+        let mut ds = base(8, 3, 1);
+        ds.set_transfer_syntax(syntaxes::IMPLICIT_VR_LITTLE_ENDIAN.clone());
+        add_overlay_shape(&mut ds, 0x6000, 3, 1, 0);
+        let overlay = OverlayData::from_dataset(&ds).pop().unwrap();
+        overlay
+            .store(&mut ds, Arc::new(MemoryBuffer::from(vec![0b0000_0101u8])))
+            .unwrap();
+        let element = ds.get_element(Tag::new(0x6000, 0x3000)).unwrap();
+        assert_eq!(element.vr(), Vr::Ow);
+        assert_eq!(
+            element.value().as_buffer().unwrap().size(),
+            2,
+            "padded to a whole 16-bit word"
         );
     }
 

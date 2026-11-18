@@ -228,6 +228,12 @@ pub struct Command {
 
 impl Command {
     /// A minimal request of the given field.
+    ///
+    /// `(0000,0800)` defaults to "no dataset follows": a request carries a
+    /// dataset only when its service says so, and every service path that sends
+    /// one assigns the field explicitly (C-FIND/C-MOVE/C-GET Identifiers,
+    /// C-STORE datasets, N-service bodies). A bare request therefore never
+    /// advertises a dataset that the peer would wait for (PS3.7 Table 9.3-5).
     pub fn request(field: CommandField, message_id: u16) -> Self {
         Command {
             field,
@@ -238,7 +244,7 @@ impl Command {
             status: None,
             error_comment: None,
             priority: Priority::default(),
-            no_dataset: false,
+            no_dataset: true,
             move_destination: None,
             affected_sop_instance_uid: None,
             requested_sop_instance_uid: None,
@@ -1010,6 +1016,28 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_request_advertises_no_dataset() {
+        use crate::test_wire::{command_bytes, element_value};
+        // PS3.7 Table 9.3-5: 0101H means "no dataset follows". A request carries
+        // a dataset only when its service path sets the bit, so the default must
+        // be "none" — otherwise the peer waits for a dataset that never comes.
+        for field in [
+            CommandField::CEchoRq,
+            CommandField::CStoreRq,
+            CommandField::NGetRq,
+        ] {
+            let request = Command::request(field, 1);
+            assert!(request.no_dataset, "{field:?} advertises no dataset");
+            let bytes = command_bytes(&request);
+            assert_eq!(
+                element_value(&bytes, 0x0000, 0x0800),
+                Some(NO_DATA_SET.to_le_bytes().to_vec()),
+                "{field:?} writes 0101H"
+            );
+        }
+    }
+
+    #[test]
     fn echo_request_round_trips_through_a_dataset() {
         let mut request = Command::request(CommandField::CEchoRq, 42);
         request.affected_sop_class_uid = Some("1.2.840.10008.1.1".into());
@@ -1022,8 +1050,8 @@ mod tests {
             Some("1.2.840.10008.1.1")
         );
         assert!(
-            !back.no_dataset,
-            "C-ECHO request has no dataset, but the flag is set by the sender"
+            back.no_dataset,
+            "a bare C-ECHO request carries no dataset and must say so (PS3.7 Table 9.3-5)"
         );
     }
 

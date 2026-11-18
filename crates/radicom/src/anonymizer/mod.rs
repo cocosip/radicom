@@ -254,15 +254,7 @@ impl Anonymizer {
                     Action::Clean | Action::Uid if vr == Vr::Ui => {
                         self.replace_uid(dataset, &tag, replaced)
                     }
-                    Action::Clean | Action::Uid => {
-                        if matches!(vr, Vr::Da | Vr::Dt | Vr::Tm | Vr::Ds | Vr::Is) {
-                            self.blank(dataset, &tag, vr, true)?;
-                        } else if vr.is_string() {
-                            dataset.insert_str(tag.clone(), vr, "ANONYMOUS");
-                        } else {
-                            self.blank(dataset, &tag, vr, true)?;
-                        }
-                    }
+                    Action::Clean | Action::Uid => self.blank(dataset, &tag, vr, true)?,
                 }
             }
 
@@ -318,9 +310,20 @@ impl Anonymizer {
     fn blank(&self, dataset: &mut Dataset, tag: &Tag, vr: Vr, non_zero: bool) -> Result<(), Error> {
         let tag = tag.clone();
 
-        // date/time: fo-dicom writes an empty (Z) or MinValue (D) value
+        // date/time: under RetainLongModifDates the value moves by the documented
+        // constant offset so intervals survive (PS3.15 E.3.6); otherwise fo-dicom
+        // writes an empty (Z) or MinValue (D) value.
         if matches!(vr, Vr::Da | Vr::Dt | Vr::Tm) {
             if non_zero {
+                if self.options.contains(AnonOption::RetainLongModifDates) {
+                    if let Some(shifted) = dataset
+                        .try_get_str(&tag)
+                        .and_then(|text| shift_modified_date_time(&text, vr))
+                    {
+                        dataset.insert_str(tag, vr, shifted);
+                        return Ok(());
+                    }
+                }
                 let dummy = match vr {
                     Vr::Da => "19000101",
                     Vr::Dt => "19000101000000",
@@ -339,6 +342,13 @@ impl Anonymizer {
             } else if matches!(vr, Vr::Ds | Vr::Is) {
                 // numeric-string VRs need a legal decimal/integer dummy, not words
                 dataset.insert_str(tag, vr, "0");
+            } else if vr == Vr::As {
+                // AS is nnnD/W/M/Y; "ANONYMOUS" is not a legal age value.
+                dataset.insert_str(tag, vr, "000Y");
+            } else if vr == Vr::Ur {
+                // UR is a URI; "ANONYMOUS" has no scheme. A reserved TLD keeps it
+                // syntactically valid without pointing at a real endpoint.
+                dataset.insert_str(tag, vr, "https://example.invalid/anonymous");
             } else {
                 dataset.insert_str(tag, vr, "ANONYMOUS");
             }
@@ -370,6 +380,147 @@ fn is_other(vr: Vr) -> bool {
         vr,
         Vr::Ob | Vr::Od | Vr::Of | Vr::Ol | Vr::Ov | Vr::Ow | Vr::Un
     )
+}
+
+/// Days subtracted from a DA/DT under Retain Longitudinal Temporal Information
+/// Modified Dates (PS3.15 E.3.6). The offset is constant so intervals between
+/// dates survive; 3653 days is about ten years and keeps shifted dates plausible.
+const MODIFIED_DATE_SHIFT_DAYS: i64 = 3653;
+
+/// Seconds added to a TM under the same option, modulo 24 h. A constant offset
+/// keeps relative times intact across a study.
+const MODIFIED_TIME_SHIFT_SECONDS: i64 = 3661;
+
+/// Shifts one DA/DT/TM value by the modified-dates constants, or `None` when the
+/// value cannot be parsed (the caller then writes the old dummy).
+fn shift_modified_date_time(text: &str, vr: Vr) -> Option<String> {
+    match vr {
+        Vr::Da => shift_da(text),
+        Vr::Dt => shift_dt(text),
+        Vr::Tm => shift_tm(text),
+        _ => None,
+    }
+}
+
+/// Shifts an eight-digit DA value by [`MODIFIED_DATE_SHIFT_DAYS`].
+fn shift_da(text: &str) -> Option<String> {
+    let (year, month, day) = parse_ymd(text.trim())?;
+    shifted_date(year, month, day)
+}
+
+/// Shifts the leading date of a DT value, leaving its time, fraction and UTC
+/// offset untouched. A DT shorter than a full date cannot be shifted safely.
+fn shift_dt(text: &str) -> Option<String> {
+    let text = text.trim();
+    let (year, month, day) = parse_ymd(text.get(..8)?)?;
+    let shifted = shifted_date(year, month, day)?;
+    Some(format!("{shifted}{}", &text[8..]))
+}
+
+/// Shifts a TM value by [`MODIFIED_TIME_SHIFT_SECONDS`] modulo 24 h, keeping the
+/// original precision and any fractional seconds.
+fn shift_tm(text: &str) -> Option<String> {
+    let text = text.trim();
+    let (body, fraction) = match text.split_once('.') {
+        Some((body, fraction)) => (body, Some(fraction)),
+        None => (text, None),
+    };
+    let digits = |value: &str| !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit());
+    if !digits(body) || !matches!(body.len(), 2 | 4 | 6) {
+        return None;
+    }
+    let hours: i64 = body.get(0..2)?.parse().ok()?;
+    let minutes: i64 = match body.get(2..4) {
+        Some(value) => value.parse().ok()?,
+        None => 0,
+    };
+    let seconds: i64 = match body.get(4..6) {
+        Some(value) => value.parse().ok()?,
+        None => 0,
+    };
+    if hours > 23 || minutes > 59 || seconds > 60 {
+        return None;
+    }
+    if let Some(fraction) = fraction {
+        // A fraction is only legal after seconds (PS3.6 TM).
+        if body.len() != 6 || fraction.is_empty() || fraction.len() > 6 || !digits(fraction) {
+            return None;
+        }
+    }
+    let total =
+        (hours * 3600 + minutes * 60 + seconds + MODIFIED_TIME_SHIFT_SECONDS).rem_euclid(24 * 3600);
+    let (hours, rest) = (total / 3600, total % 3600);
+    let (minutes, seconds) = (rest / 60, rest % 60);
+    let mut out = match body.len() {
+        2 => format!("{hours:02}"),
+        4 => format!("{hours:02}{minutes:02}"),
+        _ => format!("{hours:02}{minutes:02}{seconds:02}"),
+    };
+    if let Some(fraction) = fraction {
+        out.push('.');
+        out.push_str(fraction);
+    }
+    Some(out)
+}
+
+/// Parses a `YYYYMMDD` date, rejecting impossible calendar days.
+fn parse_ymd(text: &str) -> Option<(i64, i64, i64)> {
+    if text.len() != 8 || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let year: i64 = text.get(0..4)?.parse().ok()?;
+    let month: i64 = text.get(4..6)?.parse().ok()?;
+    let day: i64 = text.get(6..8)?.parse().ok()?;
+    if year < 1 || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    // The round trip rejects 20240231: the civil conversion normalises it.
+    if civil_from_days(days) != (year, month, day) {
+        return None;
+    }
+    Some((year, month, day))
+}
+
+/// Shifts a date by the fixed day count, or `None` when it leaves years 1..=9999.
+fn shifted_date(year: i64, month: i64, day: i64) -> Option<String> {
+    let days = days_from_civil(year, month, day).checked_sub(MODIFIED_DATE_SHIFT_DAYS)?;
+    let (year, month, day) = civil_from_days(days);
+    if !(1..=9999).contains(&year) {
+        return None;
+    }
+    Some(format!("{year:04}{month:02}{day:02}"))
+}
+
+/// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's
+/// `days_from_civil`, PS3.5 A.1's calendar without leap-second trivia).
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month_prime = (month + 9) % 12;
+    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// The inverse of [`days_from_civil`].
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let days = days + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    };
+    (year + i64::from(month <= 2), month, day)
 }
 
 /// Locks the UID map; a poisoned mutex still holds a consistent map.
@@ -839,6 +990,113 @@ mod tests {
             ds.try_get_str(Tag::new(0x5011, 0x1234)).as_deref(),
             Some("ANONYMOUS"),
             "a CleanGraph-tagged private element is cleaned, not left intact"
+        );
+    }
+
+    #[test]
+    fn modified_dates_shift_consistently_instead_of_blanking() {
+        // PS3.15 E.3.6: RetainLongModifDates must move a date by a constant offset
+        // so intervals survive. The old Clean path wrote 19000101, destroying them.
+        let options =
+            AnonOptions::BASIC_PROFILE | AnonOptions::bit(AnonOption::RetainLongModifDates);
+        let anon = Anonymizer::with_profile(SecurityProfile::basic(), options);
+        let mut early = Dataset::new();
+        early.insert_str(Tag::STUDY_DATE, Vr::Da, "20240101");
+        early.insert_str(Tag::STUDY_TIME, Vr::Tm, "120000.500000");
+        let mut late = Dataset::new();
+        late.insert_str(Tag::STUDY_DATE, Vr::Da, "20240301");
+        anon.anonymize_in_place(&mut early).unwrap();
+        anon.anonymize_in_place(&mut late).unwrap();
+
+        let early_date = early.try_get_str(Tag::STUDY_DATE).unwrap();
+        let late_date = late.try_get_str(Tag::STUDY_DATE).unwrap();
+        assert_ne!(early_date, "20240101", "the date is modified");
+        assert_ne!(late_date, "20240301", "the date is modified");
+        assert_eq!(
+            test_day_number(&late_date) - test_day_number(&early_date),
+            60,
+            "the 60-day interval is preserved"
+        );
+        // DT keeps its time, fraction and offset; only the date part moves
+        let mut datetime = Dataset::new();
+        datetime.insert_str(
+            Tag::ACQUISITION_DATE_TIME,
+            Vr::Dt,
+            "20240101120000.123456-0500",
+        );
+        anon.anonymize_in_place(&mut datetime).unwrap();
+        let dt = datetime.try_get_str(Tag::ACQUISITION_DATE_TIME).unwrap();
+        assert!(
+            dt.ends_with("120000.123456-0500"),
+            "time/fraction/offset intact: {dt}"
+        );
+        assert_ne!(&dt[..8], "20240101", "the date part moved");
+        // TM shifts by the same amount and keeps the fraction
+        let time = early.try_get_str(Tag::STUDY_TIME).unwrap();
+        assert_ne!(time, "120000.500000");
+        assert!(time.ends_with(".500000"), "fraction preserved: {time}");
+        let mut later = Dataset::new();
+        later.insert_str(Tag::STUDY_TIME, Vr::Tm, "130000.500000");
+        anon.anonymize_in_place(&mut later).unwrap();
+        let shifted_later = later.try_get_str(Tag::STUDY_TIME).unwrap();
+        let early_seconds = test_time_seconds(&time);
+        let later_seconds = test_time_seconds(&shifted_later);
+        assert_eq!(
+            (later_seconds - early_seconds).rem_euclid(24 * 3600),
+            3600,
+            "equal times shift by equal amounts"
+        );
+
+        // The option being off keeps the old dummy behaviour
+        let mut plain = Dataset::new();
+        plain.insert_str(Tag::STUDY_DATE, Vr::Da, "20240101");
+        Anonymizer::basic().anonymize_in_place(&mut plain).unwrap();
+        assert_eq!(plain.try_get_str(Tag::STUDY_DATE).as_deref(), Some(""));
+    }
+
+    /// Days since 1-1-1 in the proleptic Gregorian calendar; independent of the
+    /// production conversion so the interval check is not self-confirming.
+    fn test_day_number(text: &str) -> i64 {
+        let year: i64 = text[0..4].parse().unwrap();
+        let month: i64 = text[4..6].parse().unwrap();
+        let day: i64 = text[6..8].parse().unwrap();
+        let y = year - 1;
+        let mut days = y * 365 + y / 4 - y / 100 + y / 400;
+        const BEFORE_MONTH: [i64; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+        days += BEFORE_MONTH[(month - 1) as usize];
+        if month > 2 && ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0) {
+            days += 1;
+        }
+        days + day
+    }
+
+    /// Seconds since midnight of an `HHMMSS` TM value.
+    fn test_time_seconds(text: &str) -> i64 {
+        let body = text.split('.').next().unwrap_or(text);
+        let hh: i64 = body[0..2].parse().unwrap();
+        let mm: i64 = body[2..4].parse().unwrap();
+        let ss: i64 = body[4..6].parse().unwrap();
+        hh * 3600 + mm * 60 + ss
+    }
+
+    #[test]
+    fn generic_dummies_respect_the_vr_syntax() {
+        // AS is nnnD/W/M/Y and UR is a URI: the generic "ANONYMOUS" word is not
+        // legal for either, so each needs its own valid dummy.
+        let profile = SecurityProfile::parse("0010,1010;D\n0008,1190;D\n0010,0020;D\n").unwrap();
+        let anon = Anonymizer::with_profile(profile, AnonOption::BasicProfile);
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::PATIENT_AGE, Vr::As, "042Y");
+        ds.insert_str(Tag::RETRIEVE_URL, Vr::Ur, "https://pacs.example/studies/1");
+        ds.insert_str(Tag::PATIENT_ID, Vr::Lo, "12345");
+        anon.anonymize_in_place(&mut ds).unwrap();
+        assert_eq!(ds.try_get_str(Tag::PATIENT_AGE).as_deref(), Some("000Y"));
+        let url = ds.try_get_str(Tag::RETRIEVE_URL).unwrap();
+        assert!(url.contains("://"), "a syntactically valid URI: {url}");
+        assert_eq!(
+            ds.try_get_str(Tag::PATIENT_ID).as_deref(),
+            Some("ANONYMOUS"),
+            "a generic string keeps its existing dummy"
         );
     }
 

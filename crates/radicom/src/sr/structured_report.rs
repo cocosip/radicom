@@ -134,6 +134,23 @@ impl StructuredReport {
                 self.file.dataset.insert_or_update(item.clone());
             }
         }
+        // The document dataset *is* the root content item, so it carries no
+        // RelationshipType and exactly one value macro. A previous root's value
+        // attributes must not survive the hoist (PS3.3 C.17.2): leaving them made
+        // validate() fail or the document carry two kinds of value at once.
+        for tag in [
+            Tag::RELATIONSHIP_TYPE,
+            Tag::DATE_TIME,
+            Tag::DATE,
+            Tag::TIME,
+            Tag::PERSON_NAME,
+            Tag::UID,
+            Tag::TEXT_VALUE,
+            Tag::NUMERIC_VALUE,
+            Tag::MEASURED_VALUE_SEQUENCE,
+        ] {
+            self.file.dataset.remove(&tag);
+        }
         let children: Vec<ContentItem> = root
             .try_get_sequence(tags::CONTENT_SEQUENCE)
             .map(|sequence| {
@@ -905,6 +922,53 @@ mod tests {
         let mut root = container();
         root.add_child(ContentItem::from_dataset(child));
         assert!(report_with(root).validate().is_err());
+    }
+
+    #[test]
+    fn re_rooting_removes_the_previous_roots_value_attributes() {
+        // A previously hoisted root of another value type leaves its value macro
+        // and relationship attributes on the document dataset. The new root must
+        // not inherit them (else validate() fails or the document carries two
+        // kinds of value at once).
+        let mut report = report_with(container());
+        for (tag, vr, value) in [
+            (Tag::DATE_TIME, Vr::Dt, "20240101120000"),
+            (Tag::DATE, Vr::Da, "20240101"),
+            (Tag::TIME, Vr::Tm, "120000"),
+            (Tag::PERSON_NAME, Vr::Pn, "Doe^John"),
+            (Tag::UID, Vr::Ui, "1.2.3.4"),
+            (Tag::TEXT_VALUE, Vr::Ut, "old root"),
+            (Tag::NUMERIC_VALUE, Vr::Ds, "1"),
+            (Tag::RELATIONSHIP_TYPE, Vr::Cs, "CONTAINS"),
+        ] {
+            report.file.dataset.insert_str(tag, vr, value);
+        }
+        report
+            .file
+            .dataset
+            .insert_sequence(Tag::MEASURED_VALUE_SEQUENCE)
+            .push(Dataset::new());
+
+        report.set_root(container());
+
+        for tag in [
+            Tag::DATE_TIME,
+            Tag::DATE,
+            Tag::TIME,
+            Tag::PERSON_NAME,
+            Tag::UID,
+            Tag::TEXT_VALUE,
+            Tag::NUMERIC_VALUE,
+            Tag::MEASURED_VALUE_SEQUENCE,
+            Tag::RELATIONSHIP_TYPE,
+        ] {
+            assert!(
+                report.file.dataset.item(&tag).is_none(),
+                "{tag} from the previous root must be gone"
+            );
+        }
+        assert_eq!(report.root_value_type(), Some(ValueType::Container));
+        report.validate().unwrap();
     }
 
     fn container() -> ContentItem {

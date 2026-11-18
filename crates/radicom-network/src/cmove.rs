@@ -453,6 +453,24 @@ pub async fn store_to_destination_with_failures(
                     failed_uids.push(uid);
                 }
             }
+            Err(error) if !crate::server::is_fatal(&error) => {
+                // PS3.4 §C.4.2: one instance the destination cannot take is one
+                // failed sub-operation, not the end of the retrieve. A missing
+                // SOP class, a role the destination did not grant or a dataset
+                // this side cannot transcode all leave the association usable,
+                // so the batch continues with the next file — aborting here used
+                // to mark every remaining instance failed without trying.
+                summary.failed = summary.failed.saturating_add(1);
+                let uid = file
+                    .dataset
+                    .try_get_str(Tag::SOP_INSTANCE_UID)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                if !uid.is_empty() {
+                    failed_uids.push(uid);
+                }
+            }
             Err(error) => {
                 // A broken destination ends the batch, but the instances already
                 // delivered must stay countable: PS3.4 §C.4.2 reports progress
@@ -484,6 +502,127 @@ mod tests {
     fn sample_file(instance_uid: &str) -> DicomFile {
         let mut dataset = Dataset::new();
         dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, "1.2.840.10008.5.1.4.1.1.7");
+        dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, instance_uid);
+        dataset.set_transfer_syntax(
+            radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
+        );
+        DicomFile::from_dataset(dataset)
+    }
+
+    #[tokio::test]
+    async fn a_non_fatal_instance_failure_does_not_abort_the_move_batch() {
+        // A destination that refuses one SOP class must cost exactly that one
+        // sub-operation: the SCU returns Err (SopClassNotSupported) for the
+        // instance, and the files after it are still delivered (§11.4, PS3.4
+        // §C.4.2). Previously one such error aborted the loop and marked every
+        // remaining instance failed without trying.
+        use crate::pdu::{PData, Pdu, Pdv};
+        use crate::server::{command_bytes, command_from_bytes};
+
+        const CT: &str = "1.2.840.10008.5.1.4.1.1.7";
+        const MR: &str = "1.2.840.10008.5.1.4.1.1.4";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let Some(Pdu::AssociateRq(rq)) = crate::transport::read_pdu(&mut stream).await.unwrap()
+            else {
+                panic!("expected A-ASSOCIATE-RQ")
+            };
+            let mut answer = rq.clone();
+            for context in &mut answer.presentation_contexts {
+                // accept CT Storage only; MR is rejected as "abstract syntax not
+                // supported" (result 3), so the SCU cannot route that instance
+                context.result = if context.abstract_syntax == CT { 0 } else { 3 };
+                context.abstract_syntax.clear();
+                context.transfer_syntaxes.truncate(1);
+            }
+            crate::transport::write_pdu(&mut stream, &Pdu::AssociateAc(answer))
+                .await
+                .unwrap();
+
+            let mut assembler = crate::assembler::PdvAssembler::new();
+            let mut awaiting_dataset: Option<(u8, u16)> = None;
+            let mut delivered: Vec<String> = Vec::new();
+            loop {
+                let Some(pdu) = crate::transport::read_pdu(&mut stream).await.unwrap() else {
+                    break;
+                };
+                match pdu {
+                    Pdu::PData(data) => {
+                        for unit in assembler.push_pdata(&data).unwrap() {
+                            if unit.stream == crate::assembler::Stream::Command {
+                                let command = command_from_bytes(&unit.bytes).unwrap();
+                                assert_eq!(command.field, CommandField::CStoreRq);
+                                awaiting_dataset = Some((unit.context_id, command.message_id));
+                            } else if let Some((context_id, message_id)) = awaiting_dataset.take() {
+                                delivered.push(message_id.to_string());
+                                let mut response =
+                                    Command::request(CommandField::CStoreRsp, message_id);
+                                response.message_id_being_responded_to = Some(message_id);
+                                response.status = Some(status::SUCCESS);
+                                response.no_dataset = true;
+                                crate::transport::write_pdu(
+                                    &mut stream,
+                                    &Pdu::PData(PData {
+                                        pdvs: vec![Pdv {
+                                            context_id,
+                                            is_command: true,
+                                            is_last: true,
+                                            data: command_bytes(&response).unwrap().into(),
+                                        }],
+                                    }),
+                                )
+                                .await
+                                .unwrap();
+                            }
+                        }
+                    }
+                    Pdu::ReleaseRq => {
+                        crate::transport::write_pdu(&mut stream, &Pdu::ReleaseRp)
+                            .await
+                            .unwrap();
+                        break;
+                    }
+                    other => panic!("unexpected PDU {other:?}"),
+                }
+            }
+            delivered
+        });
+
+        let files = vec![
+            sample_file_of(CT, "1.2.3.1"),
+            sample_file_of(MR, "1.2.3.2"),
+            sample_file_of(CT, "1.2.3.3"),
+        ];
+        let (summary, failed, error) = store_to_destination_with_failures(
+            addr,
+            "MOVE-SCU",
+            "DEST",
+            &files,
+            None,
+            ClientOptions::default(),
+        )
+        .await
+        .expect("a reachable destination opens the association");
+
+        assert!(
+            error.is_none(),
+            "a non-fatal per-instance failure must not end the batch: {error:?}"
+        );
+        assert_eq!(summary.completed, 2, "both CT instances were delivered");
+        assert_eq!(summary.failed, 1, "only the MR instance failed");
+        assert_eq!(failed, vec!["1.2.3.2".to_string()]);
+        assert_eq!(
+            peer.await.unwrap(),
+            vec!["1".to_string(), "2".to_string()],
+            "the batch never stopped: the third file was pushed after the failure"
+        );
+    }
+
+    fn sample_file_of(sop_class: &str, instance_uid: &str) -> DicomFile {
+        let mut dataset = Dataset::new();
+        dataset.insert_str(Tag::SOP_CLASS_UID, Vr::Ui, sop_class);
         dataset.insert_str(Tag::SOP_INSTANCE_UID, Vr::Ui, instance_uid);
         dataset.set_transfer_syntax(
             radicom::model::transfer_syntax::syntaxes::EXPLICIT_VR_LITTLE_ENDIAN.clone(),
