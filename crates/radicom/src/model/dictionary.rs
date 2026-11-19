@@ -439,7 +439,7 @@ struct PendingTag {
     vr: &'static str,
     vm: &'static str,
     retired: bool,
-    name: &'static str,
+    name: String,
 }
 
 fn leak(s: String) -> &'static str {
@@ -461,7 +461,7 @@ fn finish_pending(
             tag: Tag::new(p.group, p.element),
             mask,
             creator: creator.clone(),
-            name: p.name,
+            name: leak(p.name.trim().to_string()),
             keyword: p.keyword,
             vrs: parse_vr_list(p.vr)?,
             vm: Vm::parse(p.vm)?,
@@ -473,8 +473,8 @@ fn finish_pending(
 
 fn load_xml_stream(reader: impl Read) -> Result<Vec<RuntimeEntry>, Error> {
     use quick_xml::events::Event;
+    use quick_xml::XmlVersion;
     let mut reader = quick_xml::Reader::from_reader(std::io::BufReader::new(reader));
-    reader.config_mut().trim_text(true);
     let mut out: Vec<RuntimeEntry> = Vec::new();
     let mut creator: Option<Arc<PrivateCreator>> = None;
     let mut interner: HashMap<String, Arc<PrivateCreator>> = HashMap::new();
@@ -483,12 +483,12 @@ fn load_xml_stream(reader: impl Read) -> Result<Vec<RuntimeEntry>, Error> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match e.name().as_ref() {
-                b"dictionary" => {
+                "dictionary" => {
                     creator = None;
                     for attr in e.attributes().flatten() {
-                        if attr.key.as_ref() == b"creator" {
+                        if attr.key.as_ref() == "creator" {
                             let name = attr
-                                .decode_and_unescape_value(reader.decoder())
+                                .normalized_value(XmlVersion::Implicit1_0)
                                 .map_err(Error::from)?
                                 .into_owned();
                             creator = Some(
@@ -500,7 +500,7 @@ fn load_xml_stream(reader: impl Read) -> Result<Vec<RuntimeEntry>, Error> {
                         }
                     }
                 }
-                b"tag" => {
+                "tag" => {
                     // A self-closing <tag/> produces no End event, so flush a
                     // pending entry from such a tag before starting a new one
                     // (CM-11).
@@ -515,22 +515,22 @@ fn load_xml_stream(reader: impl Read) -> Result<Vec<RuntimeEntry>, Error> {
                     let mut retired = false;
                     for attr in e.attributes().flatten() {
                         let val = attr
-                            .decode_and_unescape_value(reader.decoder())
+                            .normalized_value(XmlVersion::Implicit1_0)
                             .map_err(Error::from)?
                             .into_owned();
                         match attr.key.as_ref() {
-                            b"group" => group = Some(parse_hex_mask(&val)),
-                            b"element" => element = Some(parse_hex_mask(&val)),
-                            b"keyword" => keyword = val,
-                            b"vr" => {
+                            "group" => group = Some(parse_hex_mask(&val)),
+                            "element" => element = Some(parse_hex_mask(&val)),
+                            "keyword" => keyword = val,
+                            "vr" => {
                                 vr = val
                                     .split('/')
                                     .map(|s| s.trim())
                                     .collect::<Vec<_>>()
                                     .join("\\")
                             }
-                            b"vm" => vm = val,
-                            b"retired" => retired = val == "true",
+                            "vm" => vm = val,
+                            "retired" => retired = val == "true",
                             _ => {}
                         }
                     }
@@ -551,22 +551,37 @@ fn load_xml_stream(reader: impl Read) -> Result<Vec<RuntimeEntry>, Error> {
                         vr: leak(vr),
                         vm: leak(vm),
                         retired,
-                        name: "",
+                        name: String::new(),
                     });
                 }
                 _ => {}
             },
             Ok(Event::Text(t)) => {
                 if let Some(p) = pending.as_mut() {
-                    p.name = leak(t.unescape().map_err(Error::from)?.into_owned());
+                    p.name.push_str(&t.xml_content(XmlVersion::Implicit1_0));
+                }
+            }
+            Ok(Event::GeneralRef(r)) => {
+                if let Some(p) = pending.as_mut() {
+                    if let Some(ch) = r.resolve_char_ref().map_err(Error::from)? {
+                        p.name.push(ch);
+                    } else if let Some(entity) =
+                        quick_xml::escape::resolve_predefined_entity(r.as_ref())
+                    {
+                        p.name.push_str(entity);
+                    } else {
+                        return Err(Error::Data(DataError::Other {
+                            message: format!("dictionary XML: unknown entity &{};", r.as_ref()),
+                        }));
+                    }
                 }
             }
             Ok(Event::End(e)) => {
-                if e.name().as_ref() == b"tag" {
+                if e.name().as_ref() == "tag" {
                     if let Some(p) = pending.take() {
                         finish_pending(p, &creator, &mut out)?;
                     }
-                } else if e.name().as_ref() == b"dictionary" {
+                } else if e.name().as_ref() == "dictionary" {
                     // Flush a trailing self-closing tag before the creator is
                     // reset for the next <dictionary> block (CM-11).
                     if let Some(p) = pending.take() {
@@ -766,6 +781,19 @@ mod tests {
         dict.merge_runtime(rows);
         let tag = Tag::private(0x0029, 0x1001, dict.intern_creator("ACME 1.2"));
         assert_eq!(dict.entry(&tag).keyword, "AcmeWidget");
+    }
+
+    #[test]
+    fn xml_entities_in_names_and_attributes_are_resolved() {
+        let xml = r#"<dictionary creator="ACME &amp; Co"><tag group="0029" element="1001" keyword="AcmeWidget" vr="LO" vm="1">Widget &amp; &#65;</tag></dictionary>"#;
+        let rows = load_xml(xml.as_bytes()).unwrap();
+        assert_eq!(rows[0].entry.name, "Widget & A");
+        let creator = rows[0]
+            .entry
+            .creator
+            .as_ref()
+            .expect("private creator attached");
+        assert_eq!(creator.as_str(), "ACME & Co");
     }
 
     #[test]

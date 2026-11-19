@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use flate2::read::GzDecoder;
 use quick_xml::events::Event;
 use quick_xml::Reader;
+use quick_xml::XmlVersion;
 
 mod coverage;
 
@@ -91,63 +92,49 @@ fn vr_list(attr: &str) -> String {
 /// PS3.6 edition the data was generated from) and the tag rows.
 fn parse_dictionary_xml(reader: impl Read) -> Result<(String, Vec<RawTag>), String> {
     let mut reader = Reader::from_reader(std::io::BufReader::new(reader));
-    reader.config_mut().trim_text(true);
     let mut version = String::new();
     let mut tags: Vec<RawTag> = Vec::new();
     let mut buf = Vec::new();
+    let mut in_tag = false;
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == b"dictionary" => {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == "dictionary" => {
                 for attr in e.attributes().flatten() {
-                    if attr.key.as_ref() == b"version" {
+                    if attr.key.as_ref() == "version" {
                         version = attr
-                            .decode_and_unescape_value(reader.decoder())
+                            .normalized_value(XmlVersion::Implicit1_0)
                             .map_err(|e| e.to_string())?
                             .into_owned();
                     }
                 }
             }
-            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == b"tag" => {
-                let mut group = None;
-                let mut element = None;
-                let mut keyword = String::new();
-                let mut vr = String::new();
-                let mut vm = String::new();
-                let mut retired = false;
-                for attr in e.attributes().flatten() {
-                    let val = attr
-                        .decode_and_unescape_value(reader.decoder())
-                        .map_err(|e| e.to_string())?
-                        .into_owned();
-                    match attr.key.as_ref() {
-                        b"group" => group = Some(parse_masked(&val)?),
-                        b"element" => element = Some(parse_masked(&val)?),
-                        b"keyword" => keyword = val,
-                        b"vr" => vr = vr_list(&val),
-                        b"vm" => vm = val,
-                        b"retired" => retired = val == "true",
-                        _ => {}
-                    }
-                }
-                let (g, gm) = group.ok_or("tag missing group")?;
-                let (el, em) = element.ok_or("tag missing element")?;
-                tags.push(RawTag {
-                    group: g,
-                    element: el,
-                    group_mask: gm,
-                    element_mask: em,
-                    keyword,
-                    name: String::new(), // filled from the Text event
-                    vr,
-                    vm,
-                    retired,
-                });
+            Ok(Event::Start(e)) if e.name().as_ref() == "tag" => {
+                tags.push(public_tag(&e)?);
+                in_tag = true;
+            }
+            Ok(Event::Empty(e)) if e.name().as_ref() == "tag" => {
+                tags.push(public_tag(&e)?);
             }
             Ok(Event::Text(t)) => {
-                if let Some(last) = tags.last_mut() {
-                    if last.name.is_empty() {
-                        last.name = t.unescape().map_err(|e| e.to_string())?.into_owned();
+                if in_tag {
+                    if let Some(last) = tags.last_mut() {
+                        last.name.push_str(&t.xml_content(XmlVersion::Implicit1_0));
                     }
+                }
+            }
+            Ok(Event::GeneralRef(r)) => {
+                if in_tag {
+                    if let Some(last) = tags.last_mut() {
+                        append_entity(&mut last.name, &r)?;
+                    }
+                }
+            }
+            Ok(Event::End(e)) => {
+                if e.name().as_ref() == "tag" {
+                    if let Some(last) = tags.last_mut() {
+                        last.name = last.name.trim().to_string();
+                    }
+                    in_tag = false;
                 }
             }
             Ok(Event::Eof) => break,
@@ -160,6 +147,56 @@ fn parse_dictionary_xml(reader: impl Read) -> Result<(String, Vec<RawTag>), Stri
         return Err("dictionary XML has no root version attribute".into());
     }
     Ok((version, tags))
+}
+
+/// Appends a character or predefined-entity reference to a tag name.
+fn append_entity(name: &mut String, r: &quick_xml::events::BytesRef<'_>) -> Result<(), String> {
+    if let Some(ch) = r.resolve_char_ref().map_err(|e| e.to_string())? {
+        name.push(ch);
+    } else if let Some(entity) = quick_xml::escape::resolve_predefined_entity(r.as_ref()) {
+        name.push_str(entity);
+    } else {
+        return Err(format!("dictionary XML: unknown entity &{};", r.as_ref()));
+    }
+    Ok(())
+}
+
+/// Parses one public `<tag …>` element's attributes (no text child needed).
+fn public_tag(e: &quick_xml::events::BytesStart<'_>) -> Result<RawTag, String> {
+    let mut group = None;
+    let mut element = None;
+    let mut keyword = String::new();
+    let mut vr = String::new();
+    let mut vm = String::new();
+    let mut retired = false;
+    for attr in e.attributes().flatten() {
+        let val = attr
+            .normalized_value(XmlVersion::Implicit1_0)
+            .map_err(|e| e.to_string())?
+            .into_owned();
+        match attr.key.as_ref() {
+            "group" => group = Some(parse_masked(&val)?),
+            "element" => element = Some(parse_masked(&val)?),
+            "keyword" => keyword = val,
+            "vr" => vr = vr_list(&val),
+            "vm" => vm = val,
+            "retired" => retired = val == "true",
+            _ => {}
+        }
+    }
+    let (g, gm) = group.ok_or("tag missing group")?;
+    let (el, em) = element.ok_or("tag missing element")?;
+    Ok(RawTag {
+        group: g,
+        element: el,
+        group_mask: gm,
+        element_mask: em,
+        keyword,
+        name: String::new(), // filled from the Text/GeneralRef events
+        vr,
+        vm,
+        retired,
+    })
 }
 
 fn screaming_snake(keyword: &str) -> String {
@@ -529,7 +566,6 @@ fn build_generated_sources() -> Result<Generated, String> {
 /// carry no name text).
 fn parse_private_dictionary_xml(reader: impl Read) -> Result<Vec<(String, RawTag)>, String> {
     let mut reader = Reader::from_reader(std::io::BufReader::new(reader));
-    reader.config_mut().trim_text(true);
     let mut creator = String::new();
     let mut rows: Vec<(String, RawTag)> = Vec::new();
     let mut buf = Vec::new();
@@ -538,39 +574,47 @@ fn parse_private_dictionary_xml(reader: impl Read) -> Result<Vec<(String, RawTag
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => match e.name().as_ref() {
-                b"dictionary" => {
+                "dictionary" => {
                     creator.clear();
                     for attr in e.attributes().flatten() {
-                        if attr.key.as_ref() == b"creator" {
+                        if attr.key.as_ref() == "creator" {
                             creator = attr
-                                .decode_and_unescape_value(reader.decoder())
+                                .normalized_value(XmlVersion::Implicit1_0)
                                 .map_err(|e| e.to_string())?
                                 .into_owned();
                         }
                     }
                 }
-                b"tag" => {
-                    cur = Some(private_tag(&e, reader.decoder())?);
+                "tag" => {
+                    cur = Some(private_tag(&e)?);
                     in_tag = true;
                 }
                 _ => {}
             },
             Ok(Event::Empty(e)) => {
-                if e.name().as_ref() == b"tag" {
+                if e.name().as_ref() == "tag" {
                     // `<tag .../>` has no child text; keep the row immediately
-                    rows.push((creator.clone(), private_tag(&e, reader.decoder())?));
+                    rows.push((creator.clone(), private_tag(&e)?));
                 }
             }
             Ok(Event::Text(t)) => {
                 if in_tag {
                     if let Some(c) = cur.as_mut() {
-                        c.name = t.unescape().map_err(|e| e.to_string())?.into_owned();
+                        c.name.push_str(&t.xml_content(XmlVersion::Implicit1_0));
+                    }
+                }
+            }
+            Ok(Event::GeneralRef(r)) => {
+                if in_tag {
+                    if let Some(c) = cur.as_mut() {
+                        append_entity(&mut c.name, &r)?;
                     }
                 }
             }
             Ok(Event::End(e)) => {
-                if e.name().as_ref() == b"tag" {
-                    if let Some(c) = cur.take() {
+                if e.name().as_ref() == "tag" {
+                    if let Some(mut c) = cur.take() {
+                        c.name = c.name.trim().to_string();
                         rows.push((creator.clone(), c));
                     }
                     in_tag = false;
@@ -586,10 +630,7 @@ fn parse_private_dictionary_xml(reader: impl Read) -> Result<Vec<(String, RawTag
 }
 
 /// Parses one private `<tag …>` element's attributes (no text child needed).
-fn private_tag(
-    e: &quick_xml::events::BytesStart<'_>,
-    decoder: quick_xml::encoding::Decoder,
-) -> Result<RawTag, String> {
+fn private_tag(e: &quick_xml::events::BytesStart<'_>) -> Result<RawTag, String> {
     let mut g = (0u16, 0xFFFFu16);
     let mut el = (0u16, 0xFFFFu16);
     let mut keyword = String::new();
@@ -598,16 +639,16 @@ fn private_tag(
     let mut retired = false;
     for attr in e.attributes().flatten() {
         let val = attr
-            .decode_and_unescape_value(decoder)
+            .normalized_value(XmlVersion::Implicit1_0)
             .map_err(|e| e.to_string())?
             .into_owned();
         match attr.key.as_ref() {
-            b"group" => g = parse_masked(&val)?,
-            b"element" => el = parse_masked(&val)?,
-            b"keyword" => keyword = val,
-            b"vr" => vr = vr_list(&val),
-            b"vm" => vm = val,
-            b"retired" => retired = val == "true",
+            "group" => g = parse_masked(&val)?,
+            "element" => el = parse_masked(&val)?,
+            "keyword" => keyword = val,
+            "vr" => vr = vr_list(&val),
+            "vm" => vm = val,
+            "retired" => retired = val == "true",
             _ => {}
         }
     }

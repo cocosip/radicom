@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.1] - 2026-11-19
+
+### Fixed
+
+- DIMSE command sets downgrade non-ASCII Error Comment text to `?` before applying the 64-byte LO limit
+  (PS3.7 §6.3: a command set uses the default repertoire and cannot declare `(0008,0005)`). A localized
+  provider error no longer makes the response unencodable: a repeated C-STORE returns its failure status
+  (for example `0xA700`) instead of ending the association with A-ABORT, and a failed C-GET reverse
+  C-STORE still produces the terminal response with the failed sub-operation counted instead of
+  `Protocol("command set could not be encoded")`.
+- `encode_command` logs the writer's reason when a command set cannot be encoded instead of discarding it.
+
+### Changed
+
+- Updated the XML parser to `quick-xml` 0.42, `base64` to 0.23, and the test-only certificate generator to
+  `rcgen` 0.14, and refreshed compatible transitive dependencies. No radicom item signatures changed.
+
 ## [0.3.0] - 2026-11-18
 
 ### Changed

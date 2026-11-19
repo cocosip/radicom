@@ -571,7 +571,7 @@ mod tests {
         loop {
             match reader.read_event().expect("well-formed XML") {
                 Event::Start(start) => {
-                    let name = String::from_utf8_lossy(start.name().as_ref()).into_owned();
+                    let name = start.name().as_ref().to_owned();
                     if name == "NativeDicomModel" {
                         saw_root = true;
                     }

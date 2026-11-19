@@ -87,9 +87,9 @@ Legend: ✅ implemented and tested. The codec **interfaces** (`Codec`, `CodecReg
 
 ```toml
 [dependencies]
-radicom = "0.3.0"
-radicom-network = "0.3.0"   # only if you need DIMSE networking
-radicom-json = "0.3.0"      # only if you need DICOM JSON / XML
+radicom = "0.3.1"
+radicom-network = "0.3.1"   # only if you need DIMSE networking
+radicom-json = "0.3.1"      # only if you need DICOM JSON / XML
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] } # networking examples
 ```
 
@@ -107,7 +107,7 @@ Optional features of `radicom`:
 | `anonymize` | Compatibility feature; `radicom::anonymizer` is available without it |
 
 ```toml
-radicom = { version = "0.3.0", features = ["render", "anonymize"] }
+radicom = { version = "0.3.1", features = ["render", "anonymize"] }
 ```
 
 Other workspace features:
@@ -810,8 +810,8 @@ Third-party data: the DICOM dictionary XML files reused from fo-dicom (and the t
 crates.io API token with `publish-new` and `publish-update` scopes); releasing is done by pushing a tag:
 
 ```pwsh
-git tag v0.3.0
-git push origin v0.3.0
+git tag v0.3.1
+git push origin v0.3.1
 ```
 
 The version lives once in the root `Cargo.toml` (`[workspace.package] version`, mirrored by the internal

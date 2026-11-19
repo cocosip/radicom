@@ -780,7 +780,7 @@ ZfpRQ7oSMvyXNqCGkIuXOez3UtiQ5pUwnznzQF4hBfzAlhysk9/VTzgwbQxMCjDOEd6m
         let cert_path = dir.join("cert.pem");
         let key_path = dir.join("key.pem");
         std::fs::write(&cert_path, cert.cert.pem()).unwrap();
-        std::fs::write(&key_path, cert.key_pair.serialize_pem()).unwrap();
+        std::fs::write(&key_path, cert.signing_key.serialize_pem()).unwrap();
         (cert_path, key_path)
     }
 
@@ -1422,11 +1422,12 @@ ZfpRQ7oSMvyXNqCGkIuXOez3UtiQ5pUwnznzQF4hBfzAlhysk9/VTzgwbQxMCjDOEd6m
         ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         let ca_key = rcgen::KeyPair::generate().expect("CA key");
         let ca = ca_params.self_signed(&ca_key).expect("CA certificate");
+        let issuer = rcgen::Issuer::from_params(&ca_params, &ca_key);
         let leaf_params =
             rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("leaf parameters");
         let leaf_key = rcgen::KeyPair::generate().expect("leaf key");
         let leaf = leaf_params
-            .signed_by(&leaf_key, &ca, &ca_key)
+            .signed_by(&leaf_key, &issuer)
             .expect("leaf certificate");
         let dir = unique_dir("ca");
         let ca_path = dir.join("ca.pem");

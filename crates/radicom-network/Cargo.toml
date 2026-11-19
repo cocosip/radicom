@@ -33,7 +33,7 @@ tls = ["dep:tokio-rustls", "dep:rustls-pemfile", "dep:rustls-native-certs"]
 otel = []
 
 [dev-dependencies]
-rcgen = "0.13"
+rcgen = "0.14"
 
 # the interop tool's exit-code policy is unit-tested, so `cargo test` runs it
 [[example]]

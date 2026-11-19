@@ -10,7 +10,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-quick-xml = "0.37"
+quick-xml.workspace = true
 flate2.workspace = true
 radicom.workspace = true
 radicom-json.workspace = true
