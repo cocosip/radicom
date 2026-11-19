@@ -21,7 +21,12 @@ pub fn encode_command(dataset: &Dataset) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     DicomWriter::new(options)
         .write_dataset(dataset, &syntaxes::IMPLICIT_VR_LITTLE_ENDIAN, &mut out)
-        .map_err(|_| NetworkError::protocol("command set could not be encoded"))?;
+        .map_err(|error| {
+            // The caller only sees a stable protocol message; keep the writer's
+            // reason in the log so a non-conforming command set stays diagnosable.
+            tracing::error!(error = %error, "command set could not be encoded");
+            NetworkError::protocol("command set could not be encoded")
+        })?;
     Ok(out)
 }
 
@@ -808,6 +813,21 @@ mod tests {
         assert_eq!(
             Command::from_dataset(&ds).unwrap().field,
             CommandField::CEchoRq
+        );
+    }
+
+    #[test]
+    fn a_failed_command_encode_is_reported_as_a_protocol_error() {
+        // The Command layer downgrades Error Comment text, so a non-ASCII LO
+        // inserted directly reaches the writer; the returned error keeps its
+        // stable message while the writer's reason goes to the log.
+        let mut ds = Dataset::new();
+        ds.insert_str(Tag::ERROR_COMMENT, Vr::Lo, "文件存在。");
+
+        let error = encode_command(&ds).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "protocol violation: command set could not be encoded"
         );
     }
 

@@ -2064,6 +2064,81 @@ async fn loopback_c_store_failure_keeps_the_connection() {
 }
 
 #[tokio::test]
+async fn loopback_c_store_failure_with_a_non_ascii_comment_keeps_the_association() {
+    // A localized provider message must still be encodable: the command set
+    // uses the default repertoire (PS3.7 §6.3), so the comment is downgraded
+    // to ASCII instead of turning a failure status into an A-ABORT.
+    struct LocalizedFailure;
+    #[async_trait::async_trait]
+    impl ServiceProvider for LocalizedFailure {
+        fn supported_sop_classes(&self) -> Vec<String> {
+            vec![
+                sop_class::VERIFICATION.to_string(),
+                "1.2.840.10008.5.1.4.1.1.7".to_string(),
+            ]
+        }
+        async fn on_c_echo(&self, request: &CEchoRequest) -> Result<CEchoResponse> {
+            Ok(CEchoResponse::success(request))
+        }
+        async fn on_c_store(&self, _request: &CStoreRequest) -> Result<CStoreResponse> {
+            // The SDK's own `failure_response` copies `error.to_string()` into
+            // the Error Comment (PS3.4 Table B.2-1), so a localized OS error
+            // reaches the command set through this path too.
+            Err(NetworkError::Io(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "文件存在。 (os error 80)",
+            )))
+        }
+    }
+
+    let server = DicomServer::bind(
+        "127.0.0.1:0",
+        Arc::new(LocalizedFailure),
+        ServerOptions {
+            store_sink: crate::store::StoreSink::Memory,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let addr = server.local_addr();
+    let handle = tokio::spawn(async move { server.accept_one().await });
+
+    let contexts = vec![
+        PresentationContext::new(
+            1,
+            sop_class::VERIFICATION,
+            vec!["1.2.840.10008.1.2".to_string()],
+        ),
+        store_context(),
+    ];
+    let mut association = Association::open(addr, "SCU", "SCP", contexts, ClientOptions::default())
+        .await
+        .unwrap();
+
+    let response = association
+        .send_c_store(&instance_file())
+        .await
+        .expect("a localized Error Comment must not abort the association");
+    assert_eq!(response.status, crate::dimse::status::STORAGE_FAILURE);
+    assert_eq!(response.state(), crate::dimse::StatusState::Failure);
+    let comment = response
+        .error_comment
+        .expect("the failure keeps its comment");
+    assert!(comment.is_ascii(), "the wire comment is ASCII: {comment:?}");
+
+    // the connection survives a rejected instance (§11.2)
+    let echo = association
+        .send_c_echo(sop_class::VERIFICATION)
+        .await
+        .unwrap();
+    assert_eq!(echo.status, crate::dimse::status::SUCCESS);
+
+    association.release().await.unwrap();
+    handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn a_failing_echo_provider_answers_processing_failure() {
     // a provider error must not kill the association: the peer gets a
     // failure status and can keep using the connection
@@ -3859,6 +3934,69 @@ async fn loopback_c_get_reports_a_failed_sub_operation() {
     );
     assert_eq!(terminal.summary.failed, 1);
     assert_eq!(terminal.failed_sop_instance_uids, vec!["1.2.3.4.5.6"]);
+
+    association.release().await.unwrap();
+    handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn c_get_reverse_store_non_ascii_comment_still_reports_the_failed_sub_operation() {
+    // The reverse C-STORE-RSP is encoded by the SCU through the same
+    // `Command::to_dataset`: a localized comment must not fail the whole
+    // C-GET with `Protocol("command set could not be encoded")`.
+    let provider = Arc::new(GetProvider {
+        instances: vec![instance_file()],
+    });
+    let server = DicomServer::bind("127.0.0.1:0", provider, ServerOptions::default())
+        .await
+        .unwrap();
+    let addr = server.local_addr();
+    let handle = tokio::spawn(async move { server.accept_one().await });
+
+    let mut association = Association::open(
+        addr,
+        "GET-SCU",
+        "GET-SCP",
+        vec![
+            get_context(),
+            PresentationContext::new(
+                3,
+                "1.2.840.10008.5.1.4.1.1.7",
+                vec!["1.2.840.10008.1.2".to_string()],
+            ),
+            PresentationContext::new(
+                5,
+                sop_class::VERIFICATION,
+                vec!["1.2.840.10008.1.2".to_string()],
+            ),
+        ],
+        get_client_options(),
+    )
+    .await
+    .unwrap();
+    association.set_reverse_store_handler(Arc::new(|request: &CStoreRequest| {
+        Ok(CStoreResponse::failure(
+            request,
+            crate::dimse::status::STORAGE_FAILURE,
+            "文件存在。 (os error 80)",
+        ))
+    }));
+
+    let responses = association
+        .send_c_get(&crate::cget::CGetRequest::study("1.2.3.4", 1))
+        .await
+        .expect("a localized reverse-store comment must not fail the C-GET");
+    let terminal = responses.last().unwrap();
+    assert_eq!(terminal.state(), crate::dimse::StatusState::Failure);
+    assert_eq!(terminal.summary.failed, 1);
+    assert_eq!(terminal.failed_sop_instance_uids, vec!["1.2.3.4.5.6"]);
+
+    // the association survives the failed sub-operation
+    let echo = association
+        .send_c_echo(sop_class::VERIFICATION)
+        .await
+        .unwrap();
+    assert_eq!(echo.status, crate::dimse::status::SUCCESS);
 
     association.release().await.unwrap();
     handle.await.unwrap().unwrap();

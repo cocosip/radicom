@@ -321,8 +321,16 @@ impl Command {
             insert_us(&mut ds, tag::STATUS, status);
         }
         if let Some(comment) = &self.error_comment {
-            // LO is limited to 64 bytes
-            ds.insert_str(tag::ERROR_COMMENT, Vr::Lo, truncate_lo(comment));
+            // PS3.7 §6.3: a command set uses the default character repertoire
+            // and cannot carry (0008,0005), so non-ASCII text (a localized OS
+            // error, for instance) is downgraded instead of making the whole
+            // command set unencodable. Sanitize before truncating so the full
+            // LO budget of 64 bytes stays usable.
+            ds.insert_str(
+                tag::ERROR_COMMENT,
+                Vr::Lo,
+                truncate_lo(&ascii_lossy(comment)),
+            );
         }
         // PS3.7 Table E.1-1: only the four storage/query requests carry it
         if self.field.writes_priority() {
@@ -537,6 +545,18 @@ pub fn truncate_lo(comment: &str) -> String {
         end -= 1;
     }
     comment[..end].to_string()
+}
+
+/// Downgrades text to the default character repertoire: every non-ASCII
+/// character becomes `?`.
+///
+/// A command set cannot declare a character set (PS3.7 §6.3), so localized
+/// text such as an OS error would otherwise fail the writer's default-repertoire
+/// check and take the association down with it.
+fn ascii_lossy(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_ascii() { c } else { '?' })
+        .collect()
 }
 
 /// Classification of a status code (§11.3).
@@ -1248,6 +1268,71 @@ mod tests {
         assert!(truncated.len() <= 64);
         assert!(truncated.chars().all(|c| c == 'é'), "no broken characters");
         assert_eq!(truncate_lo("short"), "short");
+    }
+
+    #[test]
+    fn non_ascii_error_comment_still_encodes_as_a_legal_command_set() {
+        // PS3.7 §6.3: the command set uses the default repertoire and cannot
+        // declare (0008,0005), so a localized Error Comment must be downgraded
+        // instead of making the whole response unencodable.
+        let responses = [
+            CommandField::CEchoRsp,
+            CommandField::CStoreRsp,
+            CommandField::CFindRsp,
+            CommandField::CGetRsp,
+            CommandField::CMoveRsp,
+            CommandField::NEventReportRsp,
+            CommandField::NGetRsp,
+            CommandField::NSetRsp,
+            CommandField::NActionRsp,
+            CommandField::NCreateRsp,
+            CommandField::NDeleteRsp,
+        ];
+        for field in responses {
+            let mut response = Command::request(field, 1);
+            response.message_id_being_responded_to = Some(1);
+            response.status = Some(status::STORAGE_FAILURE);
+            response.error_comment = Some("文件存在。 (os error 80)".to_string());
+
+            let bytes = crate::message::encode_command(&response.to_dataset())
+                .unwrap_or_else(|error| panic!("{field:?}: {error}"));
+            let decoded = Command::from_dataset(
+                &crate::message::decode_command(&bytes).expect("the command set decodes"),
+            )
+            .expect("the decoded command set is valid");
+
+            let comment = decoded.error_comment.expect("the comment survives");
+            assert!(
+                comment.is_ascii(),
+                "{field:?}: the wire comment must be ASCII: {comment:?}"
+            );
+            assert!(
+                comment.len() <= 64,
+                "{field:?}: LO stays within 64 bytes: {comment:?}"
+            );
+            assert_eq!(
+                comment, "????? (os error 80)",
+                "{field:?}: the ASCII text is preserved"
+            );
+        }
+
+        // Sanitizing before truncating keeps the whole 64-byte LO budget.
+        let mut response = Command::request(CommandField::CStoreRsp, 1);
+        response.message_id_being_responded_to = Some(1);
+        response.status = Some(status::STORAGE_FAILURE);
+        response.error_comment = Some("中".repeat(100));
+        let bytes = crate::message::encode_command(&response.to_dataset())
+            .expect("long non-ASCII Error Comment encodes");
+        let decoded = crate::message::decode_command(&bytes).expect("the command set decodes");
+        let comment = Command::from_dataset(&decoded)
+            .expect("the decoded command set is valid")
+            .error_comment
+            .expect("the comment survives");
+        assert_eq!(comment.len(), 64, "LO truncates to 64 bytes");
+        assert!(
+            comment.chars().all(|c| c == '?'),
+            "every non-ASCII character is downgraded: {comment:?}"
+        );
     }
 
     #[test]

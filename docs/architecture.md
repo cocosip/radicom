@@ -457,6 +457,9 @@ client/server. One tokio task per association. Locks must not be held across `.a
 ### 11.3 DIMSE
 
 - The command set is **always** Implicit VR Little Endian, independent of the dataset syntax.
+- A command set cannot declare a character set (PS3.7 §6.3): its text uses the default repertoire, so a
+  non-ASCII Error Comment (for example a localized OS error) is downgraded to `?` and then truncated to the
+  64-byte LO limit instead of failing the encoding and aborting the association.
 - In the command field, bit 15 marks a response; a response's command field is the request value plus
   `0x8000`.
 - An unrecognised command field must answer Processing Failure or send A-ABORT — **never panic**.
